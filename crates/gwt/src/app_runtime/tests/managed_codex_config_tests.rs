@@ -903,7 +903,7 @@ fn open_server_url_events_rejects_when_server_url_unset() {
 }
 
 #[test]
-fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
+fn codex_hook_discovery_mode_keeps_worktree_local_hooks_for_every_codex_version() {
     use gwt_skills::CodexHookDiscoveryMode;
 
     assert_eq!(
@@ -920,11 +920,11 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
         super::super::codex_hook_discovery_mode_from_detected_codex_version(Some(
             "0.131.0-alpha.21"
         )),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_detected_codex_version(Some("0.131.0")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     // Legacy selector strings are not measured version evidence.
     assert_eq!(
@@ -972,7 +972,7 @@ fn codex_hook_discovery_mode_extracts_installed_codex_version_output() {
 
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_codex_version_output("codex-cli 0.133.0\n"),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        Some(CodexHookDiscoveryMode::Both)
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_from_codex_version_output("codex 0.130.0\n"),
@@ -1009,7 +1009,7 @@ fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
-        CodexHookDiscoveryMode::WorkspaceHome,
+        CodexHookDiscoveryMode::Both,
     );
     assert_eq!(
         super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unknown)),
@@ -1032,6 +1032,38 @@ fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
         super::super::codex_hook_discovery_mode_for_launch_config(&config, None),
         CodexHookDiscoveryMode::Both,
     );
+}
+
+/// Issue #5194 AC-1: Codex 0.160 does not read the workspace-home hooks file
+/// from a linked worktree, so a fresh worktree must always receive its own
+/// `.codex/hooks.json` or SessionStart never reaches gwt.
+#[test]
+fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path().join("home"));
+    let repo = temp.path().join("repo");
+    let gitdir = repo.join("repo.git/worktrees/issue-1");
+    let worktree = repo.join("work/issue-1");
+    fs::create_dir_all(&gitdir).expect("gitdir");
+    fs::create_dir_all(&worktree).expect("worktree");
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .expect("write .git");
+
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("codex-cli 0.160.0".to_string()),
+    };
+    let mode = super::super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report));
+    gwt_skills::generate_codex_hooks_for_mode(&worktree, mode).expect("generate hooks");
+
+    let local = fs::read_to_string(worktree.join(".codex/hooks.json"))
+        .expect("new linked worktree must receive a worktree-local .codex/hooks.json");
+    assert!(local.contains("SessionStart"), "{local}");
 }
 
 #[test]
@@ -1193,6 +1225,7 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
             issue_number: 42,
             project_root: home.path().to_path_buf(),
             session_mode: mode,
+            review_dispatch: false,
         };
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .working_dir(worktree.path())
@@ -1397,6 +1430,7 @@ fn managed_project_trust_skips_worktree_relative_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1455,6 +1489,7 @@ fn managed_project_trust_skips_absolute_process_codex_home_inside_worktree() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1516,6 +1551,7 @@ fn managed_project_trust_skips_profile_supplied_arbitrary_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1575,6 +1611,7 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         issue_number: 42,
         project_root: home.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -1646,6 +1683,90 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         )
         .expect_err("project trust failure must abort before Codex can prompt");
     assert!(error.contains("failed to trust gwt-managed Codex worktree"));
+}
+
+#[test]
+fn codex_project_trust_scope_accepts_only_exact_isolated_monitor_review() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+    init_repo_with_initial_commit(&project);
+    let head = gwt_core::process::run_git_logged(&["rev-parse", "HEAD"], Some(&project))
+        .expect("read reviewed HEAD");
+    assert!(head.status.success());
+    let reviewed_sha = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .linked_issue_number(42)
+        .build();
+    let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+    request.set_review_dispatch_context(&reviewed_sha);
+    let gwt::LaunchWizardLaunchRequest::Agent(config) = request else {
+        unreachable!("agent request");
+    };
+    let mut config = *config;
+    crate::launch_runtime::resolve_launch_worktree(&project, &mut config)
+        .expect("resolve detached review checkout");
+    let worktrees = gwt_git::WorktreeManager::new(&project)
+        .list()
+        .expect("read authoritative repository worktrees");
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(project.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    feedback.issue_monitor_review_dispatch = true;
+    let candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&feedback),
+    )
+    .unwrap()
+    .unwrap();
+    let validate =
+        |candidate, config: &gwt_agent::LaunchConfig, worktrees: &[gwt_git::WorktreeInfo]| {
+            super::super::validate_issue_monitor_managed_codex_worktree(
+                candidate, &project, config, worktrees,
+            )
+        };
+
+    assert!(validate(Some(&candidate), &config, &worktrees)
+        .expect("the exact typed review checkout must receive managed project trust")
+        .is_some());
+    assert!(validate(None, &config, &worktrees).unwrap().is_none());
+    assert!(validate(Some(&candidate), &config, &[]).is_err());
+    let mut ordinary_feedback = feedback;
+    ordinary_feedback.issue_monitor_review_dispatch = false;
+    let ordinary_candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&ordinary_feedback),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(validate(Some(&ordinary_candidate), &config, &worktrees).is_err());
+
+    for missing in [
+        "ephemeral",
+        "read-only",
+        "marker",
+        "exact SHA",
+        "detached",
+        "managed path",
+    ] {
+        let mut invalid = config.clone();
+        match missing {
+            "ephemeral" => invalid.is_ephemeral = false,
+            "read-only" => invalid.suppress_execution_control = false,
+            "marker" => {
+                invalid.env_vars.remove("GWT_REVIEW_DISPATCH");
+            }
+            "exact SHA" => invalid.ephemeral_base_ref = Some("0".repeat(reviewed_sha.len())),
+            "detached" => invalid.branch = Some("work/issue-42".to_string()),
+            "managed path" => invalid.working_dir = Some(project.clone()),
+            _ => unreachable!(),
+        }
+        assert!(
+            validate(Some(&candidate), &invalid, &worktrees).is_err(),
+            "a review without {missing} evidence must fail closed"
+        );
+    }
 }
 
 #[test]
@@ -1835,6 +1956,8 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     assert!(matches!(
         runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            fresh_execution: None,
+            retryable: true,
             message,
             session_mode: gwt_agent::SessionMode::Resume,
         }) if message == &error
@@ -1923,6 +2046,7 @@ fn codex_project_trust_scope_refuses_arbitrary_working_dir_even_with_issue_metad
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(arbitrary.path())
@@ -1964,6 +2088,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let valid_entry = gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -1978,6 +2103,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
                 issue_number: 42,
                 project_root: other_project.path().to_path_buf(),
                 session_mode: gwt_agent::SessionMode::Normal,
+                review_dispatch: false,
             },
             base_config(),
             valid_entry.clone(),

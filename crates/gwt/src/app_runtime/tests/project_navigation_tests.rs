@@ -463,7 +463,7 @@ fn app_runtime_select_project_tab_preserves_other_project_wizard() {
             "Other",
             other,
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree],
+            &[WindowPreset::Board],
         ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
@@ -1508,7 +1508,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
     );
     assert!(matches!(
         &events[1].event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Error
                 && detail.as_deref() == Some("boom")
@@ -2633,6 +2633,28 @@ fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    // The initial cache is deliberately stale: the Settings worker must use
+    // the active Host profile for every builtin, without host npm/network I/O.
+    let bin = write_fixture_runners(temp.path(), &["claude", "codex", "grok", "npm"]);
+    #[cfg(unix)]
+    {
+        fs::write(bin.join("claude"), "#!/bin/sh\nprintf '2.1.0\\n'\n").unwrap();
+        fs::write(bin.join("codex"), "#!/bin/sh\nexit 1\n").unwrap();
+        fs::write(bin.join("npm"), "#!/bin/sh\nprintf '\"2.1.0\"\\n'\n").unwrap();
+    }
+    #[cfg(windows)]
+    {
+        fs::write(bin.join("claude.cmd"), "@echo off\r\necho 2.1.0\r\n").unwrap();
+        fs::write(bin.join("codex.cmd"), "@echo off\r\nexit /b 1\r\n").unwrap();
+        fs::write(bin.join("npm.cmd"), "@echo off\r\necho \"2.1.0\"\r\n").unwrap();
+    }
+    let mut settings = Settings::default();
+    settings.profiles.profiles[0]
+        .env_vars
+        .insert("PATH".into(), bin.to_string_lossy().into_owned());
+    settings
+        .save(&runtime.profile_config_path().unwrap())
+        .unwrap();
     let options = vec![
         gwt::AgentOption {
             id: "claude".into(),
@@ -2659,19 +2681,29 @@ fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions
         "detection cache reads run off the GUI loop"
     );
     wait_for_recorded_event("supported agent list", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(event, UserEvent::Dispatch(outbound) if outbound.iter().any(|reply|
-                serde_json::to_value(&reply.event).unwrap()["kind"] == "supported_agent_list"))
-        })
+        events
+            .iter()
+            .any(|event| matches!(event, UserEvent::SupportedAgentCatalogReady { .. }))
     });
-    let events = recorded_events.lock().expect("events lock");
-    let payload = events
+    let ready = {
+        let mut events = recorded_events.lock().expect("events lock");
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::SupportedAgentCatalogReady { .. }))
+            .unwrap();
+        events.remove(index)
+    };
+    let UserEvent::SupportedAgentCatalogReady {
+        client_id,
+        generation,
+        event,
+    } = ready
+    else {
+        unreachable!()
+    };
+    let replies = runtime.handle_supported_agent_catalog_ready(client_id, generation, event);
+    let payload = replies
         .iter()
-        .filter_map(|event| match event {
-            UserEvent::Dispatch(outbound) => Some(outbound),
-            _ => None,
-        })
-        .flatten()
         .map(|reply| serde_json::to_value(&reply.event).unwrap())
         .find(|value| value["kind"] == "supported_agent_list")
         .expect("supported agent reply");
@@ -2683,10 +2715,26 @@ fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions
     }
     assert_eq!(rows[0]["installed"], true);
     assert_eq!(rows[0]["installed_version"], "2.1.0");
+    assert_eq!(rows[0]["up_to_date"], false);
+    assert_eq!(rows[0]["update_available"], false);
+    assert!(rows[0]["available_version"].is_null());
+    assert!(rows[0]["update_check_error"]
+        .as_str()
+        .expect("native update check reason")
+        .contains("native release channel"));
+    assert_eq!(payload["auto_update"], false);
+    assert_eq!(payload["maintenance_pending"], false);
+    let profile_only = rows.iter().find(|row| row["id"] == "grok").unwrap();
+    assert_eq!(
+        profile_only["installed"], true,
+        "all builtins use the active Host profile PATH"
+    );
+    assert_eq!(profile_only["update_available"], true);
     assert_eq!(rows[1]["installed"], true);
     assert!(rows[1]["installed_version"].is_null());
-    assert_eq!(rows[2]["installed"], false);
-    assert!(rows[2]["installed_version"].is_null());
+    let missing = rows.iter().find(|row| row["id"] == "agy").unwrap();
+    assert_eq!(missing["installed"], false);
+    assert!(missing["installed_version"].is_null());
 }
 
 #[test]
@@ -2703,7 +2751,10 @@ fn issue_monitor_error_notification_keeps_project_in_ledger() {
     let outbound = runtime
         .issue_monitor_project_notification(Some(&root), event)
         .unwrap();
-    prepare_outbound_event(&outbound);
+    gwt::error_report::record_backend_event_with_origin(
+        &outbound.event,
+        outbound.error_origin.as_ref(),
+    );
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
     let row = rows
         .iter()

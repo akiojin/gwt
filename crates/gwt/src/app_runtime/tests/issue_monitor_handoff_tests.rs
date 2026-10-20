@@ -21,6 +21,7 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
         MonitorProviderConversationFixture::Present,
         MonitorNativeHolderFixture::None,
         false,
+        LinkedIssueKind::Spec,
         gwt::cli::execution_state::ExecutionSettlement::Blocked {
             reason: "monitor predecessor failed".to_string(),
             missing_verification: Some("successor verification pending".to_string()),
@@ -64,6 +65,665 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
         );
     } else {
         assert_monitor_fresh_successor(result, &fixture);
+    }
+}
+
+// The binary harness links a non-test gwt library. Its caller-facing
+// verify.run starts this executable as a watchdog, so provide the same entry
+// point as gwtd without requiring an unbuilt sibling binary in CI.
+#[ctor::ctor(unsafe)]
+fn run_monitor_fixture_verification_watchdog() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str)
+        == Some(gwt::cli::verification_record::interruption::WATCHDOG_ARG)
+    {
+        let success = match argv.as_slice() {
+            [_, _, worktree, record_id] => {
+                gwt::cli::verification_record::interruption::run_watchdog(
+                    Path::new(worktree),
+                    record_id,
+                )
+                .is_ok()
+            }
+            _ => false,
+        };
+        std::process::exit(if success { 0 } else { 1 });
+    }
+}
+
+/// Issue #5254 / SPEC #4074 AC-1, AC-6: Monitor retries must publish the
+/// successor Work at authenticated readiness before the new agent can mutate it.
+#[test]
+fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case, settlement, terminal_kind) in [
+        (
+            "blocked-discarded",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "Monitor predecessor failed".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "completed-done",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+        (
+            "4117-done-foreign-container",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+        (
+            "5096-active-foreign-container",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Update,
+        ),
+        (
+            "4249-empty-predecessor-container",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+        (
+            "4777-discarded-successor-placeholder",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "4777-missing-historical-owner",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "4777-ownerless-root",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "5082-ownerless-current",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Discard,
+        ),
+        (
+            "5257-idle-work-after-refused-adoption",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "adoption did not complete".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Update,
+        ),
+        (
+            "5254-done-successor-placeholder",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+    ] {
+        let mut fixture = monitor_relaunch_fixture_with_settlement(
+            temp.path(),
+            case,
+            MonitorProviderConversationFixture::Present,
+            MonitorNativeHolderFixture::None,
+            true,
+            LinkedIssueKind::Spec,
+            settlement,
+        );
+        let unique_head = if case.contains("ownerless") {
+            fs::write(fixture.worktree.join("retained-source.txt"), case).unwrap();
+            run_git(&fixture.worktree, &["add", "retained-source.txt"]);
+            run_git(&fixture.worktree, &["commit", "-m", "retain unique source"]);
+            Some(git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]))
+        } else {
+            None
+        };
+        let source_path = fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id));
+        let source_bytes = fs::read(&source_path).expect("predecessor Session bytes");
+        let predecessor_active = ActiveAgentSession {
+            session_id: fixture.source_session_id.clone(),
+            branch_name: "work/issue-3165".to_string(),
+            worktree_path: fixture.worktree.clone(),
+            agent_project_root: fixture.worktree.display().to_string(),
+            ..sample_active_agent_session("tab-1", "predecessor-window")
+        };
+        save_workspace_launch_projection(
+            &fixture.project_root,
+            &predecessor_active,
+            Some("origin/develop"),
+            Some(fixture.execution_owner.number),
+            Some(fixture.execution_owner),
+            None,
+            WorkspaceLaunchProjectionKind::StartWork,
+            Some(&HashSet::from([fixture.source_session_id.clone()])),
+        )
+        .expect("publish predecessor Work");
+        let mut predecessor_id =
+            gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
+                &fixture.project_root,
+                &fixture.worktree,
+                |projection, _, _| {
+                    let event = gwt_core::workspace_projection::WorkEvent::new(
+                        terminal_kind,
+                        projection.id.clone(),
+                        Utc::now(),
+                    );
+                    Ok((projection.id.clone(), vec![event]))
+                },
+            )
+            .expect("terminalize predecessor Work");
+        // Launch starts shared-event intake. Exercise that rebuild before the
+        // readiness handshake so the predecessor's local close must survive it.
+        let project_key = gwt_core::paths::resolve_project_scope(&fixture.project_root).hash;
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &gwt_core::paths::gwt_workspace_work_items_path(&project_key),
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
+        // Issue #5288: these persisted shapes survived real launches on
+        // different hosts. Seed the machine-local projection after intake,
+        // rather than pretending every old Work still has this host's path.
+        let works_path = gwt_core::paths::gwt_workspace_work_items_path(&project_key);
+        let mut history =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        if case.contains("foreign-container") {
+            let predecessor = history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap();
+            predecessor.execution_containers[0].worktree_path =
+                Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
+        }
+        if case == "4777-ownerless-root" {
+            history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap()
+                .owner = None;
+        }
+        if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
+            let mut start = history
+                .work_items
+                .iter()
+                .find(|work| work.id == predecessor_id)
+                .unwrap()
+                .events
+                .iter()
+                .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+                .unwrap()
+                .clone();
+            start.id = format!("{case}-successor-start");
+            start.work_item_id = gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+            start.related_work_item_id = Some(predecessor_id.clone());
+            start.agent_session_id = None;
+            start.updated_at = Utc::now();
+            start.execution_container.as_mut().unwrap().worktree_path =
+                Some(dunce::canonicalize(&fixture.worktree).unwrap());
+            history.apply_event(start.clone());
+            if case.starts_with("4249") {
+                history
+                    .work_items
+                    .iter_mut()
+                    .find(|work| work.id == predecessor_id)
+                    .unwrap()
+                    .execution_containers
+                    .clear();
+            } else {
+                predecessor_id = start.work_item_id.clone();
+                history.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    &predecessor_id,
+                    Utc::now(),
+                ));
+                if case == "4777-missing-historical-owner" || case.contains("ownerless") {
+                    // Real historical chains can lose owners at the root,
+                    // terminal middle generations, or active latest Work.
+                    history
+                        .work_items
+                        .iter_mut()
+                        .find(|work| work.id == predecessor_id)
+                        .unwrap()
+                        .owner = None;
+                    if case == "5082-ownerless-current" {
+                        start.id = format!("{case}-middle-start");
+                        start.work_item_id =
+                            gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+                        start.related_work_item_id = Some(predecessor_id.clone());
+                        start.owner = None;
+                        history.apply_event(start.clone());
+                        predecessor_id = start.work_item_id.clone();
+                        history.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+                            gwt_core::workspace_projection::WorkEventKind::Discard,
+                            &predecessor_id,
+                            Utc::now(),
+                        ));
+                    }
+                    start.id = format!("{case}-latest-start");
+                    start.work_item_id =
+                        gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+                    start.related_work_item_id = Some(predecessor_id.clone());
+                    history.apply_event(start);
+                }
+            }
+        }
+        if case.contains("placeholder") {
+            let mut placeholder = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Update,
+                gwt_core::workspace_projection::successor_work_id(&predecessor_id),
+                Utc::now(),
+            );
+            placeholder.owner = Some("SPEC-3165".to_string());
+            placeholder.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some("work/issue-3165".to_string()),
+                    worktree_path: Some(dunce::canonicalize(&fixture.worktree).unwrap()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let placeholder_id = placeholder.work_item_id.clone();
+            // Reproduce the compacted 49 Update + Pause tail seen in the
+            // real rows; lost inline history must not prevent exact recovery.
+            for index in 0..60 {
+                let mut update = placeholder.clone();
+                update.id = format!("{case}-update-{index}");
+                history.apply_event(update);
+            }
+            let mut paused = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Pause,
+                placeholder_id,
+                Utc::now(),
+            );
+            paused.agent_session_id = Some(format!("stranded-{case}"));
+            history.apply_event(paused);
+        }
+        if case.starts_with("5257") {
+            let work = history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap();
+            work.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
+            work.execution_containers[0].worktree_path =
+                Some(dunce::canonicalize(&fixture.worktree).unwrap());
+            work.agents.clear();
+            work.events.clear();
+            let mut backfill = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Backfill,
+                &predecessor_id,
+                Utc::now(),
+            );
+            backfill.owner = work.owner.clone();
+            backfill.execution_container = work.execution_containers.first().cloned();
+            history.apply_event(backfill);
+        }
+        let terminal_history: Vec<_> =
+            if case == "4777-missing-historical-owner" || case.contains("ownerless") {
+                history
+                    .work_items
+                    .iter()
+                    .filter(|work| work.is_terminal())
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &history,
+        )
+        .expect("seed observed historical Work shape");
+        let predecessor =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap()
+                .work_items
+                .into_iter()
+                .find(|work| work.id == predecessor_id)
+                .expect("terminal predecessor Work");
+        let predecessor_terminal = predecessor.is_terminal();
+
+        let before =
+            gwt::cli::execution_state::diagnose_owner(&fixture.worktree, fixture.execution_owner);
+        assert_eq!(
+            before.recommended_recovery, "gwt-execute",
+            "{case}: {before:?}"
+        );
+
+        prepare_monitor_relaunch(
+            &mut fixture,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+        let (window_id, result) =
+            take_monitor_launch_complete_event(case, &fixture.recorded_events);
+        let completion = result.expect("Monitor fresh launch preparation");
+        let session_id = completion.1.clone();
+        assert_ne!(session_id, fixture.source_session_id, "{case}");
+        let readiness_nonce = completion
+            .0
+            .env
+            .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+            .cloned()
+            .expect("Monitor successor readiness nonce");
+        fixture
+            .runtime
+            .handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
+        assert!(fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&window_id));
+        let (spawner, _) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
+        ready.continuation_readiness_nonce = Some(readiness_nonce);
+        ready.project_root = Some(fixture.project_root.display().to_string());
+        ready.branch = Some("work/issue-3165".to_string());
+        fixture.runtime.handle_runtime_hook_event(ready);
+        let events = commit_pending_fresh_execution(&mut fixture.runtime);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.event,
+                BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+            )),
+            "{case}: fresh readiness must commit, not roll back: {events:?}",
+        );
+        assert!(!fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&window_id));
+        let candidate =
+            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("committed successor Session");
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(
+                &fixture.worktree,
+                fixture.execution_owner,
+            )
+            .expect("committed successor execution"),
+            Some(
+                candidate
+                    .execution_binding
+                    .expect("committed successor Session binding")
+                    .identity,
+            ),
+            "{case}: readiness must activate the candidate before Work readback",
+        );
+
+        let works =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        let successor_id = gwt_core::workspace_projection::current_work_id(
+            &works,
+            &fixture.project_root,
+            Some("work/issue-3165"),
+            Some(&fixture.worktree),
+        )
+        .expect("current canonical Work");
+        let successor = works
+            .work_items
+            .iter()
+            .find(|work| work.id == successor_id)
+            .expect("successor Work");
+        if predecessor_terminal {
+            assert_ne!(successor_id, predecessor_id, "{case}");
+        }
+        assert!(!successor.is_terminal(), "{case}");
+        if predecessor_terminal {
+            assert!(successor.related_work_item_ids.contains(&predecessor_id));
+        }
+        let projection =
+            gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        let assigned = projection
+            .latest_agent_for_session(&session_id)
+            .expect("successor Session assignment");
+        assert!(assigned.is_assigned(), "{case}");
+        assert_eq!(
+            assigned.workspace_id.as_deref(),
+            Some(successor_id.as_str())
+        );
+
+        let _current_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
+        let mut env = gwt::cli::TestEnv::new(fixture.worktree.clone());
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Workspace(gwt::cli::WorkspaceCommand::Ensure {
+                agent_session: session_id.clone(),
+                title_summary: "Monitor successor Work".to_string(),
+                current_focus: None,
+                spec: Some(fixture.execution_owner.number),
+                issue: None,
+                topic: None,
+                boundary: None,
+            }),
+        )
+        .expect("Monitor successor workspace.ensure must be accepted");
+        assert!(String::from_utf8(env.stdout)
+            .unwrap()
+            .contains(&successor_id));
+        let session =
+            gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{session_id}.toml")))
+                .unwrap();
+        let update = gwt::apply_bound_authenticated_workspace_update(
+            &fixture.project_root,
+            &session_id,
+            session.execution_binding.as_ref().unwrap(),
+            gwt::AgentWorkspaceUpdateRequest {
+                schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                observation: gwt::observe_agent_runtime(&fixture.worktree).unwrap(),
+                intent: gwt::AgentWorkspaceUpdateIntent {
+                    current_focus: Some("Monitor successor accepted".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("Monitor successor workspace.update must be accepted");
+        assert_eq!(update.work_id, successor_id, "{case}");
+        let after =
+            gwt::cli::execution_state::diagnose_owner(&fixture.worktree, fixture.execution_owner);
+        assert_ne!(after.generation_id, before.generation_id, "{case}");
+        assert_ne!(
+            after.recommended_recovery, before.recommended_recovery,
+            "{case}: {after:?}"
+        );
+        assert_eq!(fs::read(&source_path).unwrap(), source_bytes, "{case}");
+        if let Some(unique_head) = unique_head {
+            assert_eq!(
+                git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]),
+                unique_head,
+                "{case}: retain unique commit"
+            );
+        }
+        let updated =
+            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                .unwrap()
+                .unwrap();
+        if predecessor_terminal {
+            assert_eq!(
+                updated
+                    .work_items
+                    .iter()
+                    .find(|work| work.id == predecessor_id),
+                Some(&predecessor),
+                "{case}: preserve terminal Work and Session membership",
+            );
+        }
+        for historical in &terminal_history {
+            assert_eq!(
+                updated
+                    .work_items
+                    .iter()
+                    .find(|work| work.id == historical.id),
+                Some(historical),
+                "{case}: preserve every historical terminal generation",
+            );
+        }
+        let mut verify_env = gwt::cli::TestEnv::new(fixture.worktree.clone());
+        let code = gwt::cli::run(
+            &mut verify_env,
+            gwt::cli::CliCommand::Verify(gwt::cli::verification_record::VerifyCommand::Plan {
+                // This throwaway Git project has no Rust manifest. Exercise
+                // canonical verify.run authority with a real portable command.
+                commands: vec!["git diff --check".to_string()],
+                derive: false,
+            }),
+        )
+        .expect("successor verify.plan");
+        assert_eq!(
+            code,
+            0,
+            "{case}: {}",
+            String::from_utf8_lossy(&verify_env.stdout)
+        );
+        let plan = gwt::cli::verification_record::load_plan(&fixture.worktree)
+            .unwrap()
+            .unwrap();
+        let mut verify_env = gwt::cli::TestEnv::new(fixture.worktree.clone());
+        let code = gwt::cli::run(
+            &mut verify_env,
+            gwt::cli::CliCommand::Verify(gwt::cli::verification_record::VerifyCommand::Run {
+                commands: plan.commands.clone(),
+                max_wait_secs: None,
+                user_verification_result: None,
+                headed_e2e_commands: Vec::new(),
+            }),
+        )
+        .expect("successor verify.run");
+        assert_eq!(
+            code,
+            0,
+            "{case}: {}",
+            String::from_utf8_lossy(&verify_env.stdout)
+        );
+        fixture
+            .runtime
+            .stop_window_runtime_without_session_projection(&window_id);
+    }
+}
+
+#[test]
+fn successor_placeholder_cannot_take_over_related_foreign_or_live_work() {
+    use gwt_core::workspace_projection::{
+        canonical_work_id, successor_work_id, WorkEvent, WorkEventKind, WorkItemsProjection,
+        WorkspaceExecutionContainerRef, WorkspaceProjection,
+    };
+    let project = Path::new("/fixture-project");
+    let session = ActiveAgentSession {
+        session_id: "fresh-session".to_string(),
+        branch_name: "work/issue-42".to_string(),
+        worktree_path: project.join("checkout"),
+        ..sample_active_agent_session("tab", "window")
+    };
+    let now = Utc::now();
+    let predecessor_id = canonical_work_id(project, Some(&session.branch_name), None).unwrap();
+    let successor_id = successor_work_id(&predecessor_id);
+    let mut start = WorkEvent::new(WorkEventKind::Start, &predecessor_id, now);
+    start.owner = Some("Issue #42".to_string());
+    start.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(session.branch_name.clone()),
+        worktree_path: Some(session.worktree_path.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    for invalid in ["owner", "related", "live", "active", "terminal"] {
+        let mut works = WorkItemsProjection::empty(now);
+        works.apply_event(start.clone());
+        works.apply_event(WorkEvent::new(WorkEventKind::Done, &predecessor_id, now));
+        let mut placeholder = start.clone();
+        placeholder.id = format!("placeholder-{invalid}");
+        placeholder.kind = WorkEventKind::Update;
+        placeholder.work_item_id = successor_id.clone();
+        if invalid == "owner" {
+            placeholder.owner = Some("Issue #43".to_string());
+        }
+        if invalid == "related" {
+            placeholder.related_work_item_id = Some("another-work".to_string());
+        }
+        works.apply_event(placeholder);
+        let mut pause = WorkEvent::new(WorkEventKind::Pause, &successor_id, now);
+        pause.agent_session_id = Some("stranded-session".to_string());
+        works.apply_event(pause);
+        if invalid == "active" || invalid == "terminal" {
+            works
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == successor_id)
+                .unwrap()
+                .status_category = if invalid == "active" {
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+            } else {
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+            };
+        }
+        let live = if invalid == "live" {
+            HashSet::from(["stranded-session".to_string()])
+        } else {
+            HashSet::new()
+        };
+        let mut projection = WorkspaceProjection::default_for_project(project);
+        let before = projection.clone();
+        let result = super::super::workspace::apply_workspace_launch_for_current_work(
+            project,
+            &mut projection,
+            &works,
+            &session,
+            super::super::workspace::WorkspaceLaunchTransition {
+                work_id: None,
+                base_branch: None,
+                linked_issue_number: Some(42),
+                canonical_owner: None,
+                resume_context: None,
+                kind: WorkspaceLaunchProjectionKind::StartWork,
+                live_session_ids: &live,
+                now,
+            },
+        );
+        assert!(result.is_err(), "{invalid}");
+        assert_eq!(projection, before, "{invalid}: refuse before mutation");
     }
 }
 
@@ -946,7 +1606,7 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
     process.cwd = Some(fixture.worktree.clone());
     fixture
         .runtime
-        .handle_launch_complete_and_drain(window_id, result);
+        .handle_launch_complete_and_drain(window_id.clone(), result);
 
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
@@ -976,6 +1636,15 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
         prefs.queued_launch_session_strategies.get(&3165),
         Some(&gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe),
     );
+    assert!(
+        !fixture.runtime.tracked_window_exists(&window_id),
+        "a definitely pre-submit Monitor failure must not leave an Error pane"
+    );
+    assert!(fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
 }
 
 /// Issue #3716 AC-2: an incomplete provider receipt is a retryable handoff
@@ -1670,8 +2339,10 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.completed_issue_monitor_list_for_test(
+        "client-1",
+        gwt::daemon_publisher::read_issue_monitor_status,
+    );
 
     let status = events
         .iter()
@@ -1818,19 +2489,24 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .expect("confirm wizard view");
     assert_eq!(confirm_view.primary_action_label, "Save settings");
 
+    // Recovery content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let saved_events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::Submit,
         None,
     );
 
-    assert!(saved_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
-        )
-    }));
+    assert!(
+        saved_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                    if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
+            )
+        }),
+        "profile recovery save must commit successfully: {saved_events:?}"
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -1870,6 +2546,7 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
     codex.model = Some("saved-codex-model".into());
     codex.fast_mode = true;
     let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         max_active_agents: 7,
         launch_usage_threshold_percent: 83,
         ..Default::default()
@@ -1927,6 +2604,61 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
 }
 
 #[test]
+fn app_runtime_issue_monitor_profiles_set_acknowledges_save_with_git_attention() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::write(repo.join(".git"), "gitdir: missing\n").expect("broken Git metadata");
+    // The worker's cached diagnosis makes the unrelated snapshot notice
+    // deterministic, without depending on a Git subprocess or its deadline.
+    gwt_git::repository::git_health::record_metadata_failure(
+        &repo,
+        "git remote get-url origin",
+        "fatal: not a git repository: missing",
+    )
+    .expect("cached Git attention diagnosis");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "issue_monitor_profiles_set",
+        "profiles": [{"agent_id": "codex"}], "request_id": 43
+    }))
+    .expect("candidate editing event");
+    let events = runtime.handle_frontend_event("client-1".into(), event);
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("saved pool");
+    assert_eq!(saved.launch_profile_pool()[0].agent_id, "codex");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
+                if level == "error" && message.contains("Git needs attention")
+        )),
+        "fixture must retain the unrelated Git attention notice: {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. }
+        )),
+        "a successful write must not report an unrelated snapshot error: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::IssueMonitorProfiles {
+                request_id: Some(43),
+                ..
+            }
+        )),
+        "the successful write must acknowledge this request: {events:?}"
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -1937,6 +2669,7 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
     let mut seeded = gwt::IssueMonitorPrefs::default();
     seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let project_root = repo.display().to_string();
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for payload in [
@@ -1947,11 +2680,19 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
         let before = fs::read(&prefs_path).expect("read prefs");
         let mut payload = payload;
         payload["kind"] = "issue_monitor_profiles_set".into();
+        payload["request_id"] = 42.into();
         let event = serde_json::from_value(payload).expect("candidate editing event");
         let events = runtime.handle_frontend_event("client-1".into(), event);
         assert!(events.iter().any(|event| matches!(
             &event.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error"
         )));
+        assert!(events.iter().any(|event| {
+            let wire = serde_json::to_value(&event.event).expect("serialize failure");
+            wire["kind"] == "issue_monitor_profiles_write_failed"
+                && wire["request_id"] == 42
+                && wire["project_root"] == project_root
+                && !wire["message"].as_str().unwrap_or_default().is_empty()
+        }));
         assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     }
 }
@@ -2014,7 +2755,9 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             .build(),
     ));
 
-    runtime.save_issue_monitor_profile_from_launch_request(
+    // Saved content must not depend on completing fsync inside the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    let events = runtime.save_issue_monitor_profile_from_launch_request(
         session,
         IssueMonitorProfileSaveContext {
             client_id: "client-1".to_string(),
@@ -2023,6 +2766,15 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
             sets: None,
         },
         request,
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, level, .. }
+                if message == "Issue Monitor settings saved" && level == "info"
+        )),
+        "profile save must commit successfully: {events:?}"
     );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
@@ -2151,4 +2903,56 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"
     );
+}
+
+/// Issue #5043 AC-2: an ordinary Resume must deliver an ahead owner branch.
+#[test]
+fn app_runtime_monitor_plain_issue_resume_receives_delivery_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "plain-issue-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    fs::write(fixture.worktree.join("fix.rs"), "fn fixed() {}\n").expect("write source");
+    run_git(&fixture.worktree, &["add", "fix.rs"]);
+    run_git(&fixture.worktree, &["commit", "-qm", "undelivered fix"]);
+
+    prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result = take_monitor_launch_complete("plain-issue-delivery", &fixture.recorded_events);
+    let (process, .., session_mode, _, _) = result.as_ref().expect("ordinary Issue Resume");
+    assert_eq!(*session_mode, gwt_agent::SessionMode::Resume);
+    let prompt = process
+        .args
+        .iter()
+        .find(|argument| {
+            argument.contains("verify.run, a pull request, and its merge into develop")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Resume must receive the delivery prompt: {:?}",
+                process.args
+            )
+        });
+    assert!(prompt.contains("against origin/develop"), "{prompt}");
+    assert!(!prompt.contains("close Issue #3165 and finish"), "{prompt}");
 }

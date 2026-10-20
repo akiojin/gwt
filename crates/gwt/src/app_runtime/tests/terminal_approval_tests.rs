@@ -449,9 +449,9 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
     assert!(runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    // A Stop legitimately queues one blocking task now: Issue #3777 AC-3 moves
-    // the Active Work projection rebuild off the Tao loop, so reaching a
-    // terminal state schedules that background refresh. Counting queued tasks
+    // A Stop legitimately queues blocking work: Issue #3777 AC-3 moves the
+    // Active Work projection rebuild off the Tao loop, and Issue #4411 moves
+    // heartbeat publication off it too. Counting queued tasks
     // therefore no longer distinguishes "scheduled a projection rebuild" from
     // "scheduled a window teardown". Run whatever was queued and re-assert the
     // window instead: a destructive finalizer would tear it down here, so this
@@ -1775,7 +1775,7 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     )));
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::TerminalStatus { id, status, detail }
+        BackendEvent::TerminalStatus { id, status, detail, .. }
             if id == &window_id
                 && *status == WindowProcessStatus::Running
                 && detail.is_none()
@@ -1915,86 +1915,6 @@ fn close_window_removes_while_stop_window_keeps() {
     );
 }
 
-// Issue #3366 — the line-level process stream (measured ≈956 msg/s under
-// normal agent load) is delivered only while a Console window exists
-// somewhere in the workspace. Raw `process_line` events are consumed
-// exclusively by Console window controllers; the Logs window's Process
-// facet reads summary log events instead. History is not lost while
-// suppressed: `LoadProcessConsole` replays the ProcessConsoleHub ring
-// buffer on every Console mount.
-#[test]
-fn process_line_events_drop_stream_without_console_window() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    // A Logs window alone must not subscribe the raw process stream.
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo,
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Logs],
-    );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events = runtime.process_line_events(gwt_core::process_console::ProcessLine::new(
-        gwt_core::process_console::ProcessKind::Git,
-        1,
-        gwt_core::process_console::ProcessStream::Stdout,
-        "remote: Enumerating objects",
-    ));
-
-    assert!(
-        events.is_empty(),
-        "no Console window anywhere → the stream must not reach the client hub"
-    );
-}
-
-#[test]
-fn process_line_events_broadcast_while_console_window_open_on_inactive_tab() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo_a = temp.path().join("repo-a");
-    let repo_b = temp.path().join("repo-b");
-    fs::create_dir_all(&repo_a).expect("create repo-a");
-    fs::create_dir_all(&repo_b).expect("create repo-b");
-    // The Console window lives on the INACTIVE tab: its controller keeps
-    // accumulating without re-requesting a snapshot when the tab becomes
-    // active again, so the gate must consider every tab.
-    let active = sample_project_tab(
-        "tab-a",
-        "A",
-        repo_a,
-        ProjectKind::Git,
-        &[WindowPreset::Shell],
-    );
-    let inactive = sample_project_tab(
-        "tab-b",
-        "B",
-        repo_b,
-        ProjectKind::Git,
-        &[WindowPreset::Console],
-    );
-    let runtime = sample_runtime(temp.path(), vec![active, inactive], Some("tab-a"));
-
-    let events = runtime.process_line_events(gwt_core::process_console::ProcessLine::new(
-        gwt_core::process_console::ProcessKind::Gh,
-        7,
-        gwt_core::process_console::ProcessStream::Stderr,
-        "gh api rate limit",
-    ));
-
-    assert_eq!(events.len(), 1);
-    assert!(
-        matches!(&events[0].target, DispatchTarget::Project(key) if Some(key) == runtime.project_key_for_tab("tab-b"))
-    );
-    assert!(matches!(
-        &events[0].event,
-        BackendEvent::ProcessLine { line } if line.message == "gh api rate limit"
-    ));
-}
-
 // Issue #3366 — `log_entry_appended` is consumed only by Logs window
 // state. `LoadLogs` re-reads the log directory on mount, so suppressing
 // the live stream while no Logs window exists loses nothing.
@@ -2004,13 +1924,13 @@ fn log_entry_events_drop_stream_without_logs_window() {
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    // A Console window alone must not subscribe the tracing log stream.
+    // A Board window alone must not subscribe the tracing log stream.
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
         repo,
         ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Console],
+        &[WindowPreset::Shell, WindowPreset::Board],
     );
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 

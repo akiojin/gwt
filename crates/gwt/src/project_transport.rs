@@ -32,7 +32,10 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+    },
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -104,8 +107,7 @@ impl OutboundEvent {
         assert!(
             matches!(
                 &event,
-                BackendEvent::ProcessLine { .. }
-                    | BackendEvent::LogEntryAppended { .. }
+                BackendEvent::LogEntryAppended { .. }
                     | BackendEvent::RuntimeHealth { .. }
                     | BackendEvent::ProviderUsage { .. }
                     | BackendEvent::BoardAuthStatus { .. }
@@ -114,6 +116,8 @@ impl OutboundEvent {
                     | BackendEvent::SystemSettingsError { .. }
                     | BackendEvent::AutostartStatus { .. }
                     | BackendEvent::AutostartError { .. }
+                    | BackendEvent::SupportedAgentList { .. }
+                    | BackendEvent::SupportedAgentMaintenance { .. }
                     | BackendEvent::UpdateState(_)
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
@@ -414,7 +418,38 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
     }
 }
 
-/// One backend event serialized once and shared across every client queue.
+type DeferredOutboundPayload = LazyLock<Arc<str>, Box<dyn FnOnce() -> Arc<str> + Send>>;
+
+#[derive(Clone)]
+enum SharedOutboundPayload {
+    Serialized(Arc<str>),
+    Deferred(Arc<DeferredOutboundPayload>),
+}
+
+impl SharedOutboundPayload {
+    fn serialized(&self) -> &Arc<str> {
+        match self {
+            Self::Serialized(payload) => payload,
+            Self::Deferred(payload) => LazyLock::force(payload),
+        }
+    }
+}
+
+impl std::ops::Deref for SharedOutboundPayload {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.serialized().as_ref()
+    }
+}
+
+impl AsRef<str> for SharedOutboundPayload {
+    fn as_ref(&self) -> &str {
+        self.serialized().as_ref()
+    }
+}
+
+/// One backend event encoded once and shared across every client queue.
 ///
 /// `coalesce_key` and `repair_pane_id` are deliberately separate identities.
 /// `coalesce_key` collapses successive snapshots of the same logical target to
@@ -425,7 +460,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub struct PreparedOutbound {
-    payload: Arc<str>,
+    payload: SharedOutboundPayload,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -440,6 +475,33 @@ pub struct PreparedOutbound {
 }
 
 const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_WORK_PATCH_SERIALIZATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER:
+        std::cell::RefCell<Option<Arc<dyn Fn() + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_active_work_patch_serialization(event: &BackendEvent) {
+    if matches!(event, BackendEvent::ActiveWorkProjectionPatch { .. }) {
+        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let observer =
+            ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| observer.borrow().clone());
+        if let Some(observer) = observer {
+            observer();
+        }
+    }
+}
+
+fn serialize_backend_event(event: &BackendEvent) -> Arc<str> {
+    #[cfg(test)]
+    observe_active_work_patch_serialization(event);
+    Arc::from(serde_json::to_string(event).expect("backend event json"))
+}
 
 fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
     let kind = event.event_kind();
@@ -457,7 +519,7 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
+        payload: SharedOutboundPayload::Serialized(serialize_backend_event(event)),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -470,10 +532,6 @@ fn prepare_outbound(event: &crate::BackendEvent) -> PreparedOutbound {
 /// Serialize private Knowledge wire metadata without changing the public
 /// `BackendEvent` construction/destructuring shape.
 pub fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
-    crate::error_report::record_backend_event_with_origin(
-        &outbound.event,
-        outbound.error_origin.as_ref(),
-    );
     let mut prepared = prepare_outbound(&outbound.event);
     prepared.stream_seq = outbound.terminal_stream_seq;
     let Some(metadata) = outbound.knowledge_wire_metadata.as_ref() else {
@@ -519,12 +577,41 @@ pub fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
             );
         }
     }
-    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
+    prepared.payload = SharedOutboundPayload::Serialized(Arc::from(
+        serde_json::to_string(&payload).expect("backend event json"),
+    ));
     prepared
 }
 
+fn prepare_owned_outbound(outbound: OutboundEvent) -> PreparedOutbound {
+    if !matches!(
+        outbound.event,
+        BackendEvent::ActiveWorkProjectionPatch { .. }
+    ) || outbound.knowledge_wire_metadata.is_some()
+    {
+        return prepare_outbound_event(&outbound);
+    }
+    let kind = outbound.event.event_kind();
+    let stream_seq = outbound.terminal_stream_seq;
+    let event = outbound.event;
+    // Issue #4411: keep this exact patch at its existing FIFO position,
+    // but encode it once on the sender instead of the GUI producer. The
+    // consumed closure releases its structured snapshot after encoding.
+    PreparedOutbound {
+        payload: SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
+            serialize_backend_event(&event)
+        })))),
+        kind,
+        coalesce_key: None,
+        repair_pane_id: None,
+        class: queue_class_for_kind(kind),
+        terminal_pane: None,
+        stream_seq,
+    }
+}
+
 struct QueuedOutbound {
-    payload: Arc<str>,
+    payload: SharedOutboundPayload,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -760,6 +847,9 @@ impl ClientQueue {
         } else {
             Vec::new()
         };
+        // Materialization can encode a large patch or wait for another
+        // client's shared encoding. Never hold the producer's queue mutex.
+        drop(state);
         Some(DrainStep::Message {
             payload: entry.payload.to_string(),
             repair_panes,
@@ -859,6 +949,7 @@ type ClientHubDispatchHook = Arc<dyn Fn() + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+    browser_generation: Arc<AtomicU64>,
     #[cfg(test)]
     before_dispatch_enqueue: Arc<Mutex<Option<ClientHubDispatchHook>>>,
 }
@@ -924,6 +1015,9 @@ impl ClientHub {
         scope: ClientScope,
     ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
+        if receives_broadcasts {
+            self.browser_generation.fetch_add(1, Ordering::Relaxed);
+        }
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -965,6 +1059,18 @@ impl ClientHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// Transient lifetime ignores agent pane sockets and remembers a browser
+    /// even when its entire connection occurs between monitor polls.
+    pub fn browser_session_state(&self) -> (u64, bool) {
+        let connected = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| client.receives_broadcasts);
+        (self.browser_generation.load(Ordering::Relaxed), connected)
     }
 
     /// SPEC-3107: lightweight queue pressure snapshot for runtime health.
@@ -1035,9 +1141,14 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
-            let prepared = prepare_outbound_event(&outbound);
+            crate::error_report::queue_backend_event_with_origin(
+                &outbound.event,
+                outbound.error_origin.as_ref(),
+            );
+            let target = outbound.target.clone();
+            let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
-                if target_selects(&outbound.target, client_id, *receives_broadcasts, scope)
+                if target_selects(&target, client_id, *receives_broadcasts, scope)
                     && queue.enqueue(&prepared)
                 {
                     dead_clients.push(client_id.clone());
@@ -1092,7 +1203,7 @@ impl ClientHub {
         };
         let kind = "active_work_projection";
         let prepared = PreparedOutbound {
-            payload,
+            payload: SharedOutboundPayload::Serialized(payload),
             kind,
             coalesce_key: None,
             repair_pane_id: None,
@@ -1291,6 +1402,28 @@ async fn hook_live_handler(
             .to_string_lossy()
             .into_owned(),
     );
+    let source_event = match event.source_event.as_deref() {
+        Some(
+            source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+            | "SubagentStart" | "SubagentStop" | "Notification" | "PermissionRequest"),
+        ) => source,
+        None => "none",
+        _ => "other",
+    };
+    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+        event.occurred_at.as_str()
+    } else {
+        "invalid"
+    };
+    tracing::info!(
+        target: "gwt.hook.delivery",
+        stage = "receipt",
+        outcome = "authenticated",
+        gwt_session_id = principal.session_id(),
+        source_event,
+        occurred_at,
+        "runtime hook delivery"
+    );
     state.send(TransportEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
@@ -1315,15 +1448,35 @@ async fn workspace_update_handler(
             "workspace_update_requires_active_execution_authority",
         );
     };
+    let operation_id = match headers.get(crate::workspace_update_receipt::OPERATION_HEADER) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .filter(|id| crate::workspace_update_receipt::validate_operation_id(id).is_ok())
+        {
+            Some(id) => Some(id.to_string()),
+            None => {
+                return workspace_update_error_response(
+                    StatusCode::BAD_REQUEST,
+                    AgentWorkspaceUpdateError::new(
+                        AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                        "invalid workspace operation_id",
+                    ),
+                )
+            }
+        },
+        None => None,
+    };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
     let mutation_project_root = project_root.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::apply_bound_authenticated_workspace_update(
+        crate::apply_bound_authenticated_workspace_update_with_operation_id(
             &mutation_project_root,
             &session_id,
             &execution_binding,
             request,
+            operation_id.as_deref(),
         )
     })
     .await;
@@ -1811,6 +1964,22 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::CloseWork {
+                work_id,
+                close_kind,
+            } => Some(AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            }),
+            FrontendEvent::PaneName {
+                candidate,
+                request_id,
+            } if self.grant.principal().authorizes_producing_mutation() => {
+                Some(AgentFrontendRequest::Name {
+                    candidate,
+                    request_id,
+                })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -1900,10 +2069,12 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            "pane_name_result" => Some(payload),
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
             "pane_close_result" => Some(payload),
+            "work_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -2007,6 +2178,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
+            Self::Browser(_) if matches!(event, FrontendEvent::PaneName { .. }) => None,
             Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
@@ -2047,6 +2219,23 @@ impl ClientSessionScope {
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
+}
+
+fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
+    let event = serde_json::from_str(text)?;
+    if matches!(&event, FrontendEvent::PaneName { .. }) {
+        let raw: serde_json::Value = serde_json::from_str(text)?;
+        if raw.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .any(|key| !["kind", "candidate", "request_id"].contains(&key.as_str()))
+        }) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "pane_name accepts only candidate and request_id; target and authority claims are forbidden",
+            ));
+        }
+    }
+    Ok(event)
 }
 
 pub async fn client_session(socket: WebSocket, state: TransportState, scope: ClientScope) {
@@ -2090,6 +2279,30 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_self_close_response<S>(
+    sender: &mut S,
+    response: crate::agent_capability::AgentSelfCloseResponse,
+    deadline: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match response {
+        Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
+        Err(refusal) => {
+            send_agent_pm_terminal_result(
+                sender,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: refusal.window_id,
+                    reason: Some(refusal.reason),
+                },
+                deadline,
+            )
+            .await
+        }
+    }
 }
 
 async fn send_agent_pm_terminal_result<S>(
@@ -2238,7 +2451,7 @@ async fn client_session_with_scope(
                             .await;
                             break;
                         }
-                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
+                        match decode_frontend_event(text.as_ref()) {
                             Ok(event) => {
                                 match scope.filter_inbound(event) {
                                     Some(ScopedFrontendRequest::Browser(event)) => {
@@ -2491,15 +2704,10 @@ async fn client_session_with_scope(
                                                     }
                                                 }
                                             };
-                                            let Some(acceptance) = accepted else {
+                                            let Some(response) = accepted else {
                                                 break;
                                             };
-                                            send_agent_self_close_acceptance(
-                                                &mut sender,
-                                                acceptance,
-                                                Duration::from_secs(2),
-                                            )
-                                            .await;
+                                            send_agent_self_close_response(&mut sender, response, Duration::from_secs(2)).await;
                                             break;
                                         }
                                     }
@@ -2595,7 +2803,7 @@ impl ClientQueue {
     }
     pub fn enqueue_workspace_for_test(&self, payload: Arc<str>) -> bool {
         self.enqueue(&PreparedOutbound {
-            payload,
+            payload: SharedOutboundPayload::Serialized(payload),
             kind: "workspace_state",
             coalesce_key: None,
             repair_pane_id: None,
@@ -2618,10 +2826,100 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
+        use futures_util::{SinkExt, StreamExt};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut sender = socket.with(|message: axum::extract::ws::Message| {
+                    let axum::extract::ws::Message::Text(text) = message else {
+                        panic!("expected text response")
+                    };
+                    futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                        tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                    ))
+                });
+                super::send_agent_self_close_response(
+                    &mut sender,
+                    Err(crate::agent_capability::AgentSelfCloseRefusal {
+                        window_id: "tab::own".into(),
+                        reason: "unread evidence; run board.show all:true".into(),
+                    }),
+                    std::time::Duration::from_secs(1),
+                )
+                .await;
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let message = client.next().await.unwrap().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(payload["kind"], "pane_close_result");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["window_id"], "tab::own");
+            assert!(payload["reason"].as_str().unwrap().contains("board.show"));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
+        use super::{DispatchTarget, OutboundEvent};
+        use crate::BackendEvent;
+        for event in [
+            BackendEvent::SupportedAgentList {
+                agents: Vec::new(),
+                auto_update: false,
+                maintenance_pending: false,
+            },
+            BackendEvent::SupportedAgentMaintenance {
+                agent_id: "codex".into(),
+                pending: false,
+                success: Some(true),
+                message: "Updated".into(),
+                before_version: None,
+                after_version: Some("1.2.3".into()),
+            },
+        ] {
+            assert!(matches!(
+                OutboundEvent::broadcast(event).target,
+                DispatchTarget::All
+            ));
+        }
+        assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
+            BackendEvent::CloneProjectError {
+                message: "project error".into()
+            }
+        ))
+        .is_err());
+    }
     use super::*;
     use crate::{AttachmentProgressPhase, KnowledgeKind, KnowledgeSemanticRetry};
     use gwt_core::repo_hash::ProjectKey;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as WireMessage};
+    #[test]
+    fn browser_lifetime_ignores_agent_connections_and_remembers_disconnect() {
+        let clients = ClientHub::default();
+        clients.register_pane("agent".into());
+        assert_eq!(clients.browser_session_state(), (0, false));
+        clients.register_scoped("browser".into(), ClientScope::Hub);
+        assert_eq!(clients.browser_session_state(), (1, true));
+        clients.unregister("browser");
+        assert_eq!(clients.browser_session_state(), (1, false));
+        clients.register_scoped("browser".into(), ClientScope::Hub);
+        clients.unregister("browser");
+        assert_eq!(clients.browser_session_state(), (2, false));
+        assert!(clients.has_clients());
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }
@@ -2634,6 +2932,7 @@ mod tests {
             error_origin: None,
         }
     }
+
     #[tokio::test]
     async fn authenticated_http_and_websocket_dispatch_without_gui() {
         let project = tempfile::tempdir().expect("project");
@@ -2657,6 +2956,13 @@ mod tests {
             }),
         );
         let app = agent_router(state, AccessLogSink::default());
+        let hook_log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(hook_log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2670,7 +2976,8 @@ mod tests {
             .bearer_auth(&grant.token)
             .json(&serde_json::json!({
                 "kind": "runtime_state", "gwt_session_id": "transport-session",
-                "occurred_at": "2026-09-28T00:00:00Z"
+                "source_event": "PostToolUse", "occurred_at": "2026-09-28T00:00:00Z",
+                "agent_session_id": "private-provider-id", "message": "private-hook-content"
             }))
             .send()
             .await
@@ -2682,6 +2989,30 @@ mod tests {
                 .unwrap(),
             Some(TransportEvent::RuntimeHook(_))
         ));
+        let text = std::fs::read_to_string(hook_log.path()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = records
+            .iter()
+            .find(|record| record["target"] == "gwt.hook.delivery")
+            .expect("authenticated receipt must survive outside the access ring");
+        assert_eq!(receipt["level"], "INFO");
+        assert_eq!(receipt["fields"]["stage"], "receipt");
+        assert_eq!(receipt["fields"]["gwt_session_id"], "transport-session");
+        assert_eq!(receipt["fields"]["source_event"], "PostToolUse");
+        assert_eq!(receipt["fields"]["occurred_at"], "2026-09-28T00:00:00Z");
+        for private in [
+            grant.token.as_str(),
+            "private-provider-id",
+            "private-hook-content",
+        ] {
+            assert!(
+                !text.contains(private),
+                "receipt must contain correlation metadata only"
+            );
+        }
         let mut request = format!("ws://{addr}/internal/pane-ws")
             .into_client_request()
             .unwrap();
@@ -2706,6 +3037,72 @@ mod tests {
         socket.close(None).await.unwrap();
         server.abort();
     }
+    #[test]
+    fn pane_name_wire_refuses_target_and_authority_claims() {
+        let request = serde_json::json!({
+            "kind": "pane_name", "candidate": "Aster", "request_id": "request-1"
+        });
+        assert!(decode_frontend_event(&request.to_string()).is_ok());
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut foreign = request.clone();
+            foreign[forbidden] = serde_json::json!("foreign");
+            assert!(
+                decode_frontend_event(&foreign.to_string()).is_err(),
+                "accepted {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+        let project = tempfile::tempdir().expect("project");
+        let request = || {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "pane_name", "candidate": "Aster",
+                "request_id": "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+            }))
+            .expect("self-naming wire request")
+        };
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-name".to_string(),
+            repo_hash: "repo-name".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3824,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-name".to_string(),
+                binding_id: "binding-name".to_string(),
+                ledger_head_hash: "head-name".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let bound =
+            AgentSessionPrincipal::for_test_bound(project.path(), "session-name", binding.clone())
+                .unwrap();
+        let inspection = AgentSessionPrincipal::for_test(project.path(), "session-name").unwrap();
+        let prepared =
+            AgentSessionPrincipal::for_test_prepared(project.path(), "session-name", binding)
+                .unwrap();
+        for principal in [inspection, prepared] {
+            let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+                "observation-capability".to_string(),
+                principal,
+            ));
+            assert!(scope.filter_inbound(request()).is_none());
+        }
+        let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "producing-capability".to_string(),
+            bound,
+        ));
+        let name_request = scope
+            .filter_inbound(request())
+            .expect("producing self-name request");
+        assert!(name_request.mutates_host_state());
+        assert!(name_request.requires_producing_authority());
+        let browser = ClientSessionScope::Browser(ClientScope::Hub);
+        assert!(browser.filter_inbound(request()).is_none());
+    }
+
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -2898,6 +3295,25 @@ mod tests {
                 )
                 .is_some(),
             "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
+    #[test]
+    fn agent_workspace_close_preserves_authenticated_host_dispatch_and_reply() {
+        let project = tempfile::tempdir().expect("project");
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(matches!(scope.filter_inbound(FrontendEvent::CloseWork {
+            work_id: "work-1".into(), close_kind: "done".into(),
+        }), Some(super::AgentFrontendRequest::CloseWork { work_id, close_kind })
+            if work_id == "work-1" && close_kind == "done"));
+        let reply = serde_json::json!({"kind":"work_close_result","work_id":"work-1","close_kind":"done","ok":false,"retryable":true});
+        assert_eq!(
+            scope.filter_outbound(reply.to_string()),
+            Some(reply.to_string())
         );
     }
 
@@ -3348,11 +3764,86 @@ mod tests {
     }
 
     #[test]
+    fn client_hub_defers_active_work_patch_encoding_and_preserves_batch_order() {
+        let hub = ClientHub::default();
+        let first = hub.register_scoped("first".into(), ClientScope::Project(project_a()));
+        let second = hub.register_scoped("second".into(), ClientScope::Project(project_a()));
+        let projection = serde_json::from_value(serde_json::json!({
+            "id": "captured-projection", "title": "Captured Work patch",
+            "status_category": "idle", "status_text": "Paused",
+            "active_agents": 0, "blocked_agents": 0,
+            "board_refs": [], "journal_entries": [], "works": [], "agents": []
+        }))
+        .expect("projection fixture");
+        let events = vec![
+            BackendEvent::ActiveWorkProjectionPatch {
+                projection: Box::new(projection),
+            },
+            BackendEvent::WindowState {
+                window_id: "pane".into(),
+                state: crate::WindowProcessStatus::Stopped,
+            },
+            BackendEvent::TerminalStatus {
+                id: "pane".into(),
+                status: crate::WindowProcessStatus::Stopped,
+                detail: None,
+                error_code: None,
+                retryable: None,
+            },
+        ];
+        let expected: Vec<_> = events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("expected JSON"))
+            .collect();
+        ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+        hub.dispatch(
+            events
+                .into_iter()
+                .map(|event| OutboundEvent::project(project_a(), event))
+                .collect(),
+        );
+        assert_eq!(
+            ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+            0,
+            "GUI producer must enqueue the patch without encoding it"
+        );
+
+        for (queue, encodings) in [(first, 1), (second, 0)] {
+            let expected = expected.clone();
+            std::thread::spawn(move || {
+                ACTIVE_WORK_PATCH_SERIALIZATIONS.with(|count| count.set(0));
+                let observed_queue = queue.clone();
+                ACTIVE_WORK_PATCH_SERIALIZATION_OBSERVER.with(|observer| {
+                    *observer.borrow_mut() = Some(Arc::new(move || {
+                        assert!(
+                            observed_queue.state.try_lock().is_ok(),
+                            "encoding must happen after releasing the client queue mutex"
+                        );
+                    }));
+                });
+                let (payloads, repairs) = drain_all(&queue);
+                assert_eq!(
+                    payloads, expected,
+                    "patch and status wire order is unchanged"
+                );
+                assert!(repairs.is_empty());
+                assert_eq!(
+                    ACTIVE_WORK_PATCH_SERIALIZATIONS.with(std::cell::Cell::get),
+                    encodings,
+                    "both clients must share one consumer encoding"
+                );
+            })
+            .join()
+            .expect("consumer assertions");
+        }
+    }
+
+    #[test]
     fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
         let queue = ClientQueue::default();
         let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
         let prepared = PreparedOutbound {
-            payload: payload.clone(),
+            payload: SharedOutboundPayload::Serialized(payload.clone()),
             kind: "active_work_projection",
             coalesce_key: None,
             repair_pane_id: None,
@@ -3369,7 +3860,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let queued = state.entries.front().expect("queued Active Work payload");
         assert!(
-            Arc::ptr_eq(&queued.payload, &payload),
+            Arc::ptr_eq(queued.payload.serialized(), &payload),
             "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
         );
     }
@@ -3560,6 +4051,25 @@ mod tests {
     }
 
     #[test]
+    fn outbound_error_serialization_does_not_read_or_write_the_ledger() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let outbound = OutboundEvent::reply(
+            "client",
+            BackendEvent::IssueMonitorLaunchFailed {
+                issue_number: 5187,
+                message: "launch failed while the error ledger is unavailable".into(),
+            },
+        );
+        let prepared = prepare_outbound_event(&outbound);
+        assert!(prepared.payload.contains("launch failed"));
+        assert!(
+            gwt_core::error_ledger::list_since(None).unwrap().is_empty(),
+            "wire serialization must leave error ledger I/O to the background reporter"
+        );
+    }
+
+    #[test]
     fn outbound_error_origin_stays_in_ledger_not_wire() {
         use gwt_core::{
             error_ledger::{self, ErrorScope},
@@ -3580,17 +4090,20 @@ mod tests {
             prepared.payload.as_ref(),
             serde_json::to_string(&event).unwrap()
         );
-        prepare_outbound_event(&OutboundEvent::global_update_notice(
-            "error",
-            "host update error",
-        ));
-        prepare_outbound_event(&OutboundEvent::reply(
-            "client",
-            BackendEvent::IssueMonitorLaunchFailed {
-                issue_number: 4735,
-                message: "unknown launch error".into(),
-            },
-        ));
+        let hub = ClientHub::default();
+        hub.dispatch(vec![
+            outbound.clone(),
+            outbound,
+            OutboundEvent::global_update_notice("error", "host update error"),
+            OutboundEvent::reply(
+                "client",
+                BackendEvent::IssueMonitorLaunchFailed {
+                    issue_number: 4735,
+                    message: "unknown launch error".into(),
+                },
+            ),
+        ]);
+        crate::error_report::flush_backend_errors();
         let rows = error_ledger::list_since(None).unwrap();
         assert_eq!(rows.len(), 3);
         let project = rows

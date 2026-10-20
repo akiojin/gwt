@@ -1,6 +1,198 @@
 use super::*;
 
 #[test]
+fn registered_pm_workspace_close_uses_exact_cached_eligibility_and_current_membership() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let work_id = "work-session-stopped";
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        work_id,
+        Some("Stopped work"),
+        None,
+        None,
+        &[],
+        Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/stopped".into()),
+                worktree_path: Some(repo.join("stopped")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        ),
+        Some("stopped"),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let principal = AgentSessionPrincipal::for_test(&repo, "pm-session-live").unwrap();
+    let request = || AgentFrontendRequest::CloseWork {
+        work_id: work_id.into(),
+        close_kind: "done".into(),
+    };
+    let unavailable =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &unavailable[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    // Consume the scheduled preparation and accept its latest generation.
+    wait_for_active_work_projection(&mut runtime);
+    runtime.invalidate_workspace_projection_patch("tab-1");
+    assert!(runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .is_none());
+    let loading =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &loading[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    let view = wait_for_active_work_projection(&mut runtime);
+    assert!(view
+        .active_works
+        .iter()
+        .flat_map(|row| &row.works)
+        .any(|work| work.id == work_id && work.manual_close_allowed));
+
+    let ordinary = AgentSessionPrincipal::for_test(&repo, "other-session").unwrap();
+    let denied = runtime.handle_agent_frontend_event("other-client".into(), ordinary, request());
+    assert!(matches!(
+        &denied[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: false,
+            ..
+        }
+    ));
+    let unknown = runtime.handle_agent_frontend_event(
+        "pm-client".into(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWork {
+            work_id: "unknown-or-foreign-work".into(),
+            close_kind: "done".into(),
+        },
+    );
+    assert!(matches!(
+        &unknown[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: false,
+            ..
+        }
+    ));
+
+    let state = runtime.project_state_for_tab("tab-1").unwrap();
+    for row in &mut state
+        .active_work_projection_cache
+        .borrow_mut()
+        .get_mut("tab-1")
+        .unwrap()
+        .active_works
+    {
+        for work in &mut row.works {
+            if work.id == work_id {
+                work.manual_close_allowed = false;
+                work.close_blocked_reason = Some("remote_unknown".into());
+            }
+        }
+    }
+    let remote =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &remote[0].event,
+        BackendEvent::WorkCloseResult { ok: false, .. }
+    ));
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert("tab-1".into(), view);
+
+    // Attach a new current member after the cached view was accepted. It is
+    // absent from cached.agents, so the Host must read canonical membership.
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        work_id,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        Some("new-member"),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let mut resumed = sample_active_agent_session("tab-1", "tab-1::resumed");
+    resumed.session_id = "new-member".into();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::resumed".into(), resumed);
+    let live =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &live[0].event,
+        BackendEvent::WorkCloseResult { ok: false, error: Some(error), .. } if error.contains("current member agent")
+    ));
+    runtime.active_agent_sessions.remove("tab-1::resumed");
+
+    let stale =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &stale[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    wait_for_active_work_projection(&mut runtime);
+
+    let closed = runtime.handle_agent_frontend_event("pm-client".into(), principal, request());
+    assert!(
+        matches!(
+            &closed[0].event,
+            BackendEvent::WorkCloseResult {
+                ok: true,
+                changed: Some(true),
+                ..
+            }
+        ),
+        "{:?}",
+        closed[0].event
+    );
+    let items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    let target = items
+        .work_items
+        .iter()
+        .find(|work| work.id == work_id)
+        .unwrap();
+    assert!(target.is_terminal());
+    assert!(!target.discarded);
+    assert!(items
+        .work_items
+        .iter()
+        .filter(|work| work.id != work_id)
+        .all(|work| !work.is_terminal()));
+}
+
+#[test]
 fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
     let _env_lock = env_test_lock()
         .lock()
@@ -1225,7 +1417,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
         "branch equality groups a Workspace later; it must not erase a distinct Work"
     );
 
-    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo, &HashMap::new());
     super::super::attach_registry_sessions_to_active_works(
         &mut view.active_works,
         &[],
@@ -1321,7 +1513,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
     assert_eq!(live.pr_number, None);
     assert!(live.board_refs.is_empty());
 
-    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo, &HashMap::new());
     super::super::attach_registry_sessions_to_active_works(
         &mut view.active_works,
         &[],
@@ -1715,7 +1907,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     let events = capture_tracing_events(|| {
         let _ = runtime.handle_launch_complete_and_drain(
                 window_id,
-                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
+                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".into()),
             );
     });
 
@@ -1736,6 +1928,54 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     assert!(error.contains("--api-key [REDACTED]"));
     assert!(error.contains("GWT_HOOK_TOKEN=[REDACTED]"));
     assert!(error.contains("--token [REDACTED]"));
+}
+
+#[test]
+fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+
+    use super::super::launch::AgentLaunchError;
+    for (error, error_code, retryable) in [
+        (
+            AgentLaunchError::from("simulated launch failure"),
+            "launch_failed",
+            true,
+        ),
+        (
+            AgentLaunchError::active_conflict("exact launch conflict"),
+            "active_launch_conflict",
+            true,
+        ),
+        (
+            AgentLaunchError::authority_rejected("exact authority mismatch"),
+            "active_launch_authority_rejected",
+            false,
+        ),
+    ] {
+        let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Err(error));
+        let response = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.event,
+                    BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Error, .. }
+                        if id == &window_id
+                )
+            })
+            .expect("caller launch failure response");
+        let value = serde_json::to_value(&response.event).expect("serialize launch response");
+        assert_eq!(value["error_code"], error_code);
+        assert_eq!(value["retryable"], retryable);
+    }
 }
 
 #[test]
@@ -2211,7 +2451,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     }
 
     runtime.restart_window_events(&codex_id);
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds, None);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();
@@ -3089,25 +3329,70 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     );
     tab.project_root = repo.clone();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
     );
 
-    // The heartbeat itself goes out over the daemon control channel, which a
-    // unit test cannot observe. Assert the decision instead: after a hook
-    // arrival the runtime must have recorded that this window showed activity.
-    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "Running",
-        "PostToolUse",
-        "session-1",
-    ));
-
-    assert!(
-        runtime.last_agent_activity_for_test(&window_id).is_some(),
-        "a hook arrival must refresh the activity clock for its window"
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(4975));
+    let hook = runtime_hook_state_for_event("Running", "PostToolUse", "session-1");
+    // The worker is queued: receipt/window evidence must not claim application yet.
+    let captured = capture_tracing_events(|| {
+        runtime.handle_daemon_runtime_hook_event(hook.clone());
+        assert!(
+            runtime.last_agent_activity_for_test(&window_id).is_some(),
+            "a hook arrival must refresh the activity clock for its window"
+        );
+        assert_eq!(
+            tasks.lock().expect("queued tasks").len(),
+            1,
+            "RuntimeHook must defer heartbeat lookup and publication to one blocking worker"
+        );
+        tasks.lock().unwrap().pop().unwrap()();
+        let mut unmatched = hook.clone();
+        unmatched.gwt_session_id = Some("unmatched-session".into());
+        runtime.handle_daemon_runtime_hook_event(unmatched);
+        drop(runtime);
+    });
+    let delivery: Vec<_> = captured
+        .iter()
+        .filter(|event| event.target == "gwt.hook.delivery")
+        .collect();
+    let outcomes: Vec<_> = delivery
+        .iter()
+        .map(|event| {
+            (
+                event.fields["stage"].as_str(),
+                event.fields["outcome"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("window", "matched"),
+            ("heartbeat", "publish_unconfirmed"),
+            ("window", "unmatched")
+        ]
     );
+    for event in delivery {
+        assert_eq!(event.level, Level::INFO);
+        assert_eq!(event.fields["source_event"], "PostToolUse");
+        assert_eq!(event.fields["occurred_at"], hook.occurred_at);
+        assert_eq!(
+            event.fields["gwt_session_id"],
+            if event.fields["outcome"] == "unmatched" {
+                "unmatched-session"
+            } else {
+                "session-1"
+            }
+        );
+    }
 }
 
 /// Issue #4608: the heartbeat throttle is measured from the last heartbeat it
@@ -3175,6 +3460,27 @@ fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
         .expect("rfc3339")
         .with_timezone(&chrono::Utc);
     assert!(last_output_at >= before, "{last_output_at} < {before}");
+}
+
+#[test]
+fn issue_4905_window_observation_carries_session_identity_for_hook_delivery() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("codex-1", Some("session-41".into())));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-15T00:00:01Z")
+        .unwrap();
+    let observed = serde_json::to_value(&snapshot.windows[0]).unwrap();
+    assert_eq!(observed["session_id"], "session-41");
 }
 
 /// SPEC-3431 FR-067: an agent that exits cleanly also frees its slot.

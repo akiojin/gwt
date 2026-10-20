@@ -19,7 +19,7 @@
 //! while preserving the broadcast/persist contract through the existing
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
-use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
+use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection, WindowSurfaceOwner};
 
 use super::{
     close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
@@ -108,8 +108,10 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, board_all_view_windows);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
+        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_fresh_execution_finalizations);
@@ -117,6 +119,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, pending_runtime_outputs);
         $visit!($runtime, $id, window_last_output_at);
         $visit!($runtime, $id, window_hook_states);
         $visit!($runtime, $id, window_approval_waiting);
@@ -131,11 +134,64 @@ macro_rules! window_scoped_state {
 }
 
 impl AppRuntime {
+    /// Agent lifecycle requests must preserve recent evidence from their actual target.
+    /// Human canvas close and runtime terminal cleanup do not call this guard.
+    pub(super) fn agent_close_board_check(
+        &self,
+        principal: &gwt::agent_capability::AgentSessionPrincipal,
+        id: &str,
+    ) -> Option<String> {
+        let (tab, window) = self.tabs.iter().find_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| super::combined_window_id(&tab.id, &window.id) == id)
+                .map(|window| (tab, window))
+        })?;
+        let target_session = window.session_id.as_deref();
+        let target_owner = window
+            .linked_issue_number
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number)
+                })
+            })
+            .or_else(|| self.issue_monitor_issue_number_for_window(&tab.project_root, id))
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+                        .ok()
+                        .and_then(|session| session.linked_issue_number)
+                })
+            });
+        match gwt::board_read_receipts::recent_owner_unread(
+            &tab.project_root,
+            principal.session_id(),
+            target_session,
+            target_owner,
+            chrono::Utc::now(),
+        ) {
+            Ok(entries) if !entries.is_empty() => Some(
+                gwt::board_read_receipts::read_required_message("pane.close", &entries),
+            ),
+            Ok(_) => None,
+            Err(error) => {
+                let warning = gwt::board_read_receipts::warning(error);
+                tracing::warn!(%warning, window_id = id, "agent pane close Board observation failed open");
+                None
+            }
+        }
+    }
+
     pub(crate) fn create_window_events(
         &mut self,
         context: &super::ProjectContext,
         preset: WindowPreset,
         bounds: WindowGeometry,
+        surface_owner: Option<WindowSurfaceOwner>,
     ) -> Vec<OutboundEvent> {
         if preset.is_removed_legacy() {
             return Vec::new();
@@ -144,7 +200,12 @@ impl AppRuntime {
             return Vec::new();
         }
         let tab_id = context.tab_id.clone();
-        if shares_work_surface_singleton(preset) {
+        let surface_owner = surface_owner
+            .filter(|owner| *owner != WindowSurfaceOwner::Pm || !preset.is_agent_terminal());
+        if shares_work_surface_singleton(preset)
+            || (preset.canonical_surface_preset() == WindowPreset::Settings
+                && surface_owner == Some(WindowSurfaceOwner::Pm))
+        {
             let existing_id = {
                 let Some(tab) = self.tab_mut(&tab_id) else {
                     return Vec::new();
@@ -154,7 +215,11 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .filter(|window| {
+                        window.surface_owner == surface_owner
+                            && (shares_work_surface_singleton(window.preset)
+                                || window.preset == WindowPreset::Settings)
+                    })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
                 if let Some(existing_id) = existing_id.as_deref() {
@@ -169,11 +234,14 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
+        let preset = preset.canonical_surface_preset();
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset, bounds.clone())
+            let window = tab.workspace.add_window(preset, bounds.clone());
+            tab.workspace.set_surface_owner(&window.id, surface_owner);
+            window
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);

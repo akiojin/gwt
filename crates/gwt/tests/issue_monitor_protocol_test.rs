@@ -4,6 +4,31 @@ use gwt::{
 };
 
 #[test]
+fn agent_capacity_override_wire_accepts_auto_and_rejects_non_positive() {
+    let automatic = serde_json::json!({
+        "kind": "set_issue_monitor_max_active_agents",
+        "max_active_agents": null,
+    });
+    let event: FrontendEvent = serde_json::from_value(automatic.clone())
+        .expect("null explicitly restores automatic capacity");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: None
+        }
+    ));
+    for invalid in [serde_json::json!(0), serde_json::json!(-1)] {
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "set_issue_monitor_max_active_agents", "max_active_agents": invalid,
+            }))
+            .is_err(),
+            "a manual limit must be positive"
+        );
+    }
+}
+
+#[test]
 fn frontend_issue_monitor_allowed_labels_use_snake_case_wire_shape() {
     for labels in [
         serde_json::json!(["Server", "backend"]),
@@ -152,7 +177,7 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     assert!(matches!(
         event,
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 3
+            max_active_agents: Some(3)
         }
     ));
 
@@ -229,7 +254,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
-            auto_apply_updates: false,
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -253,7 +279,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             autonomous_mode: false,
             quota_hold: None,
             update_drain: None,
+            update_drain_release: None,
             autonomous_issues: Vec::new(),
+            tier_facts: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -278,6 +306,24 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     assert_eq!(value["status"]["total_candidates"], 8);
     assert_eq!(value["status"]["active_issue_number"], 42);
     assert_eq!(value["status"]["launch_profile_source"], "last_settings");
+    let mut status = value["status"].clone();
+    status["tier_facts"] = serde_json::json!([{
+        "issue_number": 42, "recorded_launch_tier": 0, "recorded_landing_tier": 0,
+        "history_floor": 0, "minimum_tier_override": 0,
+        "agent_failures": 1, "next_minimum_tier": 1,
+        "confirmed_launch": {"tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"}
+    }]);
+    let decoded: IssueMonitorStatusView = serde_json::from_value(status.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["tier_facts"],
+        status["tier_facts"]
+    );
+    status.as_object_mut().unwrap().remove("tier_facts");
+    let legacy: IssueMonitorStatusView = serde_json::from_value(status).unwrap();
+    assert!(serde_json::to_value(legacy)
+        .unwrap()
+        .get("tier_facts")
+        .is_none());
     assert_eq!(
         value["status"]["launch_profile_summary"],
         "codex / gpt-5.5 / high / host"

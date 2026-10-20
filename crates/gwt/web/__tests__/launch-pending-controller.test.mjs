@@ -222,7 +222,7 @@ test("workspace Resume errors settle exactly before sticky feedback and cache-fi
   );
   assert.match(
     settledBlock,
-    /scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    /scheduleKnowledgeRelatedWorkRefresh\(true\)/,
     "an exact Resume failure must refresh Related Work through its cache-first scheduler",
   );
   assert.equal(
@@ -231,7 +231,7 @@ test("workspace Resume errors settle exactly before sticky feedback and cache-fi
     "the Resume error case must not show feedback outside the exact-settle guard",
   );
   assert.equal(
-    errorCase.match(/scheduleKnowledgeRelatedWorkRefresh\(\)/g)?.length,
+    errorCase.match(/scheduleKnowledgeRelatedWorkRefresh\(true\)/g)?.length,
     1,
     "the Resume error case must not refresh outside the exact-settle guard",
   );

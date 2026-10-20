@@ -36,6 +36,10 @@ export function surfaceForWindow(windowData) {
   if (windowData?.is_pm) {
     return "pm";
   }
+  if (["agent", "claude", "codex"].includes(windowData?.preset)) return "agents";
+  if (windowData?.preset === "settings" && windowData.surface_owner === "pm") return "pm";
+  if (windowData?.preset === "shell" && windowData.surface_owner === "agents") return "agents";
+  if (windowData?.preset === "settings" && windowData.settingsSection === "issues") return "issues";
   return surfaceForPreset(windowData?.preset);
 }
 

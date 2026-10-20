@@ -7,6 +7,8 @@ use crate::cli::{CliEnv, CliParseError};
 /// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
+    /// Issue #4249: submit an explicitly permitted workflow dispatch.
+    Dispatch { call: ActionsDispatchCall },
     /// `actions.logs`.
     Logs { run_id: u64 },
     /// `actions.job_logs`. Issue #4849: `failed_only` returns only the lines
@@ -20,6 +22,102 @@ pub enum ActionsCommand {
     /// `actions.rerun` (Issue #3515): re-run a failed run or a single failed
     /// job without pushing a throwaway commit to retrigger CI.
     Rerun { target: ActionsRerunTarget },
+    /// Issue #4188: cancel an active repository-owned workflow run.
+    Cancel { run_id: u64 },
+    /// Issue #4188: list queued runs that have no jobs, with their elapsed age.
+    Queued,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionsDispatchCall {
+    pub workflow: String,
+    pub git_ref: String,
+    pub inputs: serde_json::Map<String, serde_json::Value>,
+}
+
+pub(super) fn validate_dispatch_call(call: &ActionsDispatchCall) -> Result<(), CliParseError> {
+    let workflow = &call.workflow;
+    let valid_id = workflow.parse::<u64>().is_ok_and(|id| id > 0);
+    if !valid_id && !is_workflow_filename(workflow) {
+        return Err(CliParseError::InvalidValue {
+            flag: "workflow",
+            reason: "must be a workflow filename or positive ID",
+        });
+    }
+    if call.git_ref.trim().is_empty() {
+        return Err(CliParseError::InvalidValue {
+            flag: "ref",
+            reason: "must be a nonempty branch or tag",
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn is_workflow_filename(name: &str) -> bool {
+    (name.ends_with(".yml") || name.ends_with(".yaml"))
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(char::is_control)
+}
+
+/// Check the workflow at the requested ref before submitting a mutation.
+pub(super) fn validate_dispatch_inputs(
+    yaml: &str,
+    inputs: &serde_json::Map<String, serde_json::Value>,
+) -> io::Result<()> {
+    use serde_yaml::Value as Yaml;
+    let workflow: Yaml = serde_yaml::from_str(yaml)
+        .map_err(|_| io::Error::other("workflow definition is invalid YAML"))?;
+    let on = &workflow["on"];
+    let dispatch = match on {
+        Yaml::Mapping(events) => events.get(Yaml::String("workflow_dispatch".into())),
+        Yaml::String(event) if event == "workflow_dispatch" => Some(&Yaml::Null),
+        Yaml::Sequence(events)
+            if events
+                .iter()
+                .any(|event| event.as_str() == Some("workflow_dispatch")) =>
+        {
+            Some(&Yaml::Null)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        io::Error::other("workflow does not declare workflow_dispatch at the requested ref")
+    })?;
+    let declarations = dispatch["inputs"].as_mapping();
+    let invalid = || {
+        io::Error::other("inputs do not match the workflow_dispatch declarations (names, required values, types or choices)")
+    };
+    for (name, value) in inputs {
+        let declaration = declarations
+            .and_then(|declared| declared.get(Yaml::String(name.clone())))
+            .ok_or_else(invalid)?;
+        let valid = match declaration["type"].as_str().unwrap_or("string") {
+            "boolean" => value.is_boolean(),
+            "number" => value.is_number(),
+            "string" | "environment" => value.is_string(),
+            "choice" => value.as_str().is_some_and(|choice| {
+                declaration["options"].as_sequence().is_some_and(|options| {
+                    options.iter().any(|option| option.as_str() == Some(choice))
+                })
+            }),
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid());
+        }
+    }
+    if let Some(declarations) = declarations {
+        for (name, declaration) in declarations {
+            let name = name.as_str().ok_or_else(invalid)?;
+            if declaration["required"].as_bool() == Some(true)
+                && declaration["default"].is_null()
+                && !inputs.contains_key(name)
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What an [`ActionsCommand::Rerun`] re-runs (Issue #3515).
@@ -37,6 +135,36 @@ pub enum ActionsRerunTarget {
 pub(super) fn parse(args: &[String]) -> Result<ActionsCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
+        Some("dispatch") => {
+            super::expect_flag(it.next(), "--workflow")?;
+            let workflow = it
+                .next()
+                .ok_or(CliParseError::MissingFlag("--workflow"))?
+                .clone();
+            super::expect_flag(it.next(), "--ref")?;
+            let git_ref = it
+                .next()
+                .ok_or(CliParseError::MissingFlag("--ref"))?
+                .clone();
+            let inputs = if it.peek().map(|arg| arg.as_str()) == Some("--inputs") {
+                it.next();
+                serde_json::from_str(it.next().ok_or(CliParseError::MissingFlag("--inputs"))?)
+                    .map_err(|_| CliParseError::InvalidValue {
+                        flag: "inputs",
+                        reason: "must be a JSON object",
+                    })?
+            } else {
+                Default::default()
+            };
+            super::ensure_no_remaining_args(it)?;
+            let call = ActionsDispatchCall {
+                workflow,
+                git_ref,
+                inputs,
+            };
+            validate_dispatch_call(&call)?;
+            Ok(ActionsCommand::Dispatch { call })
+        }
         Some("logs") => {
             super::expect_flag(it.next(), "--run")?;
             let run_id = super::parse_required_number(it.next())?;
@@ -68,6 +196,16 @@ pub(super) fn parse(args: &[String]) -> Result<ActionsCommand, CliParseError> {
                 failed_only,
                 context_lines,
             })
+        }
+        Some("cancel") => {
+            super::expect_flag(it.next(), "--run")?;
+            let run_id = super::parse_required_number(it.next())?;
+            super::ensure_no_remaining_args(it)?;
+            Ok(ActionsCommand::Cancel { run_id })
+        }
+        Some("queued") => {
+            super::ensure_no_remaining_args(it)?;
+            Ok(ActionsCommand::Queued)
         }
         Some("rerun") => {
             let target = match it.next().map(String::as_str) {
@@ -101,6 +239,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        ActionsCommand::Dispatch { call } => {
+            let outcome = env.dispatch_actions(call).map_err(super::io_as_api_error)?;
+            out.push_str(outcome.trim_end());
+            out.push('\n');
+            0
+        }
         ActionsCommand::Logs { run_id } => {
             let log = env
                 .fetch_actions_run_log(run_id)
@@ -139,6 +283,18 @@ pub(super) fn run<E: CliEnv>(
         ActionsCommand::Rerun { target } => {
             let outcome = env.rerun_actions(target).map_err(super::io_as_api_error)?;
             out.push_str(outcome.trim_end());
+            out.push('\n');
+            0
+        }
+        ActionsCommand::Cancel { run_id } => {
+            let outcome = env.cancel_actions(run_id).map_err(super::io_as_api_error)?;
+            out.push_str(outcome.trim_end());
+            out.push('\n');
+            0
+        }
+        ActionsCommand::Queued => {
+            let runs = env.fetch_queued_actions().map_err(super::io_as_api_error)?;
+            out.push_str(runs.trim_end());
             out.push('\n');
             0
         }
@@ -301,15 +457,16 @@ pub(super) fn ensure_actions_target_in_repo(
     expected_slug: &str,
     payload: &str,
     target: &ActionsRerunTarget,
+    action: &str,
 ) -> io::Result<()> {
     let described = describe_rerun_target(target);
     match repo_slug_from_actions_payload(payload, target) {
         Some(slug) if slug == expected_slug => Ok(()),
         Some(slug) => Err(io::Error::other(format!(
-            "{described} belongs to {slug}, not {expected_slug}; refusing to rerun"
+            "{described} belongs to {slug}, not {expected_slug}; refusing to {action}"
         ))),
         None => Err(io::Error::other(format!(
-            "could not confirm which repository owns {described}; refusing to rerun"
+            "could not confirm which repository owns {described}; refusing to {action}"
         ))),
     }
 }
@@ -321,11 +478,12 @@ pub(super) fn classify_actions_target_lookup_failure(
     expected_slug: &str,
     target: &ActionsRerunTarget,
     stderr: &str,
+    action: &str,
 ) -> io::Error {
     let described = describe_rerun_target(target);
     if stderr.contains("404") || stderr.contains("Not Found") {
         io::Error::other(format!(
-            "{described} does not belong to {expected_slug}; refusing to rerun"
+            "{described} does not belong to {expected_slug}; refusing to {action}"
         ))
     } else {
         io::Error::other(format!("gh api lookup for {described}: {}", stderr.trim()))
@@ -348,16 +506,13 @@ fn gh_api(
     Ok((output.success(), output.stdout, output.stderr))
 }
 
-/// Issue #3515: re-run a failed workflow run or a single failed job through the
-/// repo-scoped Actions API, after proving the target belongs to this
-/// repository.
-pub(super) fn rerun_actions_via_gh(
-    owner: &str,
-    repo: &str,
+/// Share repo-scoped lookup and ownership proof across Actions mutations.
+fn lookup_owned_actions_target(
+    slug: &str,
     repo_path: &std::path::Path,
     target: &ActionsRerunTarget,
+    action: &str,
 ) -> io::Result<String> {
-    let slug = format!("{owner}/{repo}");
     let lookup_endpoint = match target {
         ActionsRerunTarget::Run { run_id, .. } => format!("/repos/{slug}/actions/runs/{run_id}"),
         ActionsRerunTarget::Job { job_id } => format!("/repos/{slug}/actions/jobs/{job_id}"),
@@ -369,10 +524,22 @@ pub(super) fn rerun_actions_via_gh(
     )?;
     if !ok {
         return Err(classify_actions_target_lookup_failure(
-            &slug, target, &stderr,
+            slug, target, &stderr, action,
         ));
     }
-    ensure_actions_target_in_repo(&slug, &payload, target)?;
+    ensure_actions_target_in_repo(slug, &payload, target, action)?;
+    Ok(payload)
+}
+
+/// Issue #3515: re-run a failed workflow run or job owned by this repository.
+pub(super) fn rerun_actions_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &std::path::Path,
+    target: &ActionsRerunTarget,
+) -> io::Result<String> {
+    let slug = format!("{owner}/{repo}");
+    lookup_owned_actions_target(&slug, repo_path, target, "rerun")?;
 
     let rerun_endpoint = match target {
         ActionsRerunTarget::Run {
@@ -405,6 +572,126 @@ pub(super) fn rerun_actions_via_gh(
         _ => "",
     };
     Ok(format!("rerun requested for {described}{scope} in {slug}"))
+}
+
+pub(super) fn cancel_actions_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &std::path::Path,
+    run_id: u64,
+) -> io::Result<String> {
+    let slug = format!("{owner}/{repo}");
+    let target = ActionsRerunTarget::Run {
+        run_id,
+        failed_only: false,
+    };
+    let payload = lookup_owned_actions_target(&slug, repo_path, &target, "cancel")?;
+    let run: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let status = run["status"].as_str().unwrap_or("unknown");
+    if !matches!(
+        status,
+        "queued" | "in_progress" | "waiting" | "pending" | "requested"
+    ) {
+        return Err(io::Error::other(format!(
+            "run {run_id} has status {status}; refusing to cancel"
+        )));
+    }
+    let endpoint = format!("/repos/{slug}/actions/runs/{run_id}/cancel");
+    let (ok, _, stderr) = gh_api(
+        repo_path,
+        &["api", "--method", "POST", &endpoint],
+        format!("gh api --method POST {endpoint}"),
+    )?;
+    if !ok {
+        return Err(io::Error::other(format!(
+            "gh api --method POST {endpoint}: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(format!("cancel requested for run {run_id} in {slug}"))
+}
+
+pub(super) fn fetch_queued_actions_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &std::path::Path,
+) -> io::Result<String> {
+    let slug = format!("{owner}/{repo}");
+    let endpoint = format!("/repos/{slug}/actions/runs?status=queued&per_page=100");
+    let (ok, payload, stderr) = gh_api(
+        repo_path,
+        &["api", "--paginate", "--slurp", &endpoint],
+        format!("gh api --paginate --slurp {endpoint}"),
+    )?;
+    if !ok {
+        return Err(io::Error::other(format!(
+            "gh api {endpoint}: {}",
+            stderr.trim()
+        )));
+    }
+    let pages: Vec<serde_json::Value> = serde_json::from_str(&payload)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let invalid = |field: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("queued Actions response is missing or has invalid {field}"),
+        )
+    };
+    let now = chrono::Utc::now();
+    let mut runs = Vec::new();
+    for page in pages {
+        for run in page["workflow_runs"]
+            .as_array()
+            .ok_or_else(|| invalid("workflow_runs"))?
+        {
+            if run["status"].as_str() != Some("queued") {
+                continue;
+            }
+            let run_id = run["id"].as_u64().ok_or_else(|| invalid("run id"))?;
+            ensure_actions_target_in_repo(
+                &slug,
+                &run.to_string(),
+                &ActionsRerunTarget::Run {
+                    run_id,
+                    failed_only: false,
+                },
+                "list queued runs",
+            )?;
+            let jobs_endpoint = format!("/repos/{slug}/actions/runs/{run_id}/jobs?per_page=1");
+            let (ok, jobs, stderr) = gh_api(
+                repo_path,
+                &["api", &jobs_endpoint],
+                format!("gh api {jobs_endpoint}"),
+            )?;
+            if !ok {
+                return Err(io::Error::other(format!(
+                    "gh api {jobs_endpoint}: {}",
+                    stderr.trim()
+                )));
+            }
+            let jobs: serde_json::Value = serde_json::from_str(&jobs)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if jobs["total_count"]
+                .as_u64()
+                .ok_or_else(|| invalid("job total_count"))?
+                != 0
+            {
+                continue;
+            }
+            let created_at = run["created_at"]
+                .as_str()
+                .ok_or_else(|| invalid("created_at"))?;
+            let created = chrono::DateTime::parse_from_rfc3339(created_at)
+                .map_err(|_| invalid("created_at"))?;
+            runs.push(serde_json::json!({
+                "run_id": run_id, "name": run["name"], "head_branch": run["head_branch"],
+                "created_at": created_at, "age_seconds": now.signed_duration_since(created).num_seconds().max(0),
+            }));
+        }
+    }
+    serde_json::to_string_pretty(&serde_json::json!({"repository": slug, "runs": runs}))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 pub(super) fn fetch_actions_run_log_via_gh(
@@ -474,9 +761,130 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_validates_trigger_declared_inputs_and_types_without_echoing_values() {
+        let yaml = r#"on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        options: [auto, patch]
+        default: auto
+      enabled:
+        type: boolean
+      count:
+        type: number
+      name:
+        type: string
+        required: true
+"#;
+        let inputs = serde_json::json!({"bump":"auto","enabled":true,"count":2,"name":"release"});
+        validate_dispatch_inputs(yaml, inputs.as_object().unwrap()).unwrap();
+        for inputs in [
+            serde_json::json!({"name":"release","bump":"secret-invalid"}),
+            serde_json::json!({"name":"release","enabled":"secret-invalid"}),
+            serde_json::json!({"name":"release","count":"secret-invalid"}),
+            serde_json::json!({"name":false}),
+            serde_json::json!({"unknown":"secret-invalid","name":"release"}),
+            serde_json::json!({}),
+        ] {
+            let error = validate_dispatch_inputs(yaml, inputs.as_object().unwrap()).unwrap_err();
+            assert!(error.to_string().contains("inputs"));
+            assert!(!error.to_string().contains("secret-invalid"));
+        }
+        let error = validate_dispatch_inputs("on: push", &Default::default()).unwrap_err();
+        assert!(error.to_string().contains("workflow_dispatch"));
+        validate_dispatch_inputs("on: [push, workflow_dispatch]", &Default::default()).unwrap();
+    }
+
+    #[test]
     fn actions_family_parse_directly_handles_logs() {
         let cmd = parse(&[s("logs"), s("--run"), s("101")]).expect("parse actions family command");
         assert_eq!(cmd, ActionsCommand::Logs { run_id: 101 });
+    }
+
+    #[test]
+    fn issue_4188_cancel_operation_is_available() {
+        let result = parse(&[s("cancel"), s("--run"), s("101")]);
+        assert!(
+            result.is_ok(),
+            "actions.cancel must accept a run: {result:?}"
+        );
+    }
+
+    #[test]
+    fn issue_4188_queued_diagnostic_is_available() {
+        let result = parse(&[s("queued")]);
+        assert!(
+            result.is_ok(),
+            "jobless queued run listing must exist: {result:?}"
+        );
+    }
+
+    fn with_actions_fixture(test: impl FnOnce(&std::path::Path)) {
+        crate::cli::test_support::with_fake_gh("actions-4188", test);
+    }
+
+    #[test]
+    fn issue_4188_cancel_then_rerun_failed_integration() {
+        with_actions_fixture(|path| {
+            let mut env = crate::cli::DefaultCliEnv::new("fixture", "repo", path.to_path_buf());
+            let rerun = parse(&[s("rerun"), s("--run"), s("101"), s("--failed")]).unwrap();
+            let mut out = String::new();
+            let err = run(&mut env, rerun.clone(), &mut out).unwrap_err();
+            assert!(err.to_string().contains("already running"), "{err}");
+            let cancel = parse(&[s("cancel"), s("--run"), s("101")]).expect("cancel operation");
+            assert_eq!(run(&mut env, cancel.clone(), &mut out).unwrap(), 0);
+            assert!(out.contains("cancel requested for run 101"), "{out}");
+            assert_eq!(run(&mut env, rerun, &mut out).unwrap(), 0);
+            let err = run(&mut env, cancel, &mut out).unwrap_err();
+            assert!(err.to_string().contains("completed"), "{err}");
+            assert!(err.to_string().contains("refusing to cancel"), "{err}");
+            let queued = parse(&[s("cancel"), s("--run"), s("505")]).unwrap();
+            assert_eq!(run(&mut env, queued, &mut out).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn issue_4188_cancel_refuses_foreign_and_terminal_runs_without_posting() {
+        with_actions_fixture(|path| {
+            let mut env = crate::cli::DefaultCliEnv::new("fixture", "repo", path.to_path_buf());
+            for (id, expected) in [
+                (202, "belongs to other/repo"),
+                (303, "completed"),
+                (404, "does not belong"),
+            ] {
+                let cancel =
+                    parse(&[s("cancel"), s("--run"), id.to_string()]).expect("cancel operation");
+                let err = run(&mut env, cancel, &mut String::new()).unwrap_err();
+                assert!(err.to_string().contains(expected), "{err}");
+                assert!(err.to_string().contains("refusing to cancel"), "{err}");
+            }
+            let calls =
+                std::fs::read_to_string(path.parent().unwrap().join("gh-state.calls")).unwrap();
+            assert!(
+                !calls.contains("POST"),
+                "refused targets must not be mutated: {calls}"
+            );
+        });
+    }
+
+    #[test]
+    fn issue_4188_queued_lists_jobless_runs_across_pages_with_age() {
+        with_actions_fixture(|path| {
+            let mut env = crate::cli::DefaultCliEnv::new("fixture", "repo", path.to_path_buf());
+            let cmd = parse(&[s("queued")]).expect("queued operation");
+            let mut out = String::new();
+            assert_eq!(run(&mut env, cmd, &mut out).unwrap(), 0);
+            let output: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let runs = output["runs"].as_array().unwrap();
+            assert_eq!(runs.len(), 2, "only jobless runs: {out}");
+            assert_eq!(runs[0]["run_id"], 505);
+            assert_eq!(runs[1]["run_id"], 707);
+            assert_eq!(runs[0]["name"], "Test");
+            assert_eq!(runs[0]["head_branch"], "work/old");
+            assert_eq!(runs[0]["created_at"], "2020-01-01T00:00:00Z");
+            assert!(runs[0]["age_seconds"].as_i64().unwrap() > 0, "{out}");
+        });
     }
 
     /// Issue #4849 AC-1/AC-3: a job log with ANSI colour codes and a FAILED
@@ -680,6 +1088,7 @@ mod tests {
                 run_id: 90,
                 failed_only: false,
             },
+            "rerun",
         )
         .expect("same-repo run must be accepted");
 
@@ -687,6 +1096,7 @@ mod tests {
             "akiojin/gwt",
             r#"{"id":91,"run_url":"https://api.github.com/repos/akiojin/gwt/actions/runs/90"}"#,
             &ActionsRerunTarget::Job { job_id: 91 },
+            "rerun",
         )
         .expect("same-repo job must be accepted");
     }
@@ -700,6 +1110,7 @@ mod tests {
                 run_id: 90,
                 failed_only: false,
             },
+            "rerun",
         )
         .expect_err("cross-repo run must be refused");
         assert!(
@@ -711,6 +1122,7 @@ mod tests {
             "akiojin/gwt",
             r#"{"id":91,"run_url":"https://api.github.com/repos/someone/other/actions/runs/90"}"#,
             &ActionsRerunTarget::Job { job_id: 91 },
+            "rerun",
         )
         .expect_err("cross-repo job must be refused");
         assert!(
@@ -728,6 +1140,7 @@ mod tests {
                 run_id: 90,
                 failed_only: false,
             },
+            "rerun",
         )
         .expect_err("an unattributable payload must be refused");
         assert!(
@@ -745,6 +1158,7 @@ mod tests {
                 failed_only: false,
             },
             "gh: Not Found (HTTP 404)",
+            "rerun",
         );
         assert!(
             err.to_string()
@@ -756,6 +1170,7 @@ mod tests {
             "akiojin/gwt",
             &ActionsRerunTarget::Job { job_id: 91 },
             "gh: API rate limit exceeded (HTTP 403)",
+            "rerun",
         );
         assert!(
             !err.to_string().contains("does not belong to"),

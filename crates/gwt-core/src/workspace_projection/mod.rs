@@ -38,10 +38,11 @@ pub use lifecycle::{
 };
 pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
-    classify_workspace_projections, current_work_id, decode_workspace_work_event_line,
-    decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
-    detach_foreign_container_refs, detach_foreign_container_refs_for_work_event_root,
-    emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
+    classify_workspace_projections, current_work_id, current_work_id_for_launch,
+    decode_workspace_work_event_line, decompose_legacy_multi_branch_work_items,
+    decompose_legacy_multi_branch_work_items_paths, detach_foreign_container_refs,
+    detach_foreign_container_refs_for_work_event_root, emit_workspace_discard_event_for_session,
+    emit_workspace_discard_event_for_session_outcome,
     emit_workspace_discard_event_for_session_outcome_paths,
     emit_workspace_discard_event_for_session_paths, emit_workspace_discard_event_if_absent,
     emit_workspace_discard_event_if_absent_paths, emit_workspace_done_event_for_branch,
@@ -87,10 +88,12 @@ pub use persistence::{
     update_workspace_projection_with_journal_for_resolved_work_target,
     update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
-    update_workspace_projection_with_journal_paths_at, workspace_projection_stale_reason,
-    workspace_state_external_commit_resolution, workspace_state_external_commit_resolution_at,
-    workspace_work_event_from_board_entry, worktree_sources_needing_backfill, ClassifiedProjection,
-    DecodedWorkspaceWorkEvent, ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitDecision,
+    update_workspace_projection_with_journal_paths_at, with_workspace_current_and_work_items_lock,
+    workspace_projection_stale_reason, workspace_state_external_commit_resolution,
+    workspace_state_external_commit_resolution_at, workspace_state_transaction_is_pending_at,
+    workspace_work_event_from_board_entry, workspace_work_event_shard_matches,
+    worktree_sources_needing_backfill, ClassifiedProjection, DecodedWorkspaceWorkEvent,
+    ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitDecision,
     ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
     ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
     SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
@@ -100,7 +103,7 @@ pub use persistence::{
 };
 pub(crate) use persistence::{
     apply_workspace_container_detachments, save_workspace_work_items_projection_after_rebuild,
-    with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,
+    write_atomic, WorkItemsIntakeSnapshot,
 };
 pub use projection::{
     workspace_projection_default_created_at, GitDetails, WorkspaceCleanupCandidate,

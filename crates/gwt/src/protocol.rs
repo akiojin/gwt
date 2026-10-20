@@ -5,21 +5,78 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Payload limits shared with the file attachment pipeline.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentLimits {
+    pub text_max_bytes: u64,
+    pub binary_chunk_max_bytes: u64,
+}
+
+impl Default for ContentLimits {
+    fn default() -> Self {
+        Self {
+            text_max_bytes: 5 * 1024 * 1024,
+            binary_chunk_max_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+/// Render-only HTML is derived from durable report Markdown on the host.
+#[derive(Debug, Clone, Serialize)]
+pub struct PmReportView {
+    #[serde(flatten)]
+    pub report: gwt_core::pm_report::PmReport,
+    pub body_html: String,
+}
+
+impl From<gwt_core::pm_report::PmReport> for PmReportView {
+    fn from(report: gwt_core::pm_report::PmReport) -> Self {
+        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
+        Self { report, body_html }
+    }
+}
+
+fn serialize_release_notes_entries<S: serde::Serializer>(
+    entries: &[gwt_core::release_notes::ReleaseEntry],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile};
+    let mut rendered = serde_json::to_value(entries).map_err(serde::ser::Error::custom)?;
+    for (entry, value) in entries
+        .iter()
+        .zip(rendered.as_array_mut().into_iter().flatten())
+    {
+        for (section, value) in entry
+            .sections
+            .iter()
+            .zip(value["sections"].as_array_mut().into_iter().flatten())
+        {
+            let markdown = section
+                .items
+                .iter()
+                .map(|item| format!("- {item}\n"))
+                .collect::<String>();
+            value["body_html"] = serde_json::Value::String(render_markdown_html(
+                &markdown,
+                MarkdownHtmlProfile::ReleaseNotes,
+            ));
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 use crate::{
     branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
-    file_content::{Encoding, Newline},
-    file_tree::FileTreeEntry,
     issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView, MonitorNotificationTransition},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
-        WindowProcessStatus,
+        WindowProcessStatus, WindowSurfaceOwner,
     },
     preset::WindowPreset,
-    worktree_inventory::WorktreeEntry,
 };
 
 #[derive(Deserialize)]
@@ -41,23 +98,17 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentMode {
-    Text,
-    Hex,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentErrorKind {
-    Denied,
-    TooLarge,
-    IoError,
-    NotAFile,
-    BinaryNotText,
-    WindowNotFound,
-    WindowMismatch,
+fn deserialize_positive_capacity_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<usize>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(serde::de::Error::custom("manual capacity must be positive"));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -69,6 +120,7 @@ pub enum IndexSearchScope {
     Discussions,
     Board,
     Works,
+    Reports,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -100,6 +152,7 @@ impl IndexSearchScope {
             Self::Discussions => "discussions",
             Self::Board => "board",
             Self::Works => "works",
+            Self::Reports => "reports",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -109,13 +162,40 @@ impl IndexSearchScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexSearchTarget {
-    Issue { number: u64 },
-    Spec { spec_id: u64 },
-    Memory { heading: String, date: String },
-    Discussion { heading: String, date: String },
-    Board { entry_id: String },
-    Work { work_id: String },
-    File { path: String },
+    Issue {
+        number: u64,
+    },
+    Spec {
+        spec_id: u64,
+    },
+    Memory {
+        heading: String,
+        date: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_instruction: Option<Box<gwt_core::user_instruction::UserInstruction>>,
+    },
+    Discussion {
+        heading: String,
+        date: String,
+    },
+    Board {
+        entry_id: String,
+    },
+    Work {
+        work_id: String,
+    },
+    Report {
+        report_id: String,
+        created_at: String,
+        report_type: String,
+        source_kind: String,
+        question: String,
+        body: String,
+        issue_numbers: Vec<u64>,
+    },
+    File {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,24 +213,6 @@ pub struct IndexSearchResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_terms: Vec<String>,
     pub target: IndexSearchTarget,
-}
-
-/// SPEC-2006 Phase 2 amendment: structured error variants for the write
-/// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
-/// can match exhaustively on save-only outcomes (conflict / read-only /
-/// out-of-range / encoding fallback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentSaveErrorKind {
-    Denied,
-    Conflict,
-    ReadOnly,
-    OutOfRange,
-    TooLarge,
-    IoError,
-    NotAFile,
-    WindowNotFound,
-    WindowMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +434,10 @@ pub enum FrontendEvent {
     SetPmAutoStart {
         enabled: bool,
     },
+    /// Issue #3812: preserve residency while pausing autonomous PM work.
+    SetPmPaused {
+        paused: bool,
+    },
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
     SetPmLoopInterval {
         #[serde(deserialize_with = "deserialize_u64_or_decimal_string")]
@@ -415,6 +481,8 @@ pub enum FrontendEvent {
     CreateWindow {
         preset: WindowPreset,
         bounds: WindowGeometry,
+        #[serde(default)]
+        surface_owner: Option<WindowSurfaceOwner>,
     },
     FocusWindow {
         id: String,
@@ -473,6 +541,11 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
+    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    PaneName {
+        candidate: String,
+        request_id: String,
+    },
     UpdateWindowGeometry {
         id: String,
         geometry: WindowGeometry,
@@ -522,6 +595,10 @@ pub enum FrontendEvent {
     LoadPmConversation {
         id: String,
     },
+    /// Read explicitly posted reports for the registered PM window.
+    LoadPmReports {
+        id: String,
+    },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
     /// window id so the event can only target the caller's own pane.
@@ -561,53 +638,17 @@ pub enum FrontendEvent {
         filename: Option<String>,
         size: u64,
     },
+    /// Browser-side upload failures use server-derived window/project scope.
+    AttachmentUploadFailed {
+        id: String,
+        operation_id: String,
+        message: String,
+    },
     AttachFiles {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
         files: Vec<FileAttachment>,
-    },
-    LoadFileTree {
-        id: String,
-        path: Option<String>,
-    },
-    ListFileTreeWorktrees {
-        id: String,
-    },
-    SelectFileTreeWorktree {
-        id: String,
-        worktree_id: String,
-    },
-    LoadFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_length: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
-    /// byte back to disk. `expected_mtime` / `expected_size` are the values
-    /// returned by the most recent read; mismatch raises Conflict.
-    SaveFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        expected_mtime: u64,
-        expected_size: u64,
-        #[serde(default)]
-        text: Option<String>,
-        #[serde(default)]
-        encoding: Option<Encoding>,
-        #[serde(default)]
-        newline: Option<Newline>,
-        #[serde(default)]
-        has_bom: Option<bool>,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_byte: Option<u8>,
     },
     LoadBranches {
         id: String,
@@ -639,12 +680,9 @@ pub enum FrontendEvent {
         #[serde(default)]
         scope: LogScopeSelection,
     },
-    /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
-    /// the current `ProcessConsoleHub` ring buffer so historical lines
-    /// (e.g. gh calls that happened before the window opened) are visible
-    /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
-    LoadProcessConsole {
+    CheckKnowledgeRevision {
         id: String,
+        knowledge_kind: KnowledgeKind,
     },
     LoadKnowledgeBridge {
         id: String,
@@ -653,6 +691,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
+    },
+    /// Issue #5287: validated Issue-window failures enter the error ledger.
+    ReportKnowledgeError {
+        id: String,
+        stage: String,
+        message: String,
     },
     SearchKnowledgeBridge {
         id: String,
@@ -886,18 +930,22 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
-    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
-    /// the setting follows `autonomous_mode`.
-    SetIssueMonitorAutoApplyUpdates {
+    /// Read app-wide update preference and the requesting project's drain.
+    GetUpdateSettings,
+    /// GUI-only app-wide update preference shared by projects and the Hub.
+    SetAutoApplyUpdates {
         enabled: bool,
     },
+    /// Read the current project's complete saved launch profile pool.
+    GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
     },
     SetIssueMonitorMaxActiveAgents {
-        max_active_agents: usize,
+        #[serde(deserialize_with = "deserialize_positive_capacity_override")]
+        max_active_agents: Option<usize>,
     },
     SetIssueMonitorAllowedLabels {
         allowed_labels: Vec<String>,
@@ -1003,6 +1051,13 @@ pub enum FrontendEvent {
     ListCustomAgents,
     /// SPEC #1921 L3: list supported built-ins and their cached detection state.
     ListSupportedAgents,
+    MaintainSupportedAgent {
+        agent_id: String,
+        action: crate::agent_maintenance::MaintenanceAction,
+    },
+    SetAgentAutoUpdate {
+        enabled: bool,
+    },
     /// Settings > Custom Agents > Add from preset: enumerate built-in preset
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
@@ -1216,8 +1271,7 @@ pub enum FrontendEvent {
     /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
     /// Done records a terminal completion, Discarded a terminal discard; both
     /// remove the Work from the active surface. The backend blocks the close
-    /// when the owning agent session is still live (the worktree is only
-    /// removed for Paused Works that have no running agent).
+    /// when the owning agent session is still live. Worktree and branch remain.
     CloseWork {
         work_id: String,
         close_kind: String,
@@ -1413,6 +1467,8 @@ pub struct ActiveWorkAgentView {
     pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
     pub affiliation_status: String,
     pub workspace_id: Option<String>,
     pub status_category: String,
@@ -1870,6 +1926,11 @@ pub struct SupportedAgentView {
     /// None distinguishes an unavailable version from a known one; `installed`
     /// distinguishes a failed version probe from an agent that was not detected.
     pub installed_version: Option<String>,
+    pub available_version: Option<String>,
+    pub update_check_error: Option<String>,
+    pub update_available: bool,
+    pub up_to_date: bool,
+    pub install_supported: bool,
 }
 
 /// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
@@ -1880,6 +1941,8 @@ pub enum UpdateAutoApplyPhase {
     Scheduled,
     Postponed,
     Cancelled,
+    /// Automatic apply needs an administrator; retain the staged manual action.
+    ElevationRequired,
     Applying,
 }
 
@@ -1995,6 +2058,14 @@ pub enum BackendEvent {
         session_id: Option<String>,
         snapshot: crate::pm_conversation::PmConversationSnapshot,
     },
+    PmReports {
+        id: String,
+        session_id: Option<String>,
+        reports: Vec<PmReportView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
+        error: Option<String>,
+    },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
     /// sets explain every authorized pane that produced no frame.
@@ -2008,6 +2079,17 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
+    },
+    /// Origin-connection-only result for an authenticated self-naming request.
+    PaneNameResult {
+        request_id: String,
+        ok: bool,
+        agent_name: Option<String>,
+        error: Option<String>,
     },
     /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
     /// (SPEC-3050 FR-005: failures must be explicit, never silent).
@@ -2051,6 +2133,15 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    WorkCloseResult {
+        work_id: String,
+        close_kind: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed: Option<bool>,
+        retryable: bool,
+        error: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -2064,6 +2155,7 @@ pub enum BackendEvent {
         /// non-project surface or closing the final project tab.
         available: bool,
         auto_start: bool,
+        paused: bool,
         /// SPEC-3431 FR-132: effective resident-loop interval after applying
         /// the backend minimum to legacy or manually edited preferences.
         loop_interval_secs: u64,
@@ -2089,6 +2181,19 @@ pub enum BackendEvent {
         /// Boxed: the view is by far the largest payload in this enum
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
+    },
+    /// Client-scoped Settings snapshot, in saved launch candidate order.
+    IssueMonitorProfiles {
+        project_root: String,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+    /// Client-scoped failure for the exact Settings candidate save.
+    IssueMonitorProfilesWriteFailed {
+        project_root: String,
+        request_id: u64,
+        message: String,
     },
     /// Client-scoped failure for one label save; uncertain writes can still commit.
     IssueMonitorAllowedLabelsWriteFailed {
@@ -2123,88 +2228,6 @@ pub enum BackendEvent {
     WindowState {
         window_id: String,
         state: WindowProcessStatus,
-    },
-    FileTreeEntries {
-        id: String,
-        path: String,
-        entries: Vec<FileTreeEntry>,
-    },
-    FileTreeError {
-        id: String,
-        path: String,
-        message: String,
-    },
-    FileTreeWorktrees {
-        id: String,
-        entries: Vec<WorktreeEntry>,
-    },
-    FileTreeWorktreeSelected {
-        id: String,
-        worktree_id: String,
-    },
-    FileTreeWorktreeError {
-        id: String,
-        message: String,
-    },
-    FileContentText {
-        id: String,
-        path: String,
-        encoding: Encoding,
-        text: String,
-        total_size: u64,
-        // SPEC-2006 Phase 2 amendment: extra fields the GUI needs to support
-        // dirty/save/conflict flows. Defaults keep older clients compiling.
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        has_bom: bool,
-        newline: Newline,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentHex {
-        id: String,
-        path: String,
-        offset: u64,
-        bytes_b64: String,
-        total_size: u64,
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentError {
-        id: String,
-        path: String,
-        error_kind: FileContentErrorKind,
-        message: String,
-        #[serde(default)]
-        size: Option<u64>,
-        #[serde(default)]
-        limit: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: successful write. `new_mtime` / `new_size`
-    /// become the next `expected_*` baseline so subsequent saves keep their
-    /// conflict checks aligned with what is actually on disk.
-    FileContentSaved {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        new_mtime: u64,
-        new_size: u64,
-        #[serde(default)]
-        encoding_fallback: u64,
-    },
-    FileContentSaveError {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        error_kind: FileContentSaveErrorKind,
-        message: String,
-        #[serde(default)]
-        current_mtime: Option<u64>,
-        #[serde(default)]
-        current_size: Option<u64>,
     },
     BranchEntries {
         id: String,
@@ -2245,29 +2268,24 @@ pub enum BackendEvent {
     LogEntryAppended {
         entry: LogEvent,
     },
-    /// SPEC-2809 — A single redacted, ANSI-stripped stdout/stderr line
-    /// from an external process (gh / git / docker / agent / runner)
-    /// piped through `gwt_core::process_console::ProcessConsoleHub`.
-    /// Console window and Logs window both consume this event.
-    ProcessLine {
-        line: gwt_core::process_console::ProcessLine,
-    },
-    /// SPEC-2809 Phase F2 — reply to [`FrontendEvent::LoadProcessConsole`]
-    /// containing the current ring buffer for every kind, time-sorted.
-    /// The Console window controller replays these into its per-kind
-    /// buffers so historical lines are visible on first mount.
-    ProcessConsoleSnapshot {
+    KnowledgeRevision {
         id: String,
-        lines: Vec<gwt_core::process_console::ProcessLine>,
+        knowledge_kind: KnowledgeKind,
+        revision: Option<String>,
     },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
+        /// Content revision of the enriched list, independent of selection.
+        #[serde(default)]
+        revision: String,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
         refresh_enabled: bool,
+        #[serde(default)]
+        cache_revision: Option<String>,
     },
     KnowledgeSearchResults {
         id: String,
@@ -2542,6 +2560,16 @@ pub enum BackendEvent {
     /// Response to [`FrontendEvent::ListSupportedAgents`].
     SupportedAgentList {
         agents: Vec<SupportedAgentView>,
+        auto_update: bool,
+        maintenance_pending: bool,
+    },
+    SupportedAgentMaintenance {
+        agent_id: String,
+        pending: bool,
+        success: Option<bool>,
+        message: String,
+        before_version: Option<String>,
+        after_version: Option<String>,
     },
     /// Response to [`FrontendEvent::ListCustomAgentPresets`].
     CustomAgentPresetList {
@@ -2621,12 +2649,18 @@ pub enum BackendEvent {
         message: String,
         recovery: String,
     },
+    /// Update-domain preference and current-project drain snapshot.
+    UpdateSettings {
+        project_root: Option<String>,
+        status: crate::update_settings::Status,
+    },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
     /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
@@ -2693,6 +2727,7 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
@@ -2760,6 +2795,7 @@ pub enum BackendEvent {
     /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
+        #[serde(serialize_with = "serialize_release_notes_entries")]
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
@@ -2819,6 +2855,11 @@ impl BackendEventPolicy {
 }
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "pm_reports",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     BackendEventPolicy::new(
         "pm_conversation",
         BackendEventDeliveryClass::Snapshot,
@@ -2900,11 +2941,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
-        "process_line",
-        BackendEventDeliveryClass::Streamed,
-        BackendEventBackpressurePolicy::PreserveOrder,
-    ),
-    BackendEventPolicy::new(
         "terminal_preview",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -2923,6 +2959,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "terminal_status",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "pane_name_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "pane_send_result",
@@ -2949,12 +2990,27 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
+    BackendEventPolicy::new(
+        "work_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
     BackendEventPolicy::new(
         "pm_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_profiles",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_profiles_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -2992,56 +3048,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
-        "file_tree_entries",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktrees",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_selected",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_text",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_hex",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_saved",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_save_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
         "branch_entries",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3073,6 +3079,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "knowledge_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_revision",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -3289,6 +3300,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "supported_agent_maintenance",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "agent_backend_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3322,6 +3338,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "migration_error",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "update_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "system_settings",
@@ -3409,17 +3430,24 @@ impl BackendEvent {
             BackendEvent::TerminalPreview { .. } => "terminal_preview",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::PmConversation { .. } => "pm_conversation",
+            BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PaneNameResult { .. } => "pane_name_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::IssueMonitorScanRequestResult { .. } => {
                 "issue_monitor_scan_request_result"
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
+                "issue_monitor_profiles_write_failed"
+            }
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
@@ -3428,16 +3456,6 @@ impl BackendEvent {
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
-            BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
-            BackendEvent::FileTreeError { .. } => "file_tree_error",
-            BackendEvent::FileTreeWorktrees { .. } => "file_tree_worktrees",
-            BackendEvent::FileTreeWorktreeSelected { .. } => "file_tree_worktree_selected",
-            BackendEvent::FileTreeWorktreeError { .. } => "file_tree_worktree_error",
-            BackendEvent::FileContentText { .. } => "file_content_text",
-            BackendEvent::FileContentHex { .. } => "file_content_hex",
-            BackendEvent::FileContentError { .. } => "file_content_error",
-            BackendEvent::FileContentSaved { .. } => "file_content_saved",
-            BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
             BackendEvent::RemoteStartWorkBranches { .. } => "remote_start_work_branches",
             BackendEvent::BoardEntries { .. } => "board_entries",
@@ -3445,9 +3463,8 @@ impl BackendEvent {
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
-            BackendEvent::ProcessLine { .. } => "process_line",
-            BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeRevision { .. } => "knowledge_revision",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
@@ -3493,6 +3510,7 @@ impl BackendEvent {
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
             BackendEvent::SupportedAgentList { .. } => "supported_agent_list",
+            BackendEvent::SupportedAgentMaintenance { .. } => "supported_agent_maintenance",
             BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
             BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
@@ -3506,6 +3524,7 @@ impl BackendEvent {
             BackendEvent::MigrationProgress { .. } => "migration_progress",
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::UpdateSettings { .. } => "update_settings",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
@@ -3591,6 +3610,99 @@ mod tests {
     };
 
     #[test]
+    fn create_window_surface_owner_accepts_legacy_requests_and_validates_owners() {
+        let legacy = serde_json::json!({
+            "kind": "create_window",
+            "preset": "settings",
+            "bounds": {"x": 0.0, "y": 0.0, "width": 1000.0, "height": 800.0}
+        });
+        let _: FrontendEvent = serde_json::from_value(legacy.clone()).expect("legacy request");
+        for owner in ["pm", "agents"] {
+            let mut owned = legacy.clone();
+            owned["surface_owner"] = serde_json::json!(owner);
+            let _: FrontendEvent = serde_json::from_value(owned).expect("owned request");
+        }
+        let mut invalid = legacy;
+        invalid["surface_owner"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
+
+    #[test]
+    fn pm_reports_wire_uses_safe_shared_markdown_and_client_scoped_snapshot() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm"
+        }))
+        .unwrap();
+        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
+        let event = BackendEvent::PmReports {
+            id: "pm".into(), session_id: Some("session".into()), error: None,
+            current: None,
+            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
+                body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
+                created_at: chrono::Utc::now(),
+            }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "qa", "kind": "qa", "question": "Can we ship?",
+                "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap())],
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        let html = value["reports"][0]["body_html"].as_str().unwrap();
+        for expected in [
+            "<h1>Report</h1>",
+            "<strong>Ready</strong>",
+            "<code>code</code>",
+            "<li>Item</li>",
+            "<pre><code",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+        assert!(!html.contains("<script>"));
+        assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(value["reports"][1]["kind"], "qa");
+        assert_eq!(value["reports"][1]["question"], "Can we ship?");
+        assert!(value["reports"][1]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Yes.</strong>"));
+        assert_eq!(
+            event.delivery_policy().delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            event.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn release_notes_wire_uses_shared_markdown_preserving_literal_html() {
+        let event = BackendEvent::ReleaseNotesPayload {
+            id: "notes".into(),
+            focus_version: None,
+            current_version: "1.0.0".into(),
+            entries: vec![gwt_core::release_notes::ReleaseEntry {
+                version: "1.0.0".into(),
+                date: "2026-10-11".into(),
+                sections: vec![gwt_core::release_notes::Section {
+                    heading: "Fixed".into(),
+                    items: vec!["**Ready** and `code` <script>literal</script>".into()],
+                }],
+            }],
+        };
+        let value = serde_json::to_value(event).unwrap();
+        let section = &value["entries"][0]["sections"][0];
+        assert_eq!(section["heading"], "Fixed");
+        let html = section["body_html"]
+            .as_str()
+            .expect("derived Markdown HTML");
+        assert!(html.contains("<strong>Ready</strong>"));
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("&lt;script&gt;literal&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
     fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {
         for kind in ["select_project_tab", "close_project_tab"] {
             assert!(
@@ -3641,6 +3753,26 @@ mod tests {
         assert!(
             errors.contains("project_context_for_root"),
             "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_elevation_required_serializes_without_a_grace() {
+        let phase: super::UpdateAutoApplyPhase =
+            serde_json::from_value(serde_json::json!("elevation_required"))
+                .expect("administrator-required phase is part of the update protocol");
+        let event = BackendEvent::UpdateAutoApply {
+            version: "9.106.0".into(),
+            phase,
+            grace_secs: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "update_auto_apply",
+                "version": "9.106.0",
+                "phase": "elevation_required",
+            })
         );
     }
 
@@ -3770,6 +3902,7 @@ mod tests {
         let event = BackendEvent::PmStatus {
             available: true,
             auto_start: true,
+            paused: false,
             loop_interval_secs: u64::MAX,
             loop_interval_secs_decimal: u64::MAX.to_string(),
             configured_agent_id: "claude".to_string(),
@@ -3814,6 +3947,28 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #4249 AC-19: the close result reaches its origin client reliably.
+    #[test]
+    fn work_close_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::WorkCloseResult {
+            work_id: "work-1".into(),
+            close_kind: "done".into(),
+            ok: false,
+            changed: None,
+            retryable: true,
+            error: Some("refresh and retry".into()),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_close_result");
+        assert!(value.get("changed").is_none());
+        let policy = event.delivery_policy();
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,
@@ -4262,13 +4417,6 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
-        let process_line = backend_event_policy("process_line").expect("process_line policy");
-        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
-        assert_eq!(
-            process_line.backpressure,
-            BackendEventBackpressurePolicy::PreserveOrder
-        );
-
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -4324,17 +4472,6 @@ mod tests {
         assert_eq!(
             runtime_hook_event.backpressure,
             BackendEventBackpressurePolicy::BestEffort
-        );
-
-        let file_content_saved =
-            backend_event_policy("file_content_saved").expect("file_content_saved policy");
-        assert_eq!(
-            file_content_saved.delivery,
-            BackendEventDeliveryClass::Snapshot
-        );
-        assert_eq!(
-            file_content_saved.backpressure,
-            BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
     }
 
@@ -4522,6 +4659,7 @@ mod tests {
                     window_id: Some("tab-1::agent-1".to_string()),
                     agent_id: "codex".to_string(),
                     display_name: "Codex".to_string(),
+                    agent_name: None,
                     affiliation_status: "assigned".to_string(),
                     workspace_id: Some("work-1".to_string()),
                     status_category: "active".to_string(),
@@ -4540,6 +4678,17 @@ mod tests {
         };
 
         let value = serde_json::to_value(&event).expect("serialize active work projection");
+
+        let mut legacy_agent = value.pointer("/projection/agents/0").unwrap().clone();
+        legacy_agent.as_object_mut().unwrap().remove("agent_name");
+        let legacy: super::ActiveWorkAgentView = serde_json::from_value(legacy_agent.clone())
+            .expect("legacy Active Work agent without an assigned name");
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
+        let mut named_agent = legacy_agent;
+        named_agent["agent_name"] = Value::String("Aster".to_string());
+        let named: super::ActiveWorkAgentView =
+            serde_json::from_value(named_agent).expect("named Active Work agent");
+        assert_eq!(serde_json::to_value(named).unwrap()["agent_name"], "Aster");
 
         assert_eq!(
             value.get("kind"),

@@ -326,6 +326,18 @@ impl CliEnv for DefaultCliEnv {
             &request,
         )
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        crate::cli::pr::ci_delivery::fetch(
+            &self.repo_path,
+            &format!("{}/{}", self.owner, self.repo),
+            base,
+            head,
+        )
+    }
     fn compare_pr_head(
         &mut self,
         base: &str,
@@ -403,9 +415,17 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
+            .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
@@ -415,14 +435,35 @@ impl CliEnv for DefaultCliEnv {
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
+            base,
             title,
             body,
             add_labels,
         )
     }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::close_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+            comment,
+        )
+    }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
-        gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
-            .map_err(|err| io::Error::other(err.to_string()))
+        let repo_slug = format!("{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_status(&repo_slug, number).map_err(|error| {
+            if crate::cli::pr::number_is_issue_via_gh(&repo_slug, &self.repo_path, number) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Issue #{number} is an issue, not a pull request. Use `issue.view` instead."
+                    ),
+                )
+            } else {
+                io::Error::other(error.to_string())
+            }
+        })
     }
     fn fetch_pr_quarantine_context(
         &mut self,
@@ -530,6 +571,146 @@ impl CliEnv for DefaultCliEnv {
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
+    }
+
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        let identity = gwt_core::repo_hash::detect_repo_identity(&self.repo_path)
+            .ok_or_else(|| io::Error::other("project repository identity is unavailable"))?;
+        let expected = gwt_core::repo_hash::compute_repo_hash(&format!(
+            "https://github.com/{}/{}",
+            self.owner, self.repo
+        ));
+        if identity.hash != expected {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"PM settings operations require the project's canonical GitHub repository; repository overrides cannot select another target"));
+        }
+        Ok((self.owner.clone(), self.repo.clone()))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_snapshot(operation, params)
+            .map_err(api_to_io)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_mutate(operation, params, before)
+            .map_err(api_to_io)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .create_github_discussion(category, title, body)
+            .map_err(api_to_io)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .required_status_checks(branch)
+            .map_err(api_to_io)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .update_required_status_checks(branch, settings)
+            .map_err(api_to_io)
+    }
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        use gwt_config::Settings;
+        crate::cli::actions::validate_dispatch_call(&call)
+            .map_err(|_| io::Error::other("invalid workflow dispatch selector or ref"))?;
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        let config_path = gwt_core::paths::gwt_home().join("config.toml");
+        let settings = if config_path.exists() {
+            Settings::load_from_path(&config_path)
+                .map_err(|_| io::Error::other("cannot read allowed_workflows from config.toml"))?
+        } else {
+            Settings::default()
+        };
+        let repo_key = format!("{}/{}", self.owner, self.repo);
+        let allowed = settings
+            .allowed_workflows
+            .get(&repo_key)
+            .filter(|names| !names.is_empty())
+            .ok_or_else(|| {
+                io::Error::other(
+                    "workflow dispatch denied: configure allowed_workflows for this repository",
+                )
+            })?;
+        let filename = if call.workflow.parse::<u64>().is_ok() {
+            let path = self
+                .client
+                .resolve()
+                .map_err(api_to_io)?
+                .workflow_path(&call.workflow)
+                .map_err(api_to_io)?;
+            path.strip_prefix(".github/workflows/")
+                .filter(|name| crate::cli::actions::is_workflow_filename(name))
+                .ok_or_else(|| io::Error::other("workflow ID does not resolve to a workflow file"))?
+                .to_string()
+        } else {
+            call.workflow.clone()
+        };
+        if !allowed.contains(&filename) {
+            return Err(io::Error::other(format!(
+                "workflow dispatch denied: filename is not in allowed_workflows for this repository; allowed filenames: {}",
+                allowed.iter().filter(|name| crate::cli::actions::is_workflow_filename(name)).cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        if !gwt_core::paths::resolve_current_worktree_root(&self.repo_path)
+            .join(".github/workflows")
+            .join(&filename)
+            .is_file()
+        {
+            return Err(io::Error::other(
+                "workflow file does not exist in checkout .github/workflows",
+            ));
+        }
+        let client = self.client.resolve().map_err(api_to_io)?;
+        let definition = client
+            .workflow_definition(&filename, &call.git_ref)
+            .map_err(api_to_io)?;
+        crate::cli::actions::validate_dispatch_inputs(&definition, &call.inputs)?;
+        client
+            .dispatch_workflow(&filename, &call.git_ref, &call.inputs)
+            .map_err(api_to_io)?;
+        Ok("workflow dispatch requested".into())
+    }
+
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::cancel_actions_via_gh(&self.owner, &self.repo, &self.repo_path, run_id)
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        crate::cli::actions::fetch_queued_actions_via_gh(&self.owner, &self.repo, &self.repo_path)
     }
     fn run_internal_command(
         &mut self,

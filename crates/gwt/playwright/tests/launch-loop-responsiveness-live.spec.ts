@@ -46,7 +46,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       await gotoLiveGwt(page, base, { enableTestBridge: true });
       await openLiveGwtProject(page, project);
       const migration = page.locator("#migration-modal.open");
-      if (project !== PROJECT) await expect(migration).toBeVisible({ timeout: 60_000 });
+      await expect(migration).toBeVisible({ timeout: 60_000 });
       if (await migration.count()) {
         // Exercise the regular migration route only on this disposable repository.
         await migration.getByRole("button", { name: "Migrate", exact: true }).click();
@@ -60,7 +60,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       const windows: unknown[] = [];
       for (let index = initial.length; index < 60; index += 1) {
         windows.push({
-          kind: "create_window", preset: "console",
+          kind: "create_window", preset: "logs",
           bounds: { x: index * 8, y: index * 8, width: 480, height: 280 },
         });
       }

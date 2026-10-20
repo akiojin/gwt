@@ -1343,7 +1343,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
 }
 
 #[test]
-fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
+fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_window() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1392,9 +1392,23 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
         },
     );
 
+    let bootstrap_error =
+        "Process exited with status: 1\naccount/read workspace routing discovery failed (-32603)";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let _ = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        bootstrap_error,
+        Some(42),
+        Ok(()),
+    );
+    assert!(
+        runtime.tracked_window_exists(window_id),
+        "a Monitor failure ACK without a current PTY exit must retain the live pane"
+    );
+    runtime.runtimes.remove(window_id);
     let events = runtime.issue_monitor_agent_failed_result_events(
         window_id,
-        "agent failed",
+        bootstrap_error,
         Some(42),
         Ok(()),
     );
@@ -1403,15 +1417,126 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
         .pending_launch_feedback_contexts
         .contains_key(window_id));
     assert!(
-        runtime.window_lookup.contains_key(window_id),
-        "default mode retains the failed terminal for operator inspection"
+        !runtime.tracked_window_exists(window_id),
+        "a failed Monitor bootstrap must close before the row can relaunch"
     );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { level, issue_number, .. }
             if level == "error" && *issue_number == Some(42)
     )));
     assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+
+    let mut fresh = pending_fresh_execution_fixture(temp.path(), "monitor-bootstrap-before-start");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fresh.repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed unbound Monitor prefs");
+    fresh
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fresh.window_id)
+        .expect("pending fresh execution")
+        .launch_feedback_context = Some(LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(fresh.owner.number),
+        issue_monitor_delivery_id: None,
+        issue_monitor_project_root: Some(fresh.repo.clone()),
+        issue_monitor_session_mode: None,
+        issue_monitor_autonomous_handoff: None,
+        issue_monitor_autonomous_submit_started: false,
+        issue_monitor_review_dispatch: false,
+    });
+    let events = fresh.runtime.issue_monitor_agent_failed_result_events(
+        &fresh.window_id,
+        bootstrap_error,
+        None,
+        Ok(()),
+    );
+    assert!(
+        !fresh.runtime.tracked_window_exists(&fresh.window_id),
+        "an unbound Monitor bootstrap failure must roll back before another launch"
+    );
+    assert_pending_fresh_execution_was_rolled_back(&fresh);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, issue_number, .. }
+            if level == "error" && *issue_number == Some(fresh.owner.number)
+    )));
+
+    let mut retained =
+        pending_fresh_execution_fixture(temp.path(), "monitor-bootstrap-cleanup-refused");
+    let mut feedback = issue_monitor_feedback(retained.owner.number);
+    feedback.issue_monitor_project_root = Some(retained.repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    retained
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&retained.window_id)
+        .expect("pending fresh execution")
+        .launch_feedback_context = Some(feedback.clone());
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&retained.repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed spare Monitor capacity");
+    replace_fresh_candidate_session_incarnation(
+        &retained.runtime.sessions_dir,
+        &retained.candidate_session_id,
+    );
+    retained
+        .runtime
+        .set_window_status("tab-1", "agent-1", WindowProcessStatus::Error);
+    let _ = retained.runtime.issue_monitor_agent_failed_result_events(
+        &retained.window_id,
+        bootstrap_error,
+        None,
+        Ok(()),
+    );
+    assert!(retained.runtime.tracked_window_exists(&retained.window_id));
+    assert!(retained
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&retained.window_id));
+    retained.runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&retained.repo)
+        .branch("work/issue-2359")
+        .linked_issue_number(retained.owner.number)
+        .build();
+    // The RED path may create a sample canvas pane, but must never run a provider.
+    config.command = retained
+        .repo
+        .join("missing-monitor-agent")
+        .display()
+        .to_string();
+    for _ in 0..2 {
+        let result = retained.runtime.spawn_agent_window_with_feedback(
+            "tab-1",
+            config.clone(),
+            canvas_bounds(),
+            None,
+            feedback.clone(),
+        );
+        assert!(
+            result.as_ref().is_err_and(|reason| reason.contains("pending")),
+            "a retained Prepared Monitor launch must block a second pane despite spare capacity: {result:?}"
+        );
+        assert_eq!(
+            retained.runtime.tabs[0].workspace.persisted().windows.len(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -1434,6 +1559,7 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             enabled: true,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             autonomous_mode: true,
             launch_profile: Some(sample_issue_monitor_launch_profile()),
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {

@@ -52,7 +52,21 @@ test("surfaceForWindow puts the PM apart from the agents by its role marker", as
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: true }), "pm");
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: false }), "agents");
   assert.equal(surfaceForWindow({ preset: "board" }), "board");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "system" }), "settings");
   assert.equal(surfaceForWindow(null), null);
+});
+
+test("surface ownership retains authoritative roles and only routes the dedicated auxiliary views", async () => {
+  const { surfaceForWindow } = await importSurfaceRail();
+  assert.equal(surfaceForWindow({ preset: "shell", is_pm: true, surface_owner: "agents" }), "pm");
+  for (const preset of ["agent", "claude", "codex"]) {
+    assert.equal(surfaceForWindow({ preset, surface_owner: "pm", agent_name: null }), "agents");
+  }
+  assert.equal(surfaceForWindow({ preset: "settings", surface_owner: "pm", settingsSection: "issues" }), "pm");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues", "legacy Settings retains its existing section classification");
+  assert.equal(surfaceForWindow({ preset: "shell", surface_owner: "agents" }), "agents");
+  assert.equal(surfaceForWindow({ preset: "shell" }), null, "ordinary Shell keeps its existing route");
 });
 
 test("the PM sits alone above the rule, then the Surfaces group of Issues / Agents / Board / Settings", () => {

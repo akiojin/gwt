@@ -9,6 +9,40 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { acquireLiveGwtBackendLock, gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+test("live backend replays fresh index health after reconnect", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated backend");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const release = await acquireLiveGwtBackendLock(base!, testInfo);
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(String(error)));
+  try {
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    const { table } = await openIndexHealthPanel(page, true, true);
+    await expect(table.locator("tr[data-scope='issues']")).toBeVisible();
+    const status = await page.waitForFunction(() => {
+      const messages = (window as any).__gwtPlaywrightMessages ?? [];
+      return messages.map((entry: any) => entry.payload)
+        .findLast((payload: any) => payload.kind === "project_index_status" && payload.status?.scopes?.issues);
+    }).then((handle) => handle.jsonValue());
+    expect(status.status.state).toBe("ready");
+    expect(status.status.scopes.issues.healthy).toBe(true);
+    await sendLiveGwtEvent(page, { kind: "refresh_index_status", project_root: status.project_root });
+    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+
+    await gotoLiveGwt(page, page.url(), { enableTestBridge: true });
+    const reconnected = await openIndexHealthPanel(page, false, true);
+    await expect(reconnected.table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await release();
+  }
+});
 
 test.describe("Project Index status surface", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -299,6 +333,77 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
+  test("Index window Health shows Work and Reports status and Search opens Reports", async ({ page }, testInfo) => {
+    const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(String(error)));
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript((value) => localStorage.setItem("gwt:ui:theme", value), theme);
+    if (!configuredUrl) await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        works: { healthy: true, repair_required: false, document_count: 7, reason: "ready" },
+        reports: { healthy: true, repair_required: false, document_count: 3, reason: "ready" },
+      },
+    }, { includePm: true });
+
+    const url = configuredUrl
+      ? new URL(new URL(APP_URL).pathname, configuredUrl).toString()
+      : APP_URL;
+    await page.goto(url);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const pm = page.locator(".workspace-window[data-id='pm-fixture']");
+    await page.locator("#op-pm-entry").click();
+    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    const { root, table } = await openIndexHealthPanel(page);
+    const worksRow = table.locator("tr[data-scope='works']");
+    await expect(worksRow.locator(".settings-index-cell.ready")).toContainText("7 docs");
+    await worksRow.locator(".settings-index-rebuild-all[data-scope='works']").click();
+    const lastRebuild = await page.evaluate(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map((raw) => JSON.parse(raw))
+        .filter((message) => message.kind === "rebuild_index_cell").pop(),
+    );
+    expect(lastRebuild).toEqual({ kind: "rebuild_index_cell", project_root: "/fixture", scope: "works" });
+    const reportsRow = table.locator("tr[data-scope='reports']");
+    await expect(reportsRow.locator(".settings-index-cell.ready")).toContainText("3 docs");
+    await reportsRow.locator(".settings-index-rebuild-all").click();
+    const reportRebuild = await page.evaluate(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map((raw) => JSON.parse(raw))
+        .filter((message) => message.kind === "rebuild_index_cell").pop(),
+    );
+    expect(reportRebuild).toEqual({ kind: "rebuild_index_cell", project_root: "/fixture", scope: "reports" });
+    await root.locator("[data-index-tab='search']").click();
+    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("2 ready");
+    await expect(root.locator(".index-scope-button[data-scope='reports']")).toHaveAttribute("aria-pressed", "true");
+    await root.locator(".index-search-input").fill("release decision");
+    const request = await page.waitForFunction(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map((raw) => JSON.parse(raw))
+        .filter((message) => message.kind === "search_project_index").pop(),
+    ).then((handle) => handle.jsonValue());
+    expect(request.scopes).toContain("reports");
+    await page.evaluate((payload) => window.__gwtFixtureWebSocket.emit(payload), {
+      kind: "project_index_search_results", project_root: "/fixture", id: request.id,
+      request_id: request.request_id, query: request.query, scope: "reports", suggestions: [],
+      results: [{ scope: "reports", title: "Release decision", subtitle: "qa · 2026-10-15T08:00:00Z · Issue #5429",
+        preview: "Q: Can we release?\n\nA: Required checks pass.", distance: 0.08,
+        target: { kind: "report", report_id: "report-fixture", report_type: "qa", source_kind: "qa",
+          created_at: "2026-10-15T08:00:00Z", question: "Can we release?", body: "Required checks pass.", issue_numbers: [5429] } }],
+    });
+    const result = root.locator(".index-result-row");
+    await expect(result).toContainText("qa · 2026-10-15T08:00:00Z · Issue #5429");
+    await expect(root.locator(".index-detail-preview")).toContainText("Can we release?");
+    await expect(root.locator(".index-detail-preview")).toContainText("Required checks pass.");
+    await root.locator("[data-action='open-index-result']").click();
+    await expect(pm).toHaveClass(/focused/);
+    await expect(pm.getByRole("button", { name: "Reports", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(pm.getByRole("log", { name: "PM reports" })).toBeVisible();
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("Index window Search shows animated loading feedback in the results pane", async ({
     page,
   }) => {
@@ -317,7 +422,6 @@ test.describe("Project Index status surface", () => {
     await page.goto(APP_URL);
     const { root } = await openIndexSearchPanel(page);
     await root.locator(".index-search-input").fill("memory search loading");
-    await root.locator(".index-run-button").click();
 
     const loading = root.locator(".index-search-loading");
     await expect(loading).toBeVisible({ timeout: 5_000 });
@@ -355,7 +459,6 @@ test.describe("Project Index status surface", () => {
       "All terms required, e.g. Work discussion",
     );
     await root.locator(".index-search-input").fill("Workspace volatile");
-    await root.locator(".index-run-button").click();
 
     const request = await page.waitForFunction(() => {
       const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
@@ -489,18 +592,20 @@ test.describe("Project Index status surface", () => {
 
 });
 
-async function openIndexHealthPanel(page) {
+async function openIndexHealthPanel(page, createWindow = true, live = false) {
   await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
   // SPEC-1939 Phase 15: settings target=index is now the compatibility
   // entrypoint for the dedicated Index window, not a Settings tab.
-  await page.evaluate(() => {
+  if (createWindow) await page.evaluate(() => {
     document.dispatchEvent(
       new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
     );
   });
 
-  const root = page.locator(".index-search-root").first();
+  const root = page.locator(live
+    ? ".workspace-window.surface-index.focused .index-search-root"
+    : ".index-search-root").first();
   await expect(root).toBeVisible({ timeout: 10_000 });
   await root.locator("[data-index-tab='health']").click();
 
@@ -554,7 +659,14 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
       kind: "git",
       workspace: {
         viewport: { x: 0, y: 0, zoom: 1 },
-        windows: [],
+        windows: optionsPayload.includePm ? [{
+          id: "pm-fixture", title: "Project Manager", preset: "agent", is_pm: true,
+          session_id: "pm-session", status: "running", persist: true, z_index: 1,
+          geometry: { x: 20, y: 20, width: 760, height: 620 },
+        }, {
+          id: "index-fixture", title: "Index", preset: "index", status: "running", persist: true, z_index: 2,
+          geometry: { x: 96, y: 76, width: 720, height: 540 },
+        }] : [],
       },
     };
     const workspaceState = {

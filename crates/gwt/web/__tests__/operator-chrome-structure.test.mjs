@@ -30,12 +30,6 @@ const liveGwtHelperSource = readFileSync(
   resolve(here, "../../playwright/tests/_helpers/live-gwt.ts"),
   "utf8",
 );
-// SPEC-3064 Phase 3 (E6a): the File Tree window surface moved from app.js
-// to file-tree-surface.js.
-const fileTreeSurfaceSource = readFileSync(
-  resolve(here, "../file-tree-surface.js"),
-  "utf8",
-);
 // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved from
 // app.js to branches-cleanup-surface.js.
 const branchesCleanupSource = readFileSync(
@@ -935,8 +929,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /case "issues":\s*openWorkspaceOverview\(\);/,
-    "expected the Issues surface to open the overview",
+    /splitSurfaces\?\.show\(surface\)/,
+    "rail surfaces use the fixed surface host",
   );
 });
 
@@ -1006,7 +1000,7 @@ test("Workspace Overview uses the Quiet Work list filter + Detail layout", () =>
 
 test("Workspace Overview root participates in full-window layout", () => {
   const fullWindowRootRule = inlineStyle.match(
-    /\.file-tree-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
+    /\.branch-list-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
   );
   assert.ok(fullWindowRootRule, "expected shared full-window root layout rule");
   assert.match(
@@ -1112,6 +1106,17 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
     "expected window titlebars to use the shared display-title helper",
   );
+});
+
+test("Agent window title starts with assigned identity before its current purpose", () => {
+  const displayTitle = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE",
+    extractFunctionBody(appSource, "windowDisplayTitle"));
+  const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
+  const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
+  assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");
+  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Naming… — Fix cache");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
+  assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 
 test("Branches preset is removed — branch browsing is part of the Work surface", () => {
@@ -1778,8 +1783,8 @@ test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list 
   const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
   assert.match(
     body,
-    /groupProjectWindowList\(getAppState\(\),\s*windowListEntries\)/,
-    "renderWindowList must source rows from the cross-tab model, not activeWorkspace() alone",
+    /groupProjectWindowList\(catalog.appState,\s*windowListEntries\)/,
+    "renderWindowList must source rows from the shared cross-tab catalog",
   );
   assert.match(
     body,
@@ -2452,7 +2457,7 @@ test("Keyboard-navigable rows have :focus-visible outlines", () => {
   // treatment. Source-of-truth audit: every selector in app.js that
   // sets `tabIndex = 0` and `role="button"` must be in the CSS group.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  for (const selector of [".project-tab", ".file-tree-row", ".branch-row"]) {
+  for (const selector of [".project-tab", ".branch-row"]) {
     const re = new RegExp(`:root\\[data-theme\\] \\${selector}:focus-visible`);
     assert.match(
       css,
@@ -2577,44 +2582,6 @@ test("Launch wizard renders a backend-gated Back control in the footer", () => {
     launchWizardSource,
     /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
     "expected Back to dispatch the canonical backend action",
-  );
-});
-
-test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
-  // <div>-based rows can't be Tab'd to or activated with the keyboard
-  // unless explicitly opted in. Add tabindex, role="button", and a
-  // keydown handler that mirrors the click handler for Enter/Space.
-  // Without all three, keyboard-only users couldn't browse the file
-  // tree — only mouse users could.
-  assert.match(fileTreeSurfaceSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.setAttribute\("role",\s*"button"\)/,
-    "expected file tree row role='button'",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.addEventListener\("keydown",[\s\S]*event\.key === "Enter" \|\| event\.key === " "[\s\S]*activate\(\)/,
-    "expected file tree row keydown handler invoking the click activate path on Enter/Space",
-  );
-});
-
-test("File tree directory rows expose collapse state via aria-expanded", () => {
-  // The file tree shows directories with ▾/▸ caret glyphs to indicate
-  // expand/collapse state visually. Without aria-expanded, screen
-  // readers can't tell whether a directory is open or closed, so the
-  // user has to guess via context. File (non-directory) rows must
-  // explicitly removeAttribute so a row that was a directory and
-  // became a file (via state change) doesn't keep the marker.
-  assert.match(
-    fileTreeSurfaceSource,
-    /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
-    "expected directory rows to set aria-expanded based on expanded state",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.removeAttribute\("aria-expanded"\)/,
-    "expected non-directory rows to remove aria-expanded",
   );
 });
 
@@ -2911,7 +2878,6 @@ test("Selected list rows mark active item with aria-current", () => {
   // surfaces extracted from app.js count too.
   const rowSurfacesSource = [
     appAndProjectTabsSource,
-    fileTreeSurfaceSource,
     boardLogsSurfaceSource,
     knowledgeKanbanSurfaceSource,
     profileWindowSurfaceSource,
@@ -3762,7 +3728,7 @@ test("non-terminal surface bodies still follow the overall theme (FR-013 boundar
   // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:agent-kanban|branches|board|logs|knowledge|index|work|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3778,7 +3744,6 @@ test("mountWindowBody clears every known surface class before applying the activ
   for (const surfaceClass of [
     "surface-terminal",
     "surface-agent-kanban",
-    "surface-file-tree",
     "surface-branches",
     "surface-board",
     "surface-logs",
@@ -3786,7 +3751,6 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
-    "surface-console",
     "surface-mock",
   ]) {
     assert.match(
@@ -3799,7 +3763,6 @@ test("mountWindowBody clears every known surface class before applying the activ
 
 test("every readable non-terminal surface participates in the opaque window chrome grammar", () => {
   for (const surface of [
-    "file-tree",
     "branches",
     "board",
     "logs",
@@ -3807,7 +3770,6 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
-    "console",
     "mock",
   ]) {
     assert.match(
@@ -4392,6 +4354,7 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
     "dynamic_title_detail",
     "purpose_title",
     "agent_id",
+    "agent_name",
     "agent_color",
     "status",
     "geometry",
@@ -5310,7 +5273,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const chipIndex = statusBody.indexOf("chip.classList.remove(");
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
-  const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -5318,7 +5280,6 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["status chip class writes", chipIndex],
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
-    ["Window List refresh", windowListIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -5330,19 +5291,16 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   );
 });
 
-test("Runtime status updates repaint the Window List when the target window is hidden", () => {
+test("Runtime status updates publish to catalog subscribers before an unmounted target returns", () => {
   const statusBody = extractFunctionBody(appSource, "applyStatus");
   const branchMatch = statusBody.match(
     /if\s*\(\s*!element\s*\)\s*\{([\s\S]*?)return\s*;\s*\}/,
   );
   assert.ok(branchMatch, "applyStatus must handle status events for unmounted windows");
 
-  const branchBody = branchMatch[1];
-  assert.match(
-    branchBody,
-    /renderWindowList\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh the Window List",
-  );
+  assert.ok(statusBody.indexOf("publishWindowCatalogRuntime(windowId, status)") < statusBody.indexOf(branchMatch[0]),
+    "hidden target status updates must reach both catalog views before returning");
+  assert.doesNotMatch(statusBody, /renderWindowList\s*\(/);
 
 });
 
@@ -5748,5 +5706,19 @@ test("window framing activates a hidden group member after the split route", () 
   assert.match(body, /windowData\.tab_group_id && !windowData\.tab_group_active/);
   assert.match(body, /pendingFrameWindowId\s*=\s*windowId/);
   assert.match(body, /kind:\s*"activate_window_tab",\s*id:\s*windowId/);
-  assert.ok(body.indexOf('splitSurfaces?.isOpen()') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.ok(body.indexOf('splitSurfaces?.hasLayout') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.match(body, /splitSurfaces\.close\(\)/);
+});
+
+test("fixed surface bounds use the visible host instead of the hidden canvas or camera", () => {
+  const body = extractFunctionBody(appSource, "visibleBounds");
+  const bounds = new Function("splitSurfaces", "stage", "canvas", "viewport", body);
+  const stage = { closest: () => ({ clientWidth: 1200, clientHeight: 800 }) };
+  const canvas = { clientWidth: 0, clientHeight: 0, parentElement: stage.closest() };
+  const viewport = { x: -400, y: 200, zoom: 0.5 };
+  assert.deepEqual(bounds({ hasLayout: true }, stage, canvas, viewport),
+    { x: 0, y: 0, width: 1200, height: 800 });
+  assert.deepEqual(bounds({ hasLayout: false }, stage,
+    { clientWidth: 600, clientHeight: 400 }, viewport),
+    { x: 800, y: -400, width: 1200, height: 800 });
 });

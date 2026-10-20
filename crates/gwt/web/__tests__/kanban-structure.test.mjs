@@ -74,12 +74,19 @@ test("Knowledge windows install periodic cache-first refresh for external phase 
   );
   assert.match(
     appSource,
-    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*false\s*\)/,
-    "expected auto-refresh to stay cache-first instead of forcing remote sync",
+    /setInterval[\s\S]{0,900}?refreshVisibleKnowledgeWindows\(\)/,
+    "expected auto-refresh to publish a visibility-gated revision check",
   );
+  const refreshFlush = knowledgeSurfaceSource.slice(
+    knowledgeSurfaceSource.indexOf("function flushVisibleKnowledgeWindows("),
+    knowledgeSurfaceSource.indexOf("function readKanbanHideDonePreference("),
+  );
+  assert.match(refreshFlush, /kind: "check_knowledge_revision"/);
+  assert.match(refreshFlush, /requestKnowledgeBridge\(windowId, state\.kind, false\)/,
+    "changed revisions must stay cache-first");
   assert.doesNotMatch(
-    appSource,
-    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
+    refreshFlush,
+    /requestKnowledgeBridge\([^)]*,\s*true\s*\)/,
     "auto-refresh must not surface GitHub auth failures while cached entries are visible",
   );
   assert.match(
@@ -125,7 +132,7 @@ test("Issue/SPEC semantic search uses an OPEN-only direct WebSocket send", () =>
   assert.match(
     knowledgeSurfaceSource,
     /!issueSurface && state\.searching/,
-    "only PR may expose the legacy semantic searching status",
+    "Issue semantic searching status stays silent",
   );
 });
 
@@ -423,7 +430,7 @@ test("Kanban drawer uses the same display labels as the detail pane", () => {
   );
 });
 
-test("Kanban card click scopes targeted selection to Issue/SPEC and preserves PR full render", () => {
+test("Kanban card click uses targeted Issue/SPEC selection", () => {
   assert.match(
     appSource,
     /knowledge-detail-pane/,
@@ -441,8 +448,8 @@ test("Kanban card click scopes targeted selection to Issue/SPEC and preserves PR
   );
   assert.match(
     appSource,
-    /const prBaseline = normalizeKnowledgeKind\(state\.kind\) === "pr";[\s\S]{0,2200}?if \(prBaseline\) \{\s*renderKnowledgeBridge\(windowId\);\s*\} else if \(explicit\) \{\s*renderKnowledgeSelection/,
-    "expected PR selection to retain its baseline full render while Issue/SPEC use the targeted renderer",
+    /if \(explicit\) \{\s*renderKnowledgeSelection/,
+    "explicit selection uses the targeted renderer",
   );
   assert.doesNotMatch(
     appSource,
@@ -576,7 +583,7 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
   );
   assert.match(
     knowledgeSurfaceSource.slice(relatedRefreshStart, relatedRefreshEnd),
-    /requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)/,
+    /requestKnowledgeBridge\(windowId,\s*state.kind,\s*false\)/,
     "Related Work outcome refreshes must remain cache-first",
   );
   assert.match(
@@ -586,7 +593,7 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
   );
   assert.match(
     appSource,
-    /case "workspace_resume_agent_started":[\s\S]{0,500}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    /case "workspace_resume_agent_started":[\s\S]{0,500}?scheduleKnowledgeRelatedWorkRefresh\(true\)/,
     "Resume/Launch acks should refresh Knowledge related Session traces",
   );
   assert.match(

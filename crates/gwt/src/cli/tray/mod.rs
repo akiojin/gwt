@@ -13,6 +13,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 pub mod autostart;
+pub mod lifetime;
 pub mod lock;
 pub mod menu;
 pub mod port;
@@ -45,11 +46,10 @@ pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
 
 /// CLI flags accepted by the tray-resident front door.
 ///
-/// SPEC #2920 FR-013: `--no-tray` skips tray-icon creation (for CI /
-/// Playwright). `--no-open` is preserved as a no-op for backward
-/// compatibility — the tray menu `Open` action is what actually opens the
-/// browser now, so the auto-open default is `false` regardless of this
-/// flag.
+/// SPEC #2920 FR-013: `--no-tray` skips tray registration and ties the
+/// transient server to its parent/browser lifetime. `--no-open` explicitly
+/// suppresses automatic browser launch; startup never auto-opens, with or
+/// without this compatibility flag (FR-012).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayArgs {
     pub bind: IpAddr,
@@ -125,8 +125,8 @@ impl std::error::Error for TrayArgParseError {}
 ///   `127.0.0.1` (matches the documented trust boundary).
 /// - `--port <n>`: parsed via `u16::from_str`. Omission remains `None` so
 ///   stable-port policy can distinguish it from explicit `--port 0`.
-/// - `--no-tray` / `--no-open`: recognised so the README hint does not
-///   fail today, but their behaviour stays out of scope for this slice.
+/// - `--no-tray`: transient server without a tray icon.
+/// - `--no-open`: explicit startup browser suppression (also the default).
 ///
 /// Unknown long flags are rejected. One legacy positional (e.g. `gwt .`)
 /// is tolerated and ignored — the GUI route already uses `current_dir()`
@@ -202,9 +202,7 @@ mod tests {
         assert!(matches!(err, TrayError::NotYetImplemented));
     }
 
-    // SPEC #2920 Phase 4 partial — `--bind`/`--port` restore on the GUI
-    // (tray-resident) route. These cover the argv parser; full Tray route
-    // takeover and `--no-tray`/`--no-open` behaviour stay TODO.
+    // Parser coverage; native registration/lifetime is tested separately.
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
@@ -278,12 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tray_argv_accepts_no_tray_and_no_open_as_noop_flags() {
-        // SPEC #2920 Phase 4 partial: the flags are recognised so the
-        // README hint `gwt --no-tray --no-open` does not error today.
-        // Their behaviour (skipping tray icon / suppressing auto-open) is
-        // out of scope for this slice and lands in the full Tray route
-        // takeover.
+    fn parse_tray_argv_accepts_no_tray_and_no_open() {
         let args = parse_tray_argv(&argv(&["gwt", "--no-tray", "--no-open"])).expect("flags parse");
         assert!(args.no_tray);
         assert!(args.no_open);

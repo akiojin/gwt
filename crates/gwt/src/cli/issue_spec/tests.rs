@@ -396,7 +396,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert!(out.contains("#42 [OPEN] [phase/review] SPEC: Launch agents"));
+    assert!(out.starts_with("Issue #42 [OPEN] [phase/review] SPEC: Launch agents"));
 
     env.files.insert(
         "legacy.md".to_string(),
@@ -474,7 +474,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert_eq!(out, "pulled #42\n");
+    assert_eq!(out, "pulled Issue #42\n");
 
     let err = run(
         &mut env,
@@ -495,7 +495,10 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
     // #4838: the old wording claimed a repair the operation never performed —
     // it only re-read the section. A fixture with well-formed markers now says
     // so explicitly, and a genuine repair names the artifacts it rewrote.
-    assert_eq!(out, "refreshed cache for #42; no artifact needed repair\n");
+    assert_eq!(
+        out,
+        "refreshed cache for Issue #42; no artifact needed repair\n"
+    );
 
     out.clear();
     assert_eq!(
@@ -765,7 +768,9 @@ fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
     );
 
     assert!(
-        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        out.contains(
+            "Issue #3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"
+        ),
         "untracked rows are reported with their counts: {out}"
     );
     assert!(
@@ -1055,4 +1060,48 @@ fn spec_inspection_complete_blocks_when_the_artifact_moved_under_the_snapshot() 
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("BLOCKED"), "{out}");
     assert!(out.contains("snapshot recorded"), "{out}");
+}
+
+// Issue #5176 AC-1/AC-2: a plain markdown body (no section markers) must not be
+// silently dropped; it is stored as the `spec` section and the receipt names it.
+#[test]
+fn spec_create_plain_body_is_stored_as_spec_section_with_receipt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let body = "# SPEC: Plain\n\n## 背景\n\nplain body without markers\n";
+    let mut out = String::new();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Plain".to_string(),
+            body: body.to_string(),
+            labels: Vec::new(),
+        },
+        &mut out,
+    )
+    .expect("plain body create succeeds");
+    assert_eq!(code, 0);
+    let stored = body.trim_end_matches('\n');
+    assert!(
+        out.contains(&format!("wrote {} bytes to section 'spec'", stored.len())),
+        "out = {out}"
+    );
+    let number: u64 = out
+        .split('#')
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .expect("created issue number in output");
+
+    let mut read = String::new();
+    run(
+        &mut env,
+        IssueCommand::SpecReadSection {
+            number,
+            section: "spec".to_string(),
+        },
+        &mut read,
+    )
+    .expect("spec section is readable");
+    assert!(read.contains("plain body without markers"), "read = {read}");
 }

@@ -86,6 +86,7 @@ fn reconcile_projects(projects: &BTreeMap<PathBuf, PathBuf>, entries: &[Register
             .entry(crate::issue_monitor_prefs_path_for_repo_path(root))
             .or_insert((root, sessions));
     }
+    let mut censuses = BTreeMap::new();
     for (prefs_path, (project, sessions)) in repositories {
         let entries = entries
             .iter()
@@ -95,7 +96,11 @@ fn reconcile_projects(projects: &BTreeMap<PathBuf, PathBuf>, entries: &[Register
             })
             .cloned()
             .collect::<Vec<_>>();
-        if let Err(error) = reconcile_project(project, sessions, &entries) {
+        let inventory = censuses
+            .entry(sessions)
+            .or_insert_with(|| crate::session_inventory::ProjectSessionCensus::capture(sessions))
+            .observe(project);
+        if let Err(error) = reconcile_project(project, sessions, &entries, &inventory) {
             tracing::warn!(target: "gwt.monitor.runtime", project = %project.display(), %error, "runtime reconciliation failed; retaining unknown authority");
         }
     }
@@ -129,12 +134,36 @@ fn publish_counts(
                 .monitor_runtime_counts
                 .values()
                 .filter(|snapshot| {
-                    crate::process::host_process_start_time(snapshot.host_pid)
-                        .is_some_and(|started| started != snapshot.host_started_at)
-                        || !crate::process::is_host_process_alive(snapshot.host_pid)
+                    (!snapshot.counts.is_empty() || !snapshot.windows.is_empty())
+                        && (crate::process::host_process_start_time(snapshot.host_pid)
+                            .is_some_and(|started| started != snapshot.host_started_at)
+                            || !crate::process::is_host_process_alive(snapshot.host_pid))
                 })
                 .map(|snapshot| (snapshot.host_pid, snapshot.host_started_at))
                 .collect::<Vec<_>>();
+            let counts = counts(entries);
+            let windows = entries
+                .iter()
+                .filter(|entry| {
+                    !entry.registration.review_dispatch
+                        && !matches!(entry.handle.try_wait(), Ok(Some(_)))
+                })
+                .map(|entry| {
+                    (
+                        entry.registration.window_id.clone(),
+                        entry.registration.issue_number,
+                    )
+                })
+                .collect();
+            let unchanged = prefs
+                .monitor_runtime_counts
+                .get(&format!("{host_pid}:{host_started_at}"))
+                .is_some_and(|previous| previous.counts == counts && previous.windows == windows);
+            // observed_at is an ordering fence, not a heartbeat. Preserve it
+            // until membership changes; claim deadlines remain separate updates.
+            if dead_hosts.is_empty() && unchanged {
+                return Ok(());
+            }
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
                 prefs.clone(),
@@ -142,7 +171,15 @@ fn publish_counts(
             for (pid, started) in dead_hosts {
                 monitor.record_monitor_runtime_counts(pid, started, BTreeMap::new(), &now);
             }
-            monitor.record_monitor_runtime_counts(host_pid, host_started_at, counts(entries), &now);
+            if !unchanged {
+                monitor.record_monitor_runtime_windows(
+                    host_pid,
+                    host_started_at,
+                    counts,
+                    windows,
+                    &now,
+                );
+            }
             *prefs = monitor.prefs();
             Ok(())
         },
@@ -213,12 +250,12 @@ fn reconcile_project(
     project_root: &Path,
     sessions_dir: &Path,
     entries: &[RegisteredMonitorRuntime],
+    inventory: &crate::session_inventory::SessionInventory,
 ) -> io::Result<()> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         std::time::Instant::now() + Duration::from_secs(5),
     );
     let complete_counts = publish_counts(project_root, entries)?;
-    let inventory = crate::session_inventory::observe_sessions(project_root, sessions_dir);
     let mut groups = BTreeMap::<u64, Vec<&RegisteredMonitorRuntime>>::new();
     for entry in entries.iter().filter(|entry| {
         !entry.registration.review_dispatch && !matches!(entry.handle.try_wait(), Ok(Some(_)))
@@ -357,10 +394,112 @@ fn reconcile_project(
     publish_counts(project_root, entries).map(|_| ())
 }
 
+#[cfg(test)]
+mod prefs_io_tests {
+    use super::*;
+
+    #[test]
+    fn prefs_cache_five_second_io_counts() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let project = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(project.path());
+        let path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_monitor_runtime_counts(
+            pid,
+            started,
+            BTreeMap::new(),
+            "2000-01-01T00:00:00Z",
+        );
+        let mut fixture = serde_json::to_string_pretty(&monitor.prefs()).unwrap();
+        fixture.extend(std::iter::repeat_n(' ', 524 * 1024 - fixture.len()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &fixture).unwrap();
+        let before = crate::issue_monitor::prefs_io_counts_for_test();
+        // One five-second cadence: two census publications, capacity, claim renewal,
+        // live-window lookup, and eight window observations on a convergence tick.
+        for _ in 0..2 {
+            publish_counts(project.path(), &[]).unwrap();
+        }
+        for _ in 0..11 {
+            crate::load_issue_monitor_prefs(&path).unwrap();
+        }
+        let after = crate::issue_monitor::prefs_io_counts_for_test();
+        let measured = (after.0 - before.0, after.1 - before.1);
+        println!("Issue #5499: 536576-byte fixture, modeled 5s, 2 publications + 11 reads: parses={}, canonical writes={} (each write also saves a committed sidecar)", measured.0, measured.1);
+        assert_eq!(measured, (1, 0));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), fixture);
+
+        let before = crate::issue_monitor::prefs_io_counts_for_test();
+        for _ in 0..2 {
+            publish_counts(project.path(), &[]).unwrap();
+        }
+        for _ in 0..11 {
+            crate::load_issue_monitor_prefs(&path).unwrap();
+        }
+        assert_eq!(
+            crate::issue_monitor::prefs_io_counts_for_test(),
+            before,
+            "warm cadence performs no parses or writes"
+        );
+
+        // Membership changes still commit, including one durable dead-host tombstone.
+        monitor.record_monitor_runtime_windows(
+            pid,
+            started,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("pane".into(), 42)]),
+            "2000-01-01T00:00:01Z",
+        );
+        monitor.record_monitor_runtime_counts(
+            u32::MAX,
+            1,
+            BTreeMap::from([(43, 1)]),
+            "2000-01-01T00:00:01Z",
+        );
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let before = crate::issue_monitor::prefs_io_counts_for_test().1;
+        assert!(publish_counts(project.path(), &[]).unwrap().is_empty());
+        assert_eq!(
+            crate::issue_monitor::prefs_io_counts_for_test().1 - before,
+            1
+        );
+        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(prefs
+            .monitor_runtime_counts
+            .values()
+            .all(|host| host.counts.is_empty() && host.windows.is_empty()));
+        let committed = std::fs::read(&path).unwrap();
+        publish_counts(project.path(), &[]).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            committed,
+            "dead-host tombstones are not heartbeats"
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    fn reconcile_project(
+        project: &Path,
+        sessions: &Path,
+        entries: &[RegisteredMonitorRuntime],
+    ) -> io::Result<()> {
+        let inventory =
+            crate::session_inventory::ProjectSessionCensus::capture(sessions).observe(project);
+        super::reconcile_project(project, sessions, entries, &inventory)
+    }
 
     struct PtyGuard(Arc<PtyHandle>);
     impl Drop for PtyGuard {

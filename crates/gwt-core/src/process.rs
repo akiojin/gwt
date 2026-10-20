@@ -63,17 +63,17 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
-static GIT_COMMAND_OBSERVER: std::sync::OnceLock<fn(u64)> = std::sync::OnceLock::new();
+static GIT_COMMAND_OBSERVER: std::sync::OnceLock<fn(&str, u64)> = std::sync::OnceLock::new();
 
-/// Observe logged Git completions on any thread; the argument is wall time in ms.
+/// Observe logged Git completions on any thread: command label and wall time in ms.
 /// The first observer remains installed for the lifetime of the process.
-pub fn set_git_command_observer(observer: fn(u64)) {
+pub fn set_git_command_observer(observer: fn(&str, u64)) {
     let _ = GIT_COMMAND_OBSERVER.set(observer);
 }
 
-pub(crate) fn notify_git_command_finished(duration_ms: u64) {
+pub(crate) fn notify_git_command_finished(label: &str, duration_ms: u64) {
     if let Some(observer) = GIT_COMMAND_OBSERVER.get() {
-        observer(duration_ms);
+        observer(label, duration_ms);
     }
 }
 
@@ -119,6 +119,24 @@ pub fn run_git_logged(
     args: &[&str],
     current_dir: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Output> {
+    run_git_logged_inner(args, current_dir, false)
+}
+
+/// Logged Git discovery whose repository is determined only by `current_dir`.
+/// Preserves the environment isolation of callers previously using
+/// [`scrub_git_env`] on a raw command.
+pub fn run_git_logged_scrubbed(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Output> {
+    run_git_logged_inner(args, current_dir, true)
+}
+
+fn run_git_logged_inner(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+    scrub: bool,
+) -> std::io::Result<std::process::Output> {
     let spawn_id = next_git_spawn_id();
     let label = format!("git {}", args.join(" "));
     let started_at = std::time::Instant::now();
@@ -148,6 +166,9 @@ pub fn run_git_logged(
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
+    if scrub {
+        scrub_git_env(&mut command);
+    }
     let result = command.output();
 
     let (exit_code, success, stdout_lines, stderr_lines) = match &result {
@@ -170,6 +191,7 @@ pub fn run_git_logged(
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
+        &label,
         exit_code,
         duration_ms,
     );
@@ -257,6 +279,7 @@ pub fn run_git_logged_with_stdin(
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
+        &label,
         exit_code,
         duration_ms,
     );
@@ -306,11 +329,12 @@ pub fn push_command_banner_to_hub(
 pub fn push_command_summary_to_hub(
     kind: crate::process_console::ProcessKind,
     spawn_id: u64,
+    label: &str,
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
     if kind == crate::process_console::ProcessKind::Git {
-        notify_git_command_finished(duration_ms);
+        notify_git_command_finished(label, duration_ms);
     }
     let hub = crate::process_console::global();
     let exit = match exit_code {
@@ -377,12 +401,14 @@ pub fn command_exists(cmd: &str) -> bool {
 
 /// Create a non-interactive command that does not create an extra console
 /// window when spawned from the Windows GUI front door.
+/// Inherited Git selection is removed before callers add explicit child env.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     // The one sanctioned raw constructor; every other call site must go
     // through this helper (enforced via clippy.toml disallowed-methods).
     #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
+    scrub_git_env(&mut command);
     command
 }
 
@@ -407,6 +433,9 @@ pub fn resolved_tokio_command(
     #[allow(clippy::disallowed_methods)]
     let mut command = tokio::process::Command::new(&plan.program);
     configure_hidden_tokio_command(&mut command);
+    for key in GIT_ENV_SCRUB_KEYS {
+        command.env_remove(key);
+    }
     apply_resolved_tokio_plan(&mut command, &plan);
     Ok(command)
 }
@@ -566,6 +595,72 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_git_init_cannot_reinitialize_an_inherited_bare_repository() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let bare = temp.path().join("shared.git");
+        let fixture = temp.path().join("fixture");
+        let inherited_worktree = temp.path().join("inherited-worktree");
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::create_dir_all(&inherited_worktree).unwrap();
+        let mut seed = hidden_command("git");
+        scrub_git_env(&mut seed);
+        assert!(seed
+            .args(["init", "--bare", "--quiet"])
+            .arg(&bare)
+            .status()
+            .unwrap()
+            .success());
+        let config = std::fs::read(bare.join("config")).unwrap();
+        let _git_dir = crate::test_support::ScopedEnvVar::set("GIT_DIR", &bare);
+        let _worktree =
+            crate::test_support::ScopedEnvVar::set("GIT_WORK_TREE", &inherited_worktree);
+        let _index =
+            crate::test_support::ScopedEnvVar::set("GIT_INDEX_FILE", bare.join("fixture-index"));
+
+        let output = hidden_command("git")
+            .args(["init", "--quiet"])
+            .current_dir(&fixture)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            fixture.join(".git/config").is_file(),
+            "git init escaped the fixture"
+        );
+        assert_eq!(std::fs::read(bare.join("config")).unwrap(), config);
+    }
+
+    #[test]
+    fn process_constructors_scrub_git_overrides_and_preserve_explicit_environment() {
+        let program = std::env::current_exe().unwrap();
+        let hidden = hidden_command(&program);
+        let resolved = resolved_command(ProcessPlanRequest::new(&program)).unwrap();
+        let tokio = resolved_tokio_command(ProcessPlanRequest::new(&program)).unwrap();
+        for command in [&hidden, &resolved, tokio.as_std()] {
+            let environment = command
+                .get_envs()
+                .collect::<std::collections::HashMap<_, _>>();
+            for key in GIT_ENV_SCRUB_KEYS {
+                assert_eq!(environment.get(OsStr::new(key)), Some(&None), "{key}");
+            }
+        }
+        let explicit = resolved_command(
+            ProcessPlanRequest::new(&program).env("GIT_DIR", "explicit-repository"),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_DIR")
+                .unwrap()
+                .1,
+            Some(OsStr::new("explicit-repository")),
+        );
+    }
 
     fn echo_command(text: &str) -> (String, Vec<String>) {
         if cfg!(windows) {

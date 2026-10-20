@@ -8,7 +8,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -21,6 +21,110 @@ use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, Pty
 use tracing::instrument;
 
 use crate::TerminalError;
+
+#[cfg(target_os = "macos")]
+use std::sync::{atomic::AtomicUsize, TryLockError};
+
+/// Only a terminating, currently unread PTY may discard output. Sharing the
+/// locks also lets the existing background reaper drain without owning a pane.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct UnreadPtyOutput {
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    readers: Arc<AtomicUsize>,
+}
+
+#[cfg(target_os = "macos")]
+impl UnreadPtyOutput {
+    fn drain(&self) -> std::io::Result<usize> {
+        // Descriptor release takes writer before master. Never reverse that
+        // order or wait behind a live writer during non-blocking teardown.
+        let _writer = match self.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(TryLockError::WouldBlock) => return Ok(0),
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
+        };
+        let master = match self.master.try_lock() {
+            Ok(master) => master,
+            Err(TryLockError::WouldBlock) => return Ok(0),
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
+        };
+        if self.readers.load(Ordering::Acquire) != 0 {
+            return Ok(0);
+        }
+        let Some(fd) = master.as_ref().and_then(|master| master.as_raw_fd()) else {
+            return Ok(0);
+        };
+        // SAFETY: master keeps fd alive. There are no registered readers and
+        // writer is locked, so no dup user observes the temporary shared flag.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buffer = [0u8; 4096];
+        // SAFETY: buffer is writable for its full length and fd remains owned.
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        let error = (read == -1).then(std::io::Error::last_os_error);
+        // Restore even when read fails; the writer shares this open description.
+        // SAFETY: fd and flags came from the locked, live master above.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        match error {
+            // portable-pty normalizes EIO to EOF after the slave closes.
+            Some(error) if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EIO)) => Ok(0),
+            Some(error) => Err(error),
+            None => Ok(read as usize),
+        }
+    }
+
+    fn has_readable_output(&self) -> std::io::Result<bool> {
+        let master = self
+            .master
+            .try_lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let Some(fd) = master.as_ref().and_then(|master| master.as_raw_fd()) else {
+            return Ok(false);
+        };
+        // FIONREAD reports zero for macOS PTY masters even with unread output.
+        // Poll observes readiness without taking bytes from an existing reader.
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: master keeps fd alive and poll is one writable pollfd.
+        if unsafe { libc::poll(&mut poll, 1, 0) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if poll.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+        }
+        Ok(poll.revents & libc::POLLIN != 0)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct RegisteredPtyReader {
+    reader: Box<dyn Read + Send>,
+    readers: Arc<AtomicUsize>,
+}
+
+#[cfg(target_os = "macos")]
+impl Read for RegisteredPtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buffer)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RegisteredPtyReader {
+    fn drop(&mut self) {
+        self.readers.fetch_sub(1, Ordering::Release);
+    }
+}
 
 /// Phase C5 threshold (ms) above which a successful PTY resize is logged at
 /// `warn` instead of `info`. Windows ConPTY's `ResizePseudoConsole` should
@@ -233,7 +337,11 @@ impl SpawnedChildGuard {
             let _ = child.kill();
         }
         if child.try_wait().ok().flatten().is_none() {
-            reap_child_in_background(Arc::new(Mutex::new(child)));
+            reap_child_in_background(
+                Arc::new(PtyChild::new(child)),
+                #[cfg(target_os = "macos")]
+                None,
+            );
         }
     }
 
@@ -279,6 +387,198 @@ struct PtyInputState {
     unsent_user_input: bool,
 }
 
+enum ChildState {
+    Available(Box<dyn portable_pty::Child + Send>),
+    Waiting,
+    Finished(Result<ExitStatus, String>),
+}
+
+/// A blocking waiter owns the OS child outside the state mutex. Process
+/// control and nonblocking status probes remain available while it waits.
+struct PtyChild {
+    state: Mutex<ChildState>,
+    finished: Condvar,
+    pid: Option<u32>,
+    #[cfg(not(unix))]
+    killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+}
+
+impl PtyChild {
+    fn new(child: Box<dyn portable_pty::Child + Send>) -> Self {
+        Self {
+            pid: child.process_id(),
+            #[cfg(not(unix))]
+            killer: Mutex::new(child.clone_killer()),
+            state: Mutex::new(ChildState::Available(child)),
+            finished: Condvar::new(),
+        }
+    }
+
+    fn try_wait(&self) -> Result<Option<ExitStatus>, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        match &mut *state {
+            ChildState::Available(child) => {
+                let status = child
+                    .try_wait()
+                    .map_err(|error| TerminalError::PtyIoError {
+                        details: error.to_string(),
+                    })?;
+                if let Some(status) = &status {
+                    *state = ChildState::Finished(Ok(status.clone()));
+                    self.finished.notify_all();
+                }
+                Ok(status)
+            }
+            ChildState::Waiting => Ok(None),
+            ChildState::Finished(result) => result
+                .clone()
+                .map(Some)
+                .map_err(|details| TerminalError::PtyIoError { details }),
+        }
+    }
+
+    fn wait(&self) -> Result<ExitStatus, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        loop {
+            match &*state {
+                ChildState::Finished(result) => {
+                    return result
+                        .clone()
+                        .map_err(|details| TerminalError::PtyIoError { details });
+                }
+                ChildState::Waiting => {
+                    state =
+                        self.finished
+                            .wait(state)
+                            .map_err(|error| TerminalError::PtyIoError {
+                                details: format!("lock poisoned: {error}"),
+                            })?;
+                }
+                ChildState::Available(_) => break,
+            }
+        }
+        let ChildState::Available(mut child) = std::mem::replace(&mut *state, ChildState::Waiting)
+        else {
+            unreachable!("only an available child starts the OS wait");
+        };
+        drop(state);
+
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            // Keep the zombie waitable until the state mutex excludes kill.
+            // Reaping outside it would leave Waiting with a recyclable PID.
+            // Waiting also prevents another try_wait from reaping before the
+            // waitid syscall starts, so it cannot target a replacement child.
+            let ready = wait_for_child_exit(pid);
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = ready.and_then(|()| {
+                child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "child exit notification had no exit status".to_string())
+            });
+            *state = ChildState::Finished(result.clone());
+            self.finished.notify_all();
+            return result.map_err(|details| TerminalError::PtyIoError { details });
+        }
+
+        let result = child.wait().map_err(|error| error.to_string());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ChildState::Finished(result.clone());
+        self.finished.notify_all();
+        result.map_err(|details| TerminalError::PtyIoError { details })
+    }
+
+    /// Return whether the child was already reaped before signalling it.
+    fn kill(&self) -> Result<bool, TerminalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if let ChildState::Available(child) = &mut *state {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: error.to_string(),
+                })?
+            {
+                *state = ChildState::Finished(Ok(status));
+                self.finished.notify_all();
+                return Ok(true);
+            }
+        }
+        if let ChildState::Finished(result) = &*state {
+            return result
+                .clone()
+                .map(|_| true)
+                .map_err(|details| TerminalError::PtyIoError { details });
+        }
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mut killer = self
+                .killer
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("lock poisoned: {error}"),
+                })?;
+            let _ = killer.kill();
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child_exit(pid: u32) -> Result<(), String> {
+    loop {
+        // SAFETY: siginfo is writable, pid identifies our unreaped child, and
+        // WNOWAIT leaves reaping to the state-mutex-protected try_wait above.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("wait for child exit: {error}"));
+        }
+    }
+}
+
 pub struct PtyHandle {
     /// `None` once [`PtyHandle::release_descriptors`] has run. The master and
     /// the writer clone `portable-pty` dups out of it are two of the three
@@ -287,7 +587,7 @@ pub struct PtyHandle {
     /// from carrying a dead pane's descriptors to the `RLIMIT_NOFILE` ceiling
     /// (Issue #4142).
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    child: Arc<PtyChild>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     input_state: Mutex<PtyInputState>,
     generation_active: AtomicBool,
@@ -296,6 +596,10 @@ pub struct PtyHandle {
     /// read by prompt injection off any thread that holds the handle, so a
     /// delivery worker never needs the pane lock to know how to write a body.
     bracketed_paste: AtomicBool,
+    #[cfg(target_os = "macos")]
+    reap_requested: AtomicBool,
+    #[cfg(target_os = "macos")]
+    output_readers: Arc<AtomicUsize>,
     // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
     // group without waiting for `Drop`. Declared last so that when `Drop` runs
     // the direct child has already been signaled above.
@@ -550,11 +854,15 @@ impl PtyHandle {
 
         Ok(Self {
             master: Arc::new(Mutex::new(Some(pair.master))),
-            child: Arc::new(Mutex::new(child)),
+            child: Arc::new(PtyChild::new(child)),
             writer: Arc::new(Mutex::new(Some(writer))),
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
             bracketed_paste: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            reap_requested: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            output_readers: Arc::new(AtomicUsize::new(0)),
             process_group: Mutex::new(process_group),
         })
     }
@@ -873,47 +1181,28 @@ impl PtyHandle {
         group.terminate();
         drop(group);
 
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        if child
-            .try_wait()
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?
-            .is_some()
-        {
+        if self.child.kill()? {
             return Ok(());
         }
-
-        #[cfg(unix)]
-        if let Some(pid) = child.process_id() {
-            match nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            ) {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                Err(error) => tracing::debug!(pid, %error, "direct SIGKILL failed"),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = child.kill();
-        }
-        let reaped = child.try_wait().ok().flatten().is_some();
-        drop(child);
+        #[cfg(target_os = "macos")]
+        self.reap_requested.store(true, Ordering::Release);
+        let reaped = self.child.try_wait().ok().flatten().is_some();
         if !reaped {
             // Reap off the caller thread. Immediate try_wait after SIGKILL
             // often misses the exit, and a zombie still looks alive to
             // `kill(pid, 0)` (Issue #3705 / pty lifecycle tests).
-            reap_child_in_background(Arc::clone(&self.child));
+            reap_child_in_background(
+                Arc::clone(&self.child),
+                #[cfg(target_os = "macos")]
+                Some(self.unread_output()),
+            );
         }
         Ok(())
     }
 
     /// Returns the OS process id of the spawned child, if available.
     pub fn process_id(&self) -> Option<u32> {
-        self.child.lock().ok().and_then(|c| c.process_id())
+        self.child.pid
     }
 
     /// Returns a reader for the PTY output.
@@ -924,11 +1213,25 @@ impl PtyHandle {
             details: format!("lock poisoned: {e}"),
         })?;
         match master.as_ref() {
-            Some(master) => master
-                .try_clone_reader()
-                .map_err(|e| TerminalError::PtyIoError {
-                    details: e.to_string(),
-                }),
+            Some(master) => {
+                let reader = master
+                    .try_clone_reader()
+                    .map_err(|e| TerminalError::PtyIoError {
+                        details: e.to_string(),
+                    })?;
+                #[cfg(target_os = "macos")]
+                {
+                    // Register under master so a reaper cannot consume between
+                    // cloning the reader and publishing its ownership.
+                    self.output_readers.fetch_add(1, Ordering::Release);
+                    Ok(Box::new(RegisteredPtyReader {
+                        reader,
+                        readers: Arc::clone(&self.output_readers),
+                    }))
+                }
+                #[cfg(not(target_os = "macos"))]
+                Ok(reader)
+            }
             // Issue #4142: the descriptors were released after the child was
             // reaped, so there is no stream left to clone. An already-drained
             // reader lets a reader thread that arrives after the release
@@ -961,26 +1264,85 @@ impl PtyHandle {
     ///
     /// Returns `Some(ExitStatus)` if the child has exited, `None` if still running.
     pub fn try_wait(&self) -> Result<Option<ExitStatus>, TerminalError> {
-        let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        child.try_wait().map_err(|e| TerminalError::PtyIoError {
-            details: e.to_string(),
-        })
+        #[cfg(target_os = "macos")]
+        if self.reap_requested.load(Ordering::Acquire) {
+            self.unread_output()
+                .drain()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("output_unconsumed: could not drain PTY output: {error}"),
+                })?;
+        }
+        self.child.try_wait()
+    }
+
+    /// Block until the direct child exits, without holding pane, child-state,
+    /// input, or descriptor locks. Concurrent callers share the exit result.
+    pub fn wait(&self) -> Result<ExitStatus, TerminalError> {
+        self.child.wait()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unread_output(&self) -> UnreadPtyOutput {
+        UnreadPtyOutput {
+            master: Arc::clone(&self.master),
+            writer: Arc::clone(&self.writer),
+            readers: Arc::clone(&self.output_readers),
+        }
+    }
+
+    /// Explain why the captured child still lacks an exit receipt. This is
+    /// diagnostic evidence only; an absent PID never substitutes for try_wait.
+    #[cfg(target_os = "macos")]
+    pub fn unreaped_child_reason(&self) -> String {
+        unreaped_child_reason(self.process_id(), &self.unread_output())
     }
 }
 
-fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>) {
+#[cfg(target_os = "macos")]
+fn unreaped_child_reason(pid: Option<u32>, output: &UnreadPtyOutput) -> String {
+    let Some(pid) = pid else {
+        return "child_missing: captured child has no process id".into();
+    };
+    // SAFETY: getpgid only queries the captured process id.
+    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+    if pgid == -1 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ESRCH) {
+            format!("child_missing: captured pid {pid} disappeared without an exit receipt")
+        } else {
+            format!("child_exit_unconfirmed: getpgid({pid}) failed: {error}")
+        };
+    }
+    if pgid != pid as libc::pid_t {
+        return format!("child_other_pgid: captured pid {pid} is in pgid {pgid}");
+    }
+    match output.has_readable_output() {
+        Ok(true) => {
+            format!("output_unconsumed: captured pid {pid} still has readable PTY output")
+        }
+        Ok(false) => {
+            format!("child_exit_unconfirmed: captured pid {pid} has no readable PTY output")
+        }
+        Err(error) => format!("output_unconsumed: PTY output state is unavailable: {error}"),
+    }
+}
+
+fn reap_child_in_background(
+    child: Arc<PtyChild>,
+    #[cfg(target_os = "macos")] output: Option<UnreadPtyOutput>,
+) {
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            match child.lock() {
-                Ok(mut guard) => {
-                    if guard.try_wait().ok().flatten().is_some() {
-                        return;
-                    }
+            #[cfg(target_os = "macos")]
+            if let Some(output) = output.as_ref() {
+                if let Err(error) = output.drain() {
+                    tracing::debug!(%error, "background PTY reap could not drain unread output");
                 }
-                Err(_) => return,
+            }
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {}
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -1473,6 +1835,10 @@ impl Drop for PtyHandle {
         // pane.close. Reuse `kill` so a child whose pgid is not its pid still
         // receives a direct SIGKILL.
         let _ = self.kill();
+        // A macOS background reaper shares the master/writer containers, but
+        // must not extend their descriptor lifetime beyond this handle's Drop.
+        #[cfg(target_os = "macos")]
+        self.release_descriptors();
     }
 }
 
@@ -1599,6 +1965,117 @@ mod tests {
 
     fn sleep_config(secs: &str) -> SpawnConfig {
         command_config(sleep_command(secs))
+    }
+
+    #[derive(Debug)]
+    struct ControlledChild {
+        entered: std::sync::mpsc::Sender<()>,
+        exit: std::sync::mpsc::Receiver<std::io::Result<ExitStatus>>,
+    }
+
+    #[derive(Debug)]
+    struct NoopKiller;
+
+    impl portable_pty::ChildKiller for NoopKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+
+    impl portable_pty::ChildKiller for ControlledChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    impl portable_pty::Child for ControlledChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            self.entered.send(()).unwrap();
+            self.exit.recv().unwrap()
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn child_wait_keeps_control_available_and_shares_success_or_failure() {
+        use std::sync::mpsc;
+
+        for fail_wait in [false, true] {
+            let (entered, entered_rx) = mpsc::channel();
+            let (exit, exit_rx) = mpsc::channel();
+            let child = Arc::new(PtyChild::new(Box::new(ControlledChild {
+                entered,
+                exit: exit_rx,
+            })));
+            let (completed, completed_rx) = mpsc::channel();
+            let waiters: Vec<_> = (0..2)
+                .map(|_| {
+                    let child = child.clone();
+                    let completed = completed.clone();
+                    thread::spawn(move || completed.send(child.wait()).unwrap())
+                })
+                .collect();
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let (control, control_rx) = mpsc::channel();
+            let control_child = child.clone();
+            let controller = thread::spawn(move || {
+                let status = control_child.try_wait().unwrap();
+                let already_exited = control_child.kill().unwrap();
+                control.send((status, already_exited)).unwrap();
+            });
+            // The child explicitly acknowledged OS-wait entry; this probe
+            // must complete before the test permits that wait to finish.
+            let control_result = control_rx.recv_timeout(Duration::from_secs(5));
+            exit.send(if fail_wait {
+                Err(std::io::Error::other("controlled wait failure"))
+            } else {
+                Ok(ExitStatus::with_exit_code(7))
+            })
+            .unwrap();
+            let (status, already_exited) = control_result.expect("wait held the child-state mutex");
+            assert!(status.is_none());
+            assert!(!already_exited);
+            controller.join().unwrap();
+            for _ in 0..2 {
+                let result = completed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if fail_wait {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("controlled wait failure"));
+                } else {
+                    assert_eq!(result.unwrap().exit_code(), 7);
+                }
+            }
+            for waiter in waiters {
+                waiter.join().unwrap();
+            }
+            assert!(
+                entered_rx.try_recv().is_err(),
+                "only one caller may own the OS wait"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1890,18 +2367,113 @@ mod tests {
     #[test]
     fn test_kill() {
         let _pty_guard = lock_pty_test();
-        let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).expect("spawn failed"));
+        let pid = handle.process_id();
+        let (exited, exited_rx) = std::sync::mpsc::channel();
+        let waiter_handle = handle.clone();
+        let waiter = thread::spawn(move || exited.send(waiter_handle.wait()).unwrap());
         handle.kill().expect("kill should succeed");
 
-        let mut exited = false;
-        for _ in 0..50 {
-            if let Ok(Some(_)) = handle.try_wait() {
-                exited = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        exited_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("kill must release the OS waiter")
+            .expect("wait after kill");
+        waiter.join().unwrap();
+        assert!(handle.try_wait().unwrap().is_some());
+        assert_eq!(handle.process_id(), pid, "wait must retain child identity");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unread_output_handle() -> (PtyHandle, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ready = temp.path().join("ready");
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'unread teardown output\\n'; printf ready > \"$GWT_TEST_READY\"; exec sleep 60".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::from([("GWT_TEST_READY".into(), ready.display().to_string())]),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "child must acknowledge its output"
+            );
+            thread::sleep(Duration::from_millis(100));
         }
-        assert!(exited, "Process should have exited after kill");
+        (handle, temp)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kill_reaps_child_with_unread_output() {
+        let _pty_guard = lock_pty_test();
+        let (handle, _temp) = unread_output_handle();
+        let reason = handle.unreaped_child_reason();
+        assert!(reason.starts_with("output_unconsumed:"), "{reason}");
+        let output = handle.unread_output();
+        let flags = {
+            let master = output.master.lock().expect("master");
+            let fd = master
+                .as_ref()
+                .and_then(|master| master.as_raw_fd())
+                .unwrap();
+            // SAFETY: master keeps the queried descriptor alive.
+            unsafe { libc::fcntl(fd, libc::F_GETFL) }
+        };
+        handle.kill().expect("kill");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while handle.try_wait().expect("try_wait").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "unread output must not prevent reap"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(handle.unreaped_child_reason().starts_with("child_missing:"));
+        let master = output.master.lock().expect("master");
+        let fd = master
+            .as_ref()
+            .and_then(|master| master.as_raw_fd())
+            .unwrap();
+        // SAFETY: master keeps the queried descriptor alive.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFL) }, flags);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unreaped_child_reason_identifies_a_different_process_group() {
+        let _pty_guard = lock_pty_test();
+        let (handle, _temp) = unread_output_handle();
+        let mut child = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("/bin/sleep").args(["60"]),
+        )
+        .expect("resolve")
+        .spawn()
+        .expect("spawn");
+        let reason = unreaped_child_reason(Some(child.id()), &handle.unread_output());
+        child.kill().expect("kill owned child");
+        child.wait().expect("reap owned child");
+        assert!(reason.starts_with("child_other_pgid:"), "{reason}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kill_preserves_output_for_an_existing_reader() {
+        let _pty_guard = lock_pty_test();
+        let (handle, _temp) = unread_output_handle();
+        let reader = handle.reader().expect("reader");
+        handle.kill().expect("kill");
+        let output = read_until_contains(reader, Duration::from_secs(2), "unread teardown output")
+            .expect("teardown must leave output to the existing reader");
+        assert!(String::from_utf8_lossy(&output).contains("unread teardown output"));
     }
 
     /// Issue #3705 AC-2: `portable-pty` waits up to ~200ms after SIGHUP before
@@ -2175,16 +2747,9 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(command_config(success_command())).expect("spawn failed");
         answer_cursor_position_query(&handle);
-        let mut exited = false;
-        for _ in 0..50 {
-            if let Ok(Some(status)) = handle.try_wait() {
-                assert!(status.success());
-                exited = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(exited, "Process should have completed");
+        let status = handle.wait().expect("wait for successful child");
+        assert!(status.success());
+        assert!(handle.try_wait().unwrap().unwrap().success());
     }
 
     #[test]

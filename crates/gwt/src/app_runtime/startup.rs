@@ -133,6 +133,9 @@ pub(super) enum RestoreRefusal {
     /// is finished even while a settlement obligation is open, so its agent
     /// is not restarted; the placeholder is kept as the diagnostic.
     CompletedWork,
+    /// Canonical terminal Work cannot resume in the old Session. Keep its
+    /// placeholder for the Monitor's existing fresh-launch recovery.
+    FreshSessionRequired,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -166,6 +169,7 @@ impl RestoreRefusal {
             Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
             Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
             Self::CompletedWork => "completed_work_retained".to_string(),
+            Self::FreshSessionRequired => "fresh_session_required".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
@@ -735,11 +739,16 @@ pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>)
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
-    let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
-        session.update_status(gwt_agent::AgentStatus::Stopped);
-        session.restore_window_on_startup = false;
-        Ok(())
-    });
+    let _ = gwt_agent::update_session_with_wait(
+        sessions_dir,
+        session_id,
+        std::time::Duration::from_secs(2),
+        |session| {
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.restore_window_on_startup = false;
+            Ok(())
+        },
+    );
 }
 
 impl AppRuntime {
@@ -1188,6 +1197,7 @@ impl AppRuntime {
             RestoreAdmission::RefuseRetainedTerminal => Err(RestoreRefusal::ClosedWorkDiagnostic),
             RestoreAdmission::RefuseHeld(cause) => Err(RestoreRefusal::MonitorHold(cause)),
             RestoreAdmission::RefuseCompletedWork => Ok(true),
+            RestoreAdmission::RefuseFreshSession => Err(RestoreRefusal::FreshSessionRequired),
             RestoreAdmission::Admit => Ok(false),
         }
     }
@@ -1733,6 +1743,21 @@ impl AppRuntime {
         // nobody asked for, so a terminal predecessor generation is left
         // alone instead of being continued into a new Active generation.
         config.automatic_restore = origin == RestoreOrigin::Automatic;
+        let agent_name = self.tab(tab_id).and_then(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| {
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && matches!(
+                            window.status,
+                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                        )
+                        && window.session_id.as_deref() == Some(session.id.as_str())
+                })
+                .and_then(|window| window.agent_name.clone())
+        });
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id, None)
             .unwrap_or(fallback_geometry);
@@ -1751,13 +1776,32 @@ impl AppRuntime {
             geometry,
             workspace_resume_context,
         ) {
-            Ok(events) => {
+            Ok(mut events) => {
                 if let Some(window_id) = self
                     .window_lookup
                     .keys()
                     .find(|window_id| !existing_windows.contains(*window_id))
                     .cloned()
                 {
+                    if let Some(name) = agent_name {
+                        if let Some(address) = self.window_lookup.get(&window_id).cloned() {
+                            if let Some(tab) = self.tab_mut(&address.tab_id) {
+                                tab.workspace.set_agent_name(&address.raw_id, Some(name));
+                            }
+                            if let Some(context) = self.project_context(&address.tab_id) {
+                                let named_state = self.workspace_state_broadcast(&context);
+                                for event in &mut events {
+                                    if matches!(
+                                        event.event,
+                                        gwt::BackendEvent::WindowCanvasState { .. }
+                                    ) {
+                                        *event = named_state.clone();
+                                    }
+                                }
+                            }
+                            let _ = self.persist();
+                        }
+                    }
                     // Issue #4143 (AC-3): mark the in-flight automatic restore
                     // so a failure before PTY start closes the empty pane
                     // instead of persisting it into the next generation. A
@@ -2077,7 +2121,10 @@ impl AppRuntime {
             .iter()
             .find(|w| {
                 crate::runtime_support::window_is_agent_pane(w)
-                    && w.status == WindowProcessStatus::Stopped
+                    && matches!(
+                        w.status,
+                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    )
                     && w.session_id.as_deref() == Some(session_id)
                     && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
             })

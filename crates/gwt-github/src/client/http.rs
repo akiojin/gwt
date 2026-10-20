@@ -41,6 +41,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Patch,
+    Put,
     Delete,
 }
 
@@ -50,6 +51,7 @@ impl HttpMethod {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
             HttpMethod::Patch => "PATCH",
+            HttpMethod::Put => "PUT",
             HttpMethod::Delete => "DELETE",
         }
     }
@@ -296,6 +298,7 @@ fn execute_reqwest(
         HttpMethod::Get => reqwest::Method::GET,
         HttpMethod::Post => reqwest::Method::POST,
         HttpMethod::Patch => reqwest::Method::PATCH,
+        HttpMethod::Put => reqwest::Method::PUT,
         HttpMethod::Delete => reqwest::Method::DELETE,
     };
     let mut builder = client.request(method, &request.url);
@@ -349,6 +352,165 @@ fn execute_reqwest(
 // ---------------------------------------------------------------------------
 // HttpIssueClient
 // ---------------------------------------------------------------------------
+
+/// One page of top-level comments from a GitHub Discussion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionCommentsPage {
+    pub discussion_id: String,
+    pub bodies: Vec<String>,
+    pub cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
+/// Identity returned after creating a Discussion in this client's repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedDiscussion {
+    pub id: String,
+    pub number: u64,
+    pub url: String,
+}
+
+fn pm_settings_error(operation: &str, message: &str) -> ApiError {
+    ApiError::Parse {
+        operation: operation.into(),
+        message: message.into(),
+    }
+}
+
+/// Effect parameters accepted by the repository-fixed PM settings operations.
+/// This validator is shared with the JSON front door; it grants no authority.
+pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiError> {
+    let invalid = || {
+        pm_settings_error(
+            operation,
+            "unsupported or malformed bounded effect parameters",
+        )
+    };
+    let fields = params
+        .as_object()
+        .filter(|fields| !fields.is_empty())
+        .ok_or_else(invalid)?;
+    let explicit_string = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
+    };
+    match operation {
+        "pr.reopen"
+            if fields.len() == 1 && params["number"].as_u64().is_some_and(|number| number > 0) => {}
+        "pr.review.submit" => {
+            if !params["number"].as_u64().is_some_and(|number| number > 0)
+                || !matches!(
+                    params["event"].as_str(),
+                    Some("COMMENT" | "APPROVE" | "REQUEST_CHANGES")
+                )
+                || fields.iter().any(|(key, value)| {
+                    !matches!(key.as_str(), "number" | "event" | "body")
+                        || key == "body" && !value.is_string()
+                })
+                || params["event"] != "APPROVE"
+                    && !params["body"]
+                        .as_str()
+                        .is_some_and(|body| !body.trim().is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+        "release.metadata.set" => {
+            if !explicit_string(&params["tag"])
+                || fields.len() < 2
+                || fields.iter().any(|(key, value)| match key.as_str() {
+                    "tag" => !explicit_string(value),
+                    "name" | "body" => !value.is_string(),
+                    "prerelease" => !value.is_boolean(),
+                    _ => true,
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        "repository.settings.set" => {
+            if fields.contains_key("topics") {
+                if fields.len() != 1 || !valid_topics(&params["topics"]) {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
+            for (key, value) in fields {
+                let valid = match key.as_str() {
+                    "description" | "homepage" => value.is_string(),
+                    "default_branch" => explicit_string(value),
+                    "archived"
+                    | "has_issues"
+                    | "has_projects"
+                    | "has_wiki"
+                    | "has_discussions"
+                    | "is_template"
+                    | "allow_squash_merge"
+                    | "allow_merge_commit"
+                    | "allow_rebase_merge"
+                    | "allow_auto_merge"
+                    | "allow_update_branch"
+                    | "delete_branch_on_merge"
+                    | "allow_forking" => value.is_boolean(),
+                    "squash_merge_commit_title" => {
+                        matches!(value.as_str(), Some("PR_TITLE" | "COMMIT_OR_PR_TITLE"))
+                    }
+                    "squash_merge_commit_message" => matches!(
+                        value.as_str(),
+                        Some("PR_BODY" | "COMMIT_MESSAGES" | "BLANK")
+                    ),
+                    "merge_commit_title" => {
+                        matches!(value.as_str(), Some("PR_TITLE" | "MERGE_MESSAGE"))
+                    }
+                    "merge_commit_message" => {
+                        matches!(value.as_str(), Some("PR_BODY" | "PR_TITLE" | "BLANK"))
+                    }
+                    "security_and_analysis" => value.as_object().is_some_and(|features| {
+                        !features.is_empty()
+                            && features.iter().all(|(feature, setting)| {
+                                matches!(
+                                    feature.as_str(),
+                                    "advanced_security"
+                                        | "secret_scanning"
+                                        | "secret_scanning_push_protection"
+                                ) && setting.as_object().is_some_and(|setting| {
+                                    setting.len() == 1
+                                        && matches!(
+                                            setting.get("status").and_then(Value::as_str),
+                                            Some("enabled" | "disabled")
+                                        )
+                                })
+                            })
+                    }),
+                    _ => false,
+                };
+                if !valid {
+                    return Err(invalid());
+                }
+            }
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(())
+}
+
+fn valid_topics(value: &Value) -> bool {
+    value.as_array().is_some_and(|names| {
+        let mut seen = HashSet::new();
+        names.len() <= 20
+            && names.iter().all(|name| {
+                name.as_str().is_some_and(|name| {
+                    !name.is_empty()
+                        && name.len() <= 50
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })
+                        && seen.insert(name)
+                })
+            })
+    })
+}
 
 /// Real [`IssueClient`] that talks to GitHub via an [`HttpTransport`].
 pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
@@ -565,6 +727,615 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         &self.transport
     }
 
+    /// Resolve a workflow ID or filename to its repository-relative path.
+    pub fn workflow_path(&self, workflow: &str) -> Result<String, ApiError> {
+        let workflow = encode_path_segment(workflow);
+        let body = self.workflow_get(
+            format!(
+                "{}/repos/{}/{}/actions/workflows/{workflow}",
+                self.rest_base, self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        let metadata: Value = serde_json::from_str(&body)
+            .map_err(|_| ApiError::Unexpected("GitHub workflow metadata is invalid".into()))?;
+        metadata
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Unexpected("GitHub workflow path is missing".into()))
+    }
+
+    /// Read the raw workflow YAML at the exact ref selected for dispatch.
+    pub fn workflow_definition(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+    ) -> Result<String, ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/contents/.github/workflows/{workflow_filename}",
+            self.rest_base, self.owner, self.repo
+        ))
+        .map_err(|_| ApiError::Unexpected("GitHub workflow contents URL is invalid".into()))?;
+        url.query_pairs_mut().append_pair("ref", git_ref);
+        self.workflow_get(url.to_string(), "application/vnd.github.raw+json")
+    }
+
+    /// Dispatch a validated workflow without retrying the mutation.
+    pub fn dispatch_workflow(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<(), ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        self.rest_post(
+            &format!(
+                "/repos/{}/{}/actions/workflows/{workflow_filename}/dispatches",
+                self.owner, self.repo
+            ),
+            json!({ "ref": git_ref, "inputs": inputs }),
+        )
+        .map(|_| ())
+        .map_err(sanitize_workflow_error)
+    }
+
+    fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "Accept" {
+                        *value = accept.to_string();
+                    }
+                }
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url,
+                        headers,
+                        body: None,
+                    })
+                    .map_err(|_| ApiError::Network("GitHub workflow request failed".into()))?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                Ok(response.body)
+            })(),
+        )
+    }
+
+    /// Read top-level Discussion comments through the shared GraphQL budget.
+    pub fn discussion_comments(
+        &self,
+        number: u64,
+        after: Option<&str>,
+    ) -> Result<DiscussionCommentsPage, ApiError> {
+        let operation = "discussion comments";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.to_string(),
+            message: message.to_string(),
+        };
+        let value = self.graphql(
+            r#"query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    discussion(number: $number) {
+                        id
+                        comments(first: 100, after: $after) {
+                            nodes { body authorAssociation }
+                            pageInfo { endCursor hasNextPage }
+                        }
+                    }
+                }
+                rateLimit { cost remaining resetAt }
+            }"#,
+            json!({"owner": self.owner, "repo": self.repo, "number": number, "after": after}),
+        )?;
+        let discussion = value
+            .pointer("/data/repository/discussion")
+            .filter(|discussion| discussion.is_object())
+            .ok_or_else(|| invalid("discussion missing or invalid"))?;
+        let discussion_id = required_string(discussion, "id", operation)?;
+        if discussion_id.is_empty() {
+            return Err(invalid("discussion.id is empty"));
+        }
+        let comments = discussion
+            .get("comments")
+            .filter(|comments| comments.is_object())
+            .ok_or_else(|| invalid("discussion.comments missing or invalid"))?;
+        let nodes = comments
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
+        let bodies = nodes
+            .iter()
+            // Payload metadata is not proof of authority: importing a blocked
+            // or resolving post mutates local escalations and PM wake input.
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
+            .map(|node| required_string(node, "body", operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_info = comments
+            .get("pageInfo")
+            .ok_or_else(|| invalid("discussion.comments.pageInfo missing"))?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid("discussion.comments.pageInfo.hasNextPage missing or invalid")
+            })?;
+        let cursor = match page_info.get("endCursor") {
+            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
+            Some(Value::Null) if !has_next_page => None,
+            _ => {
+                return Err(invalid(
+                    "discussion.comments.pageInfo.endCursor missing or invalid",
+                ))
+            }
+        };
+        Ok(DiscussionCommentsPage {
+            discussion_id,
+            bodies,
+            cursor,
+            has_next_page,
+        })
+    }
+
+    /// Add a top-level Discussion comment through the shared GraphQL budget.
+    pub fn add_discussion_comment(&self, discussion_id: &str, body: &str) -> Result<(), ApiError> {
+        let value = self.graphql(
+            r#"mutation($discussionId: ID!, $body: String!) {
+                addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+                    comment { id }
+                }
+            }"#,
+            json!({"discussionId": discussion_id, "body": body}),
+        )?;
+        value
+            .pointer("/data/addDiscussionComment/comment/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ApiError::Parse {
+                operation: "add discussion comment".to_string(),
+                message: "created comment.id missing or invalid".to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// Create a Discussion only after resolving its category in this repository.
+    pub fn create_github_discussion(
+        &self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<CreatedDiscussion, ApiError> {
+        let operation = "create discussion";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.into(),
+            message: message.into(),
+        };
+        if [category, title, body]
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(invalid("category, title and body must be nonempty"));
+        }
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut repository_id: Option<String> = None;
+        let mut category_id: Option<String> = None;
+        loop {
+            let value = self.graphql(
+                r#"query($owner: String!, $repo: String!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                        id
+                        discussionCategories(first: 100, after: $after) {
+                            nodes { id name }
+                            pageInfo { endCursor hasNextPage }
+                        }
+                    }
+                    rateLimit { cost remaining resetAt }
+                }"#,
+                json!({"owner":self.owner,"repo":self.repo,"after":cursor}),
+            )?;
+            let repository = value
+                .pointer("/data/repository")
+                .ok_or_else(|| invalid("repository missing"))?;
+            let id = required_string(repository, "id", operation)?;
+            if id.trim().is_empty()
+                || repository_id
+                    .as_ref()
+                    .is_some_and(|previous| *previous != id)
+            {
+                return Err(invalid(
+                    "repository identity missing or changed during pagination",
+                ));
+            }
+            repository_id = Some(id);
+            let (nodes, has_next, next_cursor) =
+                page_connection(repository, &["discussionCategories"], operation)?;
+            for node in nodes {
+                let id = required_string(node, "id", operation)?;
+                let name = required_string(node, "name", operation)?;
+                if id.trim().is_empty() || name.trim().is_empty() {
+                    return Err(invalid("category identity missing"));
+                }
+                if category == id || category == name {
+                    if category_id.as_ref().is_some_and(|previous| *previous != id) {
+                        return Err(invalid("category is ambiguous in this repository"));
+                    }
+                    category_id = Some(id);
+                }
+            }
+            if !has_next {
+                break;
+            }
+            let next_cursor = next_cursor
+                .filter(|cursor| !cursor.is_empty())
+                .ok_or_else(|| invalid("category pagination cursor missing"))?;
+            if !seen_cursors.insert(next_cursor.to_string()) {
+                return Err(invalid("category pagination cursor repeated"));
+            }
+            cursor = Some(next_cursor.to_string());
+        }
+        let category_id =
+            category_id.ok_or_else(|| invalid("category does not belong to this repository"))?;
+        let value = self.graphql(
+            r#"mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+                createDiscussion(input: {repositoryId: $repositoryId, categoryId: $categoryId, title: $title, body: $body}) {
+                    discussion { id number url }
+                }
+            }"#,
+            json!({"repositoryId":repository_id,"categoryId":category_id,"title":title,"body":body}),
+        )?;
+        let discussion = value
+            .pointer("/data/createDiscussion/discussion")
+            .ok_or_else(|| invalid("created discussion missing"))?;
+        let id = required_string(discussion, "id", operation)?;
+        let number = required_u64(discussion, "number", operation)?;
+        let url = required_string(discussion, "url", operation)?;
+        let expected_url = format!(
+            "https://github.com/{}/{}/discussions/{number}",
+            self.owner, self.repo
+        );
+        if id.trim().is_empty() || number == 0 || !url.eq_ignore_ascii_case(&expected_url) {
+            return Err(invalid(
+                "created discussion identity or repository URL is invalid",
+            ));
+        }
+        Ok(CreatedDiscussion { id, number, url })
+    }
+
+    /// Read the dedicated required-status-check protection for develop or main.
+    pub fn required_status_checks(&self, branch: &str) -> Result<Value, ApiError> {
+        let path = self.required_status_checks_path(branch)?;
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url: format!("{}{}", self.rest_base, path),
+                        headers: self.auth_headers(),
+                        body: None,
+                    })
+                    .map_err(|error| ApiError::Network(error.to_string()))?;
+                check_status(&response)?;
+                parse_status_checks_response(&response.body)
+            })(),
+        )
+    }
+
+    /// Patch only required status checks, retaining the supplied app bindings.
+    pub fn update_required_status_checks(
+        &self,
+        branch: &str,
+        settings: &Value,
+    ) -> Result<Value, ApiError> {
+        let path = self.required_status_checks_path(branch)?;
+        validate_status_checks_patch(settings)?;
+        let response = self.rest_patch(&path, settings.clone())?;
+        parse_status_checks_response(&response.body)
+    }
+
+    fn required_status_checks_path(&self, branch: &str) -> Result<String, ApiError> {
+        if !matches!(branch, "develop" | "main") {
+            return Err(ApiError::PermissionDenied {
+                message: "required status checks are scoped to develop or main".into(),
+            });
+        }
+        Ok(format!(
+            "/repos/{}/{}/branches/{branch}/protection/required_status_checks",
+            self.owner, self.repo
+        ))
+    }
+
+    /// Read only the selected effect fields and validated remote identity for audit/rollback.
+    pub fn pm_settings_snapshot(&self, operation: &str, params: &Value) -> Result<Value, ApiError> {
+        validate_pm_settings(operation, params)?;
+        let root = format!("/repos/{}/{}", self.owner, self.repo);
+        let path = match operation {
+            "pr.reopen" | "pr.review.submit" => format!("{root}/pulls/{}", params["number"]),
+            "release.metadata.set" => format!(
+                "{root}/releases/tags/{}",
+                encode_path_segment(params["tag"].as_str().expect("validated tag"))
+            ),
+            "repository.settings.set" if params.get("topics").is_some() => format!("{root}/topics"),
+            "repository.settings.set" => root,
+            _ => unreachable!("validated operation"),
+        };
+        let body = self.workflow_get(
+            format!("{}{path}", self.rest_base),
+            "application/vnd.github+json",
+        )?;
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|_| pm_settings_error(operation, "invalid settings response JSON"))?;
+        self.pm_settings_projection(operation, params, &value)
+    }
+
+    /// Mutate only a named effect through its dedicated endpoint, then verify its response.
+    pub fn pm_settings_mutate(
+        &self,
+        operation: &str,
+        params: &Value,
+        before: &Value,
+    ) -> Result<Value, ApiError> {
+        validate_pm_settings(operation, params)?;
+        let invalid = || {
+            pm_settings_error(operation, "settings identity or requested change was not confirmed; inspect remote state before retrying")
+        };
+        let topics = operation == "repository.settings.set" && params.get("topics").is_some();
+        if topics && before["repository"].as_str() != Some(&format!("{}/{}", self.owner, self.repo))
+        {
+            return Err(invalid());
+        }
+        let before = self.pm_settings_projection(operation, params, before)?;
+        let root = format!("/repos/{}/{}", self.owner, self.repo);
+        let (path, patch) = match operation {
+            "pr.reopen" => {
+                if before["merged"] != false {
+                    return Err(invalid());
+                }
+                (
+                    format!("{root}/pulls/{}", params["number"]),
+                    json!({"state":"open"}),
+                )
+            }
+            "pr.review.submit" => {
+                let mut patch = params.clone();
+                patch
+                    .as_object_mut()
+                    .expect("validated object")
+                    .remove("number");
+                (format!("{root}/pulls/{}/reviews", params["number"]), patch)
+            }
+            "release.metadata.set" => {
+                let mut patch = params.clone();
+                patch
+                    .as_object_mut()
+                    .expect("validated object")
+                    .remove("tag");
+                (format!("{root}/releases/{}", before["id"]), patch)
+            }
+            "repository.settings.set" if topics => {
+                (format!("{root}/topics"), json!({"names":params["topics"]}))
+            }
+            "repository.settings.set" => (root.clone(), params.clone()),
+            _ => unreachable!("validated operation"),
+        };
+        let response = if operation == "pr.review.submit" {
+            self.rest_post(&path, patch)?
+        } else if topics {
+            self.rest_put(&path, patch)?
+        } else {
+            self.rest_patch(&path, patch)?
+        };
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| invalid())?;
+        if operation == "pr.review.submit" {
+            let expected_state = match params["event"].as_str().expect("validated event") {
+                "APPROVE" => "APPROVED",
+                "REQUEST_CHANGES" => "CHANGES_REQUESTED",
+                _ => "COMMENTED",
+            };
+            let path = format!("{root}/pulls/{}", params["number"]);
+            if !value["id"].as_u64().is_some_and(|id| id > 0)
+                || value["state"] != expected_state
+                || !value["pull_request_url"].as_str().is_some_and(|url| {
+                    [
+                        format!("https://api.github.com{path}"),
+                        format!("{}{path}", self.rest_base),
+                    ]
+                    .iter()
+                    .any(|expected| expected.eq_ignore_ascii_case(url))
+                })
+                || !value["body"].is_string()
+                || params
+                    .get("body")
+                    .is_some_and(|body| value["body"] != *body)
+            {
+                return Err(invalid());
+            }
+            return Ok(
+                json!({"repository":before["repository"],"number":params["number"],"id":value["id"],"state":value["state"],"body":value["body"]}),
+            );
+        }
+        let after = self.pm_settings_projection(operation, params, &value)?;
+        let confirmed = match operation {
+            "pr.reopen" => after["state"] == "open" && after["merged"] == false,
+            "release.metadata.set" => {
+                ["id", "url", "tag_name", "draft", "target_commitish"]
+                    .iter()
+                    .all(|key| after[key] == before[key])
+                    && params
+                        .as_object()
+                        .expect("validated object")
+                        .iter()
+                        .filter(|(key, _)| *key != "tag")
+                        .all(|(key, value)| after[key] == *value)
+            }
+            "repository.settings.set" if topics => {
+                let names = |value: &Value| {
+                    value
+                        .as_array()
+                        .expect("validated topics")
+                        .iter()
+                        .map(|value| value.as_str().expect("validated topic").to_owned())
+                        .collect::<HashSet<_>>()
+                };
+                names(&after["names"]) == names(&params["topics"])
+            }
+            "repository.settings.set" => {
+                after["id"] == before["id"]
+                    && params
+                        .as_object()
+                        .expect("validated object")
+                        .iter()
+                        .all(|(key, value)| after[key] == *value)
+            }
+            _ => false,
+        };
+        if !confirmed {
+            return Err(invalid());
+        }
+        Ok(after)
+    }
+
+    fn pm_settings_projection(
+        &self,
+        operation: &str,
+        params: &Value,
+        value: &Value,
+    ) -> Result<Value, ApiError> {
+        let invalid = || {
+            pm_settings_error(
+                operation,
+                "remote settings snapshot has incomplete or foreign identity/fields",
+            )
+        };
+        let repository = format!("{}/{}", self.owner, self.repo);
+        let mut projected = match operation {
+            "pr.reopen" | "pr.review.submit" => {
+                let repo = value
+                    .pointer("/base/repo/full_name")
+                    .or_else(|| value.get("repository"))
+                    .and_then(Value::as_str);
+                if !repo.is_some_and(|repo| repo.eq_ignore_ascii_case(&repository))
+                    || value["number"] != params["number"]
+                    || !value["merged"].is_boolean()
+                    || !matches!(value["state"].as_str(), Some("open" | "closed"))
+                {
+                    return Err(invalid());
+                }
+                return Ok(
+                    json!({"repository":repository,"number":value["number"],"state":value["state"],"merged":value["merged"]}),
+                );
+            }
+            "release.metadata.set" => {
+                let id = value["id"]
+                    .as_u64()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(invalid)?;
+                let path = format!("/repos/{}/{}/releases/{id}", self.owner, self.repo);
+                let url = value["url"].as_str().ok_or_else(invalid)?;
+                if ![
+                    format!("https://api.github.com{path}"),
+                    format!("{}{path}", self.rest_base),
+                ]
+                .iter()
+                .any(|expected| expected.eq_ignore_ascii_case(url))
+                    || value["tag_name"] != params["tag"]
+                    || !value["draft"].is_boolean()
+                    || !value["target_commitish"]
+                        .as_str()
+                        .is_some_and(|target| !target.is_empty())
+                {
+                    return Err(invalid());
+                }
+                json!({"id":id,"url":url,"tag_name":value["tag_name"],"draft":value["draft"],"target_commitish":value["target_commitish"]})
+            }
+            "repository.settings.set" if params.get("topics").is_some() => {
+                if !valid_topics(&value["names"]) {
+                    return Err(invalid());
+                }
+                return Ok(json!({"repository":repository,"names":value["names"]}));
+            }
+            "repository.settings.set" => {
+                if !value["full_name"]
+                    .as_str()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&repository))
+                    || !value["id"].as_u64().is_some_and(|id| id > 0)
+                {
+                    return Err(invalid());
+                }
+                json!({"id":value["id"],"full_name":value["full_name"]})
+            }
+            _ => return Err(invalid()),
+        };
+        for (key, requested) in params.as_object().expect("validated params") {
+            if key == "tag" {
+                continue;
+            }
+            let actual = value.get(key).ok_or_else(invalid)?;
+            if key == "security_and_analysis" {
+                let mut security = serde_json::Map::new();
+                for feature in requested
+                    .as_object()
+                    .expect("validated security settings")
+                    .keys()
+                {
+                    let setting = actual
+                        .get(feature)
+                        .filter(|setting| {
+                            matches!(setting["status"].as_str(), Some("enabled" | "disabled"))
+                        })
+                        .ok_or_else(invalid)?;
+                    security.insert(feature.clone(), json!({"status":setting["status"]}));
+                }
+                projected[key] = Value::Object(security);
+            } else {
+                let nullable = matches!(key.as_str(), "name" | "body" | "description" | "homepage");
+                if !(nullable && actual.is_null())
+                    && (requested.is_string() != actual.is_string()
+                        || requested.is_boolean() != actual.is_boolean())
+                {
+                    return Err(invalid());
+                }
+                projected[key] = actual.clone();
+            }
+        }
+        Ok(projected)
+    }
+
+    fn rest_put(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                headers.push(("Content-Type".into(), "application/json".into()));
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Put,
+                        url: format!("{}{}", self.rest_base, path),
+                        headers,
+                        body: Some(body.to_string()),
+                    })
+                    .map_err(|error| ApiError::Network(error.to_string()))?;
+                check_status(&response)?;
+                Ok(response)
+            })(),
+        )
+    }
+
     fn auth_headers(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -678,6 +1449,22 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
         if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // These numbered reads use the shared Issue/PR namespace. Only
+            // a NOT_FOUND at that exact resource path proves absence;
+            // permission, rate-limit and other GraphQL failures stay intact.
+            if matches!(query, FETCH_ISSUE_QUERY | FETCH_ISSUE_UPDATED_AT_QUERY)
+                && errs.as_array().is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|error| {
+                            error["type"] == "NOT_FOUND"
+                                && error["path"] == json!(["repository", "issue"])
+                        })
+                })
+            {
+                if let Some(number) = variables["number"].as_u64() {
+                    return Err(ApiError::NotFound(IssueNumber(number)));
+                }
+            }
             // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
             // and a `RATE_LIMIT` entry in the response body, so a status-only
             // check sees a healthy call. Classifying it here — the way the
@@ -855,6 +1642,66 @@ impl<T: HttpTransport> HttpIssueClient<T> {
 // ---------------------------------------------------------------------------
 // Status / parsing helpers
 // ---------------------------------------------------------------------------
+
+fn validate_status_checks_patch(settings: &Value) -> Result<(), ApiError> {
+    let invalid = || ApiError::Parse {
+        operation: "update required status checks".into(),
+        message: "only strict:boolean and checks:[{context:string, app_id:integer}] are permitted"
+            .into(),
+    };
+    let fields = settings.as_object().ok_or_else(invalid)?;
+    if fields.is_empty()
+        || fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "strict" | "checks"))
+        || fields
+            .get("strict")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid());
+    }
+    if let Some(checks) = fields.get("checks") {
+        for check in checks.as_array().ok_or_else(invalid)? {
+            let check = check.as_object().ok_or_else(invalid)?;
+            if check
+                .keys()
+                .any(|key| !matches!(key.as_str(), "context" | "app_id"))
+                || !check
+                    .get("context")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                || check
+                    .get("app_id")
+                    .is_some_and(|value| !value.as_i64().is_some_and(|id| id >= -1))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_status_checks_response(body: &str) -> Result<Value, ApiError> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| ApiError::Parse {
+            operation: "required status checks".into(),
+            message: "required status checks response must be a JSON object".into(),
+        })
+}
+
+fn sanitize_workflow_error(error: ApiError) -> ApiError {
+    match error {
+        error
+        @ (ApiError::RateLimited { .. } | ApiError::Unauthorized | ApiError::BodyTooLarge) => error,
+        ApiError::PermissionDenied { .. } => ApiError::PermissionDenied {
+            message: "GitHub workflow access is forbidden".into(),
+        },
+        ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
+        _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
+    }
+}
 
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
     let lowercase_body = resp.body.to_ascii_lowercase();
@@ -1775,12 +2622,15 @@ const FETCH_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){
-      number title body state updatedAt
-      labels(first:50){nodes{name}}
-      comments(first:100, after:$after){
-        nodes{databaseId body updatedAt}
-        pageInfo{ hasNextPage endCursor }
+    issue: issueOrPullRequest(number:$number){
+      __typename
+      ... on Issue {
+        number title body state updatedAt
+        labels(first:50){nodes{name}}
+        comments(first:100, after:$after){
+          nodes{databaseId body updatedAt}
+          pageInfo{ hasNextPage endCursor }
+        }
       }
     }
   }
@@ -1791,7 +2641,7 @@ const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){ updatedAt }
+    issue: issueOrPullRequest(number:$number){ __typename ... on Issue { updatedAt } }
   }
 }
 "#;
@@ -1871,6 +2721,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             if issue.is_null() {
                 return Err(ApiError::NotFound(number));
             }
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let updated_at = issue
                 .get("updatedAt")
                 .and_then(Value::as_str)
@@ -1899,6 +2752,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                 .pointer("/data/repository/issue")
                 .filter(|issue| !issue.is_null())
                 .ok_or(ApiError::NotFound(number))?;
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let (_, has_next, next_cursor) = page_connection(issue, &["comments"], operation)
                 .map_err(|error| remap_partial_page(error, completed_pages))?;
             let page = parse_graphql_issue(issue)?;
@@ -2809,6 +3665,8 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
+    use serde_json::json;
+
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
         HttpResponse, HttpTransport, ResolutionDeadline,
@@ -2974,6 +3832,152 @@ mod check_status_tests {
             "the sent call was counted: {:?}",
             snapshot.local
         );
+    }
+
+    #[test]
+    fn discussion_sync_reads_and_posts_through_the_shared_graphql_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        )
+        .with_budget(ledger.clone(), gate);
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+        });
+        let page = client.discussion_comments(42, Some("previous")).unwrap();
+        assert_eq!(page.discussion_id, "D_1");
+        assert_eq!(page.bodies, ["message"]);
+        assert_eq!(page.cursor.as_deref(), Some("cursor"));
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            3
+        );
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: r#"{"data":{"addDiscussionComment":{"comment":{"id":"C_1"}}}}"#.into(),
+        });
+        client
+            .add_discussion_comment(&page.discussion_id, "message")
+            .unwrap();
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].calls_last_hour,
+            2
+        );
+        let requests = client.transport().recorded();
+        let read: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(read["variables"]["after"], "previous");
+        assert!(read["query"]
+            .as_str()
+            .unwrap()
+            .contains("rateLimit { cost remaining resetAt }"));
+        let posted: serde_json::Value =
+            serde_json::from_str(requests[1].body.as_ref().unwrap()).unwrap();
+        assert_eq!(posted["variables"]["body"], "message");
+        assert!(!posted["query"].as_str().unwrap().contains("replyToId"));
+        assert!(!posted["query"].as_str().unwrap().contains("rateLimit"));
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            },
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            client.discussion_comments(42, None),
+            Err(ApiError::RateLimited { .. })
+        ));
+        assert_eq!(client.transport().recorded().len(), 2);
+    }
+
+    #[test]
+    fn discussion_sync_only_imports_repository_trusted_authors_without_losing_cursor() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        let mut nodes = [
+            "OWNER",
+            "MEMBER",
+            "COLLABORATOR",
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "MANNEQUIN",
+            "NONE",
+            "UNKNOWN",
+        ]
+        .into_iter()
+        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .collect::<Vec<_>>();
+        nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "all-comments-cursor"}
+            }}}}}).to_string(),
+        });
+        let page = client.discussion_comments(42, None).unwrap();
+        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
+        assert!(page.has_next_page);
+        let requests = client.transport().recorded();
+        let request: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert!(request["query"]
+            .as_str()
+            .unwrap()
+            .contains("authorAssociation"));
+    }
+
+    #[test]
+    fn discussion_sync_rejects_incomplete_remote_responses() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        for discussion in [
+            json!(null),
+            json!({"id": "D_1", "comments": null}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}
+            }}),
+        ] {
+            client.transport().enqueue(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"data": {"repository": {"discussion": discussion}}}).to_string(),
+            });
+            assert!(matches!(
+                client.discussion_comments(42, None),
+                Err(ApiError::Parse { .. })
+            ));
+        }
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: json!({"data": {"addDiscussionComment": {"comment": null}}}).to_string(),
+        });
+        assert!(matches!(
+            client.add_discussion_comment("D_1", "message"),
+            Err(ApiError::Parse { .. })
+        ));
     }
 
     #[test]

@@ -38,7 +38,7 @@ test("Board surface requests older history with cursor-based paging", () => {
   assert.match(appSource, /case\s+"board_history_page"/);
   assert.match(appSource, /function\s+mergeBoardEntries/);
   assert.match(appSource, /hasMoreBefore/);
-  assert.match(appSource, /state\.focusEntryId[\s\S]+requestOlderBoardEntries\(event\.id\)/);
+  assert.match(appSource, /state\.focusEntryId[\s\S]+requestOlderBoardEntries\(snapshot\.windowId\)/);
 });
 
 test("Board surface scrolls to bottom after the user's own post succeeds", () => {

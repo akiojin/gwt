@@ -538,18 +538,10 @@ impl AppRuntime {
     }
 
     pub(super) fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
-        let path = match gwt_config::Settings::global_config_path() {
-            Some(p) => p,
-            None => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::SystemSettingsError {
-                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
-                            .to_string(),
-                    },
-                )];
-            }
-        };
+        if let Err(error) = gwt::update_settings::migrate() {
+            tracing::warn!(target: "gwt::update", %error, "automatic update migration failed; returning existing system settings");
+        }
+        let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
             client_id,
             gwt::system_settings::get_event(&path),
@@ -564,18 +556,7 @@ impl AppRuntime {
         board_provider: Option<String>,
         agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
-        let path = match gwt_config::Settings::global_config_path() {
-            Some(p) => p,
-            None => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::SystemSettingsError {
-                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
-                            .to_string(),
-                    },
-                )];
-            }
-        };
+        let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
             client_id,
             gwt::system_settings::update_event(
@@ -589,12 +570,16 @@ impl AppRuntime {
     }
 
     pub(super) fn autostart_status_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::reply(
-            client_id,
-            autostart_status_event_from_result(
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = autostart_status_event_from_result(
                 gwt::cli::tray::autostart::AutostartManager::status(),
-            ),
-        )]
+            );
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(super) fn autostart_update_events(
@@ -602,20 +587,26 @@ impl AppRuntime {
         client_id: ClientId,
         enabled: bool,
     ) -> Vec<OutboundEvent> {
-        let result = if enabled {
-            gwt::cli::tray::autostart::AutostartManager::install()
-        } else {
-            gwt::cli::tray::autostart::AutostartManager::uninstall()
-        };
-        let event = match result {
-            Ok(()) => autostart_status_event_from_result(
-                gwt::cli::tray::autostart::AutostartManager::status(),
-            ),
-            Err(error) => BackendEvent::AutostartError {
-                message: error.to_string(),
-            },
-        };
-        vec![OutboundEvent::reply(client_id, event)]
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let result = if enabled {
+                gwt::cli::tray::autostart::AutostartManager::install()
+            } else {
+                gwt::cli::tray::autostart::AutostartManager::uninstall()
+            };
+            let event = match result {
+                Ok(()) => autostart_status_event_from_result(
+                    gwt::cli::tray::autostart::AutostartManager::status(),
+                ),
+                Err(error) => BackendEvent::AutostartError {
+                    message: error.to_string(),
+                },
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(super) fn custom_agent_reply_with_cache_refresh(
@@ -660,17 +651,25 @@ impl AppRuntime {
     }
 
     pub(crate) fn spawn_supported_agent_list(&self, client_id: ClientId) {
-        let cache = self.launch_wizard_cache.clone();
+        // Only maintenance changes the epoch; concurrent clients each need a reply.
+        let generation = self.agent_maintenance.catalog_generation;
+        let mut cache = self.launch_wizard_cache.clone();
+        let config_path = self.profile_config_path();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            // The first cache read may join detection; keep that wait off
-            // the GUI loop, just like the other Settings probes.
-            let event = BackendEvent::SupportedAgentList {
-                agents: cache.supported_agents(),
+            let event = match config_path {
+                Ok(path) => {
+                    cache.refresh_agent_options_for_profile(&path, &cwd);
+                    super::agent_maintenance::supported_agent_catalog(&cache, &path, &cwd)
+                }
+                Err(message) => BackendEvent::SystemSettingsError { message },
             };
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
+            proxy.send(UserEvent::SupportedAgentCatalogReady {
+                client_id,
+                generation,
+                event,
+            });
         });
     }
 
@@ -726,15 +725,121 @@ impl AppRuntime {
         {
             return;
         }
-        let enabled = self.project_contexts().iter().any(|context| {
-            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-                &context.project_root,
-            ))
-            .is_ok_and(|prefs| prefs.autonomous_mode && prefs.auto_apply_updates.unwrap_or(true))
-        });
-        if enabled {
+        if self.automatic_updates_enabled() {
             self.apply_update_start_events(super::UPDATE_AUTO_APPLY_CLIENT_ID);
         }
+    }
+
+    pub(crate) fn automatic_updates_enabled(&self) -> bool {
+        let enabled = match gwt::update_settings::migrate() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(target: "gwt::update", %error, "automatic update migration failed; treating as OFF");
+                false
+            }
+        };
+        enabled
+            && self.project_contexts().iter().any(|context| {
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                    &context.project_root,
+                ))
+                .is_ok_and(|prefs| prefs.autonomous_mode)
+            })
+    }
+
+    pub(super) fn update_settings_event(
+        &self,
+        project_root: Option<&std::path::Path>,
+    ) -> BackendEvent {
+        let status = match project_root {
+            Some(root) => gwt::update_settings::status(root),
+            None => {
+                gwt::update_settings::configured().map(|configured| gwt::update_settings::Status {
+                    auto_apply_updates: configured,
+                    auto_apply_updates_effective: configured.unwrap_or(false),
+                    update_drain: None,
+                })
+            }
+        };
+        match status {
+            Ok(mut status) => {
+                if let Some(drain) = status.update_drain.as_mut() {
+                    if drain.blocking.is_empty() {
+                        if let Some(cached) = project_root
+                            .and_then(|root| self.project_state_for_root(root))
+                            .and_then(|state| {
+                                state
+                                    .issue_monitor_status_cache
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|status| status.update_drain.clone())
+                            })
+                            .filter(|cached| {
+                                cached.version == drain.version && cached.since == drain.since
+                            })
+                        {
+                            drain.blocking = cached.blocking;
+                        }
+                    }
+                    self.enrich_update_drain_blockers(drain);
+                }
+                BackendEvent::UpdateSettings {
+                    project_root: project_root.map(|root| root.display().to_string()),
+                    status,
+                }
+            }
+            Err(error) => BackendEvent::SystemSettingsError {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    pub(super) fn set_global_auto_apply_updates_events(
+        &mut self,
+        client_id: &str,
+        enabled: bool,
+    ) -> Vec<OutboundEvent> {
+        if let Err(error) = gwt::update_settings::set(Some(enabled)) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::SystemSettingsError {
+                    message: error.to_string(),
+                },
+            )];
+        }
+        let mut events = Vec::new();
+        for context in self.project_contexts() {
+            if !enabled {
+                if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
+                    if drain.automatic.unwrap_or(prefs.autonomous_mode) {
+                        events.extend(
+                            self.release_update_auto_apply_for_project(&context, &drain.version),
+                        );
+                    }
+                }
+            }
+            if let Ok(prefs) = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            ) {
+                let monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                events.extend(self.issue_monitor_snapshot_events_without_wake(
+                    None,
+                    Some(&context.project_root),
+                    monitor,
+                ));
+            }
+            events.push(OutboundEvent::project(
+                context.project_key,
+                self.update_settings_event(Some(&context.project_root)),
+            ));
+        }
+        events.push(OutboundEvent::hub(self.update_settings_event(None)));
+        let path = gwt_core::paths::gwt_config_path();
+        events.push(OutboundEvent::broadcast(gwt::system_settings::get_event(
+            &path,
+        )));
+        events
     }
 
     /// Shared staging request for the update CTA and automatic discovery.

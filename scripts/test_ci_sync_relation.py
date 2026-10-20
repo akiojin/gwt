@@ -21,10 +21,11 @@ class WorkflowPolicyTests(unittest.TestCase):
                       "workflow-wide cancellation must not kill a base-only run")
         paired = jobs.split("\n  test-windows-verify-timings:", 1)[1].split("\n  #", 1)[0]
         self.assertIn("source-sync", paired)
-        self.assertIn("needs.source-sync.outputs.base_only == 'false'", paired)
+        self.assertIn("cancel-in-progress: true", paired,
+                      "admitted paired jobs must replace obsolete measurements")
         self.assertIn("github.event.pull_request.number || github.ref", paired)
-        self.assertIn("if: ${{ !cancelled() }}", paired,
-                      "even a newly irrelevant paired job must enter concurrency to supersede old work")
+        self.assertIn("if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}", paired,
+                      "only proven base synchronization skips paired admission; unknown history still measures")
         self.assertIn("'ubuntu-latest' || 'windows-latest'", paired)
         runner = jobs.split("\n  test-python-runner:", 1)[1].split("\n  test-index-e2e:", 1)[0]
         self.assertIn("python -m unittest discover -s scripts -p 'test_ci_*.py'", runner,

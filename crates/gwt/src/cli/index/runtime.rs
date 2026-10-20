@@ -70,6 +70,8 @@ pub(crate) fn run_runner_status(
         .arg(context.repo_hash.as_str())
         .arg("--worktree-hash")
         .arg(&context.worktree_hash)
+        .arg("--file-index-protocol")
+        .arg("v2")
         .current_dir(&context.project_root)
         .output()
         .map_err(io_error)
@@ -122,6 +124,12 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
+            label: "reports",
+            action: "index-reports",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
             label: "files",
             action: "index-files",
             scope: Some("files"),
@@ -145,6 +153,7 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             .collect(),
         IndexScope::Board => all.into_iter().filter(|a| a.label == "board").collect(),
         IndexScope::Works => all.into_iter().filter(|a| a.label == "works").collect(),
+        IndexScope::Reports => all.into_iter().filter(|a| a.label == "reports").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
             .into_iter()
@@ -229,6 +238,8 @@ pub(crate) fn rebuild_runner_args(
                 &gwt_core::index::paths::gwt_index_root(),
                 context.repo_hash.as_str(),
             )
+        } else if qos == "background" && !action.needs_worktree_hash {
+            "incremental"
         } else {
             "full"
         }),
@@ -308,6 +319,8 @@ pub fn render_index_status(
             "memory",
             "discussions",
             "board",
+            "works",
+            "reports",
             "files",
             "files-docs",
         ] {
@@ -332,6 +345,24 @@ pub fn render_index_status(
                     "{scope}: {} reason={reason} documents={count} repair_required={repair}\n",
                     if healthy { "ready" } else { "unhealthy" }
                 ));
+                if let Some(progress) = scope_status
+                    .get("build_progress")
+                    .and_then(Value::as_object)
+                {
+                    out.push_str(&format!(
+                        "{scope}: build phase={} done={} total={} resumable={}\n",
+                        progress
+                            .get("phase")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        progress.get("done").and_then(Value::as_u64).unwrap_or(0),
+                        progress.get("total").and_then(Value::as_u64).unwrap_or(0),
+                        progress
+                            .get("resumable")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    ));
+                }
                 if scope == "issues" {
                     let mode = scope_status
                         .get("mode")
@@ -381,6 +412,25 @@ fn io_error(err: std::io::Error) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_runner_selects_the_v2_file_index_protocol() {
+        let source = include_str!("runtime.rs");
+        let status = source
+            .split("pub(crate) fn run_runner_status(")
+            .nth(1)
+            .unwrap()
+            .split("#[derive(Debug, Clone, Copy)]")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<String>();
+
+        assert!(
+            status.contains(".arg(\"--file-index-protocol\").arg(\"v2\")"),
+            "status must inspect the v2 file index instead of absent legacy collections"
+        );
+    }
 
     #[test]
     fn issues_rebuild_selects_incremental_only_with_a_healthy_manifest() {

@@ -92,21 +92,35 @@ pub fn current_username() -> String {
 /// a direct process-handle probe on Windows. Permission failures do not
 /// establish that an owner is dead.
 pub fn is_process_alive(pid: u32) -> bool {
+    host_process_liveness(pid).unwrap_or(true)
+}
+
+/// A destructive collector must distinguish an absent PID from a failed probe.
+/// Permission and other unexpected OS errors return `None` and retain evidence.
+pub fn host_process_liveness(pid: u32) -> Option<bool> {
     if pid == 0 {
-        return false;
+        return Some(false);
     }
     #[cfg(unix)]
     {
         // SAFETY: kill(pid, 0) returns 0 if the process exists, -1
         // with ESRCH if it does not. We never deliver a real signal.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            // Values outside pid_t's positive range cannot name a Host.
+            return Some(false);
+        };
+        let rc = unsafe { libc::kill(pid, 0) };
         if rc == 0 {
-            return true;
+            return Some(true);
         }
         let err = std::io::Error::last_os_error();
         // EPERM means the process exists but we lack permission to
         // signal it — still alive from the bootstrap caller's POV.
-        matches!(err.raw_os_error(), Some(libc::EPERM))
+        match err.raw_os_error() {
+            Some(libc::ESRCH) => Some(false),
+            Some(libc::EPERM) => Some(true),
+            _ => None,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -115,23 +129,6 @@ pub fn is_process_alive(pid: u32) -> bool {
         // needs a truthful liveness answer here. A permanent `false` would
         // make every consumer delete a live daemon's endpoint file on each
         // bootstrap call and let the GUI tick double-drive the scan.
-        is_host_process_alive(pid)
-    }
-}
-
-/// Probe only the requested PID. Windows daemon event publishing calls this
-/// for every output chunk; a full process snapshot here consumes a core even
-/// when `sysinfo` is asked to refresh just one PID (Issue #4799).
-pub fn is_host_process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        is_process_alive(pid)
-    }
-    #[cfg(not(unix))]
-    {
         use windows::{
             core::HRESULT,
             Win32::{
@@ -145,7 +142,13 @@ pub fn is_host_process_alive(pid: u32) -> bool {
             Ok(handle) => handle,
             // Access denied or another uncertain failure must not authorize
             // replacing a live owner. An invalid PID is definitively absent.
-            Err(error) => return error.code() != HRESULT::from_win32(ERROR_INVALID_PARAMETER.0),
+            Err(error) => {
+                return if error.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
         };
         // SAFETY: the owned process handle stays valid through the zero-timeout
         // wait and is then closed exactly once. A signaled process has exited,
@@ -153,9 +156,15 @@ pub fn is_host_process_alive(pid: u32) -> bool {
         unsafe {
             let alive = WaitForSingleObject(handle, 0) != WAIT_OBJECT_0;
             let _ = CloseHandle(handle);
-            alive
+            Some(alive)
         }
     }
+}
+
+/// Probe only the requested PID without a full process snapshot (#4799).
+/// Uncertainty retains the owner, as required by daemon bootstrap callers.
+pub fn is_host_process_alive(pid: u32) -> bool {
+    host_process_liveness(pid).unwrap_or(true)
 }
 
 /// Issue #3906 AC-8: whether `pid` runs somewhere under `ancestor` in the
@@ -201,6 +210,10 @@ pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
 pub fn host_process_start_time(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
+    }
+    #[cfg(test)]
+    if let Some(identity) = test_clock::start_identity(pid) {
+        return identity;
     }
     #[cfg(target_os = "linux")]
     {
@@ -249,6 +262,10 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
     }
+    #[cfg(test)]
+    if let Some(epoch) = test_clock::start_epoch_secs(pid) {
+        return epoch;
+    }
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     let mut system = System::new();
@@ -262,6 +279,68 @@ pub fn host_process_start_epoch_secs(pid: u32) -> Option<u64> {
         .process(pid)
         .map(sysinfo::Process::start_time)
         .filter(|started_at| *started_at > 0)
+}
+
+/// Inject Linux observations on any test host without changing its OS clock.
+#[cfg(test)]
+pub(crate) mod test_clock {
+    use std::cell::RefCell;
+
+    struct Observation {
+        pid: u32,
+        stat: String,
+        btime: u64,
+    }
+
+    thread_local! {
+        static OBSERVATION: RefCell<Option<Observation>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct ProcessClock(Option<Observation>);
+
+    impl ProcessClock {
+        pub(crate) fn new(pid: u32, start_ticks: u64, btime: u64) -> Self {
+            let observation = Observation {
+                pid,
+                stat: format!("{pid} (gwt host) S {} {start_ticks}", ["0"; 18].join(" ")),
+                btime,
+            };
+            Self(OBSERVATION.replace(Some(observation)))
+        }
+
+        pub(crate) fn set_btime(&self, btime: u64) {
+            OBSERVATION.with_borrow_mut(|observation| {
+                observation.as_mut().unwrap().btime = btime;
+            });
+        }
+    }
+
+    impl Drop for ProcessClock {
+        fn drop(&mut self) {
+            OBSERVATION.set(self.0.take());
+        }
+    }
+
+    pub(super) fn start_identity(pid: u32) -> Option<Option<u64>> {
+        OBSERVATION.with_borrow(|observation| {
+            observation
+                .as_ref()
+                .filter(|observation| observation.pid == pid)
+                .map(|observation| super::proc_stat_start_identity(&observation.stat))
+        })
+    }
+
+    pub(super) fn start_epoch_secs(pid: u32) -> Option<Option<u64>> {
+        OBSERVATION.with_borrow(|observation| {
+            observation
+                .as_ref()
+                .filter(|observation| observation.pid == pid)
+                .map(|observation| {
+                    super::proc_stat_start_identity(&observation.stat)
+                        .map(|ticks| observation.btime + ticks / 100)
+                })
+        })
+    }
 }
 
 /// Return whether a Unix process group still contains any process.
@@ -364,11 +443,14 @@ mod tests {
     fn pid_zero_is_never_alive() {
         assert!(!is_process_alive(0));
         assert!(!is_host_process_alive(0));
+        assert_eq!(super::host_process_liveness(0), Some(false));
     }
 
     #[test]
     fn current_host_process_is_alive_on_every_supported_platform() {
         assert!(is_host_process_alive(std::process::id()));
+        assert_eq!(super::host_process_liveness(std::process::id()), Some(true));
+        assert_eq!(super::host_process_liveness(i32::MAX as u32), Some(false));
     }
 
     #[cfg(unix)]
@@ -528,17 +610,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn far_unused_pid_is_not_alive() {
-        // Use `i32::MAX as u32` so the value stays positive after the
-        // `pid as libc::pid_t` cast inside `is_process_alive`. Going
-        // higher (e.g. `u32::MAX - 1`) wraps to a negative `pid_t` and
-        // `kill(-N, 0)` probes process *group* `N` instead of a far
-        // PID, which is a different semantic and can flake on
-        // runners where group 2 exists.
-        //
-        // `i32::MAX` (~2.1 billion) is far past any realistic OS
-        // pid_t allocation window today; if this ever flakes on a CI
-        // runner we'll have learned that pid recycling has reached
-        // extreme territory.
+        // Invalid positive PIDs are absent, never negative process groups or
+        // uncertain live holders (the launch recovery fixtures use these IDs).
         assert!(!is_process_alive(i32::MAX as u32));
+        assert!(!is_process_alive(u32::MAX - 7));
+        assert_eq!(super::host_process_liveness(u32::MAX - 7), Some(false));
     }
 }

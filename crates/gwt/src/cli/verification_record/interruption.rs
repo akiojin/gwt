@@ -75,6 +75,10 @@ pub(super) fn previous_external_terminations(
     if record.content_hash.is_empty() || !integrity_ok(&record) {
         return Ok(None);
     }
+    if super::cancellation::recover_unfinished_run(worktree, &record)? {
+        record =
+            load(worktree)?.ok_or_else(|| io::Error::other("interrupted record disappeared"))?;
+    }
     if let Some(lifecycle) = record
         .lifecycle
         .as_ref()
@@ -109,6 +113,7 @@ pub(super) fn previous_external_terminations(
 pub(super) struct Watchdog {
     child: Child,
     pipe: Option<ChildStdin>,
+    detached: bool,
 }
 
 impl Watchdog {
@@ -129,7 +134,11 @@ impl Watchdog {
             .stderr(Stdio::null())
             .spawn()?;
         let pipe = child.stdin.take();
-        let mut watchdog = Self { child, pipe };
+        let mut watchdog = Self {
+            child,
+            pipe,
+            detached: false,
+        };
         let pipe = watchdog.pipe.as_mut().expect("piped stdin");
         pipe.write_all(token.as_bytes())?;
         pipe.write_all(b"\n")?;
@@ -143,6 +152,31 @@ impl Watchdog {
         }
         Ok(watchdog)
     }
+
+    /// Leave the already authenticated companion observing capacity after a
+    /// bounded deferral. It holds no lease and never executes the matrix.
+    pub(super) fn resume_after_deferral(&mut self) -> io::Result<()> {
+        if std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "self-pane endpoint unavailable",
+            ));
+        }
+        self.pipe.as_mut().expect("watchdog pipe").write_all(b"D")?;
+        drop(self.pipe.take());
+        self.detached = true;
+        Ok(())
+    }
+
+    /// Observe the original pane without blocking the admitted command or its
+    /// return. Keep the pipe open so runner death and cancellation still settle.
+    pub(super) fn resume_when_idle(&mut self) -> io::Result<()> {
+        if !self.detached && std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_some() {
+            self.pipe.as_mut().expect("watchdog pipe").write_all(b"A")?;
+            self.detached = true;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Watchdog {
@@ -152,7 +186,9 @@ impl Drop for Watchdog {
             // process death. A killed runner cannot send this byte.
             let _ = pipe.write_all(b"R");
         }
-        let _ = self.child.wait();
+        if !self.detached {
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -172,9 +208,76 @@ pub fn run_watchdog(worktree: &Path, record_id: &str) -> io::Result<()> {
     }
     io::stdout().write_all(READY.as_bytes())?;
     io::stdout().flush()?;
-    let mut returned = [0];
-    let normal_return = input.read(&mut returned)? != 0;
-    settle_interrupted(worktree, record_id, token, normal_return)
+    if record_id.starts_with("vat-") {
+        std::thread::scope(|scope| {
+            let mut observer = None;
+            loop {
+                let mut returned = [0];
+                let normal_return = input.read(&mut returned)? != 0;
+                if normal_return && returned[0] == b'A' {
+                    if observer.is_none() {
+                        observer = Some(scope.spawn(|| {
+                            if let Err(error) = super::admission_resume::run_admitted(worktree, record_id, token) {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }));
+                    }
+                    continue;
+                }
+                super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)?;
+                if !normal_return || returned[0] == b'D' {
+                    super::admission_resume::run(worktree, record_id, token)?;
+                }
+                return Ok(());
+            }
+        })
+    } else {
+        let mut returned = [0];
+        let normal_return = input.read(&mut returned)? != 0;
+        settle_interrupted(worktree, record_id, token, normal_return)
+    }
+}
+
+/// Authenticated attempt control holds the trusted write lease. Intentional
+/// cancellation preserves retry history instead of counting a runner death.
+pub(super) fn interrupt_matching_record(
+    worktree: &Path,
+    id: &str,
+    attempt_id: &str,
+    reason: &str,
+    external: bool,
+    fallback: RunLifecycle,
+) -> io::Result<()> {
+    let Some(mut record) = load(worktree)? else {
+        return Ok(());
+    };
+    if record.record_id != id
+        || !integrity_ok(&record)
+        || record
+            .unknown_fields()
+            .get("verification_attempt_id")
+            .and_then(|id| id.as_str())
+            != Some(attempt_id)
+        || record
+            .lifecycle
+            .as_ref()
+            .is_some_and(|life| life.status == RunStatus::Interrupted)
+    {
+        return Ok(());
+    }
+    // Only the exact authenticated attempt may settle this final-write gap.
+    if record.lifecycle.is_none() {
+        record.lifecycle = Some(fallback);
+    }
+    if external {
+        return persist_interrupted(worktree, &mut record, false, reason);
+    }
+    let lifecycle = record.lifecycle.as_mut().expect("running record");
+    lifecycle.status = RunStatus::Interrupted;
+    lifecycle.reason = Some(reason.to_string());
+    record.all_passed = false;
+    record.plan_covered = false;
+    save(worktree, &record)
 }
 
 fn token_hash(token: &str) -> String {
@@ -316,7 +419,7 @@ mod tests {
         );
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("replaced or interrupted"),
+            msg.to_string().contains("replaced or interrupted"),
             "unexpected error: {msg}"
         );
     }
@@ -461,6 +564,7 @@ mod tests {
         assert_eq!(marker.status.code(), Some(1), "third command ran");
         assert!(result
             .unwrap_err()
+            .to_string()
             .contains("execution infrastructure failure"));
         assert_eq!(load(dir.path()).unwrap().unwrap(), before);
 

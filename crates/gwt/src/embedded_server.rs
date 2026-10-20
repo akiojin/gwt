@@ -74,6 +74,7 @@ struct ServerState {
     /// published only through the `0600` tray lock file. `None` refuses every
     /// control request.
     control_token: Option<Arc<str>>,
+    pending_update_dir: PathBuf,
     project_open_timeout: Duration,
     // Held only so the in-process sink stays alive for the lifetime of the
     // server. Read directly through [`EmbeddedServer::access_log`] in tests.
@@ -314,6 +315,7 @@ impl EmbeddedServer {
             attachment_uploads,
             pty_writers,
             control_token: control_token.map(Arc::from),
+            pending_update_dir: gwt_core::update::pending_update_dir(),
             project_open_timeout,
             access_log: access_log.clone(),
         };
@@ -356,6 +358,10 @@ impl EmbeddedServer {
             .route(
                 gwt::project_open_control::PROJECT_OPEN_CONTROL_PATH,
                 post(project_open_control_handler),
+            )
+            .route(
+                gwt::update_control::UPDATE_APPLY_CONTROL_PATH,
+                post(update_apply_control_handler),
             )
             .with_state(server_state)
             .layer(middleware::from_fn_with_state(
@@ -634,7 +640,10 @@ async fn attachment_upload_handler(
         if let Err(error) = tokio::fs::create_dir_all(parent).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create upload directory: {error}"),
+                format!(
+                    "failed to create upload directory {}: {error}",
+                    parent.display()
+                ),
             )
                 .into_response();
         }
@@ -645,7 +654,7 @@ async fn attachment_upload_handler(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create upload file: {error}"),
+                format!("failed to create upload file {}: {error}", path.display()),
             )
                 .into_response();
         }
@@ -669,7 +678,7 @@ async fn attachment_upload_handler(
             let _ = tokio::fs::remove_file(&path).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to write upload: {error}"),
+                format!("failed to write upload {}: {error}", path.display()),
             )
                 .into_response();
         }
@@ -678,7 +687,7 @@ async fn attachment_upload_handler(
         let _ = tokio::fs::remove_file(&path).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to flush upload: {error}"),
+            format!("failed to flush upload {}: {error}", path.display()),
         )
             .into_response();
     }
@@ -776,6 +785,102 @@ async fn project_open_control_handler(
         )
             .into_response(),
     }
+}
+
+/// An explicit CLI apply belongs to the resident GUI, which owns the panes,
+/// resume marker and helper parent PID. Acknowledgement only means queued.
+async fn update_apply_control_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let refuse = |status: StatusCode, message: &str| {
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    };
+    if gwt::project_open_control::authorize_control_request(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        state.control_token.as_deref(),
+    )
+    .is_err()
+    {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or invalid control token");
+    }
+    if !headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "content type must be application/json",
+        );
+    }
+    let body = match tokio::time::timeout(
+        Duration::from_secs(10),
+        axum::body::to_bytes(request.into_body(), 2048),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => {
+            return refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "update request body exceeds 2048 bytes",
+            )
+        }
+        Err(_) => return refuse(StatusCode::REQUEST_TIMEOUT, "update request body timed out"),
+    };
+    let request: gwt::update_control::UpdateApplyControlRequest =
+        match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(_) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "expected one staged update version",
+                )
+            }
+        };
+    if semver::Version::parse(request.version.trim_start_matches('v')).is_err() {
+        return refuse(StatusCode::BAD_REQUEST, "invalid update version");
+    }
+    let pending_dir = state.pending_update_dir;
+    let manifest = match tokio::task::spawn_blocking(move || {
+        gwt_core::update::load_pending_update_manifest_in(&pending_dir)
+    }).await {
+        Ok(Some(manifest)) if manifest.version == request.version => manifest,
+        _ => return refuse(StatusCode::CONFLICT,
+            "requested payload is not staged; use the running GUI update button or retry the CLI update"),
+    };
+    let update = gwt_core::update::UpdateState::Available {
+        current: env!("CARGO_PKG_VERSION").into(),
+        latest: manifest.version.clone(),
+        release_url: manifest.asset_url.clone(),
+        asset_url: Some(manifest.asset_url),
+        checked_at: chrono::Utc::now(),
+    };
+    if state
+        .proxy
+        .send_event(UserEvent::ApplyUpdateRestartNow {
+            state: update,
+            client_id: crate::UPDATE_CONTROL_CLIENT_ID.into(),
+        })
+        .is_err()
+    {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the GUI is shutting down; retry the update after it exits",
+        );
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "accepted": true, "version": manifest.version,
+        })),
+    )
+        .into_response()
 }
 
 async fn open_project_through_runtime(
@@ -1181,6 +1286,7 @@ mod tests {
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
                 control_token: None,
+                pending_update_dir: gwt_core::update::pending_update_dir(),
                 project_open_timeout: Duration::from_secs(1),
                 access_log: super::AccessLogSink::default(),
             },
@@ -2969,11 +3075,9 @@ mod tests {
         server.shutdown();
     }
 
-    /// Issue #4443 AC-10 / AC-2: no request may drive the adoption bridge to
-    /// `http_status=500 code=internal`, the shape the PM recorded when #3697's
-    /// 409 turned into a 500 in the same session. A caller-input refusal answers
-    /// `400 invalid_request`, and a state refusal answers `409` carrying the
-    /// operation the agent can actually run.
+    /// Issue #4443 AC-10 / AC-2 and #5288 AC-4: caller-input and state refusals
+    /// must not become opaque `500 code=internal` responses. Store contention
+    /// is retryable; an unexpected store failure retains its safe diagnosis.
     #[test]
     fn execution_adoption_refuses_without_an_internal_server_error() {
         let _env_lock = crate::env_test_lock()
@@ -3095,6 +3199,53 @@ mod tests {
             "a caller input error answered as an unhandled exception: {body}"
         );
         assert_eq!(status, HttpStatusCode::BAD_REQUEST, "{body}");
+
+        // AC-4: a bounded owner-lease refusal is a conflict, while a real
+        // filesystem failure remains internal. Neither may mutate authority.
+        let authority_paths = [
+            trusted.join("execution-control.json"),
+            trusted.join("execution-generation-pointer.json"),
+            gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        ];
+        let authority_bytes = || {
+            authority_paths
+                .iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let before = authority_bytes();
+        let lock_path = trusted.join(".write-lease");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let (status, body) = adopt("retry after the other writer settles");
+        fs2::FileExt::unlock(&lock).unwrap();
+        drop(lock);
+        assert_eq!(status, HttpStatusCode::CONFLICT, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(refusal["diagnostic_reason"], "execution_adopt_store_busy");
+        assert_eq!(
+            refusal["recovery_operations"],
+            serde_json::json!(["execution.adopt"]),
+            "{body}"
+        );
+        assert_eq!(authority_bytes(), before);
+
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        let (status, body) = adopt("diagnose the unavailable store");
+        std::fs::remove_dir(&lock_path).unwrap();
+        assert_eq!(status, HttpStatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            refusal["diagnostic_reason"],
+            "execution_adopt_store_unavailable"
+        );
+        assert!(refusal.get("recovery_operations").is_none(), "{body}");
+        assert_eq!(authority_bytes(), before);
 
         // The inherited record refuses on state, and the refusal must name the
         // operation this agent can run to get out of it.
@@ -4164,9 +4315,9 @@ mod tests {
             "hook events require project routing in the runtime"
         );
         let main = include_str!("main.rs")
-            .split("fn main() ->")
-            .nth(1)
-            .unwrap();
+            .rsplit_once("fn main() ->")
+            .expect("the final main signature follows test fixture strings")
+            .1;
         for (arm, policy) in [
             (
                 "ActiveWorkProjectionPrepared(prepared)",
@@ -4204,7 +4355,11 @@ mod tests {
             .skip(1)
             .map(|tail| tail.split('{').next().unwrap())
             .collect();
-        assert_eq!(direct_globals, ["UpdateProgress", "UpdateReady",]);
+        // Explicit CLI apply uses the same host-wide update state as the GUI.
+        assert_eq!(
+            direct_globals,
+            ["UpdateProgress", "UpdateReady", "UpdateAutoApply"]
+        );
         let health = include_str!("runtime_health_poller.rs")
             .split("#[cfg(test)]")
             .next()
@@ -4220,13 +4375,11 @@ mod tests {
         assert!(usage.contains("BackendEvent::ProviderUsage {"));
         assert!(usage.contains("sessions: snapshot.sessions"));
         let runtime = include_str!("app_runtime/runtime_events.rs");
-        for event in ["ProcessLine", "LogEntryAppended"] {
-            assert!(
-                runtime.contains(&format!("BackendEvent::{event}"))
-                    && runtime.contains("project_events_for_open_surface"),
-                "diagnostics must be delivered only to projects with an open consumer: {event}"
-            );
-        }
+        assert!(
+            runtime.contains("BackendEvent::LogEntryAppended")
+                && runtime.contains("project_events_for_open_surface"),
+            "diagnostics must be delivered only to projects with an open Logs consumer"
+        );
     }
 
     #[test]
@@ -5385,6 +5538,72 @@ mod tests {
     // Issue #4538 AC-4 / AC-5: the control request is authorized and fully
     // validated before the runtime sees it; runtime outcomes map to fixed
     // statuses and nothing speculative happens on failure.
+    #[test]
+    fn update_apply_control_only_dispatches_an_authenticated_matching_staged_version() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let runtime = Runtime::new().unwrap();
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "update-secret",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let client = reqwest::blocking::Client::new();
+        let endpoint = format!("{}internal/update/apply", server.url());
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .json(&serde_json::json!({"version":"99.1.0"}))
+                .send()
+                .unwrap()
+                .status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
+        let request = |version: &str| {
+            client
+                .post(&endpoint)
+                .bearer_auth("update-secret")
+                .json(&serde_json::json!({"version":version}))
+                .send()
+                .unwrap()
+        };
+        assert_eq!(request("99.1.0").status(), HttpStatusCode::CONFLICT);
+        let payload = home.path().join("gwt.exe");
+        std::fs::write(&payload, b"fixture payload, never executed").unwrap();
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: "99.1.0".into(),
+                asset_url: "https://example.invalid/gwt.zip".into(),
+                payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+                auto_apply_deferred: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(request("99.2.0").status(), HttpStatusCode::CONFLICT);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "refusals cannot trigger an apply"
+        );
+        assert_eq!(request("99.1.0").status(), HttpStatusCode::ACCEPTED);
+        let mut delivered = events.lock().unwrap();
+        assert!(
+            matches!(delivered.pop(), Some(UserEvent::ApplyUpdateRestartNow {
+            state: gwt_core::update::UpdateState::Available { latest, .. }, ..
+        }) if latest == "99.1.0")
+        );
+        assert!(
+            delivered.is_empty(),
+            "one request dispatches one graceful apply"
+        );
+        drop(delivered);
+        server.shutdown();
+    }
+
     #[test]
     fn project_open_control_rejects_before_dispatching_to_the_runtime() {
         let runtime = Runtime::new().expect("tokio runtime");

@@ -15,6 +15,26 @@ const TRAY_LOCK: &str = include_str!("../src/cli/tray/lock.rs");
 const OPEN_CLI: &str = include_str!("../src/cli/open.rs");
 
 #[test]
+fn no_tray_skips_native_icon_registration() {
+    let icon = MAIN_RS
+        .split_once("let tray_icon_handle = ")
+        .expect("tray handle")
+        .1;
+    let branch = icon
+        .split_once("TrayIconBuilder::new()")
+        .expect("builder")
+        .0;
+    assert!(
+        branch.contains("if tray_args.no_tray {"),
+        "no-tray must branch before native tray registration"
+    );
+    assert!(
+        branch.contains("None"),
+        "the no-tray branch must not register an icon"
+    );
+}
+
+#[test]
 fn startup_tray_contract_does_not_pin_transitive_dependency_versions() {
     let startup_test = include_str!("startup_tray_performance.rs");
     assert!(
@@ -37,6 +57,35 @@ fn tray_event_loop_does_not_wait_for_project_bootstrap() {
     assert!(
         !before_loop.contains("prepare_front_door_for_path("),
         "managed hook preparation runs Git and must remain inside the bootstrap worker"
+    );
+}
+
+#[test]
+fn tray_browser_process_creation_stays_off_the_event_loop() {
+    let handler = MAIN_RS
+        .rsplit_once("Event::UserEvent(UserEvent::MenuEvent(event)) => {")
+        .expect("native tray handler")
+        .1
+        .split("Event::MainEventsCleared =>")
+        .next()
+        .unwrap();
+    assert!(
+        !handler.contains("open_browser_for_url("),
+        "native browser process creation must not block a tray dispatch"
+    );
+    assert_eq!(handler.matches("request_tray_browser_launch(").count(), 2);
+    assert!(handler.contains("action.browser_url(&browser_url)"));
+    assert!(handler.contains("request_tray_browser_launch(&runtime, &target_url, \"Open\")"));
+    let worker = MAIN_RS
+        .split_once("fn request_tray_browser_launch(")
+        .expect("tray browser worker")
+        .1
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert!(
+        worker.find("spawn_blocking(move ||").unwrap()
+            < worker.find("open_browser_for_url(").unwrap()
     );
 }
 
@@ -84,7 +133,9 @@ fn tray_menu_pins_action_ids() {
     assert!(TRAY_MENU.contains(r#"pub const OPEN: &str = "gwt.tray.open";"#));
     assert!(TRAY_MENU.contains(r#"pub const COPY_URL: &str = "gwt.tray.copy_url";"#));
     assert!(TRAY_MENU.contains(r#"pub const QUIT: &str = "gwt.tray.quit";"#));
-    assert!(TRAY_MENU.contains(r#"pub const ABOUT: &str = "gwt.tray.about";"#));
+    assert!(!TRAY_MENU.contains("pub const ABOUT:"));
+    assert!(TRAY_MENU.contains(r#"pub const OPEN_PROJECT: &str = "gwt.tray.open_project";"#));
+    assert!(TRAY_MENU.contains(r#"pub const CLONE: &str = "gwt.tray.clone";"#));
     assert!(
         !TRAY_MENU.contains("AUTOSTART_TOGGLE"),
         "autostart must live in Settings > System, not in the tray menu"
@@ -96,7 +147,7 @@ fn tray_menu_pins_action_ids() {
 }
 
 #[test]
-fn tray_menu_contract_is_open_copy_url_about_quit() {
+fn tray_menu_contract_opens_hub_intake_without_about() {
     assert!(
         MAIN_RS.contains(r#""Open in browser""#),
         "tray menu must expose Open in browser"
@@ -114,8 +165,8 @@ fn tray_menu_contract_is_open_copy_url_about_quit() {
         "tray menu must build Copy URL label from the root browser URL"
     );
     assert!(
-        MAIN_RS.contains(r#""About GWT""#),
-        "tray menu must expose About GWT"
+        !MAIN_RS.contains(r#""About GWT""#),
+        "tray menu must not expose About GWT"
     );
     assert!(MAIN_RS.contains(r#""Quit""#), "tray menu must expose Quit");
     assert!(
@@ -124,11 +175,11 @@ fn tray_menu_contract_is_open_copy_url_about_quit() {
     );
     assert!(
         !MAIN_RS.contains("PredefinedMenuItem::about"),
-        "About GWT must open browser About, not the OS native About dialog"
+        "tray must not expose an OS native About dialog"
     );
     assert!(
-        MAIN_RS.contains("about_url_for_browser_url(&browser_url)"),
-        "About GWT handler must derive browser_url#about"
+        MAIN_RS.contains(r#""Open Project…""#) && MAIN_RS.contains(r#""Clone from GitHub…""#),
+        "tray menu must expose both direct Hub intake actions"
     );
     assert!(
         MAIN_RS.contains("Some(MenuAction::CopyUrl)"),

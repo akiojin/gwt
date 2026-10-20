@@ -73,8 +73,10 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const windows = page.locator('.workspace-window[data-preset="issue"]');
+      const windows = page.locator('.workspace-window[data-preset="settings"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1120, height: 820 },
@@ -82,52 +84,46 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       await expect(windows.first()).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
-      const labels = surface.locator(".knowledge-monitor-labels");
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const issues = settings.locator('[data-settings-panel="issues"]');
+      const labels = issues.getByLabel("Allowed labels", { exact: true });
+      const openIssues = async () => {
+        await page.locator('[data-surface="issues"]').click();
+        await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
+        await expect(issues).toBeVisible();
+        const options = issues.locator(".settings-issues-options");
+        if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) {
+          await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
+        }
+        await expect(options).toHaveAttribute("open", "");
+      };
       try {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: [] });
         await expectSavedLabels(page, []);
-        await expect(labels.locator("summary")).toContainText("All labels");
-        await labels.locator("summary").click();
-        await expect(labels).toContainText("Empty list allows all labels");
-        await expect(labels).toContainText("any listed label on this terminal");
-        // Reject exactly one GUI write at the socket boundary. The subsequent
-        // edit must travel through the restored socket to the actual backend.
+        await openIssues();
+        await expect(labels).toHaveValue("");
+        // A rejected Settings write must leave the next edit usable.
         await page.evaluate(() => {
           const originalSend = WebSocket.prototype.send;
           WebSocket.prototype.send = function (data) {
             const request = typeof data === "string" ? JSON.parse(data) : null;
             if (request?.kind !== "set_issue_monitor_allowed_labels") return originalSend.call(this, data);
             WebSocket.prototype.send = originalSend;
-            (window as any).__gwtAllowedLabelsRejectedWrite = request;
-            queueMicrotask(() => {
-              for (const event of [
-                { kind: "issue_monitor_allowed_labels_write_failed", request_id: request.request_id, outcome_unknown: false },
-                { kind: "issue_monitor_toast", level: "error", message: "Issue Monitor Busy: allowed labels were not saved." },
-              ]) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
-            });
+            queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+              kind: "issue_monitor_toast", level: "error", message: "Issues Busy: allowed labels were not saved.",
+            }) })));
           };
         });
-        await labels.getByLabel("Allowed label", { exact: true }).fill("rejected-busy");
-        await labels.getByRole("button", { name: "Add label", exact: true }).click();
+        await labels.fill("rejected-busy");
+        await labels.press("Tab");
         await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some((entry: any) =>
-          entry.payload.kind === "issue_monitor_allowed_labels_write_failed"
-          && entry.payload.request_id === (window as any).__gwtAllowedLabelsRejectedWrite?.request_id));
-        expect(await page.evaluate(() => Number.isInteger((window as any).__gwtAllowedLabelsRejectedWrite?.request_id))).toBe(true);
-        await expect(labels.locator("[data-allowed-label]")).toHaveCount(0);
+          entry.payload.kind === "issue_monitor_toast" && entry.payload.message === "Issues Busy: allowed labels were not saved."));
         expect(cli("issue.monitor.status").allowed_labels).toEqual([]);
-        // Both clicks occur before any WebSocket status can be processed.
-        // Commas belong to the second label; neither addition may be lost.
-        await labels.evaluate((section, allowed) => {
-          const input = section.querySelector<HTMLInputElement>('[aria-label="Allowed label"]')!;
-          const add = section.querySelector<HTMLButtonElement>('[data-action="monitor-label-add"]')!;
-          input.value = `  ${allowed}  `;
-          add.click();
-          input.value = "agent, ready";
-          add.click();
-        }, fixture.allowed_label);
-        await expectSavedLabels(page, [fixture.allowed_label, "agent, ready"]);
+        await labels.fill(`  ${fixture.allowed_label} , agent-ready  `);
+        await labels.press("Tab");
+        await expectSavedLabels(page, [fixture.allowed_label, "agent-ready"]);
         const persisted = JSON.parse(await readFile(join(preferences, "issue-monitor.json"), "utf8"));
-        expect(persisted.allowed_labels).toEqual([fixture.allowed_label, "agent, ready"]);
+        expect(persisted.allowed_labels).toEqual([fixture.allowed_label, "agent-ready"]);
 
         // Save requests the next scan. Read its actual admission projection;
         // a changed input or an old status frame is insufficient evidence.
@@ -135,12 +131,8 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
           { timeout: 75_000, intervals: [1_000, 2_000, 5_000] }).toEqual([...fixture.expected_excluded_issues].sort((a, b) => a - b));
         const scanned = await latestStatus(page);
         expect(scanned.label_excluded_count).toBe(fixture.expected_excluded_issues.length);
-        await expect(labels.locator('[data-metric="label-excluded"]')).toContainText(`(${fixture.expected_excluded_issues.length})`);
-        for (const number of fixture.expected_excluded_issues) {
-          await expect(labels.locator('[data-metric="label-excluded"]')).toContainText(`#${number}`);
-        }
         const admission = cli("issue.monitor.status");
-        expect(admission.allowed_labels).toEqual([fixture.allowed_label, "agent, ready"]);
+        expect(admission.allowed_labels).toEqual([fixture.allowed_label, "agent-ready"]);
         expect(admission.label_excluded_issues.slice().sort((a: number, b: number) => a - b))
           .toEqual(fixture.expected_excluded_issues.slice().sort((a, b) => a - b));
         const admitted = admission.inbox.map((issue: any) => issue.issue_number);
@@ -148,29 +140,25 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
         for (const number of fixture.expected_excluded_issues) expect(admitted).not.toContain(number);
 
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-        await expectSavedLabels(page, [fixture.allowed_label, "agent, ready"]);
-        if (!(await labels.evaluate(node => (node as HTMLDetailsElement).open))) await labels.locator("summary").click();
-        await expect(labels.locator("[data-allowed-label]")).toHaveCount(2);
-        const remove = labels.getByRole("button", { name: "Remove allowed label agent, ready", exact: true });
-        await remove.focus();
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
+        await expectSavedLabels(page, [fixture.allowed_label, "agent-ready"]);
+        await openIssues();
+        await expect(labels).toHaveValue(`${fixture.allowed_label}, agent-ready`);
+        await labels.focus();
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
         await page.waitForFunction(before => ((window as any).__gwtPlaywrightMessages ?? [])
           .some((entry: any) => entry.sequence > before && entry.payload.kind === "issue_monitor_status"), cursor);
-        await expect(remove).toBeFocused();
-        expect(await remove.evaluate(node => document.activeElement === node)).toBe(true);
+        await expect(labels).toBeFocused();
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
-        await testInfo.attach(`allowed-labels-${testInfo.project.name}`, { body: await labels.screenshot(), contentType: "image/png" });
-        await labels.evaluate((section, allowed) => {
-          for (const label of ["agent, ready", allowed]) {
-            const row = [...section.querySelectorAll<HTMLElement>('[data-allowed-label]')]
-              .find(node => node.dataset.allowedLabel === label)!;
-            row.querySelector<HTMLButtonElement>("button")!.click();
-          }
-        }, fixture.allowed_label);
+        await testInfo.attach(`allowed-labels-${testInfo.project.name}`, { body: await issues.screenshot(), contentType: "image/png" });
+        await labels.fill("");
+        await labels.press("Tab");
         await expectSavedLabels(page, []);
-        await expect(labels.locator("summary")).toContainText("All labels");
-        await expect(labels.locator('[data-metric="label-excluded"]')).toHaveText("Excluded by labels: 0", { timeout: 75_000 });
+        await expect(labels).toHaveValue("");
+        await expect.poll(() => cli("issue.monitor.status").label_excluded_issues,
+          { timeout: 75_000, intervals: [1_000, 2_000, 5_000] }).toEqual([]);
         const after = cli("issue.monitor.status");
         expect(after.enabled).toBe(false);
         expect(after.autonomous_mode).toBe(false);

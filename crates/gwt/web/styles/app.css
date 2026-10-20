@@ -465,7 +465,6 @@ body {
   background: var(--color-surface);
 }
 
-.workspace-window.surface-file-tree,
 .workspace-window.surface-agent-kanban,
 .workspace-window.surface-branches,
 .workspace-window.surface-board,
@@ -473,9 +472,9 @@ body {
 .workspace-window.surface-mock,
 .workspace-window.surface-work,
 .workspace-window.surface-knowledge,
+.workspace-window.surface-settings,
 .workspace-window.surface-index,
-.workspace-window.surface-profile,
-.workspace-window.surface-console {
+.workspace-window.surface-profile {
   background: var(--color-surface);
 }
 
@@ -497,17 +496,16 @@ body {
   border-bottom: 1px solid var(--color-border);
 }
 
-.surface-file-tree .titlebar,
 .surface-agent-kanban .titlebar,
 .surface-branches .titlebar,
 .surface-board .titlebar,
 .surface-logs .titlebar,
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
+.surface-settings .titlebar,
 .surface-index .titlebar,
 .surface-work .titlebar,
-.surface-profile .titlebar,
-.surface-console .titlebar {
+.surface-profile .titlebar {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   border-bottom: 1px solid var(--color-border);
@@ -625,16 +623,15 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .status-chip,
 .surface-agent-kanban .status-chip,
 .surface-branches .status-chip,
 .surface-board .status-chip,
 .surface-logs .status-chip,
 .surface-knowledge .status-chip,
+.surface-settings .status-chip,
 .surface-index .status-chip,
 .surface-work .status-chip,
 .surface-profile .status-chip,
-.surface-console .status-chip,
 .surface-mock .status-chip {
   color: var(--color-text);
 }
@@ -691,16 +688,15 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .icon-button,
 .surface-agent-kanban .icon-button,
 .surface-branches .icon-button,
 .surface-board .icon-button,
 .surface-logs .icon-button,
 .surface-knowledge .icon-button,
+.surface-settings .icon-button,
 .surface-index .icon-button,
 .surface-work .icon-button,
 .surface-profile .icon-button,
-.surface-console .icon-button,
 .surface-mock .icon-button {
   color: var(--color-text);
 }
@@ -793,15 +789,14 @@ body {
   color: #e8eaed;
 }
 
-.surface-file-tree .window-body,
 .surface-agent-kanban .window-body,
 .surface-branches .window-body,
 .surface-board .window-body,
 .surface-logs .window-body,
 .surface-knowledge .window-body,
+.surface-settings .window-body,
 .surface-index .window-body,
 .surface-work .window-body,
-.surface-console .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
@@ -1183,7 +1178,6 @@ body {
   87.5% { content: "⣷"; }
 }
 
-.file-tree-root,
 .branch-list-root,
 .board-root,
 .logs-root,
@@ -2013,7 +2007,6 @@ body {
   cursor: default;
 }
 
-.file-tree-path,
 .branch-heading,
 .knowledge-heading,
 .mock-heading {
@@ -2030,7 +2023,7 @@ body {
   text-overflow: ellipsis;
 }
 
-/* `.file-tree-scroll`, `.branch-scroll`, and `.mock-scroll` are now
+/* `.branch-scroll` and `.mock-scroll` are now
    layered on top of `.workspace-scroll` via additive class names. */
 
 .knowledge-search {
@@ -2098,6 +2091,12 @@ body {
 
 .knowledge-list {
   display: grid;
+}
+
+.knowledge-virtual-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+  overflow-anchor: none;
 }
 
 .knowledge-state-filter {
@@ -2255,6 +2254,60 @@ body {
 .knowledge-monitor-bar [data-action="monitor-settings"] {
   margin-left: auto;
 }
+
+/* Issue #5284: linked status only; diagnostics live in notifications. */
+.knowledge-notification-badge {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.knowledge-monitor-capacity-badge[data-tone="warning"] {
+  color: var(--color-state-needs-input);
+  border-color: var(--color-state-needs-input);
+}
+
+.knowledge-monitor-capacity-badge[data-tone="info"] {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+.knowledge-notification-badge[hidden] {
+  display: none;
+}
+
+.knowledge-monitor-pill:not(:disabled) {
+  cursor: pointer;
+}
+
+.knowledge-monitor-pill:disabled {
+  opacity: 1;
+}
+
+.knowledge-notification-badge:focus-visible,
+.notification-center__item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.notification-center__details {
+  grid-column: 2 / -1;
+  min-width: 0;
+  font-size: var(--type-sm);
+}
+
+.notification-center__details > summary {
+  cursor: pointer;
+}
+
+.notification-center__details-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-top: var(--space-2);
+}
+
 
 .issue-new-body {
   display: grid;
@@ -4131,6 +4184,10 @@ body {
 .notification-center-backdrop {
   z-index: var(--z-rail);
 }
+.notification-center-drawer[hidden],
+.notification-center-backdrop[hidden] {
+  display: none;
+}
 .notification-center__actions {
   display: flex;
   align-items: center;
@@ -4558,61 +4615,8 @@ body {
   container-type: inline-size;
 }
 
-.file-tree-list,
 .branch-list {
   padding: 8px 0;
-}
-
-.file-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 0 12px;
-  font-family: var(--font-mono);
-  font-size: var(--type-sm);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.file-tree-row:hover {
-  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-}
-
-.file-tree-row.selected {
-  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-}
-
-.tree-caret {
-  width: 12px;
-  color: var(--color-text-muted);
-  text-align: center;
-}
-
-.tree-icon {
-  width: 16px;
-  color: var(--agent-codex);
-}
-
-.tree-icon.file {
-  color: var(--color-text-muted);
-}
-
-.tree-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-tree-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--color-border);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
 }
 
 .branch-row {
@@ -6791,35 +6795,6 @@ body {
   white-space: nowrap;
 }
 
-/* Issue #4538 AC-3: Project header link back to the Hub. It opens a new
-   browser tab so the Project tab keeps its URL. */
-.project-home-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  margin-right: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  color: var(--color-link);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
-  text-decoration: none;
-}
-
-.project-home-link:hover {
-  color: var(--color-link-hover);
-  border-color: var(--color-border-strong);
-}
-
-.project-home-link:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the
    Operator shell, so the body owns scrolling and the canvas background. */
 body.route-body {
@@ -7032,7 +7007,7 @@ body.route-body {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-.knowledge-monitor-controls { flex: 1; }
+.knowledge-monitor-controls { flex: 0 0 auto; }
 .knowledge-monitor-status { padding-right: var(--space-3); border-right: 1px solid var(--color-border); }
 .knowledge-monitor-refill-limit { display: flex; align-items: center; gap: var(--space-1); font-size: var(--type-xs); }
 .knowledge-monitor-refill-limit input { width: 4em; }
@@ -7079,5 +7054,69 @@ body.route-body {
 
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }
+/* Issue #5321: compact summary and selection preview. */
+.issue-bridge-root { container-type: inline-size; }
+.issue-bridge-root .knowledge-monitor-bar {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+}
+.issue-bridge-root .knowledge-monitor-status,
+.issue-bridge-root .knowledge-monitor-controls {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+.issue-bridge-root .knowledge-monitor-status {
+  padding-right: 0;
+  border-right: 0;
+}
+.issue-bridge-root .knowledge-monitor-controls { margin-left: 0; }
+.issue-bridge-root .knowledge-monitor-capacity-badge {
+  order: 0;
+  flex-shrink: 1;
+  max-width: 22ch;
+}
+.issue-bridge-root .knowledge-monitor-controls { order: 1; }
+.issue-bridge-root .knowledge-monitor-bar [data-action="monitor-settings"] { margin-left: 0; }
+.issue-bridge-root .issue-list-shell { grid-template-columns: minmax(0, 1fr) minmax(320px, 34%); }
+.issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+.issue-bridge-root .knowledge-list-pane { grid-area: 1 / 1; }
+.issue-bridge-root .modal-shell.issue-preview-shell {
+  grid-area: 1 / 2;
+  width: auto;
+  max-height: none;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-radius: 0;
+  box-shadow: none;
+}
+.issue-bridge-root .modal-header.issue-detail-tabs { align-items: center; }
+.issue-preview-close { margin-left: auto; }
+.issue-queue-column .knowledge-row-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.issue-preview-shell .knowledge-detail-title {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+@container (max-width: 1100px) {
+  .issue-bridge-root[data-view-mode="list"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+  .issue-bridge-root[data-view-mode="list"] .modal-shell.issue-preview-shell {
+    grid-area: 1 / 1;
+    justify-self: end;
+    width: min(460px, 85%);
+    z-index: 1;
+    box-shadow: var(--shadow-2);
+  }
+}
+/* /Issue #5321 */
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }

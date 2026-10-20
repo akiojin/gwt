@@ -127,6 +127,7 @@ pub enum IssueCommand {
         title: String,
         body: String,
         labels: Vec<String>,
+        owner_check: Option<super::hook::pm_spec_survey::IssueOwnerCheck>,
     },
     /// Issue #3865: update a plain Issue in place. Every field is optional and
     /// only the supplied ones are sent; `body` is a whole-body replacement and
@@ -225,12 +226,11 @@ pub enum IssueCommand {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Explicitly clear the manual concurrency override.
+        max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
-        /// Issue #3906 AC-1: explicit auto-apply-updates override (`None`
-        /// leaves the stored value untouched).
-        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
@@ -311,6 +311,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        force: bool,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.
@@ -372,6 +373,8 @@ pub enum IssueCommand {
 /// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
+    /// Narrow Ready-creation path backed by exact canonical GitHub CI.
+    CreateFromCi(crate::cli::pr::ci_delivery::CiCreateRequest),
     Current,
     /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
     HeadCheck {
@@ -411,12 +414,14 @@ pub enum PrCommand {
     },
     Edit {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
     EditBody {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         body: Option<String>,
         add_labels: Vec<String>,
@@ -429,6 +434,10 @@ pub enum PrCommand {
     },
     Draft {
         number: u64,
+    },
+    Close {
+        number: u64,
+        comment: Option<String>,
     },
     /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
     /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict

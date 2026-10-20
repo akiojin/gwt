@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22split-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function knowledgeEntry(number, overrides = {}) {
@@ -155,6 +155,7 @@ function applyEntries(surface, load, entries, selectedNumber) {
     empty_message: "",
     refresh_enabled: true,
   });
+  if (selectedNumber != null) surface.requestKnowledgeDetail("win-1", "issue", selectedNumber);
 }
 
 function click(node) {

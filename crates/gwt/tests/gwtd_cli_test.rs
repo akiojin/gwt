@@ -22,7 +22,14 @@ use gwt_core::{
 use tempfile::TempDir;
 
 fn isolated_gwtd_command() -> std::process::Command {
+    // The application child is not a Cargo test executable. Isolate its
+    // startup perf/error-ledger writes as well as the test's explicit files.
+    static HOME: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| tempfile::tempdir().expect("child home"));
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    command
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path());
     for key in [
         "GWT_BIN_PATH",
         "GWT_BROWSER_URL_FILE",

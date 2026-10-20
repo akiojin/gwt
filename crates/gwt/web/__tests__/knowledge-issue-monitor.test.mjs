@@ -22,7 +22,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -65,6 +65,9 @@ async function makeFixture(options = {}) {
   const windowData = { id: "win-1", preset: "issue" };
   const windowMap = new Map([[windowData.id, body]]);
   const sent = [];
+  const notices = [];
+  const opened = [];
+  const reports = [];
   const surface = mod.createKnowledgeKanbanSurface({
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
@@ -84,12 +87,117 @@ async function makeFixture(options = {}) {
     openIssueLaunchWizard() {},
     visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
+    reportSurfaceNotice: notice => notices.push(notice),
+    reportSurfaceError: error => reports.push(error),
+    openSurfaceNotice: key => { opened.push(key); return true; },
     ...options,
   });
   surface.mountKnowledgeWindow(windowData, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
   assert.ok(load, "Issue surface requests its cache-backed rows");
-  return { body, document, mod, sent, surface, load, windowMap };
+  return { body, document, mod, sent, surface, load, windowMap, notices, opened, reports };
+}
+
+test("Issue #5287: inbox-first startup renders every column despite GUI error and enriches late cache rows", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ enabled: true, state: "error", terminal_queue: [{ number: 2 }] });
+  surface.applyIssueMonitorInbox([1, 2, 3].map(number => ({
+    issue: { number, title: `Inbox issue ${number}`, state: "open", labels: ["bug"] },
+    state: number === 3 ? "launched" : "queued",
+    exclusion_reason: number === 1 ? "Held for acceptance review" : null,
+  })));
+  for (const [number, phase] of [[1, "backlog"], [2, "queued"], [3, "active"]]) {
+    assert.equal(body.querySelectorAll(`[data-queue-column="${phase}"] [data-issue-number="${number}"]`).length, 1);
+  }
+  assert.match(body.querySelector('[data-issue-number="1"]').textContent, /Held for acceptance review/);
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [{ ...knowledgeEntry(2, "queued", 1), state: "closed", title: "Enriched cache issue" }],
+    refresh_enabled: true });
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 3, "late cache must not remove inbox-only rows or duplicate identities");
+  assert.match(body.querySelector('[data-issue-number="2"]').textContent, /Enriched cache issue/);
+  assert.equal(body.querySelectorAll('[data-queue-column="queued"] [data-issue-number="2"]').length, 1,
+    "the current open inbox wins over stale cached closure");
+  surface.applyIssueMonitorInbox([]);
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 1, "removed inbox-only rows must not become sticky cache entries");
+});
+
+test("Issue #5287: an initial load failure shows its cause instead of empty columns and reports a ledger diagnostic", async (t) => {
+  let missing = false;
+  const opened = [];
+  const { body, surface, load, sent, reports } = await makeFixture({ openSurfaceNotice(key) {
+    opened.push(key);
+    const found = !missing;
+    missing = false;
+    return found;
+  } });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, message: "Issue cache could not be read" });
+  const badge = body.querySelector('.knowledge-list .knowledge-notification-badge');
+  assert.match(badge?.textContent || "", /Issue load failed.*Details/);
+  assert.doesNotMatch(body.textContent, /Issue cache could not be read/);
+  assert.equal(reports.at(-1).message, "Issue cache could not be read");
+  badge.click();
+  assert.equal(opened.at(-1), "issue-window:win-1:load");
+  const reportCount = reports.length;
+  missing = true; // The operator cleared or dismissed the existing row.
+  badge.click();
+  assert.equal(reports.length, reportCount + 1);
+  assert.equal(reports.at(-1).message, "Issue cache could not be read");
+  assert.deepEqual(opened, Array(3).fill("issue-window:win-1:load"));
+  assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.id === "win-1" &&
+    event.stage === "load" && event.message === "Issue cache could not be read"));
+});
+
+test("Issue #5287: a failed Issue renderer displays and reports the cause, then recovers", async (t) => {
+  let failRow = false;
+  const { body, surface, load, sent } = await makeFixture({ createNode(...args) {
+    if (failRow && String(args[1]).split(" ").includes("knowledge-row")) {
+      failRow = false;
+      throw new Error("Issue card renderer failed");
+    }
+    return createNode(globalThis.document, ...args);
+  } });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  failRow = true;
+  assert.throws(() => surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(1, "queued")], refresh_enabled: true }), /Issue card renderer failed/);
+  assert.match(body.querySelector('.knowledge-list .knowledge-notification-badge')?.textContent || "", /Issue rendering failed.*Details/);
+  assert.doesNotMatch(body.textContent, /Issue card renderer failed/);
+  assert.ok(sent.some(event => event.kind === "report_knowledge_error" && event.stage === "render" &&
+    event.message === "Issue card renderer failed"));
+  surface.applyIssueMonitorStatus({ enabled: true, state: "idle" });
+  assert.equal(body.querySelectorAll('.knowledge-list [role="alert"]').length, 0);
+  assert.equal(body.querySelectorAll(".knowledge-row").length, 1);
+});
+
+for (const stage of ["load", "render"]) {
+  test(`Issue #5287: detail-only ${stage} failure stays visible and reaches diagnostics`, async (t) => {
+    const { body, surface, load, sent, reports, opened } = await makeFixture({
+      createKnowledgeMarkdownBody() { throw new Error("detail Markdown failed"); },
+    });
+    t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+    surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: load.request_id, entries: [knowledgeEntry(5287, "queued", 1)], refresh_enabled: true });
+    body.querySelector('[data-issue-number="5287"] .knowledge-row-select').click();
+    const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+    const event = { id: "win-1", knowledge_kind: "issue", request_id: request.request_id };
+    if (stage === "load") {
+      surface.applyKnowledgeReceiveEvent({ ...event, kind: "knowledge_error", message: "detail load failed" });
+    } else {
+      assert.throws(() => surface.applyKnowledgeReceiveEvent({ ...event, kind: "knowledge_detail",
+        detail: { number: 5287, title: "Detail", state: "open", labels: [],
+          sections: [{ title: "Description", body: "Markdown" }], related_works: [] } }), /detail Markdown failed/);
+    }
+    assert.match(body.querySelector('.knowledge-detail-pane .knowledge-notification-badge')?.textContent || "", /Issue .* failed.*Details/);
+    assert.doesNotMatch(body.querySelector(".knowledge-detail-pane").textContent, /detail .* failed/);
+    assert.ok(reports.some(report => report.key === `issue-window:win-1:${stage}` && report.message.includes("detail")));
+    body.querySelector('.knowledge-detail-pane .knowledge-notification-badge').click();
+    assert.equal(opened.at(-1), `issue-window:win-1:${stage}`);
+    assert.ok(sent.some(message => message.kind === "report_knowledge_error" && message.stage === stage
+      && message.message.includes("detail")));
+  });
 }
 
 test("a failed Issue window renderer does not leave another window on the previous inbox", async (t) => {
@@ -121,7 +229,7 @@ test("a failed Issue window renderer does not leave another window on the previo
 test("a failed Monitor notification cannot prevent the controls from reading committed status", async (t) => {
   const { body, surface } = await makeFixture({ reportSurfaceError() { throw new Error("notification failed"); } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  assert.throws(() => surface.applyIssueMonitorStatus({ enabled: true, state: "active", last_error: "scan failed" }), /notification failed/);
+  assert.throws(() => surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 1, active_count: 1, max_active_agents: 2, last_error: "scan failed" }), /notification failed/);
   assert.equal(monitorBand(body).pill.textContent, "Running");
 });
 
@@ -224,7 +332,7 @@ test("Issue Monitor band presents and clears the quota-hold provider and reset",
     },
   });
 
-  assert.equal(band.text(), "Quota hold | Queue 3 | Active 0/2");
+  assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 0/2");
   assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z");
 
   surface.applyIssueMonitorStatus({
@@ -292,242 +400,110 @@ test("Issue Monitor renders the JSON gui_status contract and follows updated lim
   surface.applyIssueMonitorStatus(response.gui_status);
   assert.match(monitorBand(body).text(),
     new RegExp(`Queue ${response.queue.length} \\| Active ${response.active_launches.length}/${response.max_active}`));
-  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "4");
-  assert.equal(body.querySelector('[data-action="monitor-auto-apply"]').dataset.enabled, "true");
   surface.applyIssueMonitorStatus({ ...response.gui_status, max_active_agents: 5 });
-  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "5");
+  assert.match(monitorBand(body).text(), /Active 1\/5/);
 });
 
-test("Issue #4158: allowed labels show any-of admission, all-label default and excluded issues", async (t) => {
-  const { body, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  assert.ok(labels, "the Monitor exposes allowed-label settings");
-  assert.equal(labels.tagName, "DETAILS", "reuse the native disclosure primitive");
-  assert.ok(labels.classList.contains("knowledge-monitor-candidate"), "reuse the Operator card primitive");
-  assert.match(labels.textContent, /Empty list allows all labels/);
-  assert.match(labels.textContent, /any listed label on this terminal/);
-  assert.match(labels.querySelector("summary").textContent, /All labels/);
+function capacityStatus(overrides = {}) {
+  return {
+    enabled: true, state: "idle", active_count: 0, max_active_agents: 3,
+    max_active_agents_override: null,
+    agent_capacity: {
+      measurement_complete: true, machine_budget: 6, recommended_worker_limit: 3,
+      recommended_implementation_count: 4, recommended_total_count: 5,
+      machine_live_agents: 5, own_live_agents: 3, own_pm_agents: 1, other_live_agents: 2,
+      gui_cpu_millicores: 375, limiting_constraint: "cpu",
+      reason: "CPU limits capacity after GUI, other projects and PM reservations.",
+      constraints: [{ resource: "cpu", capacity: 6, binding: true, reason: "GUI CPU reserved" }],
+    },
+    ...overrides,
+  };
+}
 
-  surface.applyIssueMonitorStatus({
-    allowed_labels: ["agent:mac", "ready, now"],
-    label_excluded_count: 2,
-    label_excluded_issues: [42, 43],
-  });
-  assert.deepEqual([...labels.querySelectorAll("[data-allowed-label]")].map(node => node.dataset.allowedLabel),
-    ["agent:mac", "ready, now"]);
-  assert.equal(labels.querySelector("summary").textContent, "Allowed labels (2) · Excluded 2");
-  assert.equal(labels.querySelector('[data-metric="label-excluded"]').textContent,
-    "Excluded by labels (2): #42, #43");
-  surface.applyIssueMonitorStatus({ allowed_labels: [], label_excluded_count: 0, label_excluded_issues: [] });
-  assert.equal(labels.querySelector("summary").textContent, "Allowed labels · All labels · Excluded 0");
-  assert.equal(labels.querySelector('[data-metric="label-excluded"]').textContent, "Excluded by labels: 0");
+test("Issue #3620: capacity details open in the center without generating passive healthy notices", async (t) => {
+  const { body, surface, notices, opened } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const status = capacityStatus({ max_active_agents: 0 });
+  status.agent_capacity.recommended_worker_limit = 0;
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/0");
+  assert.equal(notices.length, 0, "healthy capacity does not create a notification on opening a window");
+  body.querySelector(".knowledge-monitor-capacity-badge").click();
+  assert.deepEqual(opened, ["issue-monitor:capacity"]);
+  assert.match(notices[0].details, /0 monitor workers.*4 implementation agents.*5 total including PM/);
+  assert.match(notices[0].details, /Machine budget: 6.*Machine live: 5.*This project: 3.*PM: 1.*Other projects: 2/);
+  assert.match(notices[0].details, /GUI CPU reserved: 0\.375 cores/);
+  assert.match(notices[0].details, /CPU: 6.*limiting.*GUI CPU reserved/);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity"), null, "no inline diagnostic block");
 });
 
-test("Issue #4158: label additions and removals use the latest server list without optimistic display", async (t) => {
-  const { body, sent, surface } = await makeFixture();
+test("Issue #3620: capacity badges follow confirmed manual and automatic limits", async (t) => {
+  const { body, surface, notices } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac"], label_excluded_count: 0, label_excluded_issues: [] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  assert.ok(labels, "the Monitor exposes allowed-label settings");
-  const input = labels.querySelector('[aria-label="Allowed label"]');
-  input.value = "  ready, now  ";
-  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac", "ready"] });
-  assert.equal(input.value, "  ready, now  ", "server refresh preserves a typed label");
-  labels.querySelector('[data-action="monitor-label-add"]').click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_allowed_labels", allowed_labels: ["agent:mac", "ready", "ready, now"], request_id: 1,
-  });
-  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 2, "wait for server confirmation");
-  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac", "ready", "ready, now"] });
-  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 3);
-  labels.querySelector('[aria-label="Remove allowed label ready, now"]').click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_allowed_labels", allowed_labels: ["agent:mac", "ready"], request_id: 2,
-  });
-  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 3, "removal waits for server confirmation");
+  surface.applyIssueMonitorStatus(capacityStatus({ max_active_agents: 7, max_active_agents_override: 7 }));
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/7");
+  const badge = body.querySelector(".knowledge-monitor-capacity-badge");
+  assert.equal(badge.hidden, false);
+  assert.match(badge.textContent, /Over recommended.*Details/);
+  assert.equal(badge.dataset.tone, "info");
+  assert.match(notices.at(-1).message, /Lower Max active if slow/);
+  assert.match(notices.at(-1).details, /Verification may not finish/);
+  surface.applyIssueMonitorStatus(capacityStatus());
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/3");
+  surface.applyIssueMonitorStatus({ max_active_agents: 3, max_active_agents_override: null });
+  assert.equal(badge.hidden, true, "omitted capacity cannot retain a stale badge");
 });
 
-test("Issue #4158: empty and duplicate label input cannot replace the saved allowlist", async (t) => {
-  const { body, sent, surface } = await makeFixture();
+test("Issue #5284: capacity uses one keyed notice with unique center-only diagnostics and a linked badge", async (t) => {
+  const { body, surface, notices, opened } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["agent:mac"] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  assert.ok(labels, "the Monitor exposes allowed-label settings");
-  const input = labels.querySelector('[aria-label="Allowed label"]');
-  const before = sent.length;
-  for (const value of ["   ", "  AGENT:MAC  "]) {
-    input.value = value;
-    labels.querySelector('[data-action="monitor-label-add"]').click();
-    assert.equal(sent.length, before);
-    assert.notEqual(labels.querySelector('[data-label-message]').textContent, "");
-  }
+  const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
+  const reason = `inventory_complete=false; own_pm=0; child_identity_missing ×37; target: /Users/example/target; ${diskReason}; ${diskReason}`;
+  const status = capacityStatus({ max_active_agents: 9, max_active_agents_override: 9 });
+  status.agent_capacity = { ...status.agent_capacity, measurement_complete: false, machine_budget: null,
+    recommended_worker_limit: 0, reason, constraints: [
+      { resource: "disk", capacity: null, binding: true, reason: diskReason },
+    ] };
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/9");
+  const badge = body.querySelector(".knowledge-monitor-capacity-badge");
+  assert.equal(badge.textContent, "Capacity pending · Details");
+  assert.equal(badge.dataset.tone, "info");
+  assert.doesNotMatch(body.textContent, /inventory_complete|own_pm|child_identity|\/Users\//);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity-warning"), null);
+  assert.equal(body.querySelector(".knowledge-monitor-capacity"), null);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].key, "issue-monitor:capacity");
+  assert.equal(notices[0].level, "info");
+  assert.match(notices[0].message, /Capacity pending.*manual limit 9.*no action needed/i);
+  assert.match(notices[0].details, /Machine budget: unknown[\s\S]*Disk: unknown/);
+  assert.ok(notices[0].details.includes("/Users/example/target"));
+  assert.equal(notices[0].details.split(diskReason).length - 1, 1);
+  assert.equal(notices[0].details.split("child_identity_missing").length - 1, 1);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(notices.length, 1, "identical broadcasts do not report another occurrence");
+  badge.click();
+  assert.equal(opened.at(-1), "issue-monitor:capacity");
+  surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 9 });
+  assert.equal(badge.dataset.tone, "info");
+  assert.equal(notices.at(-1).level, "info");
+  assert.match(notices.at(-1).message, /Auto limit 9 retained/);
+  surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 0 });
+  assert.equal(badge.dataset.tone, "warning");
+  assert.equal(notices.at(-1).key, notices[0].key);
+  assert.equal(notices.at(-1).level, "warn");
+  assert.match(notices.at(-1).message, /Wait or set Max active manually/);
 });
 
-test("Issue #4158: rapid label edits serialize the latest intent across acknowledgements", async (t) => {
-  const { body, sent, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client"] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  const input = labels.querySelector('[aria-label="Allowed label"]');
-  const add = labels.querySelector('[data-action="monitor-label-add"]');
-  input.value = "Tools";
-  add.click();
-  const beforeCoalescedAdd = sent.length;
-  input.value = "Docs";
-  add.click();
-  assert.equal(sent.length, beforeCoalescedAdd, "only one replacement is in flight");
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Client", "Tools"]);
-  assert.equal(labels.querySelectorAll("[data-allowed-label]").length, 2, "render the confirmed server list only");
-  const beforeDuplicate = sent.length;
-  input.value = "docs";
-  add.click();
-  assert.equal(sent.length, beforeDuplicate, "a pending addition already counts as a duplicate");
-
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client", "Tools"] });
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Client", "Tools", "Docs"], "ack sends the coalesced latest list");
-  const beforeCoalescedRemove = sent.length;
-  labels.querySelector('[aria-label="Remove allowed label Server"]').click();
-  labels.querySelector('[aria-label="Remove allowed label Client"]').click();
-  assert.equal(sent.length, beforeCoalescedRemove, "removals wait for the current replacement");
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Client", "Tools", "Docs"] });
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Tools", "Docs"], "a rapid removal cannot restore Server");
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs"] });
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs", "Other"] });
-  input.value = "Next";
-  add.click();
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Tools", "Docs", "Other", "Next"], "matching ack clears pending intent");
-
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Docs", "Other", "Next"] });
-  surface.applyIssueMonitorStatus({ allowed_labels: ["A", "B"] });
-  const beforeABA = sent.filter(event => event.kind === "set_issue_monitor_allowed_labels").length;
-  labels.querySelector('[aria-label="Remove allowed label B"]').click();
-  input.value = "B";
-  add.click();
-  labels.querySelector('[aria-label="Remove allowed label B"]').click();
-  const abaWrites = sent.filter(event => event.kind === "set_issue_monitor_allowed_labels").slice(beforeABA);
-  surface.applyIssueMonitorStatus({ allowed_labels: abaWrites[0].allowed_labels });
-  if (abaWrites[1]) surface.applyIssueMonitorStatus({ allowed_labels: abaWrites[1].allowed_labels });
-  input.value = "C";
-  add.click();
-  assert.deepEqual(sent.at(-1).allowed_labels, ["A", "C"], "an older ABA acknowledgement cannot restore removed B");
-  assert.deepEqual(abaWrites.map(event => event.allowed_labels), [["A"]], "ABA edits coalesce behind one replacement");
-});
-
-test("Issue #4158: reconnect and closing the Issue bridge discard unconfirmed label intent", async (t) => {
-  const { body, sent, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
-  let labels = body.querySelector(".knowledge-monitor-labels");
-  labels.querySelector('[aria-label="Allowed label"]').value = "  Tools  ";
-  labels.querySelector('[data-action="monitor-label-add"]').click();
-  surface.handleKnowledgeTransportChange(false);
-  surface.handleKnowledgeTransportChange(true);
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Remote"] });
-  labels.querySelector('[aria-label="Allowed label"]').value = "Next";
-  labels.querySelector('[data-action="monitor-label-add"]').click();
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Remote", "Next"], "reconnect uses fresh saved labels");
-
-  surface.clearKnowledgeBridgeState("win-1");
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Restored"] });
-  surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
-  labels = body.querySelector(".knowledge-monitor-labels");
-  labels.querySelector('[aria-label="Allowed label"]').value = "Reopened";
-  labels.querySelector('[data-action="monitor-label-add"]').click();
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Restored", "Reopened"], "new Issue view uses fresh saved labels");
-});
-
-test("Issue #4158: a correlated rejection releases edits and stale failures cannot release a newer save", async (t) => {
-  const { body, sent, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  const input = labels.querySelector('[aria-label="Allowed label"]');
-  const add = labels.querySelector('[data-action="monitor-label-add"]');
-  const writes = () => sent.filter(event => event.kind === "set_issue_monitor_allowed_labels");
-  const fail = (request, outcome_unknown = false) => surface.applyKnowledgeReceiveEvent({
-    kind: "issue_monitor_allowed_labels_write_failed", request_id: request.request_id ?? 1, outcome_unknown,
-  });
-  input.value = "Tools";
-  add.click();
-  const rejected = writes().at(-1);
-  input.value = "Coalesced";
-  add.click();
-  assert.equal(writes().length, 1, "the rejected save also owns any coalesced unsaved edits");
-  fail(rejected);
-  assert.equal(sent.at(-1).kind, "list_issue_monitor", "rejection refreshes the confirmed server state");
-  input.value = "Docs";
-  add.click();
-  assert.equal(writes().length, 2, "rejection must not hold the next user edit indefinitely");
-  const current = writes().at(-1);
-  assert.deepEqual(current.allowed_labels, ["Server", "Docs"], "failed edits do not count as saved labels");
-  assert.notEqual(current.request_id, rejected.request_id);
-  assert.ok(current.request_id > rejected.request_id, "write IDs increase after rejection");
-  fail(rejected);
-  input.value = "Next";
-  add.click();
-  assert.equal(writes().length, 2, "an old rejection cannot release the current save");
-  surface.applyIssueMonitorStatus({ allowed_labels: current.allowed_labels });
-  assert.deepEqual(writes().at(-1).allowed_labels, ["Server", "Docs", "Next"]);
-
-  surface.handleKnowledgeTransportChange(false);
-  surface.handleKnowledgeTransportChange(true);
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Remote"] });
-  input.value = "Reset";
-  add.click();
-  const afterReset = writes().at(-1);
-  assert.ok(afterReset.request_id > current.request_id, "transport resets never reuse write IDs");
-  const beforeStale = writes().length;
-  fail(current);
-  input.value = "Latest";
-  add.click();
-  assert.equal(writes().length, beforeStale, "request identities must not be reused after a reset");
-  surface.applyIssueMonitorStatus({ allowed_labels: afterReset.allowed_labels });
-  assert.deepEqual(writes().at(-1).allowed_labels, ["Server", "Remote", "Reset", "Latest"]);
-});
-
-test("Issue #4158: an uncertain label write retains intent while requesting authoritative status", async (t) => {
-  const { body, sent, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  const input = labels.querySelector('[aria-label="Allowed label"]');
-  const add = labels.querySelector('[data-action="monitor-label-add"]');
-  input.value = "Tools";
-  add.click();
-  const uncertain = sent.at(-1);
-  surface.applyKnowledgeReceiveEvent({ kind: "issue_monitor_allowed_labels_write_failed",
-    request_id: uncertain.request_id ?? 1, outcome_unknown: true });
-  assert.equal(sent.at(-1).kind, "list_issue_monitor");
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
-  input.value = "Docs";
-  add.click();
-  assert.equal(sent.filter(event => event.kind === "set_issue_monitor_allowed_labels").length, 1,
-    "an uncertain command can still commit, so the next intent must stay serialized");
-  surface.applyIssueMonitorStatus({ allowed_labels: uncertain.allowed_labels });
-  assert.deepEqual(sent.at(-1).allowed_labels, ["Server", "Tools", "Docs"]);
-});
-
-test("Issue #4158: status refresh retains the focused removal node and returns focus when its label disappears", async (t) => {
-  const { body, document, surface } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Tools"] });
-  const labels = body.querySelector(".knowledge-monitor-labels");
-  const remove = labels.querySelector('[aria-label="Remove allowed label Tools"]');
-  const summary = labels.querySelector("summary");
-  let focused = remove;
-  Object.defineProperty(document, "activeElement", { configurable: true, get: () => focused });
-  remove.focus = () => { focused = remove; };
-  summary.focus = () => { focused = summary; };
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server", "Tools"], label_excluded_count: 1 });
-  assert.ok(labels.querySelector('[aria-label="Remove allowed label Tools"]') === remove, "refresh reuses the focused button");
-  assert.equal(remove.isConnected, true);
-  assert.ok(document.activeElement === remove);
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Tools", "Server"] });
-  assert.ok(labels.querySelector('[aria-label="Remove allowed label Tools"]') === remove, "server reorder also reuses the button");
-  assert.ok(document.activeElement === remove);
-  surface.applyIssueMonitorStatus({ allowed_labels: ["Server"] });
-  assert.ok(document.activeElement === summary, "a removed focused label returns focus to the disclosure");
+test("Issue #3620: the Operator strip preserves a zero effective worker cap", async () => {
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { applyIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
+  applyIssueMonitorStatus(document, { enabled: true, state: "idle", queue_len: 2, active_count: 0, max_active_agents: 0 });
+  assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
 });
 
 test("Issue Monitor band preserves higher-priority states around quota-hold metadata", async (t) => {
@@ -550,7 +526,7 @@ test("Issue Monitor band preserves higher-priority states around quota-hold meta
   });
 
   assert.equal(band.text(), "⚠ Error | Queue 3 | Active 0/2");
-  assert.equal(band.pill.title, "issue #3785: failed");
+  assert.equal(band.pill.title, "Details in notifications");
   // FR-017: no red monitor banner; the error text is read in the
   // notification center, and the pill only says that one exists.
   assert.equal(body.querySelector(".knowledge-monitor-error"), null);
@@ -578,7 +554,7 @@ test("Issue Monitor band preserves higher-priority states around quota-hold meta
       quota_hold: quotaHold,
     });
 
-    assert.equal(band.text(), "Quota hold | Queue 3 | Active 1/2");
+    assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 1/2");
     assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z");
   }
 
@@ -678,13 +654,11 @@ test("Issue rows render monitor projections and send controls from the full cano
     position: 0,
   });
 
-  const maxActive = body.querySelector(".knowledge-monitor-max-active input");
-  maxActive.value = "4";
-  maxActive.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_max_active_agents",
-    max_active_agents: 4,
-  });
+  for (const selector of [
+    ".knowledge-monitor-max-active", ".knowledge-monitor-labels", ".knowledge-monitor-pool",
+    '[data-action="monitor-auto-apply"]', '[data-action="monitor-auto-refill"]',
+    '[data-action="monitor-capacity-auto"]',
+  ]) assert.equal(body.querySelector(selector), null, `${selector} belongs in Settings`);
 
   body.querySelector('[data-action="monitor-toggle"]').click();
   assert.deepEqual(sent.at(-1), {
@@ -696,15 +670,12 @@ test("Issue rows render monitor projections and send controls from the full cano
     kind: "set_issue_monitor_autonomous_mode",
     enabled: true,
   });
-  // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
-  // toggle and flips the effective value the backend reported.
-  body.querySelector('[data-action="monitor-auto-apply"]').click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_auto_apply_updates",
-    enabled: true,
-  });
-  body.querySelector('[data-action="monitor-settings"]').click();
-  assert.deepEqual(sent.at(-1), { kind: "issue_monitor_configure_profile" });
+  let settingsSection;
+  document.addEventListener("settings:open", event => { settingsSection = event.detail.section; });
+  const gear = body.querySelector('[data-action="monitor-settings"]');
+  assert.equal(gear.getAttribute("aria-label"), "Issues settings");
+  gear.click();
+  assert.equal(settingsSection, "issues");
 
   // SPEC #3885 T-033: quick register moved into the "+ New" popover.
   body.querySelector('[data-action="issue-new"]').click();
@@ -718,26 +689,15 @@ test("Issue rows render monitor projections and send controls from the full cano
   });
 
   assert.equal(monitorBand(body).text(), "Stopped | Queue 3 | Active 1/2");
-  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start monitor");
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
   // Issue #3561: the click above only sent the request; the switch still shows
   // the server state (Off) until a status confirms the change.
   assert.equal(
     body.querySelector('[data-action="monitor-autonomous"]').getAttribute("aria-checked"),
     "false",
   );
-  assert.equal(
-    body.querySelector('[data-action="monitor-auto-apply"]').textContent,
-    "Auto-apply updates: OFF",
-  );
-  surface.applyIssueMonitorStatus({ autonomous_mode: true, auto_apply_updates: true });
-  const autoApply = body.querySelector('[data-action="monitor-auto-apply"]');
-  assert.equal(autoApply.textContent, "Auto-apply updates: ON");
-  assert.equal(autoApply.dataset.enabled, "true");
-  autoApply.click();
-  assert.deepEqual(sent.at(-1), {
-    kind: "set_issue_monitor_auto_apply_updates",
-    enabled: false,
-  });
+  surface.applyIssueMonitorStatus({ autonomous_mode: true });
+  assert.equal(body.querySelector('[data-action="monitor-autonomous"]').getAttribute("aria-checked"), "true");
   assert.equal(document.querySelector(".issue-monitor-card"), null);
 });
 
@@ -817,22 +777,22 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
   // AC-5: Start/Stop is an action button (label = what the press does, state
   // lives in the Monitor band pill) and it does not move on click either.
   const startStop = body.querySelector('[data-action="monitor-toggle"]');
-  assert.equal(startStop.textContent, "Start monitor");
+  assert.equal(startStop.textContent, "Start");
   startStop.click();
   assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_enabled", enabled: true });
-  assert.equal(startStop.textContent, "Start monitor");
+  assert.equal(startStop.textContent, "Start");
   surface.applyIssueMonitorStatus(status(true, { enabled: true, state: "idle" }));
   assert.equal(startStop.textContent, "Stop");
-  assert.equal(monitorBand(body).pill.textContent, "Running");
+  assert.equal(monitorBand(body).pill.textContent, "Waiting · Empty");
 });
 
 // --- SPEC #3206 FR-017: errors are read in ONE place (notification center) ---
 // User ruling 2026-09-04: the Issue window shows no error surface of its own.
 // It reports every error to the notification center and renders nothing.
 
-test("FR-017: Issue Monitor last_error is reported to the center and nothing renders in the window", async (t) => {
+test("FR-017 / #5284: current Monitor error is read in the center through the state badge", async (t) => {
   const spies = errorSpies();
-  const { body, surface } = await makeFixture(spies.options);
+  const { body, surface, opened } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   assert.equal(body.querySelector(".knowledge-monitor-error"), null, "no red banner");
   assert.equal(body.querySelector(".surface-error-indicator"), null, "no compact indicator either");
@@ -842,6 +802,8 @@ test("FR-017: Issue Monitor last_error is reported to the center and nothing ren
     { key: "issue-monitor:last_error", title: "Issue Monitor", message: "issue #3785: scan failed" },
   ]);
   assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
+  monitorBand(body).pill.click();
+  assert.equal(opened.at(-1), "issue-monitor:last_error");
 
   // issue_monitor_status is re-broadcast constantly — an unchanged error is
   // not a new occurrence.
@@ -920,7 +882,8 @@ test("A fleet outage is shown even while a per-issue error occupies the error li
   });
 
   assert.equal(pill.textContent, "⚠ Error");
-  assert.match(pill.title, /the fleet has been down since/, "the outage outranks the per-issue error");
+  assert.equal(pill.dataset.notificationKey, "issue-monitor:agent_blackout", "the outage outranks the per-issue error");
+  assert.equal(pill.title, "Details in notifications");
   // FR-017 (user ruling 2026-09-04): errors are read in the notification
   // center. The outage reports under its own key, so it never competes for the
   // single `last_error` slot the per-issue failure already holds.
@@ -996,93 +959,9 @@ test("A failed row offers a requeue that returns it to the queue without launchi
   }
 });
 
-// #4530: the pool editor is distinct from Agent Settings' head replacement.
-test("candidate pool renders held rows and edits through profiles.set", async (t) => {
-  const { body, surface, sent } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const candidates = [
-    { index: 0, agent_id: "claude", summary: "Claude / Sonnet", prefer_for: ["kind:spec"], held_until: "2026-10-01T00:00:00Z" },
-    { index: 1, agent_id: "codex", summary: "Codex / gpt-6-astra", prefer_for: [], held_until: null },
-  ];
-  const status = { launch_profile_candidates: candidates, usage_threshold_percent: 80 };
-  surface.applyIssueMonitorStatus(status);
-  const pool = body.querySelector(".knowledge-monitor-pool");
-  assert.ok(pool, "a collapsible candidate pool editor is present");
-  assert.equal(pool.querySelectorAll(".knowledge-monitor-candidate").length, 2);
-  assert.match(pool.textContent, /Auto/);
-  assert.match(pool.textContent, /Held/);
-  assert.match(pool.textContent, /Claude \/ Sonnet/);
-  const click = (selector) => pool.querySelector(selector).click();
-  const last = () => sent.at(-1);
-  click('[data-pool-action="down"]');
-  assert.deepEqual(last(), { kind: "issue_monitor_profiles_set", profiles: [{ agent_id: "codex" }, { agent_id: "claude" }] });
-  pool.querySelectorAll('[data-pool-action="up"]')[1].click();
-  assert.deepEqual(last().profiles, [{ agent_id: "codex" }, { agent_id: "claude" }]);
-  click('[data-pool-action="remove"]');
-  assert.deepEqual(last().profiles, [{ agent_id: "codex" }]);
-  const threshold = pool.querySelector('[data-pool-field="threshold"]');
-  threshold.value = "70";
-  threshold.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.equal(last().usage_threshold_percent, 70);
-  const tags = pool.querySelector('[data-pool-field="prefer-for"]');
-  tags.value = "type:fix, kind:spec";
-  tags.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.deepEqual(last().profiles, [{ agent_id: "claude", prefer_for: ["type:fix", "kind:spec"] }, { agent_id: "codex" }]);
-  tags.value = "";
-  tags.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.deepEqual(last().profiles[0].prefer_for, []);
-  surface.applyIssueMonitorStatus(status);
-  const agent = pool.querySelector('[data-pool-field="agent"]');
-  agent.value = "grok";
-  const addButton = pool.querySelector('[data-pool-action="add"]');
-  Object.defineProperty(globalThis.document, "activeElement", { configurable: true, value: addButton });
-  surface.applyIssueMonitorStatus(status);
-  assert.equal(pool.querySelector('[data-pool-field="agent"]').value, "grok", "status while the Add button is focused preserves the draft");
-  click('[data-pool-action="add"]');
-  assert.deepEqual(last().profiles, [{ agent_id: "claude" }, { agent_id: "codex" }, { agent_id: "grok" }]);
-});
-
-test("candidate pool prevents empty pools, duplicate additions and invalid inputs", async (t) => {
-  const { body, surface, sent } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  surface.applyIssueMonitorStatus({ launch_profile_candidates: [{ index: 0, agent_id: "codex", summary: "Codex", prefer_for: [] }], usage_threshold_percent: 80 });
-  const pool = body.querySelector(".knowledge-monitor-pool");
-  assert.ok(pool);
-  assert.equal(pool.querySelector('[data-pool-action="remove"]').disabled, true);
-  assert.equal(pool.querySelector('[data-pool-action="up"]').disabled, true);
-  assert.equal(pool.querySelector('[data-pool-action="down"]').disabled, true);
-  const before = sent.length;
-  const threshold = pool.querySelector('[data-pool-field="threshold"]');
-  threshold.value = "0";
-  threshold.dispatchEvent(new window.Event("change", { bubbles: true }));
-  const tags = pool.querySelector('[data-pool-field="prefer-for"]');
-  tags.value = "not-a-tag";
-  tags.dispatchEvent(new window.Event("change", { bubbles: true }));
-  pool.querySelector('[data-pool-field="agent"]').value = "codex";
-  pool.querySelector('[data-pool-action="add"]').click();
-  assert.equal(sent.length, before, "invalid edits never reach the backend");
-  assert.match(pool.querySelector('[role="status"]').textContent, /already/);
-});
-
-test("pool edits preserve newer server candidates received while an input is focused", async (t) => {
-  const { body, surface, sent, document } = await makeFixture();
-  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
-  const claude = { agent_id: "claude", summary: "Claude", prefer_for: [] };
-  const codex = { agent_id: "codex", summary: "Codex", prefer_for: [] };
-  surface.applyIssueMonitorStatus({ launch_profile_candidates: [claude, codex] });
-  const tags = body.querySelector('[data-pool-field="prefer-for"]');
-  Object.defineProperty(document, "activeElement", { configurable: true, value: tags });
-  surface.applyIssueMonitorStatus({ launch_profile_candidates: [codex, claude, { agent_id: "grok", prefer_for: [] }] });
-  tags.value = "type:fix";
-  tags.dispatchEvent(new window.Event("change", { bubbles: true }));
-  assert.deepEqual(sent.at(-1).profiles, [
-    { agent_id: "codex" }, { agent_id: "claude", prefer_for: ["type:fix"] }, { agent_id: "grok" },
-  ]);
-});
-
 // #4499: terminal queue membership is the Issue board's source of truth.
 test("Issue board has four queue columns, labelled controls and one filter row", async (t) => {
-  const { body, surface, load, sent } = await makeFixture();
+  const { body, surface, load } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
     entries:[knowledgeEntry(1,"queued"), {...knowledgeEntry(2,"queued",1),queued_by:"operator"}, knowledgeEntry(3,"launching"),knowledgeEntry(4,null,null,{state:"closed"})],refresh_enabled:true});
@@ -1092,12 +971,9 @@ test("Issue board has four queue columns, labelled controls and one filter row",
   assert.match(columns[1].textContent,/operator/i);
   assert.equal(body.querySelector("[data-issue-filter], [data-issue-lane-filter]"),null);
   assert.equal(body.querySelector('[data-issue-view="list"]').textContent,"Kanban");
-  assert.match(body.querySelector('[data-action="monitor-settings"]').textContent,/Settings/);
-  const refill=body.querySelector('[data-action="monitor-auto-refill"]');
-  assert.equal(refill.getAttribute("aria-checked"),"false");
-  refill.click();
-  assert.deepEqual(sent.at(-1),{kind:"set_issue_monitor_auto_refill",enabled:true,limit:3});
-  assert.equal(refill.getAttribute("aria-checked"),"false","wait for server status");
+  assert.equal(body.querySelector('[data-action="monitor-settings"]').getAttribute("aria-label"), "Issues settings");
+  assert.equal(body.querySelector('[data-action="monitor-auto-refill"]'), null);
+
 });
 
 test("Issue queue drops send one bulk request and retain server projection", async (t) => {

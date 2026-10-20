@@ -126,6 +126,42 @@ test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () 
   }
 });
 
+test("Reports and raw terminal receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/app.js';
+  const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
+  const migrated = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/(pm_reports|terminal_output|terminal_snapshot)$/.test(finding.context));
+  assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
+  const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/app.js';
+  const modules = new Map([['crates/gwt/web/project-shell-surface.js', readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8')]]);
+  const migrated = findings => findings.filter(finding => finding.root === 'receive' && finding.context === '/window_list');
+  assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
+  const bypass = app.replace('case "window_list":', 'case "window_list": element.textContent = event.kind;');
+  assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
+});
+
+test("workspace receivers cannot manually sync Agents or Split outside the catalog", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const workspace = app.slice(app.indexOf('function renderWorkspace('), app.indexOf('const socketTransport'));
+  assert.doesNotMatch(workspace, /(?:splitSurfaces|agentsSurface)\??\.sync\s*\(/);
+  const bypasses = source => {
+    const lines = source.split('\n');
+    return scanModule(source, 'crates/gwt/web/app.js').filter(finding =>
+      /(?:splitSurfaces|agentsSurface).*\.sync\s*\(/.test(lines[finding.line - 1]));
+  };
+  assert.deepEqual(bypasses(app), []);
+  const bypass = app.replace('case "workspace_state":',
+    'case "workspace_state": splitSurfaces.sync(); agentsSurface.sync(event.windows);');
+  assert.ok(bypasses(bypass).length > 0, "the old fan-out must be detected even inside an allowed receiver");
+});
+
 test("unrelated remote advances leave the default comparison stable; explicit CI bases still apply", t => {
   const root = mkdtempSync(join(tmpdir(), "gwt-pull-render-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

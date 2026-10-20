@@ -142,6 +142,11 @@ fn normalized_status(value: &str) -> &'static str {
     match value {
         "ok" => "ok",
         "error" => "error",
+        "timeout" => "timeout",
+        "deadline" => "deadline",
+        "provider-error" => "provider-error",
+        "disconnected" => "disconnected",
+        "partial" => "partial",
         _ => "unknown",
     }
 }
@@ -172,6 +177,10 @@ fn normalized_handler(value: &str) -> &'static str {
         "action-obligation-record" => "action-obligation-record",
         "pm-delivery-ack" => "pm-delivery-ack",
         "pm-loop-reset" => "pm-loop-reset",
+        "pm-reporting-stop-check" => "pm-reporting-stop-check",
+        "board-read-stop-check" => "board-read-stop-check",
+        "branch-freshness-advisory" => "branch-freshness-advisory",
+        "external-skill-advisory" => "external-skill-advisory",
         "discussion-goal-start" => "discussion-goal-start",
         "workflow-policy" => "workflow-policy",
         "autonomous-question-guard" => "autonomous-question-guard",

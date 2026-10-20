@@ -542,6 +542,7 @@ mod idle_windows {
                 enabled: true,
                 autonomous_mode: true,
                 max_active_agents: 1,
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         )
@@ -561,6 +562,7 @@ mod idle_windows {
             review_dispatch,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 

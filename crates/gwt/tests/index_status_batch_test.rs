@@ -382,6 +382,8 @@ fn assert_model_free_projection(
         ("memory", view.scopes.memory.as_ref()),
         ("discussions", view.scopes.discussions.as_ref()),
         ("board", view.scopes.board.as_ref()),
+        ("works", view.scopes.works.as_ref()),
+        ("reports", view.scopes.reports.as_ref()),
     ] {
         let health = health
             .unwrap_or_else(|| panic!("{entrypoint} omitted repo-shared {scope} health: {view:?}"));

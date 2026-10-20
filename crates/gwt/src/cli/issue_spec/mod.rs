@@ -387,7 +387,7 @@ pub(super) fn run<E: CliEnv>(
                     .cloned()
                     .unwrap_or_default();
                 out.push_str(&format!(
-                    "#{} [{state_marker}] [{phase_label}] {}\n",
+                    "Issue #{} [{state_marker}] [{phase_label}] {}\n",
                     spec.number.0, spec.title
                 ));
             }
@@ -451,7 +451,7 @@ pub(super) fn run<E: CliEnv>(
             } else {
                 for number in numbers {
                     ops.read_section(IssueNumber(number), &SectionName("spec".to_string()))?;
-                    out.push_str(&format!("pulled #{number}\n"));
+                    out.push_str(&format!("pulled Issue #{number}\n"));
                 }
             }
             0
@@ -467,11 +467,11 @@ pub(super) fn run<E: CliEnv>(
             let repaired = ops.repair_sections(IssueNumber(number))?;
             if repaired.is_empty() {
                 out.push_str(&format!(
-                    "refreshed cache for #{number}; no artifact needed repair\n"
+                    "refreshed cache for Issue #{number}; no artifact needed repair\n"
                 ));
             } else {
                 out.push_str(&format!(
-                    "repaired {} artifact(s) for #{number}: {}\n",
+                    "repaired {} artifact(s) for Issue #{number}: {}\n",
                     repaired.len(),
                     repaired.join(", ")
                 ));
@@ -555,7 +555,7 @@ fn audit_spec_tasks<E: CliEnv>(
                 continue;
             }
             Err(err) => {
-                unreadable.push(format!("#{}: {err}", spec.number.0));
+                unreadable.push(format!("Issue #{}: {err}", spec.number.0));
                 continue;
             }
         };
@@ -569,7 +569,7 @@ fn audit_spec_tasks<E: CliEnv>(
             gwt_github::client::IssueState::Closed => "CLOSED",
         };
         out.push_str(&format!(
-            "#{} [{state_marker}] completed={} open={} untracked={} {}\n",
+            "Issue #{} [{state_marker}] completed={} open={} untracked={} {}\n",
             spec.number.0, progress.completed, progress.open, progress.untracked, spec.title
         ));
     }
@@ -630,7 +630,7 @@ fn run_spec_lint<E: CliEnv>(
     let index_diagnostics = ops.diagnose(IssueNumber(number))?;
     if !index_diagnostics.is_empty() {
         out.push_str(&format!(
-            "lint #{number}: index health check failed\n{index_diagnostics}\n"
+            "lint Issue #{number}: index health check failed\n{index_diagnostics}\n"
         ));
         return Ok(1);
     }
@@ -692,7 +692,7 @@ fn run_spec_lint<E: CliEnv>(
     );
 
     out.push_str(&format!(
-        "lint #{number}: {} section(s) scanned, {} finding(s), {} critical{}\n",
+        "lint Issue #{number}: {} section(s) scanned, {} finding(s), {} critical{}\n",
         report.sections_scanned.len(),
         report.findings.len(),
         report.critical_count(),
@@ -757,7 +757,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
         .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?
     else {
         out.push_str(&format!(
-            "no Intake Inspection Snapshot for #{number}; run issue.spec.lint first\n"
+            "no Intake Inspection Snapshot for Issue #{number}; run issue.spec.lint first\n"
         ));
         return Ok(1);
     };
@@ -783,7 +783,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
         Ok(()) => ReadbackSource::GitHubEntity,
         Err(err) => {
             out.push_str(&format!(
-                "warning: could not reach the GitHub entity for #{number} ({err}); evidence falls back to the local cache\n"
+                "warning: could not reach the GitHub entity for Issue #{number} ({err}); evidence falls back to the local cache\n"
             ));
             ReadbackSource::LocalCache
         }
@@ -821,14 +821,14 @@ fn run_spec_inspection_complete<E: CliEnv>(
     match validate_completion_evidence(&snapshot, &ledger, &evidence) {
         Ok(()) => {
             out.push_str(&format!(
-                "completion evidence for #{number}: PASS ({} section(s) confirmed against the GitHub entity)\n",
+                "completion evidence for Issue #{number}: PASS ({} section(s) confirmed against the GitHub entity)\n",
                 snapshot.section_hashes.len()
             ));
             Ok(0)
         }
         Err(errors) => {
             out.push_str(&format!(
-                "completion evidence for #{number}: BLOCKED ({} problem(s))\n",
+                "completion evidence for Issue #{number}: BLOCKED ({} problem(s))\n",
                 errors.len()
             ));
             for error in &errors {
@@ -972,11 +972,17 @@ fn create_spec_from_markdown<E: CliEnv>(
     );
     let parsed = gwt_github::extract_sections(raw)
         .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
-    let sections: BTreeMap<SectionName, String> = parsed
+    let mut sections: BTreeMap<SectionName, String> = parsed
         .into_iter()
         .map(|section| (section.name, section.content))
         .collect();
+    // Issue #5176: a plain body without section markers is the `spec`
+    // section, never silently dropped.
+    if sections.is_empty() && !raw.trim().is_empty() {
+        sections.insert(SectionName(SPEC_SECTION_NAME.to_string()), raw.to_string());
+    }
     guard_autonomous_acceptance_block(&labels, raw)?;
+    let receipts = render_create_receipts(&sections);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -988,7 +994,29 @@ fn create_spec_from_markdown<E: CliEnv>(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
     ));
+    out.push_str(&receipts);
     Ok(0)
+}
+
+/// One `wrote N bytes to section 'NAME'` line per created section, in the
+/// same shape as the `issue.spec.edit` receipt (Issue #5176 AC-2).
+fn render_create_receipts(sections: &BTreeMap<SectionName, String>) -> String {
+    use sha2::{Digest, Sha256};
+    if sections.is_empty() {
+        return "wrote no sections\n".to_string();
+    }
+    sections
+        .iter()
+        .map(|(name, content)| {
+            let canonical = content.trim_matches(['\r', '\n']);
+            format!(
+                "wrote {} bytes to section '{}' (sha256:{:x})\n",
+                canonical.len(),
+                name.0,
+                Sha256::digest(canonical.as_bytes())
+            )
+        })
+        .collect()
 }
 
 fn create_spec_from_structured_json<E: CliEnv>(
@@ -1009,6 +1037,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
     guard_autonomous_acceptance_block(&labels, &spec)?;
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
+    let receipts = render_create_receipts(&sections);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -1020,6 +1049,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
     ));
+    out.push_str(&receipts);
     Ok(0)
 }
 

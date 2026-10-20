@@ -452,6 +452,7 @@ fn materialize_pm_project_policy(
         if targets.contains(&target) {
             gwt_skills::pm_guidance::generate_pm_guidance_with_policy(
                 &runtime.join(root),
+                target,
                 &policy,
             )?;
         }
@@ -934,8 +935,8 @@ fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
     ]);
     for root in [".claude/skills", ".codex/skills"] {
         let root = worktree.join(root);
-        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
-        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+        paths.extend(gwt_skills::coordination_guidance::managed_paths(&root));
+        paths.extend(gwt_skills::pm_guidance::managed_paths(&root));
     }
     paths
 }
@@ -1773,9 +1774,28 @@ fn regenerate_managed_hook_configs_for_targets(
         // The workspace-home copy of `.codex/hooks.json` resolves to the main
         // checkout for every linked worktree, so this one write is shared.
         with_shared_repo_asset_lock(worktree, || {
-            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
-                io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
-            })
+            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(
+                |error| {
+                    io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+                },
+            )?;
+            for path in gwt_skills::codex_hooks_paths_for_codex_discovery(
+                worktree,
+                CodexHookDiscoveryMode::Both,
+            )
+            .into_iter()
+            .filter(|path| path.exists())
+            {
+                tracing::info!(
+                    writer_pid = std::process::id(),
+                    writer_executable = ?std::env::current_exe().ok(),
+                    worktree = %worktree.display(),
+                    destination = %path.display(),
+                    fallback = %gwt_skills::settings_local::sanitize_hook_bin_for_config_path(&path, &hook_bin),
+                    "regenerated managed Codex hooks"
+                );
+            }
+            Ok(())
         })?;
     }
     if targets.contains(&ManagedAssetTarget::OpenCode) {
@@ -1994,8 +2014,8 @@ fn is_bunx_temp_executable(path: &Path) -> bool {
         .any(|segment| segment.starts_with("bunx-"))
 }
 
-/// Whether `path` is a gwt build output owned by one checkout
-/// (`<root>/target/[<triple>/]{debug,release}/gwt[d]`).
+/// Whether `path` is a gwt build output
+/// (`<target-dir>/[<triple>/]{debug,release}/gwt[d]`, any `CARGO_TARGET_DIR`).
 ///
 /// #3567: the hook generator asks the same question when it decides whether a
 /// resolved binary may be written into another worktree's config, so both sides
@@ -2114,7 +2134,11 @@ mod tests {
         .unwrap();
         let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
         super::refresh_managed_gwt_assets_for_pm_worktree_locked(&canonical_worktree).unwrap();
+        let policy = runtime.join(".claude/skills/gwt-pm/references/project-policy.md");
         assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("](references/project-policy.md)"));
+        assert!(std::fs::read_to_string(&policy)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
         assert!(!std::fs::symlink_metadata(&skill)
@@ -2126,6 +2150,7 @@ mod tests {
         assert!(!std::fs::read_to_string(&skill)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
+        assert!(!policy.exists(), "opt-out removes copied project rules");
         let before = std::fs::read(&skill).unwrap();
         // #4486 AC-11: an opted-in policy file the project does not carry is
         // configuration drift, not a refresh failure. This used to return an

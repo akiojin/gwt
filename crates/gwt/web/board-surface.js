@@ -224,7 +224,8 @@ function makeLane(key, byId) {
  * `options.workspaces` is an array of `{ id, titleSummary?, title?, branch?,
  * lifecycle? }`. Returns lanes ordered by most-recent activity, with
  * Done/Archived lanes pushed to the end. Each lane's `entries` stay in
- * chronological (created_at ascending) order.
+ * chronological (created_at ascending) order. `entriesSorted` skips the sort
+ * when the caller already maintains chronological order.
  */
 export function groupBoardLanes(entries, options = {}) {
   const workspaces = Array.isArray(options.workspaces) ? options.workspaces : [];
@@ -251,7 +252,7 @@ export function groupBoardLanes(entries, options = {}) {
   }
 
   const ordered = [...lanes.values()];
-  for (const lane of ordered) {
+  for (const lane of options.entriesSorted ? [] : ordered) {
     lane.entries.sort((a, b) =>
       String(a?.created_at || "").localeCompare(String(b?.created_at || "")),
     );

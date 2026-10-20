@@ -20,6 +20,9 @@ use crate::cli::hook::{
     HookError, RawHookEvent,
 };
 
+mod hook_delivery;
+pub use hook_delivery::{hook_live_delivery_health, HookLiveDeliveryHealth};
+
 /// Per-attempt budget of a hook-live POST. Tests that assert delivery pin it
 /// (SPEC #4740): hook-live is fail-open, so an attempt that outlives the
 /// budget on a loaded host drops the event silently.
@@ -116,7 +119,7 @@ pub(crate) struct AgentBridgeFailure {
     bridge_reason: Option<String>,
     recovery_operations: RecoveryOperationSet,
     diagnostic_reason: Option<String>,
-    mismatched_fields: Vec<String>,
+    mismatched_fields: Box<[String]>,
     exact_workspace_ensure_required: bool,
     message: &'static str,
 }
@@ -131,7 +134,7 @@ impl AgentBridgeFailure {
             bridge_reason: None,
             recovery_operations: RecoveryOperationSet::default(),
             diagnostic_reason: None,
-            mismatched_fields: Vec::new(),
+            mismatched_fields: Box::default(),
             exact_workspace_ensure_required: false,
             message,
         }
@@ -210,6 +213,17 @@ impl std::fmt::Display for AgentBridgeFailure {
                     .collect::<Vec<_>>()
                     .join(" or ")
             )?;
+        }
+        // Keep the Host's free-form cause private. Only our known diagnostic
+        // tokens select static guidance to the actual persisted surface.
+        match self.diagnostic_reason.as_deref() {
+            Some("workspace_transaction_failed") => formatter.write_str(
+                "; inspect ~/.gwt/logs/gwt.log.* for the original cause; do not retry until the cause is resolved",
+            )?,
+            Some("workspace_transaction_log_unavailable") => formatter.write_str(
+                "; diagnostic logging failed; report the unavailable diagnostic to the PM; do not retry without resolving the cause",
+            )?,
+            _ => {}
         }
         if self.http_status.is_some()
             || self.bridge_code.is_some()
@@ -302,11 +316,11 @@ fn read_bounded_agent_bridge_error_body(
 /// filtered out but unrepresentable, and so the agent-visible diagnostic keeps
 /// the canonical spelling rather than whatever the response wrote.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct RecoveryOperationSet(u16);
+struct RecoveryOperationSet(u32);
 
 impl RecoveryOperationSet {
     fn from_response(values: Option<&Vec<String>>) -> Self {
-        let mut bits = 0u16;
+        let mut bits = 0u32;
         for value in values.into_iter().flatten() {
             if let Some(index) = crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
                 .iter()
@@ -941,6 +955,14 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
     target: &HookForwardTarget,
     request: &crate::AgentWorkspaceUpdateRequest,
 ) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
+    send_workspace_update_via_agent_bridge_with_operation_id(target, request, None)
+}
+
+pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceUpdateRequest,
+    operation_id: Option<&str>,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
     let observation = HostBridgeObservation::begin(gwt_agent::HostBridgeKind::WorkspaceUpdate);
     let result = (|| {
         let url = target.workspace_update_url().map_err(|_| {
@@ -959,15 +981,15 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
                     "failed to build the Host workspace bridge client",
                 )
             })?;
-        let response = client
-        .post(url)
-        .bearer_auth(&target.token)
-        .json(request)
-        .send()
+        let mut post = client.post(url).bearer_auth(&target.token).json(request);
+        if let Some(id) = operation_id {
+            post = post.header(crate::workspace_update_receipt::OPERATION_HEADER, id);
+        }
+        let response = post.send()
         .map_err(|_| {
             AgentBridgeFailure::new(
                 AgentBridgeFailureReason::TransportFailure,
-                "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown",
+                "Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
             )
         })?;
         let status = response.status();
@@ -1010,8 +1032,11 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
                 "Host workspace bridge rejected the update; no local fallback was attempted",
             ));
         }
-        let receipt = response
-        .json::<crate::AgentWorkspaceUpdateReceipt>()
+        let body = response.bytes().map_err(|_| AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host workspace bridge response body was interrupted; no update retry or local fallback was attempted",
+        ))?;
+        let receipt = serde_json::from_slice::<crate::AgentWorkspaceUpdateReceipt>(&body)
         .map_err(|_| {
             AgentBridgeFailure::new(
                 AgentBridgeFailureReason::ReceiptMismatch,
@@ -1035,6 +1060,63 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
             observation.record(true)
         }
         Err(_) => {}
+    }
+    if let (Some(operation_id), Err(error)) = (operation_id, &result) {
+        use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+        let session = gwt_agent::validate_session_id_path_component(&request.claimed_session_id)
+            .ok()
+            .and_then(|_| {
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir()
+                        .join(format!("{}.toml", request.claimed_session_id)),
+                )
+                .ok()
+            });
+        let endpoint = target.workspace_update_url().ok().map(|mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        });
+        let mut context = std::collections::BTreeMap::from([
+            ("operation".to_string(), "workspace.update".to_string()),
+            (
+                "bridge_reason".to_string(),
+                error.reason().as_str().to_string(),
+            ),
+        ]);
+        context.insert("operation_id".into(), operation_id.into());
+        if let Some(endpoint) = endpoint {
+            context.insert("endpoint".into(), endpoint);
+        }
+        if let Ok(binary) = std::env::current_exe() {
+            context.insert("binary".into(), binary.display().to_string());
+        }
+        let record = ErrorRecord::new(
+            ErrorKind::DaemonFault,
+            error.to_string(),
+            ErrorTarget {
+                issue: session
+                    .as_ref()
+                    .and_then(|session| session.linked_issue_number),
+                session_id: Some(request.claimed_session_id.clone()),
+                project_root: Some(
+                    session
+                        .as_ref()
+                        .and_then(|session| session.project_state_root.as_ref())
+                        .map_or_else(
+                            || request.observation.git_toplevel.clone(),
+                            |root| root.display().to_string(),
+                        ),
+                ),
+                ..Default::default()
+            },
+        )
+        .with_context(context);
+        if let Err(error) = gwt_core::error_ledger::record(record) {
+            tracing::warn!(%error, "could not record workspace bridge health");
+        }
     }
     result
 }
@@ -1483,7 +1565,13 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     let Some(target) = HookForwardTarget::from_env() else {
         return Ok(());
     };
-    emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+    let send = |event: &RuntimeHookEvent| {
+        emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+    };
+    match std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV) {
+        Some(path) => hook_delivery::deliver(&PathBuf::from(path), event, send),
+        None => send(event),
+    }
 }
 
 fn is_readiness_delivery(event: &RuntimeHookEvent) -> bool {
@@ -1544,6 +1632,7 @@ fn emit_live_event_with_policy(
         Instant::now,
         std::thread::sleep,
     )
+    .map_err(|error| format!("{error}; endpoint={}", target.url))
 }
 
 fn run_hook_live_retry(
@@ -1554,18 +1643,27 @@ fn run_hook_live_retry(
     mut now: impl FnMut() -> Instant,
     mut wait: impl FnMut(Duration),
 ) -> Result<(), String> {
+    let started = now();
+    let diagnostic = |message: String, attempts: usize, at: Instant| {
+        format!(
+            "{message}; attempts={attempts} elapsed_ms={} attempt_budget_ms={} overall_budget_ms={}",
+            at.saturating_duration_since(started).as_millis(),
+            policy.per_attempt_timeout.as_millis(),
+            deadline.saturating_duration_since(started).as_millis(),
+        )
+    };
     let readiness_delivery = is_readiness_delivery(event);
     let mut attempts = 0usize;
     loop {
         let Some(remaining) = deadline.checked_duration_since(now()) else {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
-            ));
+            ), attempts, now()));
         };
         if remaining.is_zero() {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
-            ));
+            ), attempts, now()));
         }
         attempts += 1;
         let attempt_timeout = policy.per_attempt_timeout.min(remaining);
@@ -1575,14 +1673,14 @@ fn run_hook_live_retry(
         };
 
         if !readiness_delivery || !failure.is_retryable() {
-            return Err(failure.diagnostic());
+            return Err(diagnostic(failure.diagnostic(), attempts, now()));
         }
         let remaining = deadline.checked_duration_since(now()).unwrap_or_default();
         if remaining <= policy.retry_delay {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts: {}",
                 failure.diagnostic()
-            ));
+            ), attempts, now()));
         }
         wait(policy.retry_delay);
     }
@@ -2097,7 +2195,12 @@ mod tests {
             clock.get().duration_since(started),
             policy.per_attempt_timeout
         );
-        assert_eq!(error, HookLiveAttemptFailure::Timeout.diagnostic());
+        assert!(
+            error.contains(&HookLiveAttemptFailure::Timeout.diagnostic()),
+            "{error}"
+        );
+        assert!(error.contains("elapsed_ms=40"), "{error}");
+        assert!(error.contains("attempt_budget_ms=40"), "{error}");
     }
 
     #[test]
@@ -2130,7 +2233,7 @@ mod tests {
         ]);
         let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
 
-        emit_live_event_with_policy(
+        let error = emit_live_event_with_policy(
             &event,
             &server.target("private-forward-token"),
             hook_live_status_retry_policy(),
@@ -2138,6 +2241,12 @@ mod tests {
         .expect_err("permanent client error must fail immediately");
 
         assert_eq!(server.attempts(), 1);
+        assert!(
+            error.contains(&format!("endpoint={}", server.forward_url)),
+            "{error}"
+        );
+        assert!(!error.contains("private-forward-token"), "{error}");
+        assert!(!error.contains("private-readiness-nonce"), "{error}");
     }
 
     #[test]
@@ -2534,6 +2643,33 @@ mod tests {
     }
 
     #[test]
+    fn workspace_transaction_diagnostic_guidance_keeps_bridge_causes_private() {
+        let response: WorkspaceBridgeDiagnosticResponse =
+            serde_json::from_value(serde_json::json!({
+                "code": "transaction_conflict",
+                "message": "private original cause sentinel",
+                "diagnostic_reason": "workspace_transaction_failed",
+                "recovery_operations": ["execution.status"]
+            }))
+            .unwrap();
+        let failure = AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            StatusCode::CONFLICT,
+            Some(&response),
+            false,
+            "Host Work terminalization bridge rejected the close; no local fallback was attempted",
+        );
+        let output = failure.to_string();
+        assert!(output.contains("~/.gwt/logs/gwt.log.*"), "{output}");
+        assert!(output.contains("do not retry"), "{output}");
+        assert!(
+            output.contains("run JSON operation `execution.status`"),
+            "{output}"
+        );
+        assert!(!output.contains("sentinel"), "{output}");
+    }
+
+    #[test]
     fn execution_continuation_preserves_bounded_safe_rejection_diagnostics() {
         let _env_lock = env_test_lock();
         let _url = ScopedEnvVar::unset(GWT_HOOK_FORWARD_URL_ENV);
@@ -2548,7 +2684,10 @@ mod tests {
                 "message": "private-message-sentinel",
                 // Issue #4443 AC-2 / #4396: the real operation crosses, the
                 // one that does not exist is discarded.
-                "recovery_operations": ["execution.continue", "workspace.prune"]
+                "recovery_operations": [
+                    "execution.continue", "workspace.prune", "execution.settle_delivered",
+                    "pr.create_from_ci", "verify.run"
+                ]
             }),
         );
         let request = crate::AgentExecutionContinuationRequest {
@@ -2568,7 +2707,10 @@ mod tests {
             "bridge_reason=authority_mismatch",
             "diagnostic_reason=host_binding_stale",
             "mismatched_fields=ledger_head_hash,capability_generation",
-            "run JSON operation `execution.continue`",
+            "run JSON operation `execution.settle_delivered`",
+            "`pr.create_from_ci`",
+            "`execution.continue`",
+            "`verify.run`",
         ] {
             assert!(error.contains(expected), "missing {expected}: {error}");
         }
@@ -2656,6 +2798,7 @@ mod tests {
     fn workspace_bridge_transport_receipt_clears_after_validated_success() {
         let _lock = env_test_lock();
         let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
         let mut session =
             gwt_agent::Session::new(dir.path(), "work/test", gwt_agent::AgentId::Codex);
         session.repo_hash = Some("repo".into());
@@ -2675,6 +2818,7 @@ mod tests {
                 },
             }))
             .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
             .unwrap()
             .unwrap();
@@ -2703,9 +2847,34 @@ mod tests {
         };
         let unavailable = HookForwardTarget {
             url: "http://127.0.0.1:1/internal/hook-live".into(),
-            token: "test".into(),
+            token: "workspace-ledger-secret-sentinel".into(),
         };
-        assert!(send_workspace_update_via_agent_bridge_detailed(&unavailable, &request).is_err());
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        assert!(send_workspace_update_via_agent_bridge_with_operation_id(
+            &unavailable,
+            &request,
+            Some(&operation_id)
+        )
+        .is_err());
+        let errors = gwt_core::error_ledger::list_since(None).unwrap();
+        let failure = errors
+            .iter()
+            .find(|record| record.context.get("operation_id") == Some(&operation_id))
+            .expect("bridge fault is queryable through errors.list");
+        assert_eq!(failure.context["bridge_reason"], "transport_failure");
+        assert_eq!(
+            failure.target.session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(failure.target.issue, Some(4774));
+        assert!(failure.target.project_root.is_some());
+        assert_eq!(
+            failure.context["endpoint"],
+            "http://127.0.0.1:1/internal/workspace-update"
+        );
+        assert!(!serde_json::to_string(failure)
+            .unwrap()
+            .contains(&unavailable.token));
         assert!(gwt_agent::has_unresolved_host_bridge_fault(&path, &runtime).unwrap());
         let success = BindingProbeServer::start(
             StatusCode::OK,

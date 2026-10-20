@@ -28,7 +28,7 @@ use std::{
     cell::{Cell, RefCell},
     ffi::OsString,
     marker::PhantomData,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
 
@@ -57,6 +57,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::PathBuf,
     process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -147,39 +148,8 @@ impl Drop for EnvLockGuard {
     }
 }
 
-thread_local! {
-    static GWT_HOME_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Returns the thread-local gwt home override used by tests.
-pub fn gwt_home_override() -> Option<PathBuf> {
-    GWT_HOME_OVERRIDE.with(|value| value.borrow().clone())
-}
-
-/// RAII guard that overrides the gwt home root for the current test thread.
-///
-/// Prefer this over mutating `HOME` for in-process tests. Environment
-/// variables are process-global, so changing them in one parallel test can
-/// make unrelated tests write into the real user home.
-pub struct ScopedGwtHome {
-    previous: Option<PathBuf>,
-}
-
-impl ScopedGwtHome {
-    pub fn set(path: impl AsRef<Path>) -> Self {
-        let next = path.as_ref().to_path_buf();
-        let previous = GWT_HOME_OVERRIDE.with(|value| value.replace(Some(next)));
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedGwtHome {
-    fn drop(&mut self) {
-        GWT_HOME_OVERRIDE.with(|value| {
-            value.replace(self.previous.take());
-        });
-    }
-}
+// One lower-layer override must drive both core paths and global settings.
+pub use gwt_config::home::{gwt_home_override, ScopedGwtHome};
 
 /// RAII guard that sets or removes one environment variable and restores the
 /// previous value on drop. Hold the [`env_lock`] mutex for the guard's whole
@@ -679,6 +649,11 @@ impl WindowsRealGwtFixture {
             .trim_end_matches('/')
             .to_string()
             + "/ws"
+    }
+
+    /// The exact child owned by this fixture, for cleanup assertions.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running gwt child").id()
     }
 
     pub fn stderr(&self) -> String {

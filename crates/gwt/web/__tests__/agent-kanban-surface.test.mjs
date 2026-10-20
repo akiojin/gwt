@@ -149,6 +149,24 @@ test("Agent Kanban card messages preserve board, lane, order, and geometry", () 
   });
 });
 
+test("Agent Kanban uses assigned identity as the primary card label", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].agent_name = "Lumen";
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    windowDisplayTitle: data => `${data.agent_name || "Naming…"} — ${data.title}`,
+    windowRoleBadgeLabel: data => data.agent_id || "Agent",
+  });
+  surface.mount(fixture.body, workspace.windows[0]);
+  const card = fixture.body.querySelector('[data-window-id="agent-1"]');
+  assert.equal(card.querySelector(".agent-kanban-card-title").textContent, "Lumen");
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /Implement UI/);
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /codex/);
+  const unnamed = fixture.body.querySelector('[data-window-id="agent-2"]');
+  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, "Naming…");
+});
+
 test("Agent Kanban drop target hit-test computes lane insertion order", () => {
   const fixture = createFixture();
   fixture.body.innerHTML = `

@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -53,14 +54,14 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-test("Supported Agents renders installed versions, unavailable versions, and missing agents distinctly", () => {
+test("Supported Agents renders the catalog, identifiers, versions, and install actions", () => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
   const render = loadFunction("renderSupportedAgentsPanel");
   render(panel, [
     { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.0" },
     { id: "codex", name: "Codex", installed: true, installed_version: null },
-    { id: "grok", name: "Grok Build", installed: false, installed_version: null },
+    { id: "grok", name: "Grok Build", installed: false, installed_version: null, install_supported: true },
   ]);
   const rows = panel.querySelectorAll("[data-agent-id]");
   assert.equal(rows.length, 3);
@@ -68,10 +69,84 @@ test("Supported Agents renders installed versions, unavailable versions, and mis
   assert.match(rows[1].textContent, /Codex.*Installed.*Unknown \(version unavailable\)/);
   assert.match(rows[2].textContent, /Grok Build.*Not installed/);
   assert.doesNotMatch(rows[2].textContent, /Unknown/);
-  assert.equal(panel.querySelectorAll("th[scope='col']").length, 3);
+  assert.match(rows[0].textContent, /\(claude\)/);
+  assert.equal(rows[2].querySelector("button")?.getAttribute("aria-label"), "Install Grok Build");
+  assert.equal(panel.querySelectorAll("th[scope='col']").length, 5);
   render(panel, null);
   assert.match(panel.textContent, /Loading agent detection/);
   assert.equal(panel.querySelectorAll("[data-agent-id]").length, 0);
+});
+
+test("Supported Agents sends maintenance requests and exposes failures and automatic update conditions", () => {
+  const { document, Event } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section");
+  const render = loadFunction("renderSupportedAgentsPanel");
+  const messages = [];
+  const agents = [
+    { id: "opencode", name: "OpenCode", installed: false, install_supported: true },
+    { id: "grok", name: "Grok Build", installed: true, installed_version: "1.0.0", available_version: "2.0.0", update_available: true },
+  ];
+  const options = { send: (message) => messages.push(message), autoUpdate: false };
+  render(panel, agents, options);
+  const install = panel.querySelector('[aria-label="Install OpenCode"]');
+  assert.ok(install, "a missing supported agent needs an Install action");
+  install.click();
+  panel.querySelector('[aria-label="Update Grok Build"]').click();
+  const automatic = panel.querySelector('[aria-label="Automatically update agents"]');
+  assert.equal(automatic.checked, false);
+  automatic.checked = true;
+  automatic.dispatchEvent(new Event("change"));
+  assert.deepEqual(messages, [
+    { kind: "maintain_supported_agent", agent_id: "opencode", action: "install" },
+    { kind: "maintain_supported_agent", agent_id: "grok", action: "update" },
+    { kind: "set_agent_auto_update", enabled: true },
+  ]);
+  assert.match(panel.textContent, /next.*startup/i);
+  assert.match(panel.textContent, /installed agents with a verified update route/i);
+  assert.match(panel.textContent, /agent windows/i);
+  const supportedAgentsModel = createUiStateStore({
+    agents, autoUpdate: false, maintenanceByAgent: {},
+  });
+  const handlers = Function("supportedAgentsModel", "send", `
+    ${extractFunctionSource(settingsSource, "supportedAgentPanelOptions")}
+    ${extractFunctionSource(settingsSource, "applySupportedAgentList")}
+    ${extractFunctionSource(settingsSource, "applySupportedAgentMaintenance")}
+    return { supportedAgentPanelOptions, applySupportedAgentList, applySupportedAgentMaintenance };
+  `)(supportedAgentsModel, message => messages.push(message));
+  let renders = 0;
+  supportedAgentsModel.subscribe(state => state, state => {
+    renders += 1;
+    render(panel, state.agents, handlers.supportedAgentPanelOptions());
+  });
+  handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: true, message: "Installing OpenCode…" });
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, true);
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]').disabled, true);
+  handlers.applySupportedAgentList({ agents, auto_update: false, maintenance_pending: false });
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false,
+    "an authoritative snapshot recovers a missed completion notification");
+  handlers.applySupportedAgentMaintenance({ agent_id: "",
+    pending: false, success: false, message: "Cannot save automatic updates. Check configuration permissions and retry.",
+  });
+  assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, false);
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Cannot save automatic updates/);
+  const retry = panel.querySelector('[aria-label="Automatically update agents"]');
+  retry.checked = true;
+  const rendersBeforeRetry = renders;
+  retry.dispatchEvent(new Event("change"));
+  assert.equal(renders, rendersBeforeRetry, "a local toggle waits for an authoritative reply before rendering");
+  assert.equal(retry.checked, true);
+  handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
+  assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
+  assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
+  handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
+  assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
+  agents[1].installed_version = "grok 2.0.0";
+  agents[1].update_available = false;
+  agents[1].up_to_date = true;
+  handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
+  assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
 });
 
 test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {
@@ -79,6 +154,19 @@ test("Supported Agents uses the shared Settings tab and refreshes from its backe
   assert.match(settingsSource, /linkSettingsPanel\(panelSupportedAgents, windowData\.id, "supported-agents"\)/);
   assert.match(settingsSource, /send\(\{\s*kind:\s*"list_supported_agents"\s*\}\)/);
   assert.match(appSource, /case "supported_agent_list":[\s\S]{0,200}applySupportedAgentList\(event\)/);
+  assert.match(appSource, /case "supported_agent_maintenance":[\s\S]{0,200}applySupportedAgentMaintenance\(event\)/);
+  assert.match(extractFunctionSource(appSource, "handleSocketOpen"), /requestSupportedAgentRefresh\(\)/);
+  const messages = [];
+  const bodies = new Set();
+  const refresh = Function("settingsWindowBodies", "purgeDetachedSettingsBodies", "send", `
+    ${extractFunctionSource(settingsSource, "requestSupportedAgentRefresh")}
+    return requestSupportedAgentRefresh;
+  `)(bodies, () => {}, message => messages.push(message));
+  refresh();
+  assert.equal(messages.length, 0, "reconnect without Settings does not probe agent metadata");
+  bodies.add({});
+  refresh();
+  assert.deepEqual(messages, [{ kind: "list_supported_agents" }]);
 });
 
 test("Supported Agents table uses Operator tokens in both themes", () => {
@@ -153,7 +241,7 @@ test("settings-tab uses Operator color/space tokens (no hardcoded colors)", () =
   assert.doesNotMatch(body, /\brgb\(/, "no raw rgb() literals");
 });
 
-test("settings toolbar lets tabs wrap inside compact tiled windows", () => {
+test("Settings keeps grouped navigation beside a flexible content pane", () => {
   const toolbarBlock = componentsCss.match(
     /:root\[data-theme\]\s+\.settings-toolbar\s*\{([\s\S]*?)\}/,
   );
@@ -168,9 +256,12 @@ test("settings toolbar lets tabs wrap inside compact tiled windows", () => {
     /:root\[data-theme\]\s+\.settings-tabs\s*\{([\s\S]*?)\}/,
   );
   assert.ok(tabsBlock, "expected .settings-tabs block in components.css");
-  assert.match(tabsBlock[1], /flex-wrap:\s*wrap/);
+  assert.match(tabsBlock[1], /flex-direction:\s*column/);
   assert.match(tabsBlock[1], /min-width:\s*0/);
-  assert.match(tabsBlock[1], /max-width:\s*100%/);
+  assert.match(tabsBlock[1], /overflow-y:\s*auto/);
+  assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
+  assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
+  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {
@@ -607,6 +698,74 @@ test("System tab exposes Launch GWT at login autostart control", () => {
     /send\(\{\s*kind:\s*"update_autostart",\s*enabled:\s*next\s*\}\)/,
     "expected autostart checkbox onChange to send update_autostart",
   );
+});
+
+test("autostart checking and failures stay local and preserve the last confirmed state", () => {
+  const { document, Event } = parseHTML("<html><body></body></html>");
+  const state = {
+    autostartEnabled: false, autostartPreviousEnabled: false,
+    autostartLoaded: false, autostartPending: false, autostartChecking: true,
+    statusMessage: "Saved system settings.", statusKind: "success",
+  };
+  const messages = [];
+  const createDiv = className => {
+    const element = document.createElement("div");
+    element.className = className;
+    return element;
+  };
+  const renderSource = extractFunctionSource(settingsSource, "renderSystemPanel");
+  const autostartSource = renderSource.slice(
+    renderSource.indexOf('const autostartSection ='),
+    renderSource.indexOf('panel.appendChild(section)'),
+  );
+  const { render, applyAutostartStatus, applyAutostartError } = Function(
+    "document", "systemSettingsState", "createDiv", "send", `
+      const renderSystemPanelInAllSettingsWindows = () => {};
+      ${extractFunctionSource(settingsSource, "applyAutostartStatus")}
+      ${extractFunctionSource(settingsSource, "applyAutostartError")}
+      function render() { ${autostartSource}; return autostartSection; }
+      return { render, applyAutostartStatus, applyAutostartError };
+    `,
+  )(document, state, createDiv, message => messages.push(message));
+  const toggle = section => section.querySelector('input[type="checkbox"]');
+  let section = render();
+  assert.equal(toggle(section).disabled, true, "unknown autostart cannot be changed");
+  assert.match(section.textContent, /Checking login launch status/);
+
+  applyAutostartError({ message: "Status query timed out." });
+  section = render();
+  assert.equal(toggle(section).disabled, true, "failed initial status remains unknown");
+  assert.match(section.textContent, /unavailable.*Status query timed out/i);
+  assert.doesNotMatch(section.textContent, /Checking login launch status/);
+
+  applyAutostartStatus({ enabled: true, mechanism: "fixture", install_path: "/fixture/gwt" });
+  state.autostartPreviousEnabled = false;
+  state.autostartChecking = true;
+  applyAutostartError({ message: "Refresh query unavailable." });
+  assert.equal(state.autostartEnabled, true, "refresh failure preserves the last confirmed value");
+  section = render();
+  assert.equal(toggle(section).disabled, false);
+  assert.equal(toggle(section).checked, true);
+  toggle(section).checked = false;
+  toggle(section).dispatchEvent(new Event("change"));
+  assert.equal(toggle(render()).disabled, true, "saving disables only the autostart control");
+  assert.deepEqual(messages, [{ kind: "update_autostart", enabled: false }]);
+  applyAutostartError({ message: "Update denied." });
+  section = render();
+  assert.equal(toggle(section).checked, true, "failed update restores the known value");
+  assert.equal(toggle(section).disabled, false, "known status allows retry");
+  assert.match(section.textContent, /Update denied/);
+  applyAutostartStatus({ enabled: false }, "Saved login launch setting.");
+  assert.match(render().textContent, /Saved login launch setting/);
+  assert.equal(state.statusMessage, "Saved system settings.");
+  assert.equal(state.statusKind, "success");
+  const openSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  assert.match(openSource, /const shouldRequestAutostartStatus = !systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking/,
+    "reopening Settings must preserve an in-flight query or update");
+  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
+    "only a new query starts checking");
+  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*send\(\{ kind: "get_autostart_status" \}\)/,
+    "use the same decision when sending the query");
 });
 
 test("renderSettingsWindow requests current settings via get_system_settings", () => {

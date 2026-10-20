@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { markdownContent, renderUiContent } from "/ui-content.js";
+import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -66,7 +67,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         notificationForTransition,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
-      import { createConsoleWindow } from "/console-window.js";
       import {
         computeCameraFrameArea,
         computeViewportForWorldRect,
@@ -89,9 +89,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
-      // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
-      // /file-tree-surface.js.
-      import { createFileTreeSurface } from "/file-tree-surface.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
       import { createBranchesCleanupSurface } from "/branches-cleanup-surface.js";
@@ -174,7 +171,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat } from "/pm-chat.js";
+      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -317,10 +314,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const settingsNavigationModel = createUiStateStore({});
       const renderedIssueWindowHeaderKeys = new Map();
-      // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
-      // /file-tree-surface.js (exported and destructured below so the
-      // window-cleanup call site keeps its text).
       // SPEC-3064 Phase 3 (E6d): knowledgeBridgeStateMap and the knowledge
       // request-id state moved to /knowledge-kanban-surface.js.
       let startupAutoResumeReadySent = false;
@@ -345,13 +340,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             "ensureWindow",
             "mountWindowBody",
             "renderWorkspace",
-          ]),
-        }),
-        fileTreeStateMap: Object.freeze({
-          owner: "file-tree-surface",
-          mutatedBy: Object.freeze([
-            "ensureFileTreeState",
-            "renderFileTree",
           ]),
         }),
         branchListStateMap: Object.freeze({
@@ -490,10 +478,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       });
       let viewportRasterTimer = null;
       let viewportDomApplied = false;
-      // SPEC-2008 camera-focus / FR-094: the Fleet Minimap is instantiated once
-      // the DOM container resolves (see the boot block). applyViewport /
-      // recomputeOperatorTelemetry call it through the optional chain so the
-      // early `applyViewport()` paths run safely before it exists.
+      // The Fleet Minimap mounts once and subscribes to the catalog and camera.
       let fleetMinimap = null;
       // SPEC-3064 Phase 3 (E5): the wizard state (launchWizard /
       // launchWizardOpenError / launchWizardOpening / branch draft /
@@ -504,8 +489,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
-      // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries moved to
-      // /project-shell-surface.js.
+      // Window List visibility stays in the shell; its snapshot gate lives in
+      // the shared catalog model below.
       // SPEC-2008 camera-focus: titlebarClickState (the double-click maximize
       // detector) was removed; a titlebar click now always frames the window.
       let appState = {
@@ -514,6 +499,68 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         active_tab_id: null,
         recent_projects: [],
       };
+      const windowCatalogModel = createUiStateStore({
+        catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
+        listEntries: [],
+        bounds: { x: 0, y: 0, width: 1, height: 1 },
+      });
+      let reconcilingWindowCatalog = false;
+
+      function catalogActiveWindows(catalog) {
+        const state = catalog.appState;
+        return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+      }
+
+      function publishWindowCatalog() {
+        if (reconcilingWindowCatalog) return;
+        // Camera echoes and other chrome updates do not invalidate the window
+        // catalog. Keep its reference stable unless a catalog consumer changed.
+        const catalogAppState = {
+          active_tab_id: appState.active_tab_id,
+          tabs: (appState.tabs || []).map(tab => ({ ...tab,
+            workspace: { windows: tab.workspace?.windows || [] },
+          })),
+        };
+        const runtimeStates = Object.fromEntries(windowRuntimeStateMap);
+        windowCatalogModel.update(state => {
+          if (state.catalog.focusedId === focusedId
+              && JSON.stringify(state.catalog.appState) === JSON.stringify(catalogAppState)
+              && JSON.stringify(state.catalog.runtimeStates) === JSON.stringify(runtimeStates)) return state;
+          return { ...state, catalog: {
+            appState: catalogAppState, runtimeStates, focusedId,
+            version: state.catalog.version + 1,
+          } };
+        });
+      }
+
+      // Existing shell callers request a catalog commit; they cannot repaint
+      // just the List while leaving another catalog subscriber stale.
+      function renderWindowList() {
+        publishWindowCatalog();
+      }
+
+      function catalogRuntimeStateForWindow(windowData) {
+        const states = windowCatalogModel.read().catalog.runtimeStates;
+        const sourceState = Object.hasOwn(states, windowData.id) ? states[windowData.id] : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function publishWindowCatalogRuntime(windowId, status) {
+        if (reconcilingWindowCatalog) return;
+        windowCatalogModel.update(state => state.catalog.runtimeStates[windowId] === status ? state : ({
+          ...state, catalog: { ...state.catalog,
+            runtimeStates: { ...state.catalog.runtimeStates, [windowId]: status },
+            version: state.catalog.version + 1,
+          },
+        }));
+      }
+
+      function publishWindowCatalogFocus() {
+        if (reconcilingWindowCatalog) return;
+        windowCatalogModel.update(state => state.catalog.focusedId === focusedId ? state : ({
+          ...state, catalog: { ...state.catalog, focusedId, version: state.catalog.version + 1 },
+        }));
+      }
       let hubCatalog = null;
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /issue-render-sync.js) so a failed sync
@@ -581,10 +628,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           appendRenderKeyPart(parts, windowData?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, windowData?.agent_name || "");
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
           appendRenderKeyPart(parts, Boolean(windowData?.is_pm));
+          appendRenderKeyPart(parts, "surface_owner");
+          appendRenderKeyPart(parts, windowData?.surface_owner || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -657,6 +708,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         appendRenderKeyPart(parts, windowData.purpose_title || "");
         appendRenderKeyPart(parts, "agent_id");
         appendRenderKeyPart(parts, windowData.agent_id || "");
+        appendRenderKeyPart(parts, "agent_name");
+        appendRenderKeyPart(parts, windowData.agent_name || "");
         appendRenderKeyPart(parts, "agent_color");
         appendRenderKeyPart(parts, windowData.agent_color || "");
         appendRenderKeyPart(parts, "worktree_form");
@@ -714,6 +767,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           appendRenderKeyPart(parts, tab.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, tab.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, tab.agent_name || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, tab.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -825,6 +880,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         makeEl,
         clearChildren,
         focusOrSpawnPreset,
+        openReports: () => {
+          openPmAgent();
+          pmChatViews.get(pmWindowId)?.controller.showReports();
+        },
         knowledgeKindForPreset,
         // SPEC-3064 Phase 3 (E6d): these two live in the knowledge-kanban
         // surface, whose factory runs after this one — close over the
@@ -887,9 +946,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         ) {
           return "terminal";
         }
-        if (preset === "file_tree") {
-          return "file-tree";
-        }
         if (preset === "agent_kanban") {
           return "agent-kanban";
         }
@@ -908,8 +964,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (
           preset === "issue" ||
           preset === "issue_monitor" ||
-          preset === "spec" ||
-          preset === "pr"
+          preset === "spec"
         ) {
           return "knowledge";
         }
@@ -919,18 +974,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (preset === "work" || preset === "workspace") {
           return "knowledge";
         }
-        if (preset === "console") {
-          return "console";
-        }
+        if (preset === "settings") return "settings";
         return "mock";
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
-        }
-        if (preset === "pr") {
-          return preset;
         }
         return null;
       }
@@ -1099,36 +1149,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           return;
         }
         sendFocusedPaneInput(text);
-      }
-
-      // SPEC-2809 — registry of Console window controllers keyed by windowId.
-      // Each Console window registers itself on render and unregisters on
-      // close; the `process_line` dispatcher fans out incoming lines to every
-      // active controller so multiple Console windows stay in sync.
-      const consoleControllers = new Map();
-      function ensureConsoleController(windowId) {
-        let controller = consoleControllers.get(windowId);
-        if (!controller) {
-          controller = createConsoleWindow({
-            document,
-            windowId,
-            send: (payload) => socketTransport.send(payload),
-          });
-          consoleControllers.set(windowId, controller);
-        }
-        return controller;
-      }
-      function disposeConsoleController(windowId) {
-        const controller = consoleControllers.get(windowId);
-        if (controller) {
-          controller.close();
-          consoleControllers.delete(windowId);
-        }
-      }
-      function broadcastProcessLineToConsoles(line) {
-        for (const controller of consoleControllers.values()) {
-          controller.push(line);
-        }
       }
 
       const releaseNotesWindow = createReleaseNotesWindow({
@@ -1330,7 +1350,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmConversations();
+        requestVisiblePmReports();
+        requestSupportedAgentRefresh();
       }
 
       function handleSocketMessage(event) {
@@ -1403,11 +1424,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function handleSocketClose() {
-        for (const [windowId, view] of pmChatViews) {
-          view.pendingSessions.length = 0;
-          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
-        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -1660,7 +1676,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           claude: "Claude",
           codex: "Codex",
           agent: "Agent",
-          file_tree: "File Tree",
           branches: "Branches",
           settings: "Settings",
           profile: "Profile",
@@ -1677,7 +1692,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           work: "Issue",
           workspace: "Issue",
           board: "Board",
-          pr: "PR",
         };
         return labels[preset] || presetLabel(preset);
       }
@@ -1798,6 +1812,11 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           return focus && focus !== PM_WINDOW_TITLE
             ? `${PM_WINDOW_TITLE} — ${focus}`
             : PM_WINDOW_TITLE;
+        }
+        if (isAgentWindowPreset(windowData?.preset)) {
+          const name = String(windowData?.agent_name || "").trim() || "Naming…";
+          const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
+          return purpose ? `${name} — ${purpose}` : name;
         }
         for (const value of candidates) {
           const title = String(value || "").trim();
@@ -2052,27 +2071,11 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
 
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
-        if (splitSurfaces?.isOpen()) {
-          if (!splitSurfaces.select(surface)) splitSurfaces.focusSurface(surface);
-          return;
-        }
-        if (surface !== "agents") setAgentsHost(null);
-        switch (surface) {
-          case "issues":
-            openWorkspaceOverview();
-            return;
-          case "board":
-            focusOrSpawnPreset("board");
-            return;
-          case "settings":
-            focusOrSpawnPreset("settings");
-            return;
-          case "agents":
-            setAgentsHost(stage.closest(".canvas-area"));
-            syncSurfaceRail();
-            return;
-          default:
-            return;
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
+        if (splitSurfaces?.show(surface)) {
+          // A rail choice supersedes camera navigation still awaiting a window.
+          pendingFrameWindowId = null;
+          pendingPmFrame = false;
         }
       }
 
@@ -2129,7 +2132,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // SPEC-2008 camera-focus / FR-094: every viewport change re-centres the
         // Fleet Minimap radar — the camera stays fixed at the minimap centre and
         // the world (cells) slides under it, mirroring the canvas stage.
-        fleetMinimap?.update();
+        windowCatalogModel.update(state => ({ ...state, bounds: visibleBounds() }));
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -2224,6 +2227,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function visibleBounds() {
+        if (splitSurfaces?.hasLayout) {
+          const area = canvas.parentElement;
+          return { x: 0, y: 0, width: area.clientWidth, height: area.clientHeight };
+        }
         return {
           x: -viewport.x / viewport.zoom,
           y: -viewport.y / viewport.zoom,
@@ -2310,7 +2317,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function clampWindowElementToCameraFrame(windowId) {
-        if (splitSurfaces?.isOpen()) return;
+        if (splitSurfaces?.hasLayout) return;
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -2419,11 +2426,21 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // model). Also applies local focus + z-order highlight (focus_window
       // stays for highlight; maximize_window is gone).
       function frameWindow(windowId, { animate = true, notifyFocus = true } = {}) {
-        const windowData = workspaceWindowById(windowId);
+        const windowData = windowWithSettingsSection(workspaceWindowById(windowId));
         if (!windowData) {
           return;
         }
-        if (splitSurfaces?.isOpen()) {
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
+        const surface = surfaceForWindow(windowData);
+        if (surface === "pm" || (surface === "agents"
+            && (windowData.surface_owner === "agents"
+              || (splitSurfaces?.hasLayout && splitSurfaces.activeSurface() === "pm")))) {
+          windowCatalogModel.update(state => ({ ...state, navigation: {
+            windowId, notifyFocus, serial: (state.navigation?.serial || 0) + 1,
+          } }));
+          return;
+        }
+        if (splitSurfaces?.hasLayout) {
           if (!splitSurfaces.containsWindow(windowId)) {
             splitSurfaces.select(surfaceForWindow(windowData));
           }
@@ -2432,7 +2449,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             else focusWindowLocally(windowId);
             return;
           }
-          // PM and legacy surfaces keep their existing single-view route.
+          // Remaining legacy surfaces keep their existing Canvas route.
           splitSurfaces.close();
         }
         // The Windows rail also lists inactive members of saved window groups.
@@ -2506,7 +2523,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       let focusedWindowViewportReframeFrame = null;
 
       function frameFocusedWindowAfterViewportResize() {
-        if (splitSurfaces?.isOpen() || !focusedId) {
+        if (splitSurfaces?.hasLayout || !focusedId) {
           return;
         }
         const windowData = workspaceWindowById(focusedId);
@@ -2683,10 +2700,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function cycleFocus(direction) {
-        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
-        // projection in runtime-priority order. Hidden tab members remain
-        // candidates and are activated before the existing local camera frame
-        // path notifies the backend of focus for z-order/highlight.
+        // SPEC #4777 T-10: cycle the existing Agents tabs in runtime-priority
+        // order without changing canvas geometry or saved window groups.
         const windows = activeWorkspace().windows || [];
         const nextWindowId = selectNextAgentFocusWindowId(
           windows,
@@ -2697,15 +2712,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (!nextWindowId) {
           return;
         }
-        const nextWindow = windows.find(
-          (windowData) => windowData.id === nextWindowId,
-        );
-        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
-          pendingFrameWindowId = nextWindowId;
-          send({ kind: "activate_window_tab", id: nextWindowId });
-          return;
-        }
-        frameWindow(nextWindowId);
+        splitSurfaces?.focusSurface("agents");
+        openSurface("agents");
+        if (!agentsSurface.openTab(nextWindowId)) return;
+        pendingFrameWindowId = null;
+        focusWindowRemotely(nextWindowId);
+        terminalMap.get(nextWindowId)?.terminal.focus();
       }
 
       const closeProjectController = createCloseProjectController({
@@ -2767,7 +2779,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         const workspaceWindow = workspaceWindowById(windowId);
         if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
         if (agentsHost === stage.closest(".canvas-area")) return false;
-        if (splitSurfaces?.isOpen() && !isOffCanvasPlacement(workspaceWindow)) {
+        if (splitSurfaces?.hasLayout && !isOffCanvasPlacement(workspaceWindow)) {
           return splitSurfaces.containsWindow(windowId);
         }
         if (isOffCanvasPlacement(workspaceWindow)) {
@@ -3390,7 +3402,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           geometry,
         );
         applyLocalGeometryToModel(windowId, geometry);
-        fleetMinimap?.renderCells();
+        publishWindowCatalog();
         const runtime = terminalMap.get(windowId);
         sendGeometry(
           windowId,
@@ -3466,8 +3478,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
 
       function updatePmLauncher(workspace) {
+        pmLauncherModel.update(state => ({ ...state, workspace }));
+      }
+
+      pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         pmWindowId = pmWindow?.id ?? null;
@@ -3482,6 +3499,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(paused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3490,6 +3508,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (paused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -3498,7 +3517,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // reachable on screen, so a visible PM never gets a duplicate CTA.
           floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
         }
-      }
+      });
 
       // True when the window's rectangle intersects the visible canvas area.
       function isWindowWithinViewport(windowData) {
@@ -3520,6 +3539,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       let pendingPmFrame = false;
 
       function openPmAgent() {
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (agentsHost) setAgentsHost(null);
         if (pmWindowId && windowMap.has(pmWindowId)) {
           requestWindowFrame(pmWindowId);
@@ -3531,11 +3551,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
 
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
-        // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
-        // the live window set (geometry / agent color / telemetry). Runs on the
-        // same cadence as the canvas empty-state + rail badges, before the
-        // operator-shell-degraded early return so the minimap stays live.
-        fleetMinimap?.renderCells();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
         // open-window count across all project tabs, matching the cross-tab
@@ -3714,6 +3729,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               windowRuntimeStateSinceMap.set(windowId, Date.now());
             }
             windowRuntimeStateMap.set(windowId, status);
+            publishWindowCatalogRuntime(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3759,7 +3775,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             renderedRuntimeStatusKeys.set(windowId, nextRuntimeStatusKey);
             const element = windowMap.get(windowId);
             if (!element) {
-              renderWindowList();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3820,7 +3835,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                 stopSpinnerAnimation(overlay);
               }
             }
-            renderWindowList();
 
           },
         );
@@ -3895,6 +3909,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         }
         const previousFocusedId = focusedId;
         focusedId = windowId;
+        publishWindowCatalogFocus();
         if (previousFocusedId && previousFocusedId !== windowId) {
           const previousElement = windowMap.get(previousFocusedId);
           previousElement?.classList.remove("focused");
@@ -3906,9 +3921,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         syncSurfaceRail();
       }
 
+      function windowWithSettingsSection(data) {
+        return data?.preset === "settings"
+          ? { ...data, settingsSection: settingsNavigationModel.read()[data.id] } : data;
+      }
+
       // The selected pane or Agents host takes precedence over canvas focus.
       function syncSurfaceRail() {
-        if (splitSurfaces?.isOpen()) {
+        if (splitSurfaces?.hasLayout) {
           applySurfaceSelection(document, splitSurfaces.activeSurface());
           return;
         }
@@ -3916,11 +3936,18 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           applySurfaceSelection(document, "agents");
           return;
         }
-        const focused = focusedId
+        const focusedWindow = focusedId
           ? (activeWorkspace().windows || []).find((windowData) => windowData.id === focusedId)
           : null;
+        const focused = windowWithSettingsSection(focusedWindow);
         applySurfaceSelection(document, surfaceForWindow(focused));
       }
+
+      document.addEventListener("settings:section-changed", event => {
+        const { windowId, section } = event.detail || {};
+        if (windowId) settingsNavigationModel.update(state => ({ ...state, [windowId]: section }));
+        syncSurfaceRail();
+      });
 
       function numericZIndex(value) {
         const numeric = Number.parseInt(value || "0", 10);
@@ -4595,15 +4622,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                 ["Blocked", "0 cards"],
               ],
             };
-          case "pr":
-            return {
-              heading: "PR Bridge",
-              rows: [
-                ["Cache", "repo-scoped"],
-                ["Checks", "cache-backed"],
-                ["Workflow", "gwt-managed"],
-              ],
-            };
           default:
             return {
               heading: "Work",
@@ -4615,40 +4633,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             };
         }
       }
-
-      // SPEC-3064 Phase 3 (E6a): the File Tree window surface (file tree
-      // state map, worktree picker, text/hex viewer + dirty tracking,
-      // highlight.js lazy load, renderFileTree / renderFileTreeViewer, the
-      // File Tree window mount, and the file_tree_* / file_content_*
-      // receive bodies) moved to /file-tree-surface.js. app.js keeps the
-      // receive() case arms, the frontendUnits registry entries, and the
-      // window-cleanup call sites, wired through this factory.
-      const {
-        fileTreeStateMap,
-        ensureFileTreeState,
-        requestFileTree,
-        renderFileTree,
-        renderFileTreeViewer,
-        openWorktreePicker,
-        closeWorktreePicker,
-        renderWorktreePicker,
-        requestFileContent,
-        requestSaveFileContent,
-        renderDiscardModal,
-        renderConflictModal,
-        queueNavigationGuardedByDirty,
-        beginViewerForFile,
-        applyAfterSaveContinuation,
-        mountFileTreeWindow,
-        applyFileTreeReceiveEvent,
-      } = createFileTreeSurface({
-        send,
-        makeEl,
-        clearChildren,
-        focusWindowLocally,
-        sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
-        windowMap,
-      });
 
       function makeEl(tag, options = {}, children = []) {
         const el = document.createElement(tag);
@@ -4786,6 +4770,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
         scheduleKnowledgeRelatedWorkRefresh,
+        resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -4795,10 +4780,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
         sendKnowledgeSemanticSearchNow,
@@ -4806,10 +4793,15 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        isKnowledgeWindowVisible: (id) => !document.hidden &&
+          !workspaceWindowById(id)?.minimized &&
+          (!workspaceWindowById(id)?.tab_group_id || workspaceWindowById(id)?.tab_group_active) &&
+          elementHasLayoutBox(windowMap.get(id)?.querySelector(".surface-knowledge") || windowMap.get(id)),
         getWorkspaceWindows: () =>
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
             .filter(Boolean),
+        windowCatalogModel,
         pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,
@@ -4822,6 +4814,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // runtime read-only, so the live output streams but no input path exists.
         createTerminalRuntime: (id, terminalRoot, options) =>
           createTerminalRuntime(id, terminalRoot, { ...options, readOnly: Boolean(agentsHost) || options?.readOnly }),
+        isAgentsSurfaceMounted: () => Boolean(agentsHost),
         windowDisplayTitle,
         windowRoleBadgeLabel,
         // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban
@@ -4856,11 +4849,15 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // the center is constructed after this factory.
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
+        reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
+        openSurfaceNotice: (key) => notificationCenter.open(key),
       });
       issueMonitorModel.subscribe(model => model.status, status =>
         window.__operatorShell?.applyIssueMonitorStatus?.(status));
       issueMonitorModel.subscribe(model => model.status, status =>
         updateCtaController.handleIssueMonitorStatus(status));
+      windowCatalogModel.subscribe(model => model.catalog, () =>
+        requestAnimationFrame(refreshVisibleKnowledgeWindows));
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
       // state maps, Work-id tracking for the Board Work filter, board chat
@@ -5037,7 +5034,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           });
         }
         if (isStrongContinueWorkSuccess(exact)) {
-          scheduleKnowledgeRelatedWorkRefresh();
+          scheduleKnowledgeRelatedWorkRefresh(true);
         }
       }
 
@@ -5116,7 +5113,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         launchPending,
         continueWork: (workId, bounds) =>
           continueWorkDispatcher.dispatch(workId, bounds),
-        branchesSurface: {
+        branchesFileTreeSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
           renderBranches: (...a) => renderBranches(...a),
@@ -5130,6 +5127,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // sendWizardAction (transport helpers), the receive() case arms, and
       // the frontendUnits registry entries, wired through this factory.
       const {
+        visibilityModel: launchWizardVisibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
@@ -5246,12 +5244,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         closeCloneProjectModal,
         updateActionAvailability,
         requestWindowList,
-        renderWindowList,
         toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
-        applyWindowListEvent,
         applyCloneProjectReceiveEvent,
         applyPickerReceiveEvent,
         applyProjectOpenReceiveEvent,
@@ -5260,18 +5256,20 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         handleMigrationModalEscape,
         handleWindowListEscape,
         installProjectShellChrome,
+        dispose: disposeProjectShellSurface,
       } = createProjectShellSurface({
         send,
         createNode,
         // appState / projectError are reassigned in app.js, so the surface
         // reads them through accessors.
         getAppState: () => appState,
+        windowCatalogModel,
         getProjectError: () => projectError,
         activeProjectTab,
         activeWorkspace,
         windowMap,
         appendRenderKeyPart,
-        runtimeStateForWindow,
+        runtimeStateForWindow: catalogRuntimeStateForWindow,
         windowDisplayTitle,
         windowTitleTooltip,
         windowRoleBadgeLabel,
@@ -5327,7 +5325,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -5379,10 +5377,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       const pmChatViews = new Map();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const renderedTerminalPackets = new Map();
+      subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
+        if (!state) return;
+        const packet = state.terminal;
+        if (packet && renderedTerminalPackets.get(state.windowId) !== packet) {
+          if (packet.kind === "terminal_snapshot") frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64);
+          else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
+          renderedTerminalPackets.set(state.windowId, packet);
+        }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
+      });
 
       function disposePmChat(windowId) {
         const view = pmChatViews.get(windowId);
         if (!view) return;
+        view.unsubscribe();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -5402,8 +5414,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (view) {
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
-            view.controller.setSession(windowData.session_id);
-            requestVisiblePmConversations();
+            bindPmWindowState(windowData.id, windowData.session_id);
+            requestVisiblePmReports();
           }
           return;
         }
@@ -5418,17 +5430,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (overlay) logHost.append(overlay);
         body.classList.add("pm-conversation-body");
         body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          send: (message) => {
-            const result = send(message);
-            if (result === "sent") view.pendingSessions.push(view.sessionId);
-            return result;
-          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmConversations();
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5436,19 +5443,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           },
         });
         pmChatViews.set(windowData.id, view);
-        requestVisiblePmConversations();
+        bindPmWindowState(windowData.id, windowData.session_id);
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
+          view.controller.update(state);
+          if (state) view.logHost.dataset.stateVersion = String(state.revision);
+        });
+        requestVisiblePmReports();
       }
 
-      function requestVisiblePmConversations() {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_conversation", id: windowData.id });
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
-      window.setInterval(requestVisiblePmConversations, 5000);
+      window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
         disposePmChat(windowData.id);
@@ -5458,15 +5470,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         element.classList.remove(
           "surface-terminal",
           "surface-agent-kanban",
-          "surface-file-tree",
           "surface-branches",
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-settings",
           "surface-index",
           "surface-work",
           "surface-profile",
-          "surface-console",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -5530,13 +5541,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           return;
         }
 
-        if (surface === "file-tree") {
-          // SPEC-3064 Phase 3 (E6a): the File Tree window mount moved to
-          // the file tree surface.
-          mountFileTreeWindow(windowData, body);
-          return;
-        }
-
         if (surface === "branches") {
           // SPEC-3064 Phase 3 (E6b): the Branches window mount moved to
           // the branches cleanup surface.
@@ -5562,20 +5566,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // SPEC-3064 Phase 3 (E6c): the Logs window mount moved to the
           // board & logs surface.
           mountLogsWindow(windowData, body);
-          return;
-        }
-
-        if (surface === "console") {
-          // SPEC-2809 — Console window mount: register a controller for
-          // this windowId and attach its DOM to the window body. The
-          // controller subscribes implicitly via the shared
-          // `consoleControllers` registry that the `process_line`
-          // dispatcher fans out to.
-          const controller = ensureConsoleController(windowData.id);
-          while (body.firstChild) {
-            body.removeChild(body.firstChild);
-          }
-          controller.mount(body);
           return;
         }
 
@@ -5641,6 +5631,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // document-level <select> guard listeners, wired through this
       // factory.
       const {
+        applyGlobalUpdateSettings,
+        applyIssueSettingsStatus,
+        applyIssueMonitorProfiles,
+        applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
@@ -5651,6 +5645,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         applyCustomAgentDeleted,
         applyCustomAgentError,
         applySupportedAgentList,
+        applySupportedAgentMaintenance,
+        requestSupportedAgentRefresh,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -5669,6 +5665,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         renderUsagePanel,
         indexStatusByProjectRoot,
         pmSettingsPanel,
+        mountIssues: (data, host) => {
+          mountKnowledgeWindow(data, host);
+          send({ kind: "request_remote_start_work_branches", id: data.id });
+        },
       });
 
       function ensureWindow(windowData) {
@@ -5923,7 +5923,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge") {
+        if (surface === "knowledge" || surface === "settings") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -5984,174 +5984,191 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function renderWorkspace(workspace) {
-        return traceMeasure(
-          UI_TRACE_EVENT.renderWorkspace,
-          { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
-          () => {
-            const pendingAgentKanbanPlacement =
-              agentKanbanPendingPlacement.consumePlacementMessage(
-                workspace?.windows || [],
-              );
-            if (pendingAgentKanbanPlacement) {
-              send(pendingAgentKanbanPlacement);
-            }
+        const wasReconciling = reconcilingWindowCatalog;
+        reconcilingWindowCatalog = true;
+        let result;
+        try {
+          result = traceMeasure(
+            UI_TRACE_EVENT.renderWorkspace,
+            { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
+            () => {
+              const pendingAgentKanbanPlacement =
+                agentKanbanPendingPlacement.consumePlacementMessage(
+                  workspace?.windows || [],
+                );
+              if (pendingAgentKanbanPlacement) {
+                send(pendingAgentKanbanPlacement);
+              }
 
-            // Issue #3364 — resolve local gesture guards BEFORE anything
-            // (render keys, minimap, telemetry, window elements) reads the
-            // incoming windows: while a gesture is active or a commit's echo
-            // is still in flight, a backlogged stale broadcast must neither
-            // snap the window back nor desync the Fleet Minimap. Suppressed
-            // windows (and their tab-group members, which share geometry
-            // server-side) are patched back to the local truth so the MODEL
-            // stays consistent with the DOM.
-            for (const incomingWindow of workspace?.windows || []) {
-              const decision = resolveIncomingGeometry(geometrySyncState, {
-                id: incomingWindow.id,
-                geometry: incomingWindow.geometry,
-              });
-              if (decision.apply) {
-                continue;
-              }
-              const localGeometry =
-                decision.patchGeometry || domWindowGeometry(incomingWindow.id);
-              if (!localGeometry) {
-                continue;
-              }
-              const suppressedGroupId = windowGroupId(incomingWindow);
-              for (const member of workspace.windows) {
-                if (windowGroupId(member) !== suppressedGroupId) {
+              // Issue #3364 — resolve local gesture guards BEFORE anything
+              // (render keys, minimap, telemetry, window elements) reads the
+              // incoming windows: while a gesture is active or a commit's echo
+              // is still in flight, a backlogged stale broadcast must neither
+              // snap the window back nor desync the Fleet Minimap. Suppressed
+              // windows (and their tab-group members, which share geometry
+              // server-side) are patched back to the local truth so the MODEL
+              // stays consistent with the DOM.
+              for (const incomingWindow of workspace?.windows || []) {
+                const decision = resolveIncomingGeometry(geometrySyncState, {
+                  id: incomingWindow.id,
+                  geometry: incomingWindow.geometry,
+                });
+                if (decision.apply) {
                   continue;
                 }
-                member.geometry = { ...localGeometry };
-              }
-            }
-
-            const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
-              scopeKey: activeViewportScopeKey(),
-            });
-            const viewportChanged = !sameViewportValues(viewport, nextViewport);
-            viewport = nextViewport;
-            if (!viewportDomApplied || viewportChanged) {
-              applyViewport();
-            }
-
-            // SPEC-2008 camera-focus: nothing to re-sync when the window set is
-            // unchanged — windows render at their own geometry and the camera
-            // is driven locally (frameWindow), not per-render. Issue #3365: the
-            // key diff + commit live in workspaceRenderSync so an exception
-            // mid-sync leaves the key uncommitted (the next workspace_state
-            // retries instead of freezing), one poisoned window cannot block
-            // the others, and the telemetry recompute always runs.
-            let activeWindowIdSet = null;
-            workspaceRenderSync.render({
-              key: workspaceWindowsRenderKey(workspace),
-              sync: (isolate) => {
-                activeWindowIdSet = workspaceWindowIdSet(workspace);
-                const visibility = classifyProjectWindowVisibility({
-                  activeWindowIdSet,
-                  allProjectWindowIdSet: allProjectWindowIdSet(),
-                  mountedWindowIds: windowMap.keys(),
-                });
-                isolate("hide_window", visibility.hidden, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: true,
-                    hasTerminal: terminalMap.has(windowId),
-                    onReveal: () => activateTerminalOnReveal(windowId),
-                  });
-                });
-                isolate("remove_window", visibility.removed, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  if (!element) return;
-                  disposePmChat(windowId);
-                  const runtime = terminalMap.get(windowId);
-                  if (runtime && runtime.activationFrame !== null) {
-                    cancelAnimationFrame(runtime.activationFrame);
-                  }
-                  terminalViewportRefreshScheduler?.clear(windowId);
-                  runtime?.cleanup?.();
-                  runtime?.terminal.dispose();
-                  terminalMap.delete(windowId);
-                  decoderMap.delete(windowId);
-                  detailMap.delete(windowId);
-                  windowRuntimeStateMap.delete(windowId);
-                  windowRuntimeStateSinceMap.delete(windowId);
-                  agentCompletionNotifier.forgetWindow(windowId);
-                  agentAttentionToaster.forgetWindow(windowId);
-                  // SPEC #3206: dismiss this window's attention toast from the shared
-                  // alerts stack so a sticky error toast never orphans a gone window.
-                  alertsToasts.dismiss(`attention-${windowId}`);
-                  renderedWindowElementKeys.delete(windowId);
-                  renderedRuntimeStatusKeys.delete(windowId);
-                  renderedAgentKanbanBodyKeys.delete(windowId);
-                  renderedIssuePreviewBodyKeys.delete(windowId);
-                  renderedIssueWindowHeaderKeys.delete(windowId);
-                  pendingOutputMap.delete(windowId);
-                  pendingSnapshotMap.delete(windowId);
-                  terminalOutputBatcher.clear(windowId);
-                  const profileState = profileStateMap.get(windowId);
-                  if (profileState) {
-                    clearProfileSaveTimer(profileState);
-                  }
-                  fileTreeStateMap.delete(windowId);
-                  branchListStateMap.delete(windowId);
-                  profileStateMap.delete(windowId);
-                  boardStateMap.delete(windowId);
-                  logStateMap.delete(windowId);
-                  indexSearchStateMap.delete(windowId);
-                  clearKnowledgeBridgeState(windowId);
-                  workspaceOverviewSurface.deleteState(windowId);
-                  clearBranchCleanupForWindow(windowId);
-                  clearLocalGeometryEdit(geometrySyncState, windowId);
-                  element.remove();
-                  windowMap.delete(windowId);
-                });
-
-                // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-                // for tab-grouped terminal windows so the newly visible terminal
-                // gets fit + viewport refresh + focus on the same animation frame
-                // cycle. Without this, scrollback wheel input requires a manual
-                // OS-level resize before xterm picks up the new measurement. The
-                // transition logic lives in `terminal-viewport-reflow.js` so a
-                // behavior test (linkedom + element stub) can exercise the
-                // hidden-to-visible activation path directly.
-                isolate("ensure_window", workspace.windows, (windowData) => {
-                  ensureWindow(windowData);
-                  const element = windowMap.get(windowData.id);
-                  if (!element) return;
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: !visibleWindowData(windowData),
-                    hasTerminal: terminalMap.has(windowData.id),
-                    onReveal: () => activateTerminalOnReveal(windowData.id),
-                  });
-                });
-              },
-              // SPEC-2008 camera-focus: keep the rail window-count badge and the
-              // empty-canvas state in sync with window mounts/unmounts, not only
-              // with agent status events.
-              recompute: recomputeOperatorTelemetry,
-              afterSync: () => {
-                if (splitSurfaces?.isOpen() || agentsHost) return;
-                const topmostId = topmostWindowId(workspace);
-                if (topmostId && activeWindowIdSet?.has(topmostId)) {
-                  focusWindowLocally(topmostId);
-                  scheduleTerminalFocusActivation(topmostId, {
-                    shouldPersistGeometry: false,
-                    reason: "topmost_focus",
-                  });
-                } else {
-                  focusedId = null;
-                  syncSurfaceRail();
+                const localGeometry =
+                  decision.patchGeometry || domWindowGeometry(incomingWindow.id);
+                if (!localGeometry) {
+                  continue;
                 }
-              },
-            });
-            splitSurfaces?.sync();
-            if (agentsHost) agentsSurface.sync(workspace.windows || []);
-            cleanupTextPreviews();
-          },
-        );
+                const suppressedGroupId = windowGroupId(incomingWindow);
+                for (const member of workspace.windows) {
+                  if (windowGroupId(member) !== suppressedGroupId) {
+                    continue;
+                  }
+                  member.geometry = { ...localGeometry };
+                }
+              }
+
+              const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+                scopeKey: activeViewportScopeKey(),
+              });
+              const viewportChanged = !sameViewportValues(viewport, nextViewport);
+              viewport = nextViewport;
+              if (!viewportDomApplied || viewportChanged) {
+                applyViewport();
+              }
+
+              // SPEC-2008 camera-focus: nothing to re-sync when the window set is
+              // unchanged — windows render at their own geometry and the camera
+              // is driven locally (frameWindow), not per-render. Issue #3365: the
+              // key diff + commit live in workspaceRenderSync so an exception
+              // mid-sync leaves the key uncommitted (the next workspace_state
+              // retries instead of freezing), one poisoned window cannot block
+              // the others, and the telemetry recompute always runs.
+              let activeWindowIdSet = null;
+              workspaceRenderSync.render({
+                key: workspaceWindowsRenderKey(workspace),
+                sync: (isolate) => {
+                  activeWindowIdSet = workspaceWindowIdSet(workspace);
+                  const visibility = classifyProjectWindowVisibility({
+                    activeWindowIdSet,
+                    allProjectWindowIdSet: allProjectWindowIdSet(),
+                    mountedWindowIds: windowMap.keys(),
+                  });
+                  isolate("hide_window", visibility.hidden, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: true,
+                      hasTerminal: terminalMap.has(windowId),
+                      onReveal: () => activateTerminalOnReveal(windowId),
+                    });
+                  });
+                  isolate("remove_window", visibility.removed, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    if (!element) return;
+                    disposePmChat(windowId);
+                    removePmWindowState(windowId);
+                    renderedTerminalPackets.delete(windowId);
+                    const runtime = terminalMap.get(windowId);
+                    if (runtime && runtime.activationFrame !== null) {
+                      cancelAnimationFrame(runtime.activationFrame);
+                    }
+                    terminalViewportRefreshScheduler?.clear(windowId);
+                    runtime?.cleanup?.();
+                    runtime?.terminal.dispose();
+                    terminalMap.delete(windowId);
+                    decoderMap.delete(windowId);
+                    detailMap.delete(windowId);
+                    windowRuntimeStateMap.delete(windowId);
+                    windowRuntimeStateSinceMap.delete(windowId);
+                    agentCompletionNotifier.forgetWindow(windowId);
+                    agentAttentionToaster.forgetWindow(windowId);
+                    // SPEC #3206: dismiss this window's attention toast from the shared
+                    // alerts stack so a sticky error toast never orphans a gone window.
+                    alertsToasts.dismiss(`attention-${windowId}`);
+                    renderedWindowElementKeys.delete(windowId);
+                    renderedRuntimeStatusKeys.delete(windowId);
+                    renderedAgentKanbanBodyKeys.delete(windowId);
+                    renderedIssuePreviewBodyKeys.delete(windowId);
+                    settingsNavigationModel.update(state => {
+                      const next = { ...state };
+                      delete next[windowId];
+                      return next;
+                    });
+                    renderedIssueWindowHeaderKeys.delete(windowId);
+                    pendingOutputMap.delete(windowId);
+                    pendingSnapshotMap.delete(windowId);
+                    terminalOutputBatcher.clear(windowId);
+                    const profileState = profileStateMap.get(windowId);
+                    if (profileState) {
+                      clearProfileSaveTimer(profileState);
+                    }
+                    branchListStateMap.delete(windowId);
+                    profileStateMap.delete(windowId);
+                    boardStateMap.delete(windowId);
+                    logStateMap.delete(windowId);
+                    indexSearchStateMap.delete(windowId);
+                    clearKnowledgeBridgeState(windowId);
+                    workspaceOverviewSurface.deleteState(windowId);
+                    clearBranchCleanupForWindow(windowId);
+                    clearLocalGeometryEdit(geometrySyncState, windowId);
+                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
+                    element.remove();
+                    windowMap.delete(windowId);
+                  });
+
+                  // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+                  // for tab-grouped terminal windows so the newly visible terminal
+                  // gets fit + viewport refresh + focus on the same animation frame
+                  // cycle. Without this, scrollback wheel input requires a manual
+                  // OS-level resize before xterm picks up the new measurement. The
+                  // transition logic lives in `terminal-viewport-reflow.js` so a
+                  // behavior test (linkedom + element stub) can exercise the
+                  // hidden-to-visible activation path directly.
+                  isolate("ensure_window", workspace.windows, (windowData) => {
+                    ensureWindow(windowData);
+                    const element = windowMap.get(windowData.id);
+                    if (!element) return;
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: !visibleWindowData(windowData),
+                      hasTerminal: terminalMap.has(windowData.id),
+                      onReveal: () => activateTerminalOnReveal(windowData.id),
+                    });
+                  });
+                },
+                // SPEC-2008 camera-focus: keep the rail window-count badge and the
+                // empty-canvas state in sync with window mounts/unmounts, not only
+                // with agent status events.
+                recompute: recomputeOperatorTelemetry,
+                afterSync: () => {
+                  if (splitSurfaces?.hasLayout || agentsHost) return;
+                  const topmostId = topmostWindowId(workspace);
+                  if (topmostId && activeWindowIdSet?.has(topmostId)) {
+                    focusWindowLocally(topmostId);
+                    scheduleTerminalFocusActivation(topmostId, {
+                      shouldPersistGeometry: false,
+                      reason: "topmost_focus",
+                    });
+                  } else {
+                    focusedId = null;
+                    syncSurfaceRail();
+                  }
+                },
+              });
+              cleanupTextPreviews();
+            },
+          );
+        } finally {
+          reconcilingWindowCatalog = wasReconciling;
+        }
+        // Subscribers may mount runtimes: publish only after removal, creation
+        // and focus have settled, never with the previous membership.
+        publishWindowCatalog();
+        resumeKnowledgeEventRefresh();
+        return result;
       }
 
       const socketTransport = Object.freeze({
@@ -6220,29 +6237,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       });
 
       const branchesFileTreeSurface = Object.freeze({
-        ensureFileTreeState,
         ensureBranchListState,
-        requestFileTree,
         requestBranches,
-        renderFileTree,
         renderBranches,
         openBranchCleanupModal,
         closeBranchCleanupModal,
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
-        // SPEC-2009 amendment: Worktree picker + file content viewer.
-        openWorktreePicker,
-        closeWorktreePicker,
-        renderWorktreePicker,
-        renderFileTreeViewer,
-        requestFileContent,
-        // SPEC-2009 amendment Phase 2: edit affordance.
-        requestSaveFileContent,
-        renderDiscardModal,
-        renderConflictModal,
-        queueNavigationGuardedByDirty,
-        beginViewerForFile,
-        applyAfterSaveContinuation,
       });
 
       const profileSurface = Object.freeze({
@@ -6315,6 +6316,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         switch (event.kind) {
           case "hub_state": {
             receiveHubState(event.hub);
+            updatePmLauncher(activeWorkspace());
             break;
           }
           case "project_not_found": {
@@ -6408,10 +6410,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
-          // SPEC-3064 Phase 3 (E7): window list entries and rendering live
-          // in the project shell surface.
+          // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":
-            applyWindowListEvent(event);
+            windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
             break;
           case "provider_usage":
             applyProviderUsageUi({
@@ -6423,34 +6424,25 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
-          case "pm_conversation": {
-            const view = pmChatViews.get(event.id);
-            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
-            break;
-          }
-          case "pane_send_result": {
-            let view = pmChatViews.get(event.window_id);
-            // A pane removed before submit has no window ID in its rejection.
-            // Only an unambiguous failure may unlock a pending PM draft.
-            if (!event.window_id && event.ok === false) {
-              const pending = (activeWorkspace()?.windows || [])
-                .map(windowData => pmChatViews.get(windowData.id))
-                .filter(candidate => candidate?.pendingSessions.length);
-              if (pending.length === 1) view = pending[0];
-            }
-            if (view && view.pendingSessions.length) {
-              const sentSession = view.pendingSessions.shift();
-              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
-            }
+          case "pm_reports": {
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
+            applyIssueSettingsStatus(event.status || {}, activeProjectTab()?.project_root);
             // Issue #3906 AC-12: the update CTA shows the drain progress.
+            break;
+          case "issue_monitor_profiles":
+            applyIssueMonitorProfiles(event);
+            break;
+          case "issue_monitor_profiles_write_failed":
+            applyIssueMonitorProfilesError(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
@@ -6484,10 +6476,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           }
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_snapshot":
-            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(
@@ -6522,20 +6514,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           case "project_index_search_error":
             handleProjectIndexSearchError(event);
-            break;
-          // SPEC-3064 Phase 3 (E6a): file tree / file content state and
-          // rendering live in the file tree surface.
-          case "file_tree_entries":
-          case "file_tree_error":
-          case "file_tree_worktrees":
-          case "file_tree_worktree_selected":
-          case "file_tree_worktree_error":
-          case "file_content_text":
-          case "file_content_hex":
-          case "file_content_saved":
-          case "file_content_save_error":
-          case "file_content_error":
-            applyFileTreeReceiveEvent(event);
             break;
           case "branch_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
@@ -6594,26 +6572,11 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
             applyProjectBoardConfigEventToBoard(event);
             break;
-          case "process_line":
-            // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
-            // line from `ProcessConsoleHub` to every Console window
-            // controller. Phase F3 also wires Logs window's Process facet
-            // to consume the same event independently.
-            if (event.line) {
-              broadcastProcessLineToConsoles(event.line);
-            }
-            break;
-          case "process_console_snapshot": {
-            // SPEC-2809 Phase F2 — initial ring buffer replay for the
-            // Console window that just mounted.
-            const target = consoleControllers.get(event.id);
-            if (target) {
-              target.ingestSnapshot(event.lines || []);
-            }
-            break;
-          }
           // SPEC-3064 Phase 3 (E6d): knowledge bridge state and rendering
           // live in the knowledge kanban surface.
+          case "knowledge_revision":
+            applyKnowledgeCacheRevision(event);
+            break;
           case "knowledge_entries":
           case "knowledge_search_results":
           case "knowledge_detail":
@@ -6696,7 +6659,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                   dismissible: true,
                   timeoutMs: 0,
                 });
-                scheduleKnowledgeRelatedWorkRefresh();
+                scheduleKnowledgeRelatedWorkRefresh(true);
               }
             }
             break;
@@ -6705,7 +6668,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "workspace_resume_agent_started":
             workspaceResumePicker.handleStarted(event);
             launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh();
+            scheduleKnowledgeRelatedWorkRefresh(true);
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -6767,6 +6730,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
+            break;
+          case "supported_agent_maintenance":
+            applySupportedAgentMaintenance(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per
@@ -6855,6 +6821,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             };
             renderSystemPanelInAllSettingsWindows();
             break;
+          case "update_settings":
+            applyGlobalUpdateSettings(event);
+            break;
           case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
@@ -6908,6 +6877,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_error":
+            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({
@@ -7413,9 +7383,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // semantic state. Cell click flies the camera (frameWindow).
       fleetMinimap = createFleetMinimap({
         container: document.getElementById("fleet-minimap"),
-        getWindows: () => activeWorkspace().windows || [],
-        getVisibleBounds: visibleBounds,
-        getFocusedId: () => focusedId,
+        windowCatalogModel,
+        getWindows: () => {
+          const state = windowCatalogModel.read().catalog.appState;
+          return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+        },
+        getVisibleBounds: () => windowCatalogModel.read().bounds,
+        getFocusedId: () => windowCatalogModel.read().catalog.focusedId,
         frameWindow,
         windowDisplayTitle,
         // FR-045 (anshin): the cell tooltip/aria-label surfaces each agent's
@@ -7433,11 +7407,17 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // render a neutral cell with no telemetry dot.
         cellTelemetryState: (windowData) =>
           shouldShowRuntimeStatus(windowData)
-            ? mapAgentTelemetryState(runtimeStateForWindow(windowData))
+            ? mapAgentTelemetryState(catalogRuntimeStateForWindow(windowData))
             : "",
       });
-      // First paint from whatever windows already exist at boot.
-      fleetMinimap.renderCells();
+      window.addEventListener("unload", () => {
+        disposeProjectShellSurface();
+        fleetMinimap.dispose();
+        agentsSurface?.dispose();
+        splitSurfaces?.dispose();
+        windowCatalogModel.dispose();
+        launchWizardVisibilityModel.dispose();
+      }, { once: true });
 
       window.addEventListener(
         "keydown",
@@ -7595,7 +7575,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         area.classList.toggle("is-agents", host === area);
         agentsSurface.element.hidden = !host;
         (host || area).appendChild(agentsSurface.element);
-        if (host) agentsSurface.sync(activeWorkspace().windows || []);
+        if (host) agentsSurface.sync();
         else {
           for (const [id, previous] of agentPreviousHosts) {
             const runtime = terminalMap.get(id);
@@ -7612,6 +7592,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
       agentsSurface = createAgentsSurface({
         document,
+        windowCatalogModel,
+        windowDisplayTitle,
+        getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
+          ...data, status: catalog.runtimeStates[data.id] ?? data.status,
+        })),
+        isMounted: () => Boolean(agentsHost),
         mountTerminal: (id, root) => {
           const runtime = terminalMap.get(id);
           if (runtime && runtime.terminalContainer !== root && !agentPreviousHosts.get(id)?.container.isConnected) {
@@ -7643,12 +7629,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       splitSurfaces = createSplitSurfaces({
         document,
         stage,
-        getWindows: () => (activeWorkspace().windows || []).filter((data) => !isOffCanvasPlacement(data)),
+        windowCatalogModel,
+        getWindows: catalog => catalogActiveWindows(catalog).filter((data) => !isOffCanvasPlacement(data)),
         getElement: (id) => windowMap.get(id),
         onAgentsHost: setAgentsHost,
         restoreVisibility: (id, element) => { element.hidden = !visibleWindowData(workspaceWindowById(id)); },
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "issue" : surface;
+          const preset = surface === "issues" ? "settings" : surface;
           send({ kind: "create_window", preset, bounds: visibleBounds() });
         },
         onChange: () => syncSurfaceRail(),
@@ -7657,16 +7644,66 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
-        if (splitSurfaces.isOpen()) splitSurfaces.close();
-        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(workspaceWindowById(focusedId)));
+        if (splitSurfaces.isOpen()) splitSurfaces.collapse();
+        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
       });
       window.addEventListener("resize", () => {
-        if (!splitSurfaces.isOpen() && !agentsHost) return;
+        if (!splitSurfaces.hasLayout && !agentsHost) return;
         for (const id of windowMap.keys()) {
           if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
       installSurfaceRail(document, { openSurface });
+      launchWizardVisibilityModel.subscribe(model => model.open, open => {
+        if (open) openSurface("agents");
+      });
+      windowCatalogModel.subscribe(model => model.navigation, navigation => {
+        if (!navigation) return;
+        const { windowId, notifyFocus } = navigation;
+        const data = workspaceWindowById(windowId);
+        if (surfaceForWindow(data) === "pm") splitSurfaces.showWindow(windowId);
+        else {
+          openSurface("agents");
+          agentsSurface.reveal(windowId);
+        }
+        if (notifyFocus) focusWindowRemotely(windowId);
+        else focusWindowLocally(windowId);
+      });
+      pmLauncherModel.subscribe(state => state, () => {
+        if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
+      });
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
+      windowCatalogModel.subscribe(model => model.catalog, catalog => {
+        const pending = windowCatalogModel.read().pendingSurface;
+        if (pending && pending.tabId === catalog.appState.active_tab_id) {
+          const target = catalogActiveWindows(catalog).find(data => data.preset === pending.preset
+            && data.surface_owner === pending.surfaceOwner);
+          if (target && windowMap.has(target.id)) {
+            windowCatalogModel.update(state => ({ ...state, pendingSurface: null }));
+            requestWindowFrame(target.id);
+          }
+        }
+        const tabId = catalog.appState.active_tab_id;
+        if (tabId !== initialSurfaceTabId) {
+          initialSurfaceTabId = tabId;
+          initialSurfaceSelected = false;
+        }
+        if (!tabId || initialSurfaceSelected || splitSurfaces.hasLayout) return;
+        const windows = catalogActiveWindows(catalog).filter(data => !isOffCanvasPlacement(data));
+        const initial = windows.find(data => data.id === catalog.focusedId)
+          || windows.find(data => data.is_pm) || windows[0];
+        if (initial && windowMap.has(initial.id)) {
+          initialSurfaceSelected = true;
+          const surface = surfaceForWindow(windowWithSettingsSection(initial));
+          if (surface === "pm") frameWindow(initial.id, { animate: false });
+          else if (surface === "agents" && initial.surface_owner === "agents") {
+            openSurface("agents");
+            agentsSurface.reveal(initial.id);
+            focusWindowLocally(initial.id);
+          }
+        }
+      });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -7768,6 +7805,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           return;
         }
         rearmVisibleTerminalViewportRefreshes();
+        resumeKnowledgeEventRefresh();
+        refreshVisibleKnowledgeWindows();
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
@@ -7821,11 +7860,16 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         frameWindow(windowData.id, { animate: shouldAnimateWindowFrame() });
       }
 
-      function focusOrSpawnPreset(preset) {
+      function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
+        if (preset === "issue") {
+          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
+          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
+        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
-          ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset)
+          ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset
+            && (w.surface_owner || null) === surfaceOwner)
           : null;
         if (existing) {
           openExistingSurfaceWindow(existing);
@@ -7836,6 +7880,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           preset,
           bounds: visibleBounds(),
         };
+        if (surfaceOwner) {
+          message.surface_owner = surfaceOwner;
+          windowCatalogModel.update(state => ({ ...state, pendingSurface: {
+            preset, surfaceOwner, tabId: state.catalog.appState.active_tab_id,
+          } }));
+        }
         frontendUnits.socketTransport.send(message);
         return null;
       }
@@ -7860,9 +7910,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             return;
           case "open-branches":
             focusOrSpawnPreset("work");
-            return;
-          case "open-files":
-            focusOrSpawnPreset("file_tree");
             return;
           case "open-index":
             focusOrSpawnPreset("index");

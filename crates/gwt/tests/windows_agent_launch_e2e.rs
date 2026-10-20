@@ -306,6 +306,14 @@ fn assert_public_ws_agent_route_boundary(
             fixture.stderr()
         );
     }
+    let owned_pid = fixture.pid();
+    drop(fixture);
+    // A terminated Windows process object can remain in a Toolhelp snapshot
+    // while another handle is open. Probe its exit signal, not PID membership.
+    assert!(
+        !gwt::process::is_host_process_alive(owned_pid),
+        "WindowsRealGwtFixture leaked its owned gwt process {owned_pid}"
+    );
 }
 
 /// Issue #4644: since #4537 the bootstrap `/ws` connection is Hub-only. It

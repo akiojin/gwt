@@ -99,7 +99,7 @@ fn assert_driver_relink(target_dir: &str) {
     assert_eq!(
         fs::metadata(&artifact).unwrap().len(),
         3,
-        "the artifact remained locked"
+        "the artifact was not replaced; child output: {output:?}"
     );
     assert_eq!(fs::read(&artifact).unwrap(), [1, 2, 3]);
     let record: gwt::cli::verification_record::VerificationRunRecord =

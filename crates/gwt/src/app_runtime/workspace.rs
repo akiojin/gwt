@@ -323,51 +323,41 @@ pub(super) fn apply_workspace_launch_for_current_work(
     mut transition: WorkspaceLaunchTransition<'_>,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
     use gwt_core::workspace_projection::{
-        can_upgrade_work_owner, canonical_work_id, current_work_id, successor_work_id,
-        workspace_group_key_for_item, WorkEventKind,
+        can_upgrade_work_owner, canonical_work_id, current_work_id_for_launch, successor_work_id,
+        workspace_group_key_for_item, WorkEventKind, WorkspaceStatusCategory,
     };
     let canonical_id = canonical_work_id(
         project_root,
         Some(&session.branch_name),
         Some(&session.worktree_path),
     );
-    transition.work_id = current_work_id(
+    let owner = transition.owner();
+    transition.work_id = current_work_id_for_launch(
         work_items,
         project_root,
         Some(&session.branch_name),
         Some(&session.worktree_path),
-    );
+        transition.canonical_owner.and(owner.as_deref()),
+    )?;
     let mut predecessor_id = None;
     if let Some(current) = work_items
         .work_items
         .iter()
         .find(|item| Some(&item.id) == transition.work_id.as_ref())
-        .filter(|item| item.discarded || Some(&item.id) != canonical_id.as_ref())
+        .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
     {
-        let owner = transition.owner();
         let owner_matches = current.owner == owner
+            || (current.owner.is_none() && transition.canonical_owner.is_some())
             || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
-        // Shared Work history can include other hosts' paths. Require one
-        // exact local container without dropping those historical references.
-        let container_matches = current
-            .execution_containers
-            .iter()
-            .filter(|container| {
-                canonical_work_id(
-                    project_root,
-                    container.branch.as_deref(),
-                    container.worktree_path.as_deref(),
-                ) == canonical_id
-                    && container.worktree_path.as_deref().is_some_and(|path| {
-                        path == session.worktree_path
-                            || dunce::canonicalize(path)
-                                .ok()
-                                .zip(dunce::canonicalize(&session.worktree_path).ok())
-                                .is_some_and(|(left, right)| left == right)
-                    })
-            })
-            .count()
-            == 1;
+        // The authenticated launch proves this Session's local path. Work's
+        // branch identity spans hosts, including history with no saved path.
+        let container_matches = current.execution_containers.iter().all(|container| {
+            canonical_work_id(
+                project_root,
+                container.branch.as_deref(),
+                container.worktree_path.as_deref(),
+            ) == canonical_id
+        });
         if !owner_matches || !container_matches {
             return Err(gwt_core::error::GwtError::Other(format!(
                 "cannot launch successor of Work {}: owner or execution container mismatch",
@@ -375,7 +365,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
             )));
         }
         if work_items.work_items.iter().any(|item| {
-            item.discarded
+            item.is_terminal()
                 && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
                 && item
                     .agents
@@ -383,19 +373,47 @@ pub(super) fn apply_workspace_launch_for_current_work(
                     .any(|agent| agent.session_id == session.session_id)
         }) {
             return Err(gwt_core::error::GwtError::Other(format!(
-                "Session {} belongs to a discarded Work; start a new Session for the successor",
+                "Session {} belongs to a terminal Work; start a new Session for the successor",
                 session.session_id
             )));
         }
-        if current.discarded {
+        if current.is_terminal() {
             let successor_id = successor_work_id(&current.id);
-            if work_items
+            if let Some(occupied) = work_items
                 .work_items
                 .iter()
-                .any(|item| item.id == successor_id)
+                .find(|item| item.id == successor_id)
             {
-                return Err(gwt_core::error::GwtError::Other(format!(
-                    "cannot launch successor of Work {}: successor {successor_id} has invalid lineage", current.id)));
+                // Earlier refused launches could leave an Idle orphan at
+                // this deterministic ID. Complete its missing lineage under
+                // fresh execution authority, preserving historical events.
+                // Inline histories are compacted, so absence of Start in the
+                // retained tail cannot prove that a lifetime never started.
+                let recoverable_orphan = !occupied.is_terminal()
+                    && occupied.status_category == WorkspaceStatusCategory::Idle
+                    && occupied.related_work_item_ids.is_empty()
+                    && (occupied.owner == owner
+                        || can_upgrade_work_owner(occupied.owner.as_deref(), owner.as_deref()))
+                    && !occupied.execution_containers.is_empty()
+                    && occupied.execution_containers.iter().all(|container| {
+                        canonical_work_id(
+                            project_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                        ) == canonical_id
+                    })
+                    && occupied
+                        .events
+                        .iter()
+                        .all(|event| event.related_work_item_id.is_none())
+                    && occupied
+                        .agents
+                        .iter()
+                        .all(|agent| !transition.live_session_ids.contains(&agent.session_id));
+                if !recoverable_orphan {
+                    return Err(gwt_core::error::GwtError::Other(format!(
+                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage", current.id)));
+                }
             }
             predecessor_id = Some(current.id.clone());
             transition.work_id = Some(successor_id);

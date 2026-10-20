@@ -290,6 +290,8 @@ fn gh_spawns_are_recorded_in_the_machine_local_budget_ledger() {
         spawn_logged_blocking, ProcessConsoleHub, ProcessKind, SpawnOptions,
     };
     const MISSING_PROGRAM: &str = "gwt-nonexistent-gh-3891";
+    let home = tempfile::tempdir().expect("budget ledger home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
     let hub = ProcessConsoleHub::new();
     let before = BudgetLedger::global().snapshot(Utc::now());
     let _ = spawn_logged_blocking(

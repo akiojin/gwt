@@ -323,9 +323,10 @@ pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
 
 pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
-        WindowPreset::Issue | WindowPreset::IssueMonitor => Some(KnowledgeKind::Issue),
+        WindowPreset::Settings | WindowPreset::Issue | WindowPreset::IssueMonitor => {
+            Some(KnowledgeKind::Issue)
+        }
         WindowPreset::Spec => Some(KnowledgeKind::Issue),
-        WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
 }
@@ -959,6 +960,14 @@ mod tests {
     fn legacy_spec_preset_uses_unified_issue_knowledge_kind() {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(gwt::KnowledgeKind::Issue)
+        );
+    }
+
+    #[test]
+    fn settings_preset_hosts_issue_knowledge() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Settings),
             Some(gwt::KnowledgeKind::Issue)
         );
     }

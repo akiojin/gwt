@@ -14,14 +14,18 @@ test("the title bar offers a reversible split and the split uses Operator tokens
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\.split-pane\[data-active="true"\][\s\S]*?var\(--color-focus-ring\)/);
   assert.match(css, /\.split-pane \.resize-handle\s*\{\s*display: none !important;/);
+  assert.match(css, /\.split-pane\[hidden\][\s\S]*?display: none !important;/);
+  assert.match(css, /\.split-surfaces\[data-split="false"\] \.split-pane__header/);
 });
 
 async function fixture() {
+  const { createUiStateStore } = await import("../ui-state-store.js");
+  const model = createUiStateStore({ catalog: { version: 0 } });
   const { createSplitSurfaces } = await import("../split-surfaces.js");
   const { document, window } = parseHTML(html);
   const stage = document.getElementById("canvas-stage");
   const windows = [
-    { id: "issues", preset: "issue" },
+    { id: "issues", preset: "settings" },
     { id: "board", preset: "board" },
     { id: "settings", preset: "settings" },
     { id: "a", preset: "agent" },
@@ -43,6 +47,7 @@ async function fixture() {
   const controller = createSplitSurfaces({
     document,
     stage,
+    windowCatalogModel: model,
     onAgentsHost: (host, previewHost) => {
       agentHosts.push([host, previewHost]);
       if (host) host.appendChild(agents); else agents.remove();
@@ -53,10 +58,10 @@ async function fixture() {
     onChange: () => {},
     onLayout: () => {},
   });
-  return { controller, document, window, stage, windows, elements, opened, agents, agentHosts };
+  return { controller, model, document, window, stage, windows, elements, opened, agents, agentHosts };
 }
 
-test("two panes select independently, preserve live nodes and restore canvas geometry", async () => {
+test("two panes select independently and release restores canvas geometry", async () => {
   const { controller, document, stage, elements } = await fixture();
   controller.open("issues");
   const panes = document.querySelectorAll(".split-pane");
@@ -86,11 +91,14 @@ test("two panes select independently, preserve live nodes and restore canvas geo
 test("same non-Agent surfaces use distinct live windows and request only the missing view", async () => {
   for (const surface of ["issues", "board", "settings"]) {
     const { controller, document, windows, elements, stage, opened } = await fixture();
+    if (surface === "issues" || surface === "settings") {
+      windows.splice(windows.findIndex(w => w.id === (surface === "issues" ? "settings" : "issues")), 1);
+    }
     controller.open(surface);
     assert.equal(controller.select(surface, 1), true);
     controller.sync();
     assert.deepEqual(opened, [surface]);
-    const second = { id: `${surface}-second`, preset: surface === "issues" ? "issue" : surface };
+    const second = { id: `${surface}-second`, preset: surface === "issues" ? "settings" : surface };
     const element = document.createElement("div");
     stage.appendChild(element);
     elements.set(second.id, element);
@@ -126,6 +134,30 @@ test("same Agents surface keeps the active live host and a preview in the other 
   assert.equal(agentHosts.at(-1)[1], null);
 });
 
+test("Split reconciles arriving views from catalog commits and unsubscribes", async () => {
+  const { controller, model, windows, elements, stage, document } = await fixture();
+  const settings = document.createElement("select");
+  settings.innerHTML = '<option value="Normal" disabled>Normal</option><option value="Continue" selected>Continue</option>';
+  elements.get("board").appendChild(settings);
+  controller.open("board");
+  controller.select("board", 1);
+  const second = { id: "second-board", preset: "board" };
+  const element = document.createElement("div");
+  stage.appendChild(element);
+  elements.set(second.id, element);
+  windows.push(second);
+  model.update(() => ({ catalog: { version: 1 } }));
+  assert.equal(settings.value, "Continue", "host sync must preserve embedded settings choices");
+  assert.equal(settings.options[0].hasAttribute("disabled"), true);
+  assert.equal(settings.options[1].textContent, "Continue");
+  assert.ok(element.closest(".split-pane") === document.querySelectorAll(".split-pane")[1], "catalog commit mounts the arriving view without manual sync");
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
+  controller.dispose();
+  windows.splice(windows.indexOf(second), 1);
+  model.update(() => ({ catalog: { version: 2 } }));
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
+});
+
 test("Agents hosts its dedicated grid and releases it when switching surfaces", async () => {
   const { controller, elements, agents, stage } = await fixture();
   controller.open("agents");
@@ -139,7 +171,8 @@ test("Agents hosts its dedicated grid and releases it when switching surfaces", 
 test("a missing surface requests the existing launcher once and mounts the arriving window", async () => {
   const { controller, windows, opened } = await fixture();
   windows.splice(windows.findIndex((w) => w.id === "settings"), 1);
-  controller.open("issues");
+  windows.splice(windows.findIndex((w) => w.id === "issues"), 1);
+  controller.open("agents");
   controller.select("settings", 1);
   controller.sync();
   controller.sync();
@@ -160,6 +193,56 @@ test("a missing surface requests the existing launcher once and mounts the arriv
   assert.equal(controller.containsWindow("settings"), true);
 });
 
+test("rail surfaces share a single fixed host before and after splitting", async () => {
+  const { controller, document, elements, stage } = await fixture();
+  controller.show("board");
+  assert.equal(controller.hasLayout, true);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(document.getElementById("split-surfaces").hidden, false);
+  let panes = [...document.querySelectorAll(".split-pane")].filter(p => !p.hidden);
+  assert.equal(panes.length, 1);
+  assert.equal(elements.get("board").closest(".split-pane"), panes[0]);
+  controller.open();
+  assert.equal(controller.isOpen(), true);
+  controller.select("settings", 1);
+  const selected = [...document.querySelectorAll(".split-pane")][1].querySelector(".workspace-window");
+  controller.collapse();
+  assert.equal(controller.hasLayout, true);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller.activeSurface(), "settings");
+  panes = [...document.querySelectorAll(".split-pane")].filter(p => !p.hidden);
+  assert.equal(panes.length, 1);
+  assert.equal(selected.closest(".split-pane"), panes[0]);
+  assert.equal(elements.get("board").parentElement, stage);
+  controller.show("board");
+  assert.equal(elements.get("board").closest(".split-pane"), panes[0]);
+  controller.close();
+  assert.equal(controller.hasLayout, false);
+  assert.equal(document.getElementById("split-surfaces").hidden, true);
+  assert.equal(elements.get("board").parentElement, stage);
+});
+
+test("collapse retains the active same-surface live view and single Agents host", async () => {
+  const { controller, document, elements, agentHosts, agents } = await fixture();
+  controller.open("settings");
+  controller.select("settings", 1);
+  const panes = [...document.querySelectorAll(".split-pane")];
+  const inactiveView = panes[0].querySelector(".workspace-window");
+  const activeView = panes[1].querySelector(".workspace-window");
+  controller.collapse();
+  assert.equal(controller.containsWindow(activeView.dataset.id), true);
+  assert.equal(controller.containsWindow(inactiveView.dataset.id), false);
+  assert.equal(elements.get(activeView.dataset.id), activeView);
+  controller.show("agents");
+  assert.equal(agents.closest(".split-pane").hidden, false);
+  assert.equal(agentHosts.at(-1)[1], null);
+  controller.open();
+  controller.select("agents", 0);
+  controller.collapse();
+  assert.equal(agents.closest(".split-pane").hidden, false);
+  assert.equal(agentHosts.at(-1)[1], null);
+});
+
 test("Issues and Settings select their canonical views, not legacy windows sharing a rail category", async () => {
   const { controller, windows, elements, stage, document } = await fixture();
   for (const preset of ["work", "index", "agent_kanban", "profile", "branches"]) {
@@ -173,4 +256,60 @@ test("Issues and Settings select their canonical views, not legacy windows shari
   controller.select("settings", 1);
   assert.equal(controller.containsWindow("settings"), true);
   assert.equal(controller.containsWindow("branches"), false);
+});
+
+test("PM uses one fixed window without entering the core split selector and retains its live DOM", async () => {
+  const { controller, document, stage, elements, opened } = await fixture();
+  const pm = elements.get("pm");
+  const input = document.createElement("textarea");
+  pm.appendChild(input);
+  controller.open("agents");
+  assert.equal(controller.showWindow("pm"), true);
+  assert.equal(controller.activeSurface(), "pm");
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller.hasLayout, true);
+  assert.equal([...document.querySelectorAll(".split-pane")].filter(pane => !pane.hidden).length, 1);
+  assert.equal(pm.closest(".split-pane").dataset.surface, "pm");
+  assert.equal(document.querySelectorAll('option[value="pm"]').length, 0);
+  const button = document.getElementById("split-view-button");
+  assert.equal(button.disabled, true);
+  assert.match(button.title, /PM.*single pane/);
+  controller.open("issues");
+  assert.equal(controller.activeSurface(), "pm", "PM cannot be split through the title bar action");
+  assert.equal(controller.showWindow("a"), false, "an implementation agent cannot enter the PM host");
+  controller.sync();
+  assert.deepEqual(opened, [], "PM sync never starts a window");
+  controller.show("agents");
+  assert.equal(button.disabled, false);
+  assert.equal(pm.parentElement, stage);
+  assert.equal(controller.showWindow("pm"), true);
+  assert.equal(pm.querySelector("textarea"), input);
+  controller.close();
+  assert.equal(button.disabled, false);
+});
+
+test("PM auxiliary selection survives sync and returns to the existing PM only after catalog removal", async () => {
+  const { controller, model, document, windows, elements, stage, opened } = await fixture();
+  const auxiliary = { id: "pm-settings", preset: "settings", surface_owner: "pm" };
+  const element = document.createElement("div");
+  stage.appendChild(element);
+  elements.set(auxiliary.id, element);
+  windows.unshift(auxiliary);
+  controller.show("settings");
+  assert.equal(controller.containsWindow(auxiliary.id), false, "core Settings does not steal PM-owned Settings");
+  controller.showWindow(auxiliary.id);
+  controller.sync();
+  assert.equal(controller.containsWindow(auxiliary.id), true, "a cancelled close or metadata update preserves the auxiliary selection");
+  windows.splice(windows.indexOf(auxiliary), 1);
+  model.update(() => ({ catalog: { version: 1 } }));
+  assert.equal(controller.activeSurface(), "pm");
+  assert.equal(controller.containsWindow("pm"), true);
+  assert.equal(controller.containsWindow(auxiliary.id), false);
+  windows.splice(windows.findIndex(data => data.id === "pm"), 1);
+  model.update(() => ({ catalog: { version: 2 } }));
+  controller.sync();
+  assert.equal(controller.containsWindow("pm"), false);
+  assert.equal(controller.activeSurface(), "pm");
+  assert.deepEqual(opened, [], "removal does not implicitly respawn the PM");
+  assert.equal(controller.showWindow("missing-pm"), false);
 });

@@ -24,6 +24,11 @@ use crate::cli::{CliEnv, CliParseError, WorkspaceCommand};
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
+        "receipt" if rest.len() == 2 && rest[0] == "--operation-id" => {
+            Ok(WorkspaceCommand::Receipt {
+                operation_id: rest[1].clone(),
+            })
+        }
         "update" => parse_update(rest),
         "candidates" => parse_candidates(rest),
         "join" => parse_join(rest),
@@ -807,6 +812,36 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match cmd {
+        WorkspaceCommand::Close {
+            work_id,
+            close_kind,
+        } => {
+            let result = super::pane::close_work(&work_id, &close_kind).map_err(string_error)?;
+            out.push_str(&result.to_string());
+            out.push('\n');
+            Ok(if result["ok"].as_bool() == Some(true) {
+                0
+            } else {
+                1
+            })
+        }
+        WorkspaceCommand::Receipt { operation_id } => {
+            let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| {
+                string_error("workspace.receipt requires ambient GWT_SESSION_ID".to_string())
+            })?;
+            let status = crate::workspace_update_receipt::inspect(
+                env.repo_path(),
+                &session_id,
+                &operation_id,
+                None,
+            )
+            .map_err(|error| string_error(error.to_string()))?;
+            out.push_str(
+                &serde_json::to_string(&status).map_err(|error| string_error(error.to_string()))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
         WorkspaceCommand::Update {
             title,
             status,
@@ -891,9 +926,10 @@ pub(super) fn run<E: CliEnv>(
                     observation,
                     intent,
                 };
+                let operation_id = uuid::Uuid::new_v4().to_string();
                 let receipt =
-                    match crate::daemon_runtime::send_workspace_update_via_agent_bridge_detailed(
-                        &target, &request,
+                    match crate::daemon_runtime::send_workspace_update_via_agent_bridge_with_operation_id(
+                        &target, &request, Some(&operation_id),
                     ) {
                         Ok(receipt) => {
                             if let Some(authority) = bridge_authority.as_ref() {
@@ -917,7 +953,19 @@ pub(super) fn run<E: CliEnv>(
                             )
                             .map_err(string_error)?
                         }
-                        Err(error) => return Err(string_error(error.to_string())),
+                        Err(error) if error.reason() == crate::daemon_runtime::AgentBridgeFailureReason::TransportFailure => {
+                            let recovered = bridge_authority.as_ref().filter(|authority| authority.local_continuation_eligible)
+                                .and_then(|authority| crate::workspace_update_receipt::inspect(
+                                    &legacy_repo_path, &session_id, &operation_id, Some((&request, &authority.identity)),
+                                ).ok()).and_then(|status| status.receipt);
+                            match recovered {
+                                Some(receipt) => receipt,
+                                None => return Err(string_error(format!(
+                                    "{error}; operation_id={operation_id}, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update"
+                                ))),
+                            }
+                        }
+                        Err(error) => return Err(string_error(format!("{error}; operation_id={operation_id}"))),
                     };
                 out.push_str(&format!(
                     "workspace updated: {}\n",
@@ -1984,12 +2032,12 @@ pub(super) fn ensure_workspace_for_agent(
                 // container resolves, instead of refusing the session forever.
                 // #3684's claim heal does not reach this: the stale Work keeps
                 // its own container, so it is never a whole-Work duplicate.
-                // Discarded Works retain their container history, including
+                // Terminal Works retain their container history, including
                 // the provenance needed to resolve an active successor.
                 let repairable_work_ids = work_items
                     .work_items
                     .iter()
-                    .filter(|item| !item.discarded)
+                    .filter(|item| !item.is_terminal())
                     .map(|item| item.id.clone())
                     .collect::<Vec<_>>();
                 let detached = gwt_core::workspace_projection::detach_foreign_container_refs_for_work_event_root(
@@ -2023,7 +2071,7 @@ pub(super) fn ensure_workspace_for_agent(
                         )))
                     })?;
             let result =
-                crate::cli::execution_state::with_current_active_session_execution_identity_lease(
+                crate::cli::execution_state::with_current_projection_session_execution_identity_lease(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &exact_session,
                     || {
@@ -2080,7 +2128,7 @@ pub(super) fn ensure_workspace_for_agent(
                         )))
                     })?;
             let result =
-                crate::cli::execution_state::with_current_active_session_execution_identity_lease(
+                crate::cli::execution_state::with_current_projection_session_execution_identity_lease(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &exact_session,
                     || {
@@ -8954,7 +9002,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+    fn workspace_ensure_blocked_binding_restores_identity_before_verified_reopen() {
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -8989,9 +9037,6 @@ pub(crate) mod tests {
             .expect("settle execution Blocked"),
             crate::cli::execution_state::SettleResult::Settled(_)
         ));
-        let paths = workspace_recovery_state_paths(&project_root, &worktree);
-        let before = workspace_recovery_state_bytes(&paths);
-
         let ensure_input = WorkspaceEnsureInput {
             agent_session: session_id.to_string(),
             title_summary: "Recover terminal binding".to_string(),
@@ -9001,19 +9046,13 @@ pub(crate) mod tests {
             topic: None,
             boundary: None,
         };
-        let error = ensure_workspace_for_agent(&worktree, ensure_input.clone())
-            .expect_err("terminal execution binding must refuse workspace.ensure");
-        let message = error.to_string();
-
-        assert!(message.contains("terminal"), "{message}");
-        assert!(message.contains("execution.status"), "{message}");
-        assert!(message.contains("recovery_probes"), "{message}");
-        assert!(message.contains("verify.plan"), "{message}");
-        assert!(
-            !message.contains("`build.abort`"),
-            "workspace.ensure must not unconditionally restart the build.abort loop: {message}"
+        ensure_workspace_for_agent(&worktree, ensure_input.clone())
+            .expect("current Blocked binding must permit identity recovery");
+        assert_eq!(
+            crate::cli::execution_state::diagnose(&worktree, Some(session_id)).ecr_status,
+            crate::cli::execution_state::ExecutionDiagnosisState::Blocked,
+            "identity recovery must not reopen execution"
         );
-        assert_eq!(workspace_recovery_state_bytes(&paths), before);
 
         let _session =
             crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
@@ -9130,7 +9169,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_noncurrent_execution_binding_before_workspace_write() {
+    fn workspace_ensure_rejects_completed_execution_binding_before_workspace_write() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -9147,10 +9186,7 @@ pub(crate) mod tests {
             crate::cli::execution_state::settle(
                 &worktree,
                 "session-stale-binding",
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
-                    reason: "terminal test binding".to_string(),
-                    missing_verification: Some("test evidence".to_string()),
-                },
+                crate::cli::execution_state::ExecutionSettlement::Completed,
             )
             .expect("terminalize bound execution"),
             crate::cli::execution_state::SettleResult::Settled(_)
@@ -10267,7 +10303,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_ensure_rejects_noncurrent_docker_binding_without_mutation() {
+    fn workspace_ensure_rejects_completed_docker_binding_without_mutation() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -10291,10 +10327,7 @@ pub(crate) mod tests {
             crate::cli::execution_state::settle(
                 &repo,
                 "session-docker-stale-binding",
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
-                    reason: "terminal Docker binding".to_string(),
-                    missing_verification: Some("test evidence".to_string()),
-                },
+                crate::cli::execution_state::ExecutionSettlement::Completed,
             )
             .expect("terminalize Docker execution"),
             crate::cli::execution_state::SettleResult::Settled(_)

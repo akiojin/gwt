@@ -59,6 +59,19 @@ def _make_project(base: Path, docs: int) -> Path:
 
 
 class GenerationStoreTests(unittest.TestCase):
+    def test_staging_count_error_never_publishes_an_empty_generation(self):
+        collection = mock.Mock()
+        collection.count.side_effect = RuntimeError("count unavailable")
+        with mock.patch.object(
+            runner, "_open_chroma_collection", return_value=(mock.Mock(), collection)
+        ), mock.patch.object(runner, "_publish_generation") as publish:
+            result = runner._finish_full_build(
+                self.base / "board", self.base / "board.staging", "board"
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["error_code"], "BUILD_VERIFY_FAILED")
+        publish.assert_not_called()
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._tmp = tempfile.TemporaryDirectory()
@@ -426,6 +439,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.repo = self.base / "repo"
         self.repo.mkdir()
         self._git("init", "--quiet", str(self.repo))
+        # Auto maintenance can detach and write objects/maintenance.lock after
+        # commit returns, racing TemporaryDirectory cleanup (Issue #5167).
+        self._git("-C", str(self.repo), "config", "maintenance.auto", "false")
+        self._git("-C", str(self.repo), "config", "gc.auto", "0")
         self._git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/develop")
         (self.repo / "src").mkdir()
         (self.repo / "docs").mkdir()
@@ -498,6 +515,21 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             "-m",
             message,
         )
+
+    def test_fixture_commit_does_not_spawn_auto_maintenance(self):
+        trace = self.base / "git-trace.jsonl"
+        (self.repo / "src" / "feature.rs").write_text(
+            "fn feature_v2() {}\n", encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            self._commit("fixture maintenance probe")
+        maintenance = [
+            event["argv"]
+            for line in trace.read_text(encoding="utf-8").splitlines()
+            if (event := json.loads(line)).get("event") == "child_start"
+            and event["argv"][1:2] in (["maintenance"], ["gc"])
+        ]
+        self.assertEqual(maintenance, [], "fixture commits must finish before cleanup")
 
     def _build(self, compatibility_descriptor=None) -> dict:
         return runner.action_index_files_v2(
@@ -1569,6 +1601,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertIs(result.get("superseded"), True, result)
         self.assertIs(result.get("published"), False, result)
+        status = runner._explicit_file_index_v2_status(
+            REPO_HASH, WORKTREE_HASH, self.db_root
+        )
+        self.assertIn("build_progress", status["files"])
         self.assertEqual(self._head_path().read_bytes(), old_head)
         self.assertGreater(
             len(set((self._worktree_root() / "overlays").iterdir())),

@@ -660,6 +660,25 @@ impl PrInventoryHistory {
 }
 
 impl PrInventoryItem {
+    /// #5034: completion applies the Ready predicate to either an open Draft
+    /// or an already Ready PR, without changing the PM inventory taxonomy.
+    pub fn completion_blocker(&self) -> Option<&'static str> {
+        if !self.ci_status.eq_ignore_ascii_case("SUCCESS") {
+            return Some("checks_not_green");
+        }
+        if self.review_status.eq_ignore_ascii_case("CHANGES_REQUESTED") {
+            return Some("changes_requested");
+        }
+        let mut fields = self.fields();
+        fields.is_draft = true;
+        if fields.merge_state_status.eq_ignore_ascii_case("BEHIND")
+            && fields.required_status_checks_strict == Some(false)
+        {
+            fields.merge_state_status = "CLEAN".to_string();
+        }
+        ready_to_promote_blocker(&fields)
+    }
+
     fn fields(&self) -> PrInventoryFields {
         PrInventoryFields {
             number: self.number,
@@ -1258,9 +1277,7 @@ impl PrInventoryCache {
             std::fs::create_dir_all(parent)?;
         }
         let rendered = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, rendered)?;
-        std::fs::rename(&tmp, path)
+        gwt_core::atomic_file::write_atomic(path, rendered.as_bytes())
     }
 
     fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
@@ -1325,16 +1342,22 @@ pub struct PrInventoryRead {
     pub hydrated: usize,
     /// PRs skipped as unchanged after a live bulk comparison; zero on cache reads.
     pub skipped_unchanged: usize,
-    /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
+    /// Issue #4074 FR-005 / #5053: delivery branches with commits and no open PR
     /// to land them. Read from local refs, so it stays truthful even when the
     /// PR rows came from cache.
     pub unlanded_branches: Vec<UnlandedBranch>,
 }
 
-/// The base every `work/issue-*` branch is expected to land on.
+/// The base every tracked delivery branch is expected to land on.
 pub const UNLANDED_BRANCH_BASE_REF: &str = "origin/develop";
 
-/// One remote `work/issue-*` branch carrying commits the base does not have
+/// Remote refs included in the unlanded delivery inventory (Issue #5053).
+const UNLANDED_DELIVERY_REFS: &[&str] = &[
+    "refs/remotes/origin/work/",
+    "refs/remotes/origin/pm/resident",
+];
+
+/// One remote delivery branch carrying commits the base does not have
 /// (Issue #4074 FR-005), before the open-PR filter is applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlandedBranchProbe {
@@ -1506,7 +1529,7 @@ pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<
         .collect()
 }
 
-/// Read the remote `work/issue-*` branches that are not merged into `base_ref`
+/// Read tracked remote delivery branches that are not merged into `base_ref`
 /// and count how far each is ahead.
 ///
 /// `git for-each-ref --no-merged` narrows the set in one local command so the
@@ -1515,17 +1538,15 @@ pub fn collect_unlanded_work_branches(
     repo_path: &Path,
     base_ref: &str,
 ) -> std::result::Result<Vec<UnlandedBranchProbe>, String> {
-    let output = gwt_core::process::run_git_logged(
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)%09%(committerdate:iso-strict)",
-            "--no-merged",
-            base_ref,
-            "refs/remotes/origin/work/",
-        ],
-        Some(repo_path),
-    )
-    .map_err(|error| error.to_string())?;
+    let mut args = vec![
+        "for-each-ref",
+        "--format=%(refname:short)%09%(committerdate:iso-strict)",
+        "--no-merged",
+        base_ref,
+    ];
+    args.extend_from_slice(UNLANDED_DELIVERY_REFS);
+    let output = gwt_core::process::run_git_logged(&args, Some(repo_path))
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
@@ -1533,6 +1554,15 @@ pub fn collect_unlanded_work_branches(
     for (branch, last_commit_at) in
         parse_unlanded_branch_refs(&String::from_utf8_lossy(&output.stdout))
     {
+        // Plain Git ref patterns also include descendants; only entries ending
+        // in '/' declare a prefix in our delivery inventory.
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        if !UNLANDED_DELIVERY_REFS.iter().any(|reference| {
+            remote_ref == *reference
+                || (reference.ends_with('/') && remote_ref.starts_with(reference))
+        }) {
+            continue;
+        }
         let Ok(divergence) =
             crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
         else {
@@ -1551,6 +1581,22 @@ pub fn collect_unlanded_work_branches(
         });
     }
     Ok(probes)
+}
+
+/// Budget/TTL-aware observation without advancing the resident PM's history.
+pub fn fetch_pr_inventory_cached(
+    repo_path: &Path,
+    cache_path: &Path,
+    options: &PrInventoryOptions,
+) -> Result<PrInventoryRead> {
+    fetch_pr_inventory_cached_with(
+        repo_path,
+        cache_path,
+        &BudgetLedger::global(),
+        Utc::now(),
+        options,
+        run_gh_command,
+    )
 }
 
 /// Fetch open PRs, classify them, and fold the read into the per-project
@@ -2272,6 +2318,66 @@ fn probe_review_state<F>(
 where
     F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
+    parse_review_state(&read_review_state_json(
+        repo_path,
+        url,
+        number,
+        REVIEW_STATE_QUERY,
+        run_gh,
+    )?)
+}
+
+// Completion cannot interpret a partial thread list as "all reviews resolved".
+// Keep the Monitor's existing query and parser unchanged.
+const COMPLETION_REVIEW_STATE_QUERY: &str = r#"
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }
+      latestReviews(first: 20) { nodes { submittedAt author { login } } }
+      commits(last: 1) { nodes { commit { committedDate } } }
+    }
+  }
+}
+"#;
+
+fn probe_completion_review_state<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    run_gh: &F,
+) -> Option<PrReviewState>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let json = read_review_state_json(
+        repo_path,
+        url,
+        number,
+        COMPLETION_REVIEW_STATE_QUERY,
+        run_gh,
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    if value
+        .pointer("/data/repository/pullRequest/reviewThreads/pageInfo/hasNextPage")?
+        .as_bool()
+        != Some(false)
+    {
+        return None;
+    }
+    parse_review_state(&json)
+}
+
+fn read_review_state_json<F>(
+    repo_path: &Path,
+    url: &str,
+    number: u64,
+    query: &str,
+    run_gh: &F,
+) -> Option<String>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
     let (owner, repo) = owner_repo_from_pr_url(url)?;
     let output = run_gh(
         repo_path,
@@ -2279,7 +2385,7 @@ where
             "api",
             "graphql",
             "-f",
-            &format!("query={REVIEW_STATE_QUERY}"),
+            &format!("query={query}"),
             "-f",
             &format!("owner={owner}"),
             "-f",
@@ -2289,7 +2395,7 @@ where
         ],
     )
     .ok()?;
-    output.success.then(|| parse_review_state(&output.stdout))?
+    output.success.then_some(output.stdout)
 }
 
 /// One `gh pr view <n> --json <fields>` for the heavy fields.
@@ -3350,6 +3456,88 @@ pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
 /// Checked variant used by deadline-integral scans.
 pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+/// Fresh, targeted completion evidence. This never reads the PM inventory
+/// cache: a completion decision must describe the current PR head and gates.
+#[derive(Debug, Clone)]
+pub struct PrCompletionSnapshot {
+    pub state: PrState,
+    pub head_sha: String,
+    pub inventory: PrInventoryItem,
+}
+
+pub fn fetch_pr_completion_snapshot(repo_path: &Path, number: u64) -> Result<PrCompletionSnapshot> {
+    fetch_pr_completion_snapshot_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_completion_snapshot_with<F>(
+    repo_path: &Path,
+    number: u64,
+    run_gh: F,
+) -> Result<PrCompletionSnapshot>
+where
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number_arg = number.to_string();
+    let fields = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,body";
+    let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view {number}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|head| !head.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GwtError::Other("PR head SHA is unknown".into()))?;
+    if value.get("number").and_then(serde_json::Value::as_u64) != Some(number)
+        || value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        || !matches!(
+            value.get("state").and_then(serde_json::Value::as_str),
+            Some("OPEN" | "CLOSED" | "MERGED")
+        )
+        || value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(GwtError::Other(
+            "PR identity, state or Draft status is unknown".into(),
+        ));
+    }
+    let state = parse_pr_status_json(&output.stdout)?.state;
+    let now = Utc::now();
+    if state == PrState::Open {
+        let url = value
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if let Some(review) = probe_completion_review_state(repo_path, url, number, &run_gh) {
+            value[GWT_REVIEW_STATE_KEY] =
+                serde_json::to_value(review).map_err(|error| GwtError::Other(error.to_string()))?;
+        }
+        probe_merge_queue(
+            repo_path,
+            std::slice::from_mut(&mut value),
+            &BudgetLedger::global(),
+            now,
+            &mut |path, args| run_gh(path, args),
+        );
+    }
+    Ok(PrCompletionSnapshot {
+        state,
+        head_sha,
+        inventory: inventory_item_from_value(&value, now, &PrInventoryOptions::default())?,
+    })
 }
 
 fn try_fetch_pr_head_sha_with<F>(
@@ -5239,6 +5427,86 @@ mod tests {
     }
 
     #[test]
+    fn completion_snapshot_reads_current_pr_and_review_without_inventory_cache() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            calls.borrow_mut().push(args.join(" "));
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":false,"headRefName":"work/issue-5034","headRefOid":"verified-head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"}).to_string()
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+                    "commits":{"nodes":[{"commit":{"committedDate":"2026-10-09T00:00:00Z"}}]},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}}).to_string()
+            };
+            Ok(GhCliOutput { success: true, stdout, stderr: String::new() })
+        }).unwrap();
+        assert_eq!(snapshot.head_sha, "verified-head");
+        assert_eq!(snapshot.inventory.completion_blocker(), None);
+        assert_eq!(calls.borrow().len(), 2);
+        assert!(calls.borrow()[0].starts_with("pr view 42 --json"));
+        assert!(calls.borrow()[1].starts_with("api graphql"));
+        assert!(calls.borrow()[1].contains("pageInfo { hasNextPage }"));
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
+        let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
+        let read = |value: serde_json::Value| {
+            fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+                Ok(GhCliOutput {
+                    success: args[0] == "pr",
+                    stdout: value.to_string(),
+                    stderr: "unread review".into(),
+                })
+            })
+        };
+        assert!(read(payload.clone()).is_err());
+        let mut with_draft = payload;
+        with_draft["isDraft"] = serde_json::json!(true);
+        let snapshot = read(with_draft).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_refuses_truncated_review_threads() {
+        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            let stdout = if args[0] == "pr" {
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":true,"headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"})
+            } else {
+                serde_json::json!({"data":{"repository":{"pullRequest":{
+                    "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true}},
+                    "latestReviews":{"nodes":[{"author":{"login":"coderabbitai"},"submittedAt":"2026-10-09T00:01:00Z"}]}
+                }}}})
+            };
+            Ok(GhCliOutput { success: true, stdout: stdout.to_string(), stderr: String::new() })
+        }).unwrap();
+        assert_eq!(
+            snapshot.inventory.completion_blocker(),
+            Some("review_threads_unknown")
+        );
+    }
+
+    #[test]
+    fn completion_uses_non_strict_behind_policy_without_changing_promotion_taxonomy() {
+        let mut fields = promotable_fields();
+        fields.merge_state_status = "BEHIND".into();
+        assert_eq!(ready_to_promote_blocker(&fields), Some("behind_base"));
+        let row =
+            |fields| inventory_item_from_fields(fields, Utc::now(), &PrInventoryOptions::default());
+        assert_eq!(
+            row(fields.clone()).completion_blocker(),
+            Some("behind_base")
+        );
+        fields.required_status_checks_strict = Some(false);
+        assert_eq!(row(fields).completion_blocker(), None);
+    }
+
+    #[test]
     fn classifies_merge_candidate_when_clean_and_green() {
         let decision = classify_pr_lifecycle(
             &sample_inventory_fields(),
@@ -5812,6 +6080,78 @@ mod tests {
         git(tmp.path(), &["add", "."]);
         git(tmp.path(), &["commit", "-m", "initial"]);
         tmp
+    }
+
+    #[test]
+    fn unlanded_inventory_collects_pm_resident_and_work_branches() {
+        let tmp = init_merge_projection_repo();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        std::fs::write(tmp.path().join("source.txt"), "feature\n").expect("write feature");
+        git(tmp.path(), &["commit", "-am", "source work"]);
+        for reference in [
+            "refs/remotes/origin/pm/resident",
+            "refs/remotes/origin/work/issue-5053",
+        ] {
+            git(tmp.path(), &["update-ref", reference, "HEAD"]);
+        }
+
+        let probes = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect delivery branches");
+        let rows = classify_unlanded_branches(probes, &[]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].branch, "pm/resident");
+        assert_eq!(rows[0].owner_issue, None);
+        assert_eq!(rows[1].branch, "work/issue-5053");
+        assert_eq!(rows[1].owner_issue, Some(5053));
+        for row in rows {
+            assert_eq!(row.ahead, 1);
+            assert!(row.last_commit_at.is_some());
+            assert!(!row.has_open_pr);
+            assert_eq!(row.has_non_gwt_changes, Some(true));
+        }
+
+        // Git also treats a plain ref pattern as a slash-delimited prefix.
+        git(
+            tmp.path(),
+            &["update-ref", "-d", "refs/remotes/origin/pm/resident"],
+        );
+        git(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/pm/resident/other",
+                "HEAD",
+            ],
+        );
+        let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect exact PM ref and work prefix");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "work/issue-5053");
+    }
+
+    #[test]
+    fn unlanded_inventory_collects_pm_bookkeeping_only_residue() {
+        let tmp = init_merge_projection_repo();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        std::fs::write(tmp.path().join(".gwt/state"), "bookkeeping\n").expect("write state");
+        git(tmp.path(), &["commit", "-am", "bookkeeping"]);
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/pm/resident", "HEAD"],
+        );
+
+        let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("collect PM bookkeeping");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].branch, "pm/resident");
+        assert_eq!(rows[0].ahead, 1);
+        assert_eq!(rows[0].has_non_gwt_changes, Some(false));
     }
 
     #[test]

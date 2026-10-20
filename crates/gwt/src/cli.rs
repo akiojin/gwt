@@ -12,6 +12,7 @@ mod board;
 pub(crate) mod branch;
 mod build;
 mod commands;
+mod completion_pr;
 mod concern;
 pub mod daemon;
 pub mod delivered_owner;
@@ -42,6 +43,7 @@ pub(crate) mod perf;
 pub mod permission_readiness;
 mod plan;
 mod pm;
+pub mod pm_authorization;
 mod pr;
 mod provider_reset;
 pub(crate) mod register;
@@ -64,7 +66,7 @@ pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
 
-pub use actions::{ActionsCommand, ActionsRerunTarget};
+pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
@@ -112,6 +114,7 @@ pub enum CliCommand {
     Build(BuildCommand),
     Register(RegisterCommand),
     Update(UpdateCommand),
+    PmAuthorization(pm_authorization::PmAuthorizationCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
     /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
@@ -158,6 +161,10 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Ask the authenticated Host to close one eligible Work record.
+    Close { work_id: String, close_kind: String },
+    /// Read the outcome of one update without contacting or mutating the Host.
+    Receipt { operation_id: String },
     /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,
@@ -257,6 +264,8 @@ pub enum HookCommand {
 /// SPEC-1942 command model for update and internal updater operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCommand {
+    /// Read the app-wide update preference and this project's update drain.
+    SettingsStatus { project_root: Option<PathBuf> },
     /// Update check-only mode.
     CheckOnly,
     /// Check and, with approval, download and apply.
@@ -291,6 +300,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Assign the authenticated producing Session's own stable Agent name.
+    Name { candidate: String },
     /// `pane.read`.
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.
@@ -656,6 +667,11 @@ pub(crate) fn run_collect<E: CliEnv>(
             expected_hook_bin,
             repair,
         }) => {
+            // Browser-check must use the same default as launch/self-heal;
+            // choosing a separate bare name invalidates shared-root trust.
+            let managed_hook_bin =
+                crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
+            let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
             let repair = if repair {
                 Some(
                     hook::health::repair_managed_hook_configs(env.repo_path())
@@ -677,6 +693,11 @@ pub(crate) fn run_collect<E: CliEnv>(
             let mut health = hook::health::read_managed_hook_health(&input);
             hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let payload = serde_json::json!({
+                "managed_hook_bin": managed_hook_bin,
+                "repair_writer": repair.as_ref().map(|_| serde_json::json!({
+                    "pid": std::process::id(),
+                    "executable": std::env::current_exe().ok(),
+                })),
                 "repair": repair,
                 "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,
@@ -686,6 +707,10 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
+        CliCommand::PmAuthorization(inner) => pm_authorization::run(env, inner, &mut out)?,
+        CliCommand::Update(UpdateCommand::SettingsStatus { project_root }) => {
+            update::run_settings_status(env, project_root.as_deref(), &mut out)?
+        }
         CliCommand::Update(UpdateCommand::CheckOnly) => {
             std::process::exit(update::run(update::UpdateRunMode::CheckOnly));
         }

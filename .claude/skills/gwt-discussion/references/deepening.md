@@ -21,7 +21,7 @@ break down coarse tasks through a two-phase interactive workshop.
 
 ## Phase 5.1: Analysis report
 
-### Read all SPEC artifacts
+### Establish the relevant SPEC context
 
 ```bash
 gwtd <<'JSON'
@@ -29,7 +29,7 @@ gwtd <<'JSON'
 JSON
 ```
 
-Read spec.md, plan.md, and tasks.md (whichever exist).
+Read the sections needed for the active question, reusing current context. Use the full-artifact read when cross-artifact traceability needs review.
 
 ### Spec-level analysis (spec.md)
 

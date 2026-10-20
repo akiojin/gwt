@@ -25,6 +25,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/terminal-text-preview.test.mjs \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \
   crates/gwt/web/__tests__/pm-chat.test.mjs \
+  crates/gwt/web/__tests__/gui-english-copy.test.mjs \
   crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
@@ -34,6 +35,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
   crates/gwt/web/__tests__/knowledge-kanban-load-recovery.test.mjs \
+  crates/gwt/web/__tests__/knowledge-event-refresh.test.mjs \
   crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/issue-preview-placement.test.mjs \
@@ -64,6 +66,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/fleet-minimap.test.mjs \
   crates/gwt/web/__tests__/custom-agent-env-editor.test.mjs \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \
+  crates/gwt/web/__tests__/settings-issues.test.mjs \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-backend-picker.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-hermes-options.test.mjs \
@@ -95,7 +98,6 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/clone-modal-focus-guard-wiring.test.mjs \
   crates/gwt/web/__tests__/recent-row-style.test.mjs \
   crates/gwt/web/__tests__/release-notes-window.test.mjs \
-  crates/gwt/web/__tests__/console-window.test.mjs \
   crates/gwt/web/__tests__/surface-window-reopen.test.mjs \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \

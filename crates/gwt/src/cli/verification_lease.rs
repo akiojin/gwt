@@ -155,7 +155,11 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
     let Some(test_filter) = test_filter else {
         return CommandWeight::Heavy;
     };
-    classify_cargo_scope(&args.collect::<Vec<_>>(), test_filter)
+    classify_cargo_scope(
+        &args.collect::<Vec<_>>(),
+        test_filter,
+        subcommand == "nextest",
+    )
 }
 
 /// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
@@ -275,10 +279,15 @@ fn has_libtest_filter(args: &[String]) -> Option<bool> {
 /// workspace with `default-members`, so `cargo test --lib` with no package
 /// selects the lib target of *every* default member — the workspace-wide build
 /// this classification exists to catch, wearing a narrowing flag.
-fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWeight {
+fn classify_cargo_scope(
+    cargo_args: &[&str],
+    mut test_filter: bool,
+    nextest: bool,
+) -> CommandWeight {
     let mut named_targets = 0usize;
     let mut lib_target = false;
     let mut packages = 0usize;
+    let mut nextest_filterset = false;
     let mut args = cargo_args.iter().copied();
     while let Some(arg) = args.next() {
         // `--test=name` and `--test name` select the same target.
@@ -290,6 +299,19 @@ fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWe
         }
         if flag == "--lib" {
             lib_target = true;
+            continue;
+        }
+        if nextest && matches!(flag, "-E" | "--filterset") {
+            let Some(value) = inline_value.or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Nextest unions repeated filtersets. Only one simple equality
+            // is proven narrow here; general expressions stay fail-closed.
+            if nextest_filterset || !is_exact_nextest_filter(value) {
+                return CommandWeight::Heavy;
+            }
+            nextest_filterset = true;
+            test_filter = true;
             continue;
         }
         let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
@@ -359,6 +381,18 @@ fn classify_cargo_scope(cargo_args: &[&str], mut test_filter: bool) -> CommandWe
     }
 }
 
+fn is_exact_nextest_filter(value: &str) -> bool {
+    value
+        .strip_prefix("test(=")
+        .and_then(|name| name.strip_suffix(')'))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        })
+}
+
 /// The first command of a matrix that needs the host to itself, if any.
 ///
 /// A matrix is only as light as its heaviest command, and naming the command
@@ -410,7 +444,7 @@ pub(super) fn run<E: CliEnv>(
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
-            observe_holder_activity(&mut status, &worktree);
+            observe_holder_activity(&mut status, &worktree)?;
             render(
                 out,
                 "held",
@@ -668,6 +702,7 @@ fn reclaim_holder(
         owner.pid,
         std::process::id()
     );
+    current.record_ttl_overrun(Some(confirmed.cpu_percent));
     coordinator.record_lease_reclaimed(lease_id, target, owner.clone(), &record);
     out.push_str("verification lease: reclaimed\n");
     out.push_str(&format!("lease_id: {lease_id}\n"));
@@ -901,23 +936,43 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
-    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
-        return;
-    };
-    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
-    // working set has to reach into the daemons that launched it.
-    let workload = holder_workload(
-        status.holder_spawn_host.as_deref(),
-        status.target.as_deref(),
-        worktree,
-    );
-    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
-        status.holder_held_ms = Some(activity.held_ms);
-        status.holder_cpu_percent = Some(activity.cpu_percent);
-        status.holder_state = Some(activity.state().to_string());
-        status.holder_state_detail = Some(activity.describe());
+fn observe_holder_activity(
+    status: &mut LeaseStatusSnapshot,
+    worktree: &Path,
+) -> Result<(), SpecOpsError> {
+    observe_holder_activity_with(status, |status| {
+        let pid = status.owner_pid.filter(|_| status.held)?;
+        // Daemon-hosted commands run outside the holder's own process tree.
+        let workload = holder_workload(
+            status.holder_spawn_host.as_deref(),
+            status.target.as_deref(),
+            worktree,
+        );
+        holder_activity::observe(pid, &workload, status.acquired_at_ms)
+    })
+}
+
+fn observe_holder_activity_with(
+    status: &mut LeaseStatusSnapshot,
+    observe: impl FnOnce(&LeaseStatusSnapshot) -> Option<holder_activity::HolderActivity>,
+) -> Result<(), SpecOpsError> {
+    let activity = observe(status);
+    // A process sample is historical evidence, not proof it still owns a lease.
+    let mut current = self::status()?;
+    if let Some(activity) = activity.filter(|_| {
+        current.held
+            && current.lease_id == status.lease_id
+            && current.owner_pid == status.owner_pid
+            && current.target == status.target
+            && current.acquired_at_ms == status.acquired_at_ms
+    }) {
+        current.holder_held_ms = Some(activity.held_ms);
+        current.holder_cpu_percent = Some(activity.cpu_percent);
+        current.holder_state = Some(activity.state().to_string());
+        current.holder_state_detail = Some(activity.describe());
     }
+    *status = current;
+    Ok(())
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -1169,13 +1224,23 @@ pub(super) fn effective_cargo_target(
         .output()
         .map_err(|error| format!("Cargo target resolution failed: {error}"))?;
     if !output.status.success() {
-        // A wrapper or unresolved metadata is safe on the legacy exclusive
-        // route; it must never silently receive a parallel slot.
-        return Ok(None);
+        return Err(format!(
+            "Cargo target resolution failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    Ok(serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .ok()
-        .and_then(|metadata| metadata["target_directory"].as_str().map(PathBuf::from)))
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!("Cargo target resolution failed: invalid metadata JSON: {error}")
+    })?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| {
+            "Cargo target resolution failed: metadata target_directory must be a non-empty string"
+                .to_string()
+        })?;
+    Ok(Some(PathBuf::from(target)))
 }
 
 pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<PathBuf, String> {
@@ -1446,12 +1511,53 @@ fn render(
     push_status_fields(out, status, current_project);
 }
 
+const QUEUE_BYPASS_RECOVERY: &str =
+    "FIFO position retained; rerun verify.run with the identical full matrix to reclaim priority";
+
+/// Explain root exclusion without confusing a current unknown-resource command
+/// with a pre-pool binary. Older tickets are attributed from live process data.
+fn push_slot_admission_fields(
+    out: &mut String,
+    label: &str,
+    holder: &HeavyLeaseStatus,
+    executable: Option<&Path>,
+    cwd: Option<&Path>,
+) {
+    let exclusive = label == "legacy";
+    let mode = if exclusive { "exclusive" } else { "shared" };
+    out.push_str(&format!("slots[{label}].mode: {mode}\n"));
+    if exclusive {
+        let reason = holder.holder_context.as_ref().map_or(
+            "legacy or unclassified runner holds the root lock",
+            |context| context.qos.as_str(),
+        );
+        out.push_str(&format!("slots[{label}].exclusive_reason: {reason}\n"));
+    }
+    let command = holder
+        .holder_context
+        .as_ref()
+        .map_or("unknown", |context| context.action.as_str());
+    out.push_str(&format!("slots[{label}].command: {command}\n"));
+    let worktree = holder
+        .holder_context
+        .as_ref()
+        .map(|context| context.project_root.as_path())
+        .or(cwd);
+    for (field, path) in [("executable", executable), ("worktree", worktree)] {
+        out.push_str(&format!(
+            "slots[{label}].{field}: {}\n",
+            path.map_or_else(|| "unknown".to_string(), |path| path.display().to_string())
+        ));
+    }
+}
+
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_project: &str) {
     if let Some(capacity) = status.capacity {
         out.push_str(&format!(
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
+        out.push_str("exclusive_commands: headed Playwright, coverage, and other commands without a resolved Cargo target; legacy root locks also exclude all slots\n");
         for slot in &status.slots {
             let label = slot
                 .slot
@@ -1469,6 +1575,30 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
                 holder.holder_stale,
                 holder_project_relation(holder.target.as_deref(), current_project).as_str(),
             ));
+            if holder.held || holder.holder_stale {
+                use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+                let mut system = System::new();
+                if let Some(owner) = &holder.owner {
+                    system.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&[Pid::from_u32(owner.pid)]),
+                        true,
+                        ProcessRefreshKind::nothing()
+                            .with_exe(UpdateKind::Always)
+                            .with_cwd(UpdateKind::Always),
+                    );
+                }
+                let process = holder
+                    .owner
+                    .as_ref()
+                    .and_then(|owner| system.process(Pid::from_u32(owner.pid)));
+                push_slot_admission_fields(
+                    out,
+                    &label,
+                    holder,
+                    process.and_then(|process| process.exe()),
+                    process.and_then(|process| process.cwd()),
+                );
+            }
         }
     }
     if let Some(lease_id) = &status.lease_id {
@@ -1572,12 +1702,30 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
     // it has been waiting, in the order the lease will be handed over.
     for (position, entry) in status.queue.iter().enumerate() {
         out.push_str(&format!(
-            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={}\n",
+            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={} resident={} attempt_id={} job_status={}\n",
             entry.target.as_deref().unwrap_or("unknown"),
             entry.priority.as_str(),
             entry.queued_at_ms,
             entry.waiting_ms,
+            entry.resident,
+            entry.attempt_id.as_deref().unwrap_or("unknown"),
+            entry.job_status.map(|status| status.as_str()).unwrap_or("unknown"),
         ));
+        if let Some(reason) = &entry.bypass_reason {
+            out.push_str(&format!(
+                "queue[{position}].bypass: {reason}; {QUEUE_BYPASS_RECOVERY}\n"
+            ));
+        }
+        if status.capacity.is_some() {
+            let mode = match entry.mode {
+                gwt_core::index_coordinator::HeavyQueueMode::Shared => "shared",
+                gwt_core::index_coordinator::HeavyQueueMode::Exclusive => "exclusive",
+            };
+            out.push_str(&format!("queue[{position}].mode: {mode}\n"));
+            if let Some(reason) = &entry.scheduling_reason {
+                out.push_str(&format!("queue[{position}].scheduling: {reason}\n"));
+            }
+        }
     }
 }
 
@@ -1596,7 +1744,11 @@ fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
          Canonical leases are owned by `verify.run` and release when the runner finishes; \
          they cannot be released or extended through the manual API unless the holder is \
          orphaned or an old in-tree driver is stalled with no workload left to run.{holder} \
-         Check `verify.lease.status` for the current holder."
+         Check `verify.lease.status` for the current holder. For a same-project reclaim \
+         candidate, use `verify.lease.release` with `params.lease_id` and `params.reason`. \
+         To stop your own running attempt, get its ID from `verify.status` and call \
+         `verify.cancel` with `params.attempt_id` and `params.reason` from the same \
+         project, worktree, session and execution authority. Other attempts stay protected."
     ))
 }
 
@@ -1617,6 +1769,16 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_refusal_names_the_authorized_recovery_operations() {
+        let error = super::canonical_refusal("held", None).to_string();
+        for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
+            assert!(error.contains(operation), "{error}");
+        }
+        assert!(error.contains("params.attempt_id"), "{error}");
+        assert!(error.contains("params.reason"), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_disk_budgets_do_not_require_a_listed_mount() {
@@ -1781,6 +1943,11 @@ mod tests {
             super::effective_cargo_target(dir.path(), "python runner.py", false).unwrap(),
             None
         );
+        std::fs::write(dir.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        let error = super::effective_cargo_target(&root, "cargo test --workspace", false)
+            .expect_err("metadata failure must remain distinct from a command without artifacts");
+        assert!(error.contains("Cargo target resolution failed"), "{error}");
+        assert!(error.contains("Cargo.toml"), "{error}");
     }
 
     fn command_strings(parts: &[&str]) -> Vec<String> {
@@ -1879,6 +2046,9 @@ mod tests {
             "cargo test -p gwt --all-features --test verification_lease",
             "cargo test -p gwt --all-features --lib verification_lease::tests",
             "cargo test -p gwt --all-features --lib -- verification_lease::tests --exact",
+            "cargo nextest run -p gwt --all-features --lib -E 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset='test(=module::case_1)'",
             r#"cargo test -p gwt --lib verification_lease -- --skip """#,
             "markdownlint README.md",
             "markdownlint-cli2 README.md",
@@ -1896,6 +2066,22 @@ mod tests {
             "cargo test -p gwt --lib --features extra",
             "cargo test -p gwt --lib -- --skip ignored_case",
             "cargo test -p gwt --lib -- --test-threads 1",
+            "cargo nextest run -p gwt --lib -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'test(case)'",
+            "cargo nextest run -p gwt --lib -E 'not test(=case)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case) or all()'",
+            "cargo nextest run -p gwt --lib -E 'test(=)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case'",
+            "cargo nextest run -p gwt --lib -E",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' --filterset 'test(=two)'",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'all()' -E 'test(=one)'",
+            "cargo nextest run --lib -E 'test(=case)'",
+            "cargo nextest run --workspace -p gwt --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt -p gwt-core --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --all-targets --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --lib --test admission -E 'test(=case)'",
+            "cargo test -p gwt --lib -E 'test(=case)'",
             r#"cargo test -p gwt --all-features --lib verification_lease -- """#,
             r#"cargo test -p gwt --lib -- verification_lease """#,
             r#"cargo test -p gwt --lib -- "" verification_lease"#,
@@ -2075,6 +2261,75 @@ mod tests {
     }
 
     #[test]
+    fn status_attributes_exclusive_commands_and_legacy_runners() {
+        let mut out = String::new();
+        let holder = HeavyLeaseStatus {
+            holder_context: Some(gwt_core::index_coordinator::HeavyHolderContext {
+                project_root: PathBuf::from("/work/owner"),
+                action: "node scripts/coverage-summary.mjs".into(),
+                qos: "coverage requires exclusive host resources".into(),
+            }),
+            ..HeavyLeaseStatus::default()
+        };
+        push_slot_admission_fields(&mut out, "legacy", &holder, None, None);
+        assert!(out.contains("mode: exclusive"), "{out}");
+        assert!(
+            out.contains("coverage requires exclusive host resources"),
+            "{out}"
+        );
+        assert!(
+            out.contains("command: node scripts/coverage-summary.mjs"),
+            "{out}"
+        );
+        assert!(out.contains("worktree: /work/owner"), "{out}");
+        out.clear();
+        push_slot_admission_fields(
+            &mut out,
+            "legacy",
+            &HeavyLeaseStatus::default(),
+            Some(Path::new("/old/target/debug/gwtd")),
+            Some(Path::new("/old")),
+        );
+        assert!(
+            out.contains("legacy or unclassified runner holds the root lock"),
+            "{out}"
+        );
+        assert!(out.contains("executable: /old/target/debug/gwtd"), "{out}");
+        assert!(out.contains("worktree: /old"), "{out}");
+        out.clear();
+        push_slot_admission_fields(&mut out, "legacy", &HeavyLeaseStatus::default(), None, None);
+        assert!(out.contains("executable: unknown"), "{out}");
+        assert!(out.contains("worktree: unknown"), "{out}");
+        assert!(out.contains("command: unknown"), "{out}");
+    }
+
+    #[test]
+    fn status_explains_bypassed_reservation_recovery() {
+        let entry: HeavyQueueEntry = serde_json::from_value(serde_json::json!({
+            "priority": "manual-rebuild", "queued_at_ms": 1, "waiting_ms": 180000,
+            "resident": false, "bypass_reason": "non-resident reservation grace elapsed"
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                queue: vec![entry],
+                ..LeaseStatusSnapshot::default()
+            },
+            "repo",
+        );
+        assert!(
+            out.contains("non-resident reservation grace elapsed"),
+            "{out}"
+        );
+        assert!(out.contains("FIFO position retained"), "{out}");
+        assert!(out.contains("identical full matrix"), "{out}");
+    }
+
+    #[test]
     fn held_status_renders_the_holder_and_remaining_ttl() {
         let mut out = String::new();
         render(
@@ -2096,14 +2351,26 @@ mod tests {
                     HeavyQueueEntry {
                         target: Some("repo--verification--early".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 500,
                         waiting_ms: 90_000,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
+                        bypass_reason: None,
                     },
                     HeavyQueueEntry {
                         target: Some("repo--verification--late".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 900,
                         waiting_ms: 89_600,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
+                        bypass_reason: None,
                     },
                 ],
                 holder_kind: Some("verification".to_string()),
@@ -2152,9 +2419,9 @@ mod tests {
              waiter_action: wait\n\
              waiter_reason: waiting for canonical admission is expected; queue position does not authorize reclaiming or stopping the holder\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \
-             queued_at_ms=500 waiting_ms=90000\n\
+             queued_at_ms=500 waiting_ms=90000 resident=true attempt_id=unknown job_status=unknown\n\
              queue[1]: target=repo--verification--late priority=manual-rebuild \
-             queued_at_ms=900 waiting_ms=89600\n"
+             queued_at_ms=900 waiting_ms=89600 resident=true attempt_id=unknown job_status=unknown\n"
         );
     }
 
@@ -2658,8 +2925,34 @@ mod tests {
         }
 
         #[test]
-        fn a_confirmed_empty_stalled_driver_releases_the_lease() {
+        fn a_confirmed_expired_stalled_driver_unblocks_twelve_waiters() {
             let mut held = hold_lease();
+            // Reproduce Issue #4425 without waiting on a wall clock: an
+            // expired holder, no CPU progress, and twelve queued verifiers.
+            held.lease.as_mut().unwrap().extend_until(0).unwrap();
+            let coordinator = open_coordinator().unwrap();
+            let waiting: Vec<_> = (0..12)
+                .map(|index| {
+                    TargetKey::verification("99a8660247f5bc49", format!("waiting-{index:02}"))
+                })
+                .collect();
+            for key in &waiting {
+                coordinator
+                    .reserve_heavy(
+                        key,
+                        JobPriority::ManualRebuild,
+                        Duration::from_secs(600),
+                        Some("waiting for the stalled holder"),
+                    )
+                    .unwrap();
+            }
+            let before = coordinator.heavy_lease_status().unwrap();
+            assert!(before.expired);
+            assert_eq!(before.queue.len(), 12);
+            let next = waiting
+                .iter()
+                .find(|key| Some(key.file_stem()) == before.queue[0].target)
+                .unwrap();
             let lease_id = held.lease_id.clone();
             let mut reclaimer = ScriptedReclaimer {
                 readings: vec![Some(stalled_driver()), Some(stalled_driver())],
@@ -2679,6 +2972,7 @@ mod tests {
 
             assert_eq!(reclaimer.terminated, vec![(std::process::id(), false)]);
             assert!(!still_held(&lease_id));
+            assert_eq!(coordinator.heavy_lease_status().unwrap().queue.len(), 12);
             let events = open_coordinator().unwrap().lease_events().unwrap();
             let event = events.last().unwrap();
             assert_eq!(event.kind, LeaseEventKind::Reclaimed);
@@ -2687,6 +2981,13 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("all commands exited"));
+            let JobAdmission::Owner(next) = coordinator
+                .request_job(next, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("the first waiting verifier must be able to progress");
+            };
+            let _lease = next.acquire_heavy(Duration::from_secs(1)).unwrap();
         }
 
         #[test]

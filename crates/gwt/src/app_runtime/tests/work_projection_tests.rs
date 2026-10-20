@@ -13,6 +13,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         &runtime.test_context(),
         WindowPreset::Branches,
         canvas_bounds(),
+        None,
     );
     let legacy = runtime
         .tab("tab-1")
@@ -21,8 +22,12 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         .persisted()
         .windows[0]
         .clone();
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -32,7 +37,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
 
     assert_eq!(windows.len(), 1, "Branches and Work must share identity");
     assert_eq!(windows[0].id, legacy.id);
-    assert_eq!(windows[0].preset, WindowPreset::Branches);
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
     assert!(windows[0].z_index > legacy.z_index);
     assert!(events
         .iter()
@@ -53,20 +58,20 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
         "Repo",
         repo,
         ProjectKind::Git,
-        &[WindowPreset::Work, WindowPreset::FileTree],
+        &[WindowPreset::Work, WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let work_id = combined_window_id("tab-1", "work-1");
-    let file_tree_id = combined_window_id("tab-1", "file-tree-1");
+    let board_id = combined_window_id("tab-1", "board-1");
 
-    runtime.dock_window_tab_events(&file_tree_id, &work_id);
+    runtime.dock_window_tab_events(&board_id, &work_id);
     let before = runtime.tab("tab-1").expect("tab").workspace.persisted();
     assert!(
         before
             .windows
             .iter()
-            .find(|window| window.id == "file-tree-1")
-            .expect("File Tree tab")
+            .find(|window| window.id == "board-1")
+            .expect("Board tab")
             .tab_group_active
     );
     assert!(
@@ -78,27 +83,31 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
             .tab_group_active
     );
 
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let after = runtime.tab("tab-1").expect("tab").workspace.persisted();
     let work = after
         .windows
         .iter()
         .find(|window| window.id == "work-1")
         .expect("reused Work tab");
-    let file_tree = after
+    let board = after
         .windows
         .iter()
-        .find(|window| window.id == "file-tree-1")
-        .expect("grouped File Tree tab");
+        .find(|window| window.id == "board-1")
+        .expect("grouped Board tab");
 
     assert_eq!(after.windows.len(), 2);
     assert!(
         work.tab_group_active,
         "reuse must reveal the Work group tab"
     );
-    assert!(!file_tree.tab_group_active);
-    assert!(work.z_index >= file_tree.z_index);
+    assert!(!board.tab_group_active);
+    assert!(work.z_index >= board.z_index);
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
@@ -123,7 +132,12 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -168,11 +182,13 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
         &runtime.test_context(),
         WindowPreset::Shell,
         canvas_bounds(),
+        None,
     );
     runtime.create_window_events(
         &runtime.test_context(),
         WindowPreset::Shell,
         canvas_bounds(),
+        None,
     );
     let shell_ids = runtime
         .tab("tab-1")
@@ -1027,6 +1043,75 @@ fn image_paste_event_ignores_non_agent_terminal_window() {
         !worktree.join(".gwt").join("drop-files").exists(),
         "non-agent terminal paste must not create image files"
     );
+}
+
+#[test]
+fn clipboard_upload_failure_records_cause_and_target_without_stopping_agent() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let worktree = temp.path().join("repo");
+    fs::create_dir_all(&worktree).unwrap();
+    let window_id = combined_window_id("tab-1", "pm");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "pm",
+        worktree.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let message =
+        "Could not upload pasted image. HTTP 500: failed to create upload directory: access denied";
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "attachment_upload_failed", "id": window_id,
+        "operation_id": "paste-failure", "message": message,
+    }))
+    .expect("deserialize clipboard failure");
+    assert!(runtime
+        .handle_frontend_event("client-1".into(), event)
+        .is_empty());
+    let errors = gwt_core::error_ledger::list_since(None).unwrap();
+    let error = errors
+        .iter()
+        .find(|error| error.message == message)
+        .expect("clipboard cause in errors.list");
+    assert_eq!(
+        serde_json::to_value(error.kind).unwrap(),
+        "attachment_failure"
+    );
+    assert_eq!(error.target.window_id.as_deref(), Some(window_id.as_str()));
+    assert_eq!(
+        error.target.project_root.as_deref(),
+        Some(worktree.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        error.context.get("operation_id").map(String::as_str),
+        Some("paste-failure")
+    );
+    assert_eq!(
+        runtime.tab("tab-1").unwrap().workspace.persisted().windows[0].status,
+        WindowProcessStatus::Running
+    );
+    // An Agent that exited between save and prompt delivery must not appear attached.
+    let events = runtime.inject_attachment_prompt_events(
+        "client-1".into(),
+        window_id.clone(),
+        "paste-after-exit".into(),
+        "Image file: .gwt/drop-files/image.png".into(),
+        1,
+        Some("image.png".into()),
+    );
+    assert!(matches!(
+        events.last().unwrap().event,
+        BackendEvent::AttachmentProgress {
+            phase: gwt::AttachmentProgressPhase::Failed,
+            ..
+        }
+    ));
+    assert!(gwt_core::error_ledger::list_since(None)
+        .unwrap()
+        .iter()
+        .any(|error| error.message.contains("terminal runtime not found")));
 }
 
 #[test]

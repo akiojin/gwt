@@ -39,10 +39,10 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(page.locator(".workspace-window[data-id='agent-1'] .title-text"))
       .toHaveAttribute("title", "Codex · implementing complete maximize");
     await page.locator("#window-list-button").click();
-    await expect(rowFor(page, "Codex").locator(".window-list-title"))
+    await expect(rowFor(page, "Aster").locator(".window-list-title"))
       .toHaveAttribute("title", "Codex · implementing complete maximize");
-    await expect(rowFor(page, "Claude").locator(".window-list-title"))
-      .toHaveAttribute("title", "Claude");
+    await expect(rowFor(page, "Birch").locator(".window-list-title"))
+      .toHaveAttribute("title", "Birch");
   });
 
   test("Windows opens an inactive grouped agent for input and preserves Close Guard", async ({ page }) => {
@@ -50,11 +50,15 @@ test.describe("Agent window navigation without tabs", () => {
     const target = page.locator(".workspace-window[data-id='agent-2']");
     await expect(target).toBeHidden();
     await page.locator("#window-list-button").click();
-    await rowFor(page, "Claude").click();
+    await rowFor(page, "Birch").click();
     await expect(target).toBeVisible();
     await expect(active).toBeHidden();
-    await expect(target.locator(".title-text")).toHaveAttribute("title", "Claude");
+    await expect(target.locator(".title-text")).toHaveAttribute("title", "Birch");
+    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
+      .some(message => message.kind === "startup_terminal_ready" && message.id === "agent-2")))
+      .toBe(true);
     await target.locator(".xterm-helper-textarea").focus();
+    await expect(target.locator(".xterm-helper-textarea")).toBeFocused();
     await page.keyboard.type("hello");
     await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
       .filter(message => message.kind === "terminal_input" && message.id === "agent-2")
@@ -115,7 +119,7 @@ test.describe("Agent window navigation without tabs", () => {
 
   test("Windows list updates inactive agent telemetry without activating it", async ({ page }) => {
     await page.locator("#window-list-button").click();
-    const chip = rowFor(page, "Claude").locator(".status-chip");
+    const chip = rowFor(page, "Birch").locator(".status-chip");
     await expect(chip).toHaveClass(/running/);
     await expect(chip.locator(".status-label")).toHaveText("Running");
     await page.evaluate(() => window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle"));
@@ -161,6 +165,7 @@ async function installTabbedAgentsBackend(page) {
                   title: "Codex",
                   z_index: 2,
                   agent_id: "codex",
+                  agent_name: "Aster",
                   agent_color: "cyan",
                   dynamic_title_detail: "Codex · implementing complete maximize",
                   tab_group_active: true,
@@ -172,6 +177,7 @@ async function installTabbedAgentsBackend(page) {
                   status: "running",
                   z_index: 1,
                   agent_id: "claude",
+                  agent_name: "Birch",
                   agent_color: "violet",
                   tab_group_active: false,
                 },
