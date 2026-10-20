@@ -24,6 +24,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 struct RemoteFixture {
+    _gwt_home: gwt_core::test_support::ScopedGwtHome,
     _root: tempfile::TempDir,
     verified_repo: PathBuf,
     other_clone: PathBuf,
@@ -33,6 +34,8 @@ struct RemoteFixture {
 impl RemoteFixture {
     fn new() -> Self {
         let root = tempfile::tempdir().expect("remote-head fixture");
+        // Keep trusted verification state fixed while sibling tests change HOME.
+        let gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let remote = root.path().join("remote.git");
         let verified_repo = root.path().join("verified");
         let other_clone = root.path().join("other");
@@ -90,6 +93,7 @@ impl RemoteFixture {
         Self::configure(&other_clone);
         git(&other_clone, &["checkout", "--quiet", HEAD_BRANCH]);
         Self {
+            _gwt_home: gwt_home,
             _root: root,
             verified_repo,
             other_clone,
