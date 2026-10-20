@@ -1076,6 +1076,23 @@ fn spawn_issue_monitor_worker_with_lease(
                                 let previous_limit = monitor.effective_max_active_agents();
                                 monitor.refresh_agent_capacity(&scope.project_root);
                                 let capacity_changed = previous_limit != monitor.effective_max_active_agents();
+                                let completed_delivery_stage = match &control {
+                                    IssueMonitorControl::LaunchDeliveryMaterialized {
+                                        issue_number, delivery_id, materializer_id, materializer_window_id,
+                                    }
+                                    | IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
+                                        issue_number, delivery_id, materializer_id, materializer_window_id,
+                                    } => monitor.prefs().pending_launch_deliveries.into_iter().find(|delivery| {
+                                        delivery.issue_number == *issue_number
+                                            && delivery.delivery_id == *delivery_id
+                                            && delivery.materializer_id.as_ref() == Some(materializer_id)
+                                            && delivery.materializer_window_id.as_ref() == Some(materializer_window_id)
+                                            && delivery.materialized_window_id.as_ref() == Some(materializer_window_id)
+                                            && (!matches!(&control, IssueMonitorControl::LaunchDeliveryWorkspaceDurable { .. })
+                                                || delivery.workspace_durable_window_id.as_ref() == Some(materializer_window_id))
+                                    }),
+                                    _ => None,
+                                };
                                 let outcome = apply_or_queue_issue_monitor_control(
                                     &hub,
                                     &prefs_path,
@@ -1094,11 +1111,17 @@ fn spawn_issue_monitor_worker_with_lease(
                                         monitor.record_verified_live_launch_owners(&owners, &observed_at);
                                     }
                                 }
-                                // A refused launch ACK changes no launch authority.
+                                // Replayed delivery stages and refused launch ACKs
+                                // change no launch authority (Issue #5783).
                                 // Invalidating its captured scan would let one
                                 // retained delivery starve every other candidate.
                                 let refused_launch_ack = launch_ack && outcome == IssueMonitorControlCommit::Rejected;
-                                if !refused_launch_ack || capacity_changed {
+                                let unchanged_delivery_stage = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
+                                    && completed_delivery_stage.as_ref().is_some_and(|before| {
+                                        monitor.prefs().pending_launch_deliveries.contains(before)
+                                    });
+                                let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage;
+                                if !launch_authority_unchanged || capacity_changed {
                                     revision = next_revision;
                                 }
                                 if pending_authority_controls
@@ -1113,9 +1136,9 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     control_open = false;
                                 }
-                                if review_deferred || refused_launch_ack {
+                                if review_deferred || launch_authority_unchanged {
                                     // Publish the row diagnostic without immediately
-                                    // redelivering the ACK this control just refused.
+                                    // redelivering an unchanged launch notification.
                                     publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                                 } else {
                                     publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -15531,8 +15554,27 @@ exit 0
         for scan in 1..=2 {
             let started = wait_for_marker_count(&scan_started, scan).await;
             // Every rejection lands after this exact scan captured its revision.
-            // Repeating the ACK models the retained delivery's GUI re-ACK path.
+            // GUI re-ACKs repeat both already committed durability stages before
+            // retrying the refused launch binding (Issue #5783).
             for _ in 0..2 {
+                for stage in [
+                    "launch_delivery_materialized",
+                    "launch_delivery_workspace_durable",
+                ] {
+                    hub.publish_issue_monitor_control(DaemonFrame::Event {
+                        channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),
+                        payload: crate::runtime_daemon_events::issue_monitor_payload(
+                            "control",
+                            serde_json::json!({(stage): {
+                                "issue_number": 43, "delivery_id": delivery_id,
+                                "materializer_id": "gui-test", "materializer_window_id": shared,
+                            }}),
+                            std::process::id().wrapping_add(1),
+                        ),
+                    })
+                    .await
+                    .expect("the exact delivery durability stage remains acknowledged");
+                }
                 refusals.push(
                     hub.publish_issue_monitor_control(DaemonFrame::Event {
                         channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.into(),

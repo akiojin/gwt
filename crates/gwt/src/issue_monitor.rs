@@ -21674,6 +21674,9 @@ impl IssueMonitorState {
         {
             return None;
         }
+        // Retire this closed window before clearing the identity used by revoke.
+        // Other live windows retain their ledger entries for verified readoption.
+        self.revoke_launch_binding(issue_number);
         let attempt = self.record_classified_attempt(issue_number, classification);
         let max = self.autonomous_tuning.max_attempts;
         // Issue #3944 AC-6: the human-gated flow keeps its cap-park unchanged.
@@ -25306,6 +25309,13 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+        assert!(
+            monitor.prefs().launch_bindings.is_empty(),
+            "Issue #5783: closing releases the binding before the next scan"
+        );
+        monitor.record_candidate(issue(43));
+        monitor.complete_active_launch(43, "tab-1::agent-1");
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-1"), Some(43));
     }
 
     #[test]
@@ -29125,6 +29135,37 @@ mod tests {
         assert_eq!(foreign.prefs().launch_bindings.len(), 1);
     }
 
+    #[test]
+    fn issue_5783_ten_stale_bindings_allow_verified_window_id_reuse() {
+        let stale_bindings = (0..10)
+            .map(|index| (format!("project-a::agent-{index}"), 100 + index))
+            .collect::<BTreeMap<_, _>>();
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_bindings: stale_bindings.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(monitor.prefs().launch_bindings.len(), 10);
+        for (window, old_owner) in stale_bindings {
+            let new_owner = old_owner + 100;
+            monitor.record_candidate(issue(new_owner));
+            // The PM reconcile path supplies only Session/execution-verified owners.
+            monitor.readopt_live_launch_bindings(
+                &BTreeMap::from([(window.clone(), new_owner)]),
+                "2026-10-20T00:00:00Z",
+            );
+            monitor.complete_active_launch_at(new_owner, &window, "2026-10-20T00:00:00Z");
+            assert_eq!(monitor.launched_window_issue(&window), Some(new_owner));
+            assert_eq!(
+                monitor.prefs().launch_bindings.get(&window),
+                Some(&new_owner)
+            );
+        }
+        assert_eq!(monitor.active_issue_numbers().len(), 10);
+    }
+
     /// Issue #4862 AC-3/AC-4, the live case: #4777 was working in its window while
     /// its row read `hold_excluded` with no bound window at all, so the card sat
     /// outside Active and the slot accounting under-counted by one
@@ -29653,6 +29694,10 @@ mod tests {
             monitor.complete_active_launch(42, "tab-1::agent-1");
             monitor.requeue_window("tab-1::agent-1");
         }
+        assert!(
+            monitor.prefs().launch_bindings.is_empty(),
+            "Issue #5783: exhausting the retry budget also releases the binding"
+        );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman),
