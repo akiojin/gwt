@@ -17734,6 +17734,42 @@ impl IssueMonitorState {
         outcome
     }
 
+    /// Apply the owning canvas's absence evidence as well as verified owners.
+    /// Daemon scans must also retire ledger-only windows left by older closes.
+    pub(crate) fn reconcile_observed_launch_bindings(
+        &mut self,
+        live_launch_owners: &BTreeMap<String, u64>,
+        observed_at: &str,
+        now: &str,
+    ) -> Vec<u64> {
+        let mut readopted = self.readopt_live_launch_bindings(live_launch_owners, observed_at);
+        let Some(snapshot) = self.fresh_window_snapshot(now).filter(|snapshot| {
+            snapshot.observed_at == observed_at
+                && rfc3339_elapsed_secs(observed_at, now).is_some_and(|age| age >= 0)
+        }) else {
+            return readopted;
+        };
+        let live_windows = snapshot
+            .windows
+            .iter()
+            .map(|window| window.window_id.clone())
+            .collect();
+        for tab in self
+            .window_snapshot_tabs
+            .clone()
+            .iter()
+            .filter(|tab| !tab.is_empty())
+        {
+            readopted.extend(
+                self.reconcile_launch_bindings(tab, &live_windows, live_launch_owners, observed_at)
+                    .readopted,
+            );
+        }
+        readopted.sort_unstable();
+        readopted.dedup();
+        readopted
+    }
+
     /// Repair old ACK projections without taking a window away from its owner.
     fn reconcile_duplicate_launch_bindings(
         &mut self,
@@ -44206,20 +44242,23 @@ mod tests {
         );
         assert_eq!(monitor.active_count(), 2);
 
-        // The second half of the incident: the close of the *previous*
-        // occupant of `agent-348` is handled anyway and releases the new
-        // launch's local binding, so the next scan finds #4306 queued while
-        // its agent keeps running. The durable ledger still attributes the
-        // window to the Issue (#3883).
+        // The late close belongs to the previous generation. Production close
+        // controls carry its exact identity; an ID alone cannot revoke the
+        // successor (Issue #5783 releases genuinely closed bindings immediately).
         assert_eq!(
-            monitor.requeue_window_at("tab-1::agent-348", next_scan_at),
-            Some(4306)
+            monitor.requeue_exact_window(&IssueMonitorStopTarget {
+                issue_number: 4306,
+                claim_id: Some("gwt-auto-improve:previous-occupant".into()),
+                delivery_id: None,
+                window_id: Some("tab-1::agent-348".into()),
+            }),
+            None
         );
         assert_eq!(
             monitor.inbox_item(4306).unwrap().state,
-            MonitorInboxState::Queued
+            MonitorInboxState::Launched
         );
-        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.active_count(), 2);
 
         // A fresh scan proves the live Session before claim authorship can
         // preserve the recovered launch; the claim alone cannot restore it.
@@ -44228,7 +44267,7 @@ mod tests {
                 &BTreeMap::from([("tab-1::agent-348".to_string(), 4306)]),
                 next_scan_at,
             ),
-            vec![4306]
+            Vec::<u64>::new()
         );
 
         // AC-2: acquiring the claim again returns the comment this Monitor
@@ -44381,10 +44420,15 @@ mod tests {
             "2026-10-01T10:07:15Z",
         ));
         monitor.complete_active_launch_at(4740, "tab-1::agent-348", "2026-10-01T10:07:15Z");
-        assert_eq!(
-            monitor.requeue_window_at("tab-1::agent-348", "2026-10-01T10:10:09Z"),
-            Some(4740)
-        );
+        // A restart lost the volatile launch projection, not a real window.
+        // A genuine close now revokes its ledger and must not be readopted.
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        prefs.pending_launch_deliveries.clear();
+        monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.active_count(), 0);
+        monitor.record_candidate(issue(4740));
         assert_eq!(
             monitor.readopt_live_launch_bindings(
                 &BTreeMap::from([("tab-1::agent-348".to_string(), 4740)]),

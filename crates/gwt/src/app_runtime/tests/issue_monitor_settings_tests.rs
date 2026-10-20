@@ -1062,7 +1062,11 @@ fn app_runtime_issue_monitor_agent_settings_save_refuses_a_pool_changed_elsewher
     elsewhere.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &elsewhere).expect("concurrent profiles.set");
 
-    let events = save_agent_settings_sets(&mut runtime, &recorded_events);
+    let events = {
+        // Verify the concurrent-pool refusal independently of host fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        save_agent_settings_sets(&mut runtime, &recorded_events)
+    };
 
     assert!(!events.iter().any(|event| matches!(
         &event.event,
