@@ -3756,7 +3756,7 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
 }
 
 #[test]
-fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeSet,
@@ -3831,6 +3831,24 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let monitor = RefCell::new(monitor);
     let received = RefCell::new(Vec::new());
     let daemon_accepted = Cell::new(false);
+    let lost_ack = || {
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "claim ACK lost".to_string(),
+        )
+    };
+    assert!(
+        runtime
+            .claim_issue_monitor_launch_delivery_with_publishers(
+                &repo,
+                42,
+                "launch:effect-42",
+                window_id,
+                |_, _| Ok(()),
+                |_| Err(lost_ack()),
+            )
+            .is_err(),
+        "an uncommitted claim must remain uncertain"
+    );
     let accepted = runtime
         .claim_issue_monitor_launch_delivery_with_publishers(
             &repo,
@@ -3872,7 +3890,7 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
                 );
                 gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
                     .expect("commit daemon prefs");
-                Ok(())
+                Err(lost_ack())
             },
         )
         .expect("daemon claim outcome");

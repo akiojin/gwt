@@ -23,6 +23,104 @@ mod startup_tests {
             super::monitor_startup_failure_detail(5415, Some("› $gwt-execute #54150"));
         assert!(!other_owner.contains("initial prompt was not submitted"));
     }
+
+    #[test]
+    fn issue_5694_unknown_ack_publications_accept_only_exact_committed_identity() {
+        use super::*;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let issue = 5694;
+        let delivery_id = "launch:effect-5694";
+        let window_id = "tab-1::agent-1";
+        let materializer = "gui-5694";
+        let pending = gwt::issue_monitor::PendingIssueMonitorLaunchDelivery {
+            issue_number: issue,
+            delivery_id: delivery_id.into(),
+            branch_name: "work/issue-5694".into(),
+            linked_issue_kind: gwt::LinkedIssueKind::Issue,
+            claim_id: "claim-5694".into(),
+            claim_owner: "host/session".into(),
+            selected_tier: None,
+            materializer_id: Some(materializer.into()),
+            materializer_pid: Some(std::process::id()),
+            materializer_window_id: Some(window_id.into()),
+            materialized_window_id: Some(window_id.into()),
+            workspace_durable_window_id: Some(window_id.into()),
+            launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            requeue_reason: None,
+        };
+        let prefs = gwt::IssueMonitorPrefs {
+            pending_launch_deliveries: vec![pending],
+            ..Default::default()
+        };
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("committed delivery markers");
+        let unknown =
+            || IssueMonitorControlPublishError::OutcomeUnknown("ACK response lost".into());
+        for workspace_durable in [false, true] {
+            assert_eq!(
+                AppRuntime::issue_monitor_delivery_marker_result(
+                    &repo,
+                    issue,
+                    delivery_id,
+                    materializer,
+                    window_id,
+                    workspace_durable,
+                    Err(unknown()),
+                ),
+                Ok(true),
+                "a committed exact marker survives a lost daemon response"
+            );
+            assert_eq!(
+                AppRuntime::issue_monitor_delivery_marker_result(
+                    &repo,
+                    issue,
+                    delivery_id,
+                    "another-gui",
+                    window_id,
+                    workspace_durable,
+                    Err(unknown()),
+                ),
+                Err(unknown()),
+                "foreign materialization cannot resolve an unknown publication"
+            );
+        }
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        assert!(monitor.complete_active_launch_delivery(issue, window_id, Some(delivery_id)));
+        let acknowledged = monitor.prefs();
+        gwt::save_issue_monitor_prefs(&prefs_path, &acknowledged).expect("committed launch ACK");
+        assert!(reconcile_delivery_ack_result(
+            &repo,
+            issue,
+            window_id,
+            delivery_id,
+            Err((unknown(), "launch-succeeded")),
+        )
+        .expect("exact completed ACK resolves the lost response")
+        .is_some());
+        assert!(matches!(
+            reconcile_delivery_ack_result(
+                &repo,
+                issue,
+                "tab-1::another-pane",
+                delivery_id,
+                Err((unknown(), "launch-succeeded")),
+            ),
+            Err((
+                IssueMonitorControlPublishError::OutcomeUnknown(_),
+                "launch-succeeded"
+            ))
+        ));
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&prefs_path).expect("readback never mutates prefs"),
+            acknowledged
+        );
+    }
 }
 
 /// Only initial Monitor launches are supervised; native resumes, reviews and
@@ -127,49 +225,21 @@ struct LaunchDeliveryAckInput {
 }
 
 fn acknowledge_delivery(input: LaunchDeliveryAckInput) -> IssueMonitorLaunchDeliveryAcknowledged {
-    let result = acknowledge_delivery_inner(&input).and_then(|result| {
-        let identity = &input.identity;
-        if result.is_some()
-            || !identity.current.load(Ordering::Acquire)
-            || identity.handoff_id.is_some()
-            || identity.delivery_id.is_none()
-        {
-            return Ok(result);
-        }
-        // An ACK can consume the delivery before its response times out. The
-        // missing pending row alone cannot distinguish that from expiration.
-        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+    let mut result = acknowledge_delivery_inner(&input);
+    let identity = &input.identity;
+    if let Some(delivery_id) = identity
+        .delivery_id
+        .as_deref()
+        .filter(|_| identity.current.load(Ordering::Acquire) && identity.handoff_id.is_none())
+    {
+        result = reconcile_delivery_ack_result(
             &identity.monitor_project_root,
-        ))
-        .map_err(|error| {
-            (
-                IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                    "launch delivery ACK readback failed: {error}"
-                )),
-                "read-launch-delivery-ack",
-            )
-        })?;
-        let already_applied = prefs
-            .launch_confirmations
-            .get(&identity.issue_number)
-            .is_some_and(|ack| {
-                ack.window_id == identity.window_id
-                    && ack.delivery_id == identity.delivery_id
-                    && ack.claim_id.as_ref().is_some_and(|claim| {
-                        prefs.launched_claims.get(&identity.issue_number) == Some(claim)
-                    })
-            })
-            && prefs.launch_bindings.get(&identity.window_id) == Some(&identity.issue_number)
-            && prefs.launched_issues.iter().any(|launched| {
-                launched.issue_number == identity.issue_number
-                    && launched.window_id == identity.window_id
-            })
-            && !prefs.pending_launch_deliveries.iter().any(|delivery| {
-                delivery.issue_number == identity.issue_number
-                    && Some(&delivery.delivery_id) == identity.delivery_id.as_ref()
-            });
-        Ok(already_applied.then(LaunchDeliveryAckResult::default))
-    });
+            identity.issue_number,
+            &identity.window_id,
+            delivery_id,
+            result,
+        );
+    }
     let result = result.map(|result| {
         let semantic_receipt_settled = input.identity.current.load(Ordering::Acquire)
             && input
@@ -195,6 +265,65 @@ fn acknowledge_delivery(input: LaunchDeliveryAckInput) -> IssueMonitorLaunchDeli
     IssueMonitorLaunchDeliveryAcknowledged {
         identity: input.identity,
         result,
+    }
+}
+
+fn reconcile_delivery_ack_result(
+    project_root: &Path,
+    issue_number: u64,
+    window_id: &str,
+    delivery_id: &str,
+    result: Result<
+        Option<LaunchDeliveryAckResult>,
+        (IssueMonitorControlPublishError, &'static str),
+    >,
+) -> Result<Option<LaunchDeliveryAckResult>, (IssueMonitorControlPublishError, &'static str)> {
+    if !matches!(
+        &result,
+        Ok(None) | Err((IssueMonitorControlPublishError::OutcomeUnknown(_), _))
+    ) {
+        return result;
+    }
+    // A missing pending row alone cannot distinguish a consumed ACK from expiration.
+    let prefs = match gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        project_root,
+    )) {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            return if result.is_err() {
+                result
+            } else {
+                Err((
+                    IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                        "launch delivery ACK readback failed: {error}"
+                    )),
+                    "read-launch-delivery-ack",
+                ))
+            };
+        }
+    };
+    let already_applied = prefs
+        .launch_confirmations
+        .get(&issue_number)
+        .is_some_and(|ack| {
+            ack.window_id == window_id
+                && ack.delivery_id.as_deref() == Some(delivery_id)
+                && ack
+                    .claim_id
+                    .as_ref()
+                    .is_some_and(|claim| prefs.launched_claims.get(&issue_number) == Some(claim))
+        })
+        && prefs.launch_bindings.get(window_id) == Some(&issue_number)
+        && prefs.launched_issues.iter().any(|launched| {
+            launched.issue_number == issue_number && launched.window_id == window_id
+        })
+        && !prefs.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        });
+    if already_applied {
+        Ok(Some(LaunchDeliveryAckResult::default()))
+    } else {
+        result
     }
 }
 
@@ -273,7 +402,7 @@ fn acknowledge_delivery_inner(
     if !is_current() {
         return Ok(None);
     }
-    match AppRuntime::publish_issue_monitor_control_owned(
+    match AppRuntime::publish_durable_issue_monitor_control_owned(
         root,
         serde_json::json!({ "launched": launched }),
     ) {

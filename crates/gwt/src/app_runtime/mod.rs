@@ -1514,7 +1514,10 @@ impl IssueMonitorLaunchClaimInput {
             }
         }));
         match publication {
-            Ok(()) => {
+            outcome @ (Ok(())
+            | Err(
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_),
+            )) => {
                 let prefs = gwt::load_issue_monitor_prefs(
                     &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
                 )
@@ -1523,7 +1526,13 @@ impl IssueMonitorLaunchClaimInput {
                         format!("launch delivery claim readback failed: {error}"),
                     )
                 })?;
-                Ok(self.matches_durable_claim(&prefs))
+                // A receipt timeout can follow a durable claim. Only the
+                // exact tuple proves ownership; absence remains uncertain.
+                if self.matches_durable_claim(&prefs) {
+                    Ok(true)
+                } else {
+                    outcome.map(|()| false)
+                }
             }
             Err(error) if error.allows_local_fallback() => {
                 AppRuntime::commit_local_issue_monitor_control_with_timeout(
@@ -6015,6 +6024,18 @@ impl AppRuntime {
         gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
     }
 
+    fn publish_durable_issue_monitor_control_owned(
+        project_root: &Path,
+        payload: serde_json::Value,
+    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            payload,
+            std::process::id(),
+        );
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(project_root, payload)
+    }
+
     fn claim_issue_monitor_launch_delivery(
         &self,
         project_root: &Path,
@@ -6136,7 +6157,7 @@ impl AppRuntime {
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let publication = Self::publish_issue_monitor_control_owned(
+        let publication = Self::publish_durable_issue_monitor_control_owned(
             project_root,
             serde_json::json!({
                 "launch_delivery_materialized": {
@@ -6148,23 +6169,18 @@ impl AppRuntime {
             }),
         );
         match publication {
-            Ok(()) => {
-                let prefs = gwt::load_issue_monitor_prefs(
-                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
-                )
-                .map_err(|error| {
-                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                        format!("launch delivery materialization readback failed: {error}"),
-                    )
-                })?;
-                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
-                    delivery.issue_number == issue_number
-                        && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id)
-                        && delivery.materialized_window_id.as_deref()
-                            == Some(materializer_window_id)
-                }))
-            }
+            publication @ (Ok(())
+            | Err(
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_),
+            )) => Self::issue_monitor_delivery_marker_result(
+                project_root,
+                issue_number,
+                delivery_id,
+                materializer_id,
+                materializer_window_id,
+                false,
+                publication,
+            ),
             Err(error) if error.allows_local_fallback() => {
                 Self::commit_local_issue_monitor_control_with_timeout(
                     project_root,
@@ -6195,7 +6211,7 @@ impl AppRuntime {
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let publication = Self::publish_issue_monitor_control_owned(
+        let publication = Self::publish_durable_issue_monitor_control_owned(
             project_root,
             serde_json::json!({
                 "launch_delivery_workspace_durable": {
@@ -6207,23 +6223,18 @@ impl AppRuntime {
             }),
         );
         match publication {
-            Ok(()) => {
-                let prefs = gwt::load_issue_monitor_prefs(
-                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
-                )
-                .map_err(|error| {
-                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                        format!("launch delivery workspace durability readback failed: {error}"),
-                    )
-                })?;
-                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
-                    delivery.issue_number == issue_number
-                        && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id)
-                        && delivery.workspace_durable_window_id.as_deref()
-                            == Some(materializer_window_id)
-                }))
-            }
+            publication @ (Ok(())
+            | Err(
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_),
+            )) => Self::issue_monitor_delivery_marker_result(
+                project_root,
+                issue_number,
+                delivery_id,
+                materializer_id,
+                materializer_window_id,
+                true,
+                publication,
+            ),
             Err(error) if error.allows_local_fallback() => {
                 Self::commit_local_issue_monitor_control_with_timeout(
                     project_root,
@@ -6243,6 +6254,57 @@ impl AppRuntime {
                 Ok(false)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    fn issue_monitor_delivery_marker_result(
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        window_id: &str,
+        workspace_durable: bool,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let unknown = match publication {
+            Ok(()) => None,
+            Err(
+                error
+                @ gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                    _,
+                ),
+            ) => Some(error),
+            Err(error) => return Err(error),
+        };
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .map_err(|error| {
+            unknown.clone().unwrap_or_else(|| {
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                    format!("launch delivery marker readback failed: {error}"),
+                )
+            })
+        })?;
+        let committed = prefs.pending_launch_deliveries.iter().any(|delivery| {
+            let marker = if workspace_durable {
+                delivery.workspace_durable_window_id.as_deref()
+            } else {
+                delivery.materialized_window_id.as_deref()
+            };
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == delivery_id
+                && delivery.materializer_id.as_deref() == Some(materializer_id)
+                && delivery.materializer_pid == Some(std::process::id())
+                && delivery.materializer_window_id.as_deref() == Some(window_id)
+                && delivery.materialized_window_id.as_deref() == Some(window_id)
+                && marker == Some(window_id)
+        });
+        // Only exact committed ownership resolves an ambiguous response. Keep
+        // an unproven outcome unknown so the ACK handler cannot close the pane.
+        match (committed, unknown) {
+            (false, Some(error)) => Err(error),
+            _ => Ok(committed),
         }
     }
 

@@ -4403,7 +4403,7 @@ fn publish_monitor_config_set(
     project_root: &std::path::Path,
     payload: serde_json::Value,
 ) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
-    crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+    crate::daemon_publisher::publish_durable_issue_monitor_control(project_root, payload)
 }
 
 /// Issue #3844: the Issue an agent's wait declaration is about. The launch

@@ -4644,9 +4644,10 @@ pub struct IssueMonitorState {
     #[serde(default, skip)]
     legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
     last_scan_at: Option<String>,
-    /// A startup authority failure is a scan blocker, not a completed scan.
+    /// Authority recovery blocks the daemon until replacement; ordinary scan
+    /// success or failure must not erase its cause and recovery instructions.
     #[serde(skip)]
-    scan_recovery_blocked: bool,
+    scan_recovery_error: Option<String>,
     /// Issue #3628 (AC-5): when the fleet went to zero running agents while it
     /// still had runnable work. `None` while the fleet is healthy.
     #[serde(default)]
@@ -7236,7 +7237,7 @@ impl IssueMonitorState {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
             last_scan_at: None,
-            scan_recovery_blocked: false,
+            scan_recovery_error: None,
             agent_blackout_since: None,
             last_error: None,
             launch_auth_required: false,
@@ -10101,8 +10102,8 @@ impl IssueMonitorState {
     }
 
     pub(crate) fn record_authority_recovery_blocked(&mut self, error: impl Into<String>) {
-        self.scan_recovery_blocked = true;
-        self.record_control_commit_error(error);
+        self.scan_recovery_error = Some(error.into());
+        self.launch_auth_required = false;
     }
 
     pub fn record_launch_auth_required(&mut self, now: impl Into<String>) {
@@ -12680,11 +12681,12 @@ impl IssueMonitorState {
         now: &str,
         quota_hold: Option<IssueMonitorProviderQuotaHold>,
     ) -> IssueMonitorStatusView {
+        // A blocked authority lane must remain diagnosable after later scans.
         // Issue #3883 AC-2: a durable-state reset outranks a per-issue failure
         // banner. It is the one condition where the rest of this view is
         // describing state that was destroyed rather than state that happened,
         // so a reader must see it before drawing any conclusion from the queue.
-        let last_error = self
+        let last_error = self.scan_recovery_error.clone().or_else(|| self
             .last_prefs_reset
             .as_ref()
             .map(|reset| {
@@ -12702,10 +12704,11 @@ impl IssueMonitorState {
                     .filter(|message| !self.is_stop_only_error_banner(message))
                     .cloned()
             })
-            .or_else(|| self.first_failed_issue_banner());
+            .or_else(|| self.first_failed_issue_banner()));
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
         // only a current monitor fault makes the whole monitor read as Error.
-        let has_current_error = self.last_prefs_reset.is_some()
+        let has_current_error = self.scan_recovery_error.is_some()
+            || self.last_prefs_reset.is_some()
             || (!self.launch_auth_required
                 && self.last_error.as_ref().is_some_and(|error| {
                     !self.failed_issues.iter().any(|(issue_number, reason)| {
@@ -13319,7 +13322,7 @@ impl IssueMonitorState {
         status.gui_status = Some(self.status_view_at(now));
         status.scan_stall = self.scan_stall_at(now);
         status.agent_blackout = self.agent_blackout_at(now);
-        if self.scan_recovery_blocked && status.enabled {
+        if self.scan_recovery_error.is_some() && status.enabled {
             status.stall_reason = Some(IssueMonitorStallReason::Unknown);
             status.gui_action = None;
             status.slot_occupancy = None;
@@ -13475,8 +13478,8 @@ impl IssueMonitorState {
         if !self.config.enabled {
             return None;
         }
-        if self.scan_recovery_blocked {
-            return self.last_error.clone();
+        if self.scan_recovery_error.is_some() {
+            return self.scan_recovery_error.clone();
         }
         let Some(last_scan_at) = self.last_scan_at.as_deref() else {
             // The #3633 state itself: enabled, queued work, and no driver has
@@ -13503,7 +13506,8 @@ impl IssueMonitorState {
         let mut status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         // Fleet blackout is independent of the current scan/error state.
         status.agent_blackout = self.agent_blackout_at(now);
-        if !status.enabled || self.scan_recovery_blocked || status.state == "auth_required" {
+        if !status.enabled || self.scan_recovery_error.is_some() || status.state == "auth_required"
+        {
             return status;
         }
         let Some(last_scan_at) = status.last_scan_at.as_deref() else {
