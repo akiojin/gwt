@@ -127,6 +127,7 @@ function collectBrowserErrors(page: Page): string[] {
 async function installRouteBackend(page: Page) {
   await page.addInitScript(({ projects }) => {
     (window as any).__gwtSent = [];
+    (window as any).__gwtRouteSockets = [];
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -139,6 +140,7 @@ async function installRouteBackend(page: Page) {
         super();
         this.url = url;
         this.projectKey = new URL(url).searchParams.get("repo_hash");
+        (window as any).__gwtRouteSockets.push(this);
         if (!this.projectKey) (window as any).__gwtHubReply = (event: unknown) =>
           this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
         setTimeout(() => {
@@ -163,11 +165,15 @@ async function installRouteBackend(page: Page) {
                 recent_projects: [{ path: "/Users/e2e/secret/beta", title: "Beta", kind: "git", project_key: projects[1].project_key }],
               },
             };
+        if (reply.kind === 'workspace_state') (window as any).__gwtRouteWorkspace = reply.workspace;
         setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(reply) })), 0);
       }
       close() {
-        this.readyState = 3;
-        this.dispatchEvent(new CloseEvent("close"));
+        this.readyState = 2;
+        setTimeout(() => {
+          this.readyState = 3;
+          this.dispatchEvent(new CloseEvent("close"));
+        }, 0);
       }
     }
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
@@ -175,6 +181,54 @@ async function installRouteBackend(page: Page) {
 }
 
 test.describe("Project Hub and routes", () => {
+  test("Project not-found state fences other projects and closes route connections", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+      testInfo.project.name.includes("light") ? "light" : "dark");
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL(`/p/${projectA.project_key}`, base || ORIGIN_URL).href);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.clock.install();
+    const emit = (key: string) => page.evaluate(({ key, projectKey }) => {
+      const sockets = (window as any).__gwtRouteSockets.filter((socket: any) =>
+        socket.projectKey === projectKey && socket.readyState === 1);
+      if (!sockets.length) throw new Error("Project socket is not open");
+      if (key === projectKey) sockets[0].dispatchEvent(new MessageEvent('message', {
+        data: JSON.stringify({ kind: 'workspace_state', workspace: (window as any).__gwtRouteWorkspace }),
+      }));
+      sockets[0].dispatchEvent(new MessageEvent("message", {
+        data: JSON.stringify({ kind: "project_not_found", project_key: key }),
+      }));
+    }, { key, projectKey: projectA.project_key });
+    await emit(projectB.project_key);
+    await page.clock.runFor(100);
+    await expect(page.locator("[data-route-not-found]")).toHaveCount(0);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await emit(projectA.project_key);
+    await page.clock.runFor(100);
+    const view = page.locator("[data-route-not-found]");
+    await expect(view).toBeVisible();
+    await expect(page).toHaveTitle("gwt — Project not found");
+    await expect(view.locator("a")).toHaveAttribute("href", "/");
+    await expect(page.locator("#app")).toHaveCount(0);
+    expect(await view.textContent()).not.toMatch(/\/fixture|secret|[A-Z]:\\/);
+    const sockets = await page.evaluate(() => (window as any).__gwtRouteSockets.map((socket: any) => socket.readyState));
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    expect(sockets.every((state: number) => state === 3)).toBe(true);
+    await page.clock.fastForward(30_000);
+    expect(await page.evaluate(() => (window as any).__gwtRouteSockets.length)).toBe(sockets.length);
+    await expect(page.locator('.connection-overlay')).toHaveCount(0);
+    await expect(page.locator('.render-degradation-banner')).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("project-not-found-state.png") });
+    await view.getByRole('link', { name: 'Go to Hub' }).click();
+    await expect(page.locator('[data-hub]')).toBeVisible();
+    await expect(page).toHaveTitle('gwt — Hub');
+    expect(errors).toEqual([]);
+  });
+
   test("tray Open Project URL opens the folder picker without another click", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);

@@ -738,6 +738,9 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 Issue も計画の監査記録に残します。目標変更では、ロードマップ項目からその目標へ明示的に
 紐付く Issue のみが対象です。この記録だけでは、依存先や担当エージェントへの
 通知済みとは判断しません。
+リスク・意思決定・ポリシーの編集も、credential を除去した変更前後の値を同じ監査記録に
+残します。これらの記録は直接の Issue 紐付けを持たず、その不足を明記します。影響 Issue が
+空でも「影響なし」を意味しません。定期作業の編集は、この変更証跡の対象外です。
 
 PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
 スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
@@ -824,6 +827,13 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+
+SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
+`gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
+通常 Issue、`scopes:["specs","issues"]` は両方を検索します。既定では両種と他の検索
+スコープを含みます。`gwt-spec-search` / `gwt-issue-search` も同じフィルターを使います。
+どちらかのスコープを再構築すると、ローカル Issue キャッシュから旧索引を移行します。
+旧 SPEC 専用ストアは参照されなくなるため、手動で削除する必要はありません。
 
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
@@ -1761,6 +1771,11 @@ JSON
 secondary limit のローカル推定（GitHub は公開しないため、このマシンの
 `~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
 そして定期読み取りが今受ける間引き判定が含まれます。
+
+source 内訳には、継続ページも含めて `issue-cache.refresh` や
+`issue-monitor.queued-issues` などの呼び出し元名が表示されます。Monitor の
+キャッシュ更新に失敗した場合、一般一覧の取得済みページを既存の15分の期限内で再利用します。
+キュー一覧と明示的な更新は、引き続きリモートから取得します。
 
 ### リリース手順
 

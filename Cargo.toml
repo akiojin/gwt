@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.129.4"
+version = "9.130.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -37,7 +37,6 @@ gwt-git = { path = "crates/gwt-git" }
 gwt-github = { path = "crates/gwt-github" }
 gwt-skills = { path = "crates/gwt-skills" }
 gwt-terminal = { path = "crates/gwt-terminal" }
-gwt-voice = { path = "crates/gwt-voice" }
 
 # Error handling
 thiserror = "2"
@@ -50,14 +49,11 @@ flate2 = "1.0"
 tar = "0.4"
 zip = "9.0.4"
 
-# Git operations
-gix = { version = "0.80", default-features = false, features = [
-    "blocking-network-client",
-    "worktree-mutation",
-] }
-
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = [
+    "fs", "io-util", "macros", "net", "parking_lot", "process", "rt",
+    "rt-multi-thread", "signal", "sync", "time",
+] }
 tokio-tungstenite = "0.30"
 
 # Configuration
@@ -125,10 +121,6 @@ notify-debouncer-mini = "0.7"
 
 # .gitignore filtering for the watcher
 ignore = "0.4"
-
-# Text encoding auto-detection (SPEC-2006 amendment: file content domain)
-chardetng = "1"
-encoding_rs = "0.8"
 
 # Hex encoding for hash values
 hex = "0.4"

@@ -804,6 +804,10 @@ Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
 not confirm that dependent work or its agents have been notified.
+Risk, decision and policy edits also retain their redacted changed values in these
+receipts. They have no direct Issue mapping, which is explicitly marked as missing;
+an empty affected-Issue set does not mean the change has no impact. Recurring edits
+remain outside this change evidence.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
@@ -898,6 +902,14 @@ entrypoints are:
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent-pane inspection and control
+
+SPECs and plain Issues share one search index. SPECs are indexed once as heading
+chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
+`scopes:["issues"]` selects plain Issues, and `scopes:["specs","issues"]`
+selects both. The default includes both kinds and the other search scopes.
+`gwt-spec-search` and `gwt-issue-search` use these same filters. Rebuilding either
+scope upgrades older indexes from the local Issue cache; old separate SPEC
+stores are no longer read and need no manual removal.
 
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
@@ -1895,6 +1907,11 @@ a local estimate of the per-minute secondary limit (GitHub does not expose
 it; the estimate comes from this machine's spawn ledger under
 `~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
 decision a periodic read would get right now.
+
+The source breakdown identifies callers such as `issue-cache.refresh` and
+`issue-monitor.queued-issues`, including paginated requests. Failed Monitor
+cache refreshes reuse general pages within the existing 15-minute freshness
+window; queue reads and explicit refreshes still fetch live data.
 
 ### Releasing
 

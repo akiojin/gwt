@@ -23,9 +23,9 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       import {
         attentionForWorkspace,
+        createActiveWorkProjectionModel,
         createIssueOtherSurface,
         formatLifecycleStateLabel,
-        mergeActiveWorkProjectionPatch,
       } from "/issue-other-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -445,6 +445,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // pending action) and wizardInteractionGuard moved to
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
+      const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -1280,8 +1281,17 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // Issue #4538 AC-1: the route's hash resolved to no open or Recent
       // Project. Show the path-free not-found view and stop reconnecting.
+      const projectRouteNotFoundModel = createUiStateStore(false);
+      projectRouteNotFoundModel.subscribe(missing => missing, missing => {
+        if (missing) showProjectRouteNotFound();
+      });
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
+        connectionOverlay.dispose();
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+        hubReconnectTimer = null;
         for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
@@ -1443,10 +1453,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
-        setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
+        reconnectTimer = null;
+        if (routeProjectMissing) return;
+        setConnectionState(false);
         reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
@@ -1507,7 +1519,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           clearPickerPending();
           if (socket === connection) handleSocketClose();
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
-          hubReconnectTimer = window.setTimeout(connectSocket, 1000);
+          hubReconnectTimer = null;
+          if (!routeProjectMissing) hubReconnectTimer = window.setTimeout(connectSocket, 1000);
         });
       }
 
@@ -2098,6 +2111,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         startupAutoResumeReadySent = true;
         requestAnimationFrame(() => {
+          if (routeProjectMissing) return;
           send({
             kind: "startup_auto_resume_ready",
             bounds: visibleBounds(),
@@ -5093,6 +5107,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       });
 
+      const runtimeHookModel = createUiStateStore(null);
+      runtimeHookModel.subscribe(state => state, state => {
+        if (state) frontendUnits.boardSurface.handleRuntimeHookEvent(state);
+      });
+
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
@@ -5216,7 +5235,22 @@ import { createUiStateStore } from "/ui-state-store.js";
         knowledgeSettingsSurface,
       });
 
+      function renderActiveWorkProjection(snapshot) {
+        if (!snapshot) return;
+        activeWorkProjection = snapshot.projection;
+        cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+        syncCurrentProjectWorkspaceIds(
+          deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+        );
+        refreshBoardCurrentWorkspaceId();
+        workspaceOverviewSurface.renderWindows();
+        scheduleKnowledgeRelatedWorkRefresh();
+        recomputeOperatorTelemetry();
+      }
+      activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
+
       function receive(event) {
+        if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
           return;
@@ -5228,7 +5262,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "project_not_found": {
-            if (event.project_key === routeProjectKey) showProjectRouteNotFound();
+            if (event.project_key === routeProjectKey) projectRouteNotFoundModel.update(() => true);
             break;
           }
           case "project_agent_aggregate": {
@@ -5288,37 +5322,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
-            activeWorkProjection = event.projection || null;
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
-            break;
           case "active_work_projection_patch":
-            activeWorkProjection = mergeActiveWorkProjectionPatch(
-              activeWorkProjection,
-              event.projection || null,
-            );
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
+            applyActiveWorkProjectionReceiveEvent(event);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":
@@ -5566,7 +5571,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
-            frontendUnits.boardSurface.handleRuntimeHookEvent(event);
+            runtimeHookModel.update(() => ({
+              event: event.event ? { kind: event.event.kind, project_root: event.event.project_root } : null,
+            }));
             break;
           case "update_state":
             if (event.state === "available") {

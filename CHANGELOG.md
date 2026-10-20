@@ -1,6 +1,100 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.130.0] - 2026-10-20
+
+### Bug Fixes
+
+- **issue-monitor:** Commit max active once and record its source
+- **settings:** Apply remote max active mode while editing
+- **recovery:** Isolate handles and make store reads side-effect free
+- **github:** Preserve graphql budgets across rest probes
+- **hook:** Allow declared waits to release active stop gates
+- **monitor:** Respect declared waits in idle stall notices
+- **test:** Freeze clock for stale pool settings save
+- **hooks:** Preserve reachable PM action obligations
+- **github:** Monitor 全更新の再試行で取得済みページを再利用する
+- **github:** Release cache locks before inherited descriptors close
+- **test:** Freeze clock for stale pool settings save
+
+### Features
+
+- **pm:** 計画状態の型付き更新と監査付き再試行を公開する
+- **pm:** 目標とロードマップの読み取り診断を追加する
+- **pm:** Retain planning change history and direct impact
+- **pm:** 目標変更の証跡と直接影響を記録する
+- **pm:** マイルストーンの観測状態と未観測Issueを示す
+- **pm:** Expose goal issue observations
+- **pm:** リスク・意思決定・ポリシー変更の監査証跡を保持する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 5026 pull request
+- **work:** Issue #5016 のPR関連付けを記録
+- **work:** Issue #5016 の配送記録を確定
+- **work:** Issue #5016 のPR関連付けを記録
+- **work:** Issue #5016 のPR関連付けを記録
+- **work:** Link update availability slice to PR 5761
+- **work:** Link migration modal delivery PR
+- **work:** Link clone project modal delivery PR
+- **work:** Open Project の配送 PR を関連付け
+- **work:** エージェント一覧の受入照合を記録
+- **work:** 受入照合 PR の配送記録を保存
+- **work:** PM 計画 API の PR 参照を記録する
+- **work:** フォルダー選択の配送 PR を関連付け
+- **work:** Reconcile remaining agent acceptance mirrors
+- **work:** Record remaining acceptance audit delivery
+- **work:** PR #5770 の参照イベントを保存する
+- **work:** Reports 共同描画の配送 PR を関連付け
+- **work:** Link planning change delivery PR
+- **work:** Link launch progress delivery PR
+- **work:** Record merged launch progress delivery
+- **work:** 更新設定独立性の配送PRを関連付け
+- **work:** 目標変更スライスの PR 参照を記録する
+- **work:** Reconcile Launch Settings verification gates
+- **work:** Link verification gate reconciliation PR
+- **work:** 端末状態移行の配信情報を記録
+- **work:** 添付進捗の配信記録を保存
+- **work:** マイルストーン診断の配信引継ぎを記録する
+- **work:** マイルストーン診断の PR 参照を記録する
+- **work:** Record goal observation PR
+- **work:** Runtime hook の配信記録を保存
+- **work:** PR #5786 の監査証跡参照を保存する
+- **work:** Record issue 5737 delivery handoff
+- **work:** Record issue 5630 delivery handoff
+- **work:** Runtime hook の回復検証を記録
+- **work:** 回復検証 PR の関連付けを記録
+- **work:** Link Issue #5790 to PR #5796
+- **work:** Record Issue #5730 delivery handoff
+
+### Refactor
+
+- **ui:** 更新進捗を共有状態から描画
+- **ui:** 更新適用エラーを共有状態から描画
+- **ui:** 更新準備状態を共有モデルから描画
+- **ui:** Render update availability and auto-apply from shared state
+- **ui:** Render migration modal from shared state
+- **ui:** Render clone project modal from shared state
+- **ui:** Open Project の結果表示を共有状態から描画
+- **ui:** フォルダー選択を共有状態から通知する
+- **ui:** Render launch progress from shared state
+- **ui:** 端末状態を共有モデルから描画
+- **ui:** 添付進捗を共有モデルから描画
+- **ui:** Render runtime hook updates from shared state
+- **agent:** Remove redundant unconditional libc dependency
+- **github:** Remove unused import silencing helpers
+
+### Testing
+
+- **gc:** Fixture の自動 Git maintenance を停止する
+- **ui:** Reports と実行ログの共同状態版を headed E2E で固定
+- **agent:** 本体とエージェントの更新設定の独立性を固定
+- Align reserve windows and pin settings save time
+
+### Ci
+
+- **windows:** 起動修復の14件を固定 head で検証する
+
 ## [9.129.4] - 2026-10-19
 
 ### Bug Fixes

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 import { createPmWindowModel } from "../pm-chat.js";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -26,7 +27,7 @@ function fixture({ routeProjectKey = null } = {}) {
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0, socketInputHandoff: null,
-    reconnectCallbacks: [],
+    reconnectCallbacks: [], connectionStates: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
     agentCompletionNotifier: { reset() {} },
@@ -44,7 +45,14 @@ function fixture({ routeProjectKey = null } = {}) {
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
-    opened, renderRouteNotFound() { context.notFoundRendered = true; },
+    createUiStateStore,
+    opened, renderRouteNotFound() {
+      assert.equal(context.routeProjectMissing, true);
+      assert.ok(sockets.every(socket => socket.readyState === 3));
+      assert.equal(context.socketInputHandoff, null);
+      assert.equal(context.overlayDisposed, true);
+      context.notFoundRendered = (context.notFoundRendered || 0) + 1;
+    },
     renderAppState(state) { context.appState = context.mergeProjectCatalog(state); context.connectSocket(); },
     window: {
       location: { href: "http://localhost:1234/?token=discard#fragment" },
@@ -52,8 +60,12 @@ function fixture({ routeProjectKey = null } = {}) {
       open: (...args) => { opened.push(args); return null; },
     },
     document: {},
-    droppedInputs: 0, connectionOverlay: { reportInputDropped() { context.droppedInputs += 1; } },
-    clearTimeout() {}, clearPickerPending() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
+    droppedInputs: 0, connectionOverlay: {
+      reportInputDropped() { context.droppedInputs += 1; },
+      dispose() { context.overlayDisposed = true; },
+    },
+    clearTimeout() {}, clearPickerPending() {},
+    setConnectionState(connected) { context.connectionStates.push(connected); }, syncRunningBranchCleanups() {},
     dispatcherOptions: [],
     disposedDispatchers: 0,
     createSocketReceiveDispatcher: (options) => {
@@ -72,6 +84,8 @@ function fixture({ routeProjectKey = null } = {}) {
   for (const name of ["mergeProjectCatalog", "receiveHubState", "showProjectRouteNotFound"]) {
     if (source.includes(`function ${name}(`)) vm.runInContext(functionSource(name), context);
   }
+  vm.runInContext(source.slice(source.indexOf('      const projectRouteNotFoundModel ='),
+    source.indexOf('      function showProjectRouteNotFound(')), context);
   // Allow the pre-change implementation to reach behavioral assertions.
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
   if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
@@ -337,12 +351,48 @@ test("project not found stops every reconnect for the route", () => {
   sockets[1].open();
   context.dispatcherOptions.at(-1).onResync("visible");
   assert.equal(sockets[1].readyState, 1, "exercise not-found cleanup during the live input handoff");
-  context.showProjectRouteNotFound();
-  assert.equal(context.notFoundRendered, true);
+  const reconnectCount = context.reconnectCallbacks.length;
+  const connectionStates = [...context.connectionStates];
+  assert.equal(context.notFoundRendered, undefined, "the initial false state must not close the route");
+  vm.runInContext('projectRouteNotFoundModel.update(() => true)', context);
+  assert.equal(context.notFoundRendered, 1);
   assert.ok(sockets.every((socket) => socket.readyState === 3));
+  assert.equal(context.reconnectCallbacks.length, reconnectCount, "terminal close must not reserve reconnects");
+  assert.deepEqual(context.connectionStates, connectionStates, "terminal close must not start an outage overlay");
+  assert.equal(context.reconnectTimer, null);
+  assert.equal(context.hubReconnectTimer, null);
+  vm.runInContext('projectRouteNotFoundModel.update(() => true)', context);
+  assert.equal(context.notFoundRendered, 1, "the same missing state must not rebuild the view");
   const count = sockets.length;
   context.connectSocket();
   assert.equal(sockets.length, count);
+});
+
+test("a queued startup notification ignores a route that became missing", () => {
+  for (const missing of [false, true]) {
+    const queued = [], sent = [];
+    const context = vm.createContext({
+      startupAutoResumeReadySent: false, routeProjectMissing: false,
+      requestAnimationFrame(callback) { queued.push(callback); },
+      visibleBounds() { assert.equal(context.routeProjectMissing, false); return { width: 800, height: 600 }; },
+      send(message) { sent.push(message); },
+    });
+    vm.runInContext(functionSource('sendStartupAutoResumeReady'), context);
+    context.sendStartupAutoResumeReady();
+    context.routeProjectMissing = missing;
+    queued[0]();
+    assert.equal(sent.length, missing ? 0 : 1);
+    if (!missing) assert.equal(sent[0].kind, 'startup_auto_resume_ready');
+  }
+});
+
+test("a missing route ignores late receive work", () => {
+  const context = vm.createContext({
+    routeProjectMissing: true,
+    closeProjectController: { receive() { assert.fail('a missing route must ignore received work'); } },
+  });
+  vm.runInContext(functionSource('receive'), context);
+  context.receive({ kind: 'workspace_state', workspace: {} });
 });
 
 

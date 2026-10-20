@@ -1,4 +1,17 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
+import { createUiStateStore } from "./ui-state-store.js";
+
+export function createActiveWorkProjectionModel() {
+  const model = createUiStateStore(null);
+  function applyActiveWorkProjectionReceiveEvent(event) {
+    model.update(state => ({
+      projection: event.kind === "active_work_projection_patch"
+        ? mergeActiveWorkProjectionPatch(state?.projection, event.projection || null)
+        : event.projection || null,
+    }));
+  }
+  return { model, applyActiveWorkProjectionReceiveEvent };
+}
 
 function compactText(value, fallback = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();

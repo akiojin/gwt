@@ -438,14 +438,6 @@ pub struct WorktreeProbeOutcome {
     pub status_payload: Result<serde_json::Value, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitWorktreeListEntry {
-    path: PathBuf,
-    branch: Option<String>,
-    bare: bool,
-    prunable: bool,
-}
-
 /// Translate a single scope sub-payload from the runner status JSON into a
 /// [`ScopeHealthView`]. Returns `None` if the payload is not an object.
 pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView> {
@@ -928,26 +920,15 @@ fn collect_current_worktree_probe_inputs(
         .collect()
 }
 
-/// Enumerate worktrees under `repo_root` via `git worktree list --porcelain`.
+/// Enumerate active worktrees from `repo_root`'s shared worktree inventory.
 /// Returned entries pair each worktree's canonicalized path with its branch
 /// label and pre-computed `worktree_hash`.
 pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeInput>, String> {
-    if gwt_core::operation_deadline::current().is_some() {
-        return list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string());
-    }
-    // Issue #4398 AC-4: the logged wrapper records this listing in the gwt.log
-    // process summary; a raw hidden spawn left it out of every measurement.
-    let output =
-        gwt_core::process::run_git_logged(&["worktree", "list", "--porcelain"], Some(repo_root))
-            .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+    list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string())
 }
 
 /// Probe inputs from an already-listed inventory, filtered like
-/// [`parse_worktree_probe_inputs`]: the inventory has already dropped
+/// [`active_git_worktrees`]: the inventory has already dropped
 /// prunable entries, and a checkout always has a `.git` entry while a bare
 /// repository has none.
 fn probe_inputs_from_inventory(
@@ -964,91 +945,46 @@ fn probe_inputs_from_inventory(
 }
 
 fn list_worktree_probe_inputs_result(repo_root: &Path) -> io::Result<Vec<WorktreeProbeInput>> {
-    let output = run_project_index_git_probe(repo_root, &["worktree", "list", "--porcelain"])?;
-    if !output.success() {
-        return Err(io::Error::other(output.stderr.trim().to_string()));
-    }
-
-    parse_worktree_probe_inputs(&output.stdout)
+    probe_inputs_from_worktrees(list_git_worktree_inventory(repo_root)?)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn parse_worktree_probe_inputs(stdout: &str) -> Result<Vec<WorktreeProbeInput>, String> {
+fn probe_inputs_from_worktrees(
+    worktrees: Vec<gwt_git::WorktreeInfo>,
+) -> Result<Vec<WorktreeProbeInput>, String> {
     let mut inputs = Vec::new();
-    for entry in parse_git_worktree_porcelain(stdout) {
-        if !git_worktree_entry_is_active(&entry) {
-            continue;
-        }
+    for entry in active_git_worktrees(worktrees) {
         push_worktree_probe_input(&mut inputs, entry.path, entry.branch)?;
     }
-
     Ok(inputs)
 }
 
-fn parse_git_worktree_paths(stdout: &str) -> Vec<PathBuf> {
-    parse_git_worktree_porcelain(stdout)
+fn list_git_worktree_inventory(repo_root: &Path) -> io::Result<Vec<gwt_git::WorktreeInfo>> {
+    // An expired operation must fail even when the shared inventory is warm;
+    // a failed listing cannot authorize orphan index deletion.
+    gwt_core::operation_deadline::ensure_remaining("project index git probe")?;
+    gwt_git::WorktreeManager::new(repo_root)
+        .list()
+        .map_err(io::Error::other)
+}
+
+fn active_git_worktrees(
+    worktrees: Vec<gwt_git::WorktreeInfo>,
+) -> impl Iterator<Item = gwt_git::WorktreeInfo> {
+    worktrees
         .into_iter()
-        .filter(git_worktree_entry_is_active)
-        .map(|entry| entry.path)
-        .collect()
-}
-
-fn git_worktree_entry_is_active(entry: &GitWorktreeListEntry) -> bool {
-    !entry.bare && !entry.prunable && entry.path.exists()
-}
-
-fn parse_git_worktree_porcelain(stdout: &str) -> Vec<GitWorktreeListEntry> {
-    let mut entries = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_branch: Option<String> = None;
-    let mut current_bare = false;
-    let mut current_prunable = false;
-
-    let flush = |entries: &mut Vec<GitWorktreeListEntry>,
-                 current_path: &mut Option<PathBuf>,
-                 current_branch: &mut Option<String>,
-                 current_bare: &mut bool,
-                 current_prunable: &mut bool| {
-        if let Some(path) = current_path.take() {
-            entries.push(GitWorktreeListEntry {
-                path,
-                branch: current_branch.take(),
-                bare: *current_bare,
-                prunable: *current_prunable,
-            });
-        }
-        *current_bare = false;
-        *current_prunable = false;
-    };
-
-    for line in stdout.lines().chain(std::iter::once("")) {
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            flush(
-                &mut entries,
-                &mut current_path,
-                &mut current_branch,
-                &mut current_bare,
-                &mut current_prunable,
-            );
-            current_path = Some(canonicalize_path(PathBuf::from(rest)));
-        } else if let Some(branch) = line.strip_prefix("branch ") {
-            current_branch = Some(branch.trim_start_matches("refs/heads/").to_string());
-        } else if line == "bare" {
-            current_bare = true;
-        } else if line.starts_with("prunable") {
-            current_prunable = true;
-        } else if line.is_empty() {
-            flush(
-                &mut entries,
-                &mut current_path,
-                &mut current_branch,
-                &mut current_bare,
-                &mut current_prunable,
-            );
-        }
-    }
-
-    entries
+        // A checkout has a .git entry; the bare main repository does not.
+        // Check existence on each read so a cached inventory cannot keep a
+        // worktree whose directory has disappeared. A lock still protects an
+        // existing worktree with a missing marker from orphan index deletion.
+        .filter(|entry| {
+            !entry.prunable
+                && (entry.path.join(".git").exists() || (entry.locked && entry.path.exists()))
+        })
+        .map(|mut entry| {
+            entry.path = canonicalize_path(entry.path);
+            entry
+        })
 }
 
 fn push_worktree_probe_input(
@@ -1542,15 +1478,9 @@ pub(crate) fn rebuild_action_for_scope(
     use crate::cli::index::runtime::RebuildAction;
 
     match scope {
-        IndexRebuildScope::Issues => RebuildAction {
+        IndexRebuildScope::Issues | IndexRebuildScope::Specs => RebuildAction {
             label: "issues",
             action: "index-issues",
-            scope: None,
-            needs_worktree_hash: false,
-        },
-        IndexRebuildScope::Specs => RebuildAction {
-            label: "specs",
-            action: "index-specs",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -1747,8 +1677,7 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     let mut targets = Vec::new();
     if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
-    }
-    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
+    } else if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
     if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
@@ -1812,8 +1741,7 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     let mut targets = Vec::new();
     if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
-    }
-    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
+    } else if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
     if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
@@ -2005,19 +1933,6 @@ fn project_index_status_for_path_inner(
     Ok(project_disk_status_view(&repo_hash, selection.inputs).with_coverage(coverage))
 }
 
-fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
-    let meta_path = index_root
-        .join(repo_hash.as_str())
-        .join("issues")
-        .join("meta.json");
-    let bytes = std::fs::read(meta_path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("source_cache_fingerprint")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
 fn issue_index_needs_rebuild_for_cache(
     index_root: &Path,
     repo_hash: &RepoHash,
@@ -2039,8 +1954,9 @@ fn issue_index_needs_rebuild_for_cache(
     if let Some(repair) = interrupted {
         let expected = &repair["expected_budget_interruption"];
         if repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
-            && repair["fingerprint"].as_str() == Some(source.fingerprint.as_str())
-            && expected["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && repair["fingerprint"].as_str().is_some_and(|fingerprint| {
+                !fingerprint.is_empty() && expected["fingerprint"].as_str() == Some(fingerprint)
+            })
             && repair["refresh_run_id"].as_str().is_some_and(|run_id| {
                 !run_id.is_empty() && expected["run_id"].as_str() == Some(run_id)
             })
@@ -2050,10 +1966,26 @@ fn issue_index_needs_rebuild_for_cache(
             return Ok(true);
         }
     }
-    Ok(
-        read_issue_index_source_fingerprint(index_root, repo_hash).as_deref()
-            != Some(source.fingerprint.as_str()),
-    )
+    let meta = std::fs::read(index_root.join(repo_hash.as_str()).join("issues/meta.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+    let revision = std::fs::read_to_string(cache_root.join("source-revision"))
+        .ok()
+        .and_then(|value| uuid::Uuid::parse_str(&value).ok());
+    if let Some(revision) = revision {
+        // The canonical stamp includes SPEC section edits. The record hash
+        // includes chunking and must not be compared to the legacy Issue hash.
+        let indexed = meta["source_cache_revision"]
+            .as_str()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        return Ok(indexed != Some(revision));
+    }
+    Ok(meta
+        .get("issue_cache_fingerprint")
+        .or_else(|| meta.get("source_cache_fingerprint"))
+        .and_then(serde_json::Value::as_str)
+        != Some(source.fingerprint.as_str()))
 }
 
 /// Project roots this process registered with the Refresh Broker, keyed by
@@ -2107,9 +2039,8 @@ pub fn registered_refresh_project(repo_hash: &str) -> Option<RegisteredRefreshPr
 /// Both Files scopes always travel together so one View head publishes them
 /// atomically (SPEC #1939 AS-23).
 pub const REFRESH_FILE_SCOPES: [RefreshScope; 2] = [RefreshScope::Files, RefreshScope::FilesDocs];
-const REFRESH_REPO_SCOPES: [RefreshScope; 7] = [
+const REFRESH_REPO_SCOPES: [RefreshScope; 6] = [
     RefreshScope::Issues,
-    RefreshScope::Specs,
     RefreshScope::Memory,
     RefreshScope::Discussions,
     RefreshScope::Board,
@@ -3022,13 +2953,11 @@ fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = run_project_index_git_probe(project_root, &["worktree", "list", "--porcelain"])
-        .map_err(|err| err.to_string())?;
-    if !output.success() {
-        return Err(output.stderr.trim().to_string());
-    }
-
-    let mut worktrees = parse_git_worktree_paths(&output.stdout);
+    let mut worktrees: Vec<PathBuf> = active_git_worktrees(
+        list_git_worktree_inventory(project_root).map_err(|error| error.to_string())?,
+    )
+    .map(|entry| entry.path)
+    .collect();
 
     if worktrees.is_empty() {
         worktrees.push(canonicalize_path(project_root.to_path_buf()));
@@ -3479,42 +3408,42 @@ mod tests {
     }
 
     #[test]
-    fn worktree_probe_input_parser_skips_bare_prunable_and_missing_worktrees() {
+    fn worktree_probe_inputs_skip_bare_prunable_and_missing_worktrees() {
         let temp = tempfile::tempdir().expect("tempdir");
         let bare = temp.path().join("gwt.git");
         let develop = temp.path().join("develop");
         let work = temp.path().join("work");
         let missing = temp.path().join("stale");
+        let prunable = temp.path().join("prunable");
+        let locked = temp.path().join("locked");
         std::fs::create_dir_all(&bare).expect("bare dir");
-        std::fs::create_dir_all(&develop).expect("develop dir");
-        std::fs::create_dir_all(&work).expect("work dir");
-        let stdout = format!(
-            "\
-worktree {bare}
-bare
+        std::fs::create_dir_all(&locked).expect("locked checkout without git marker");
+        for path in [&develop, &work, &prunable] {
+            std::fs::create_dir_all(path.join(".git")).expect("checkout git dir");
+        }
+        let entry = |path: &Path, branch: Option<&str>, prunable| gwt_git::WorktreeInfo {
+            path: path.to_path_buf(),
+            branch: branch.map(str::to_string),
+            locked: false,
+            prunable,
+        };
+        let worktrees = vec![
+            entry(&bare, None, false),
+            entry(&missing, Some("missing"), false),
+            entry(&prunable, Some("prunable"), true),
+            entry(&develop, Some("develop"), false),
+            entry(&work, None, false),
+            gwt_git::WorktreeInfo {
+                locked: true,
+                ..entry(&locked, Some("locked"), false)
+            },
+        ];
+        let paths: Vec<_> = active_git_worktrees(worktrees.clone())
+            .map(|entry| entry.path)
+            .collect();
+        let inputs = probe_inputs_from_worktrees(worktrees).expect("probe inputs");
 
-worktree {missing}
-HEAD 1111111111111111111111111111111111111111
-prunable gitdir file points to non-existent location
-
-worktree {develop}
-HEAD 2222222222222222222222222222222222222222
-branch refs/heads/develop
-
-worktree {work}
-HEAD 3333333333333333333333333333333333333333
-detached
-
-",
-            bare = bare.display(),
-            missing = missing.display(),
-            develop = develop.display(),
-            work = work.display(),
-        );
-
-        let inputs = parse_worktree_probe_inputs(&stdout).expect("parse probe inputs");
-
-        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].path, canonicalize_path(develop.clone()));
         assert_eq!(inputs[0].branch, "develop");
         assert_eq!(
@@ -3525,9 +3454,15 @@ detached
         );
         assert_eq!(inputs[1].path, canonicalize_path(work.clone()));
         assert_eq!(inputs[1].branch, "(detached)");
+        assert_eq!(inputs[2].path, canonicalize_path(locked.clone()));
+        assert_eq!(inputs[2].branch, "locked");
         assert_eq!(
-            parse_git_worktree_paths(&stdout),
-            vec![canonicalize_path(develop), canonicalize_path(work)]
+            paths,
+            vec![
+                canonicalize_path(develop),
+                canonicalize_path(work),
+                canonicalize_path(locked)
+            ]
         );
     }
 
@@ -3675,7 +3610,7 @@ detached
     }
 
     #[test]
-    fn worktree_listing_for_status_is_a_logged_git_spawn() {
+    fn worktree_listing_for_status_is_logged_and_shared() {
         // Issue #4398 AC-4: the listing reaches the gwt.log process summary
         // through the logged wrapper instead of an invisible hidden spawn.
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3685,6 +3620,14 @@ detached
         list_worktree_probe_inputs(temp.path()).expect("list worktrees");
 
         assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 1);
+
+        list_worktree_probe_inputs_result(temp.path()).expect("reuse probe inventory");
+        list_git_worktree_paths(temp.path()).expect("reuse reconcile inventory");
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - before,
+            1,
+            "status and reconcile must reuse the same worktree inventory"
+        );
     }
 
     struct CurrentDirGuard {
@@ -4398,7 +4341,7 @@ detached
             let snapshot = broker.inspect().unwrap();
             assert_eq!(
                 snapshot.target_count(),
-                7,
+                6,
                 "only repo-shared scopes for empty tree"
             );
             assert!(snapshot
@@ -4460,8 +4403,8 @@ detached
         let snapshot = broker.inspect().expect("inspect");
         assert_eq!(
             snapshot.target_count(),
-            8,
-            "replays coalesce onto one Files pair and seven repo scope targets"
+            7,
+            "replays coalesce onto one Files pair and six repo scope targets"
         );
         assert_eq!(snapshot.queue_depth(), 0);
         assert_eq!(snapshot.running_count(), 0);
@@ -4884,7 +4827,6 @@ detached
             targets,
             vec![
                 (IndexRebuildScope::Issues, None),
-                (IndexRebuildScope::Specs, None),
                 (IndexRebuildScope::Files, Some(current_hash.clone())),
             ]
         );
@@ -5028,10 +4970,14 @@ detached
         let source = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
             .expect("source fingerprint")
             .expect("source");
+        let revision_path = cache_root.join("source-revision");
+        let revision = std::fs::read_to_string(&revision_path).expect("canonical revision");
         std::fs::write(
             issues_dir.join("meta.json"),
             serde_json::json!({
-                "source_cache_fingerprint": source.fingerprint,
+                "source_cache_fingerprint": "unified-record-fingerprint",
+                "issue_cache_fingerprint": source.fingerprint,
+                "source_cache_revision": revision,
             })
             .to_string(),
         )
@@ -5039,6 +4985,12 @@ detached
         assert!(
             !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
                 .expect("current source")
+        );
+        std::fs::write(&revision_path, uuid::Uuid::new_v4().to_string()).unwrap();
+        assert!(issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap());
+        std::fs::remove_file(&revision_path).unwrap();
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap()
         );
         std::fs::write(
             issues_dir.join("repair.json"),

@@ -5299,6 +5299,10 @@ pub struct AutonomousReviewAttempts {
     /// (the 60→1800 s ladder, same tuning as implementation retries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<String>,
+    /// Issue #4117 AC-6: the last review of `reviewed_sha` returned a FAIL
+    /// verdict, so the SHA is not reviewed again until the PR head moves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verdict_failed: bool,
 }
 
 /// Issue #4815: what recording a failed review window did.
@@ -5641,6 +5645,13 @@ pub struct IssueMonitorReviewWindow {
     /// The window id once the GUI's canvas snapshot has shown the pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    /// Issue #4117 AC-9: the SHA this window reviews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_sha: Option<String>,
+    /// Issue #4117 AC-9: which review of `reviewed_sha` this is (1-based);
+    /// 0 for a window adopted from the canvas after a daemon restart.
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 /// Issue #4117 AC-1/AC-2: why a PR-ready Issue's review dispatch was not
@@ -8433,7 +8444,8 @@ impl IssueMonitorState {
             record.delivering_since = None;
         }
         if phase != AutonomousPhase::Reviewing {
-            self.forget_review_window(issue_number);
+            // Issue #4117 AC-7: a record that left review has no reviewer.
+            self.close_review_window(issue_number, IssueMonitorIdleKind::BindingDead);
         }
     }
 
@@ -10180,7 +10192,7 @@ impl IssueMonitorState {
     fn monitor_canvas_windows(&self) -> impl Iterator<Item = &IssueMonitorWindowObservation> {
         self.window_snapshot.iter().flat_map(move |snapshot| {
             snapshot.windows.iter().filter(move |window| {
-                window.monitor_owned
+                (window.monitor_owned || window.review_dispatch)
                     && issue_monitor_qualified_window_id(&window.window_id).is_some_and(
                         |(tab, _)| {
                             self.window_snapshot_tabs.contains(tab)
@@ -14368,6 +14380,10 @@ impl IssueMonitorState {
         self.autonomous_records
             .values()
             .filter(|record| Self::is_in_flight_phase(record.phase))
+            .filter(|record| {
+                self.review_dispatch_exclusion_reason(record.issue_number)
+                    .is_none()
+            })
             .map(|record| record.issue_number)
             .collect()
     }
@@ -14414,14 +14430,52 @@ impl IssueMonitorState {
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
     /// reviewed SHA. The gate is evaluated on the next tick.
     pub fn record_review_verdict(&mut self, issue_number: u64, passed: bool) {
+        let max = self.autonomous_tuning.max_attempts;
         let record = self.autonomous_record_mut(issue_number);
         record.review_passed = Some(passed);
-        // Issue #4815: a verdict means the review window ran; the failures
-        // that preceded it no longer describe this SHA.
-        record.review_attempts = None;
-        // Issue #4117 AC-2: the verdict is the review window's last act; its
-        // slot is free even though the idle pane is closed a scan later.
-        self.forget_review_window(issue_number);
+        let exhausted = if passed {
+            // Issue #4815: a PASS ends the review ladder for this SHA.
+            record.review_attempts = None;
+            None
+        } else {
+            // Issue #4117 AC-5/AC-6: a FAIL is a spent review of this SHA.
+            // It stays on the ladder and holds the SHA until the head moves;
+            // remediation goes to the implementation, not to a new reviewer.
+            let reviewed_sha = record.reviewed_sha.clone().unwrap_or_default();
+            let count = record
+                .review_attempts
+                .as_ref()
+                .filter(|attempts| attempts.reviewed_sha == reviewed_sha)
+                .map_or(0, |attempts| attempts.count)
+                .saturating_add(1);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            record.review_attempts = Some(AutonomousReviewAttempts {
+                reviewed_sha: reviewed_sha.clone(),
+                count,
+                last_error: "independent review returned a FAIL verdict".to_string(),
+                last_failed_at: now.clone(),
+                not_before: None,
+                verdict_failed: true,
+            });
+            let pr = record
+                .pr_number
+                .map_or_else(|| "the PR".to_string(), |pr| format!("PR #{pr}"));
+            (count >= max).then(|| {
+                (
+                    format!(
+                        "independent review for {pr} at {reviewed_sha} returned FAIL {count}/{max} times; dispatch stops until the PR head changes"
+                    ),
+                    now,
+                )
+            })
+        };
+        if let Some((reason, now)) = exhausted {
+            // Issue #4117 AC-9: the cap stops the spawn and asks the PM.
+            self.request_autonomous_steering(issue_number, reason, &now);
+        }
+        // Release the reservation and request close. The canvas still counts
+        // the reviewer until its pane disappears.
+        self.close_review_window(issue_number, IssueMonitorIdleKind::ReviewVerdictPublished);
         // A close worker may already be doing remote readback. Preserve the
         // veto now instead of waiting for its settlement to mark work done.
         if !passed
@@ -14483,7 +14537,15 @@ impl IssueMonitorState {
     fn occupied_slot_count(&self) -> usize {
         let mut reviews = self
             .monitor_canvas_windows()
-            .filter(|window| window.review_dispatch)
+            .filter(|window| {
+                window.review_dispatch
+                    // A settled Idle reviewer releases its active slot in the
+                    // same scan (#4084), but still blocks duplicate reviews.
+                    && !(window.status == WindowState::Idle
+                        && window
+                            .issue_number
+                            .is_some_and(|issue| self.review_verdict_published(issue)))
+            })
             .map(|window| window.window_id.as_str())
             .collect::<BTreeSet<_>>();
         let mut pending_reviews = 0;
@@ -14508,6 +14570,18 @@ impl IssueMonitorState {
     /// Only a reservation that has not become a pane supplies its own slot.
     pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
         if self.update_drain().is_some() {
+            return false;
+        }
+        if review_dispatch
+            && (self
+                .review_dispatch_exclusion_reason(issue_number)
+                .is_some()
+                || self.monitor_canvas_windows().any(|window| {
+                    window.review_dispatch
+                        && window.issue_number == Some(issue_number)
+                        && idle_window_is_alive(window.status)
+                }))
+        {
             return false;
         }
         let max_active = self.effective_max_active_agents();
@@ -14560,8 +14634,73 @@ impl IssueMonitorState {
             < max_active
     }
 
-    fn forget_review_window(&mut self, issue_number: u64) {
-        self.review_windows.remove(&issue_number);
+    /// Release a review reservation and close its observed panes, including
+    /// duplicates recovered from an earlier daemon generation.
+    fn close_review_window(&mut self, issue_number: u64, kind: IssueMonitorIdleKind) {
+        let mut windows = self
+            .monitor_canvas_windows()
+            .filter(|window| window.review_dispatch && window.issue_number == Some(issue_number))
+            .map(|window| window.window_id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(window_id) = self
+            .review_windows
+            .remove(&issue_number)
+            .and_then(|window| window.window_id)
+        {
+            windows.insert(window_id);
+        }
+        self.pending_review_dispatches
+            .retain(|dispatch| dispatch.issue_number != issue_number);
+        for window_id in windows {
+            if self
+                .launched_windows
+                .get(&issue_number)
+                .is_some_and(|bound| issue_monitor_window_ids_match(bound, &window_id))
+            {
+                continue;
+            }
+            self.request_review_pane_close(issue_number, window_id, kind);
+        }
+    }
+
+    fn request_review_pane_close(
+        &mut self,
+        issue_number: u64,
+        window_id: String,
+        kind: IssueMonitorIdleKind,
+    ) {
+        if self.idle_pane_closes_requested.insert(window_id.clone()) {
+            tracing::info!(
+                issue = issue_number,
+                window_id = %window_id,
+                kind = kind.as_str(),
+                "issue monitor: closing independent review pane"
+            );
+            self.pending_idle_pane_closes
+                .push_back(IssueMonitorIdlePaneClose {
+                    window_id,
+                    issue_number: Some(issue_number),
+                    idle_kind: kind,
+                });
+        }
+    }
+
+    /// Issue #4117 AC-8: an Issue the operator removed from this host's queue
+    /// or stopped gets no review dispatch, whatever its autonomous record says.
+    fn review_dispatch_exclusion_reason(&self, issue_number: u64) -> Option<String> {
+        if let Some(reason) = self.stop_only_reason(issue_number) {
+            return Some(format!(
+                "Issue #{issue_number} was stopped (issue.monitor.stop: {reason}); no review is dispatched"
+            ));
+        }
+        self.terminal_queue_exclusions
+            .get(&crate::process::current_hostname())
+            .is_some_and(|excluded| excluded.contains(&issue_number))
+            .then(|| {
+                format!(
+                    "Issue #{issue_number} was removed from the queue (issue.monitor.queue.remove); no review is dispatched"
+                )
+            })
     }
 
     /// Issue #4117 AC-1/AC-2: why a review dispatch for `pr_number` must not
@@ -14574,7 +14713,9 @@ impl IssueMonitorState {
         head_sha: Option<&str>,
         now: &str,
     ) -> Option<AutonomousReviewDispatchHold> {
-        let reason = if let Some(drain) = self.update_drain() {
+        let reason = if let Some(reason) = self.review_dispatch_exclusion_reason(issue_number) {
+            reason
+        } else if let Some(drain) = self.update_drain() {
             format!(
                 "update_drain for v{} holds new review windows; use {UPDATE_DRAIN_RELEASE_OPERATION}",
                 drain.version
@@ -14597,6 +14738,19 @@ impl IssueMonitorState {
                     window.dispatched_at
                 ),
             }
+        } else if let Some(window) = self.monitor_canvas_windows().find(|window| {
+            window.review_dispatch
+                && idle_window_is_alive(window.status)
+                && (window.issue_number == Some(issue_number)
+                    || window
+                        .issue_number
+                        .and_then(|issue| self.autonomous_record(issue))
+                        .is_some_and(|record| record.pr_number == Some(pr_number)))
+        }) {
+            format!(
+                "review window for PR #{pr_number} is already live ({})",
+                window.window_id
+            )
         } else {
             let max_active = self.effective_max_active_agents();
             let occupied = self.occupied_slot_count();
@@ -14640,6 +14794,14 @@ impl IssueMonitorState {
             return None;
         }
         let max = self.autonomous_tuning.max_attempts;
+        // Issue #4117 AC-6: a FAIL verdict is not retried on a timer; the
+        // implementation has to move the head first.
+        if attempts.verdict_failed {
+            return Some(format!(
+                "independent review for PR #{pr_number} at {} returned a FAIL verdict (review {}/{max}); dispatch waits for a new PR head",
+                attempts.reviewed_sha, attempts.count
+            ));
+        }
         if attempts.count >= max {
             return Some(format!(
                 "independent review for PR #{pr_number} at {} failed {}/{max} times (last error: {}); dispatch stops until the PR head changes or the operator steers",
@@ -14712,6 +14874,7 @@ impl IssueMonitorState {
             last_error: message.clone(),
             last_failed_at: now.to_string(),
             not_before: not_before.clone(),
+            verdict_failed: false,
         });
         // The record returns to Implementing: the PR is still open and the
         // next scan re-detects it; the ladder decides when it is dispatched.
@@ -14719,9 +14882,13 @@ impl IssueMonitorState {
         // `resume_inflight_reviews_after_restart` refreshes it — a review
         // failure is not implementation silence.
         record.phase = AutonomousPhase::Implementing;
+        // The failed review has ended; retain its SHA on the retry history,
+        // but do not adopt a late pane or accept its verdict as a current review.
+        record.reviewed_sha = None;
         record.review_passed = None;
         record.last_heartbeat = Some(now.to_string());
-        self.forget_review_window(issue_number);
+        // Issue #4117 AC-7: a failed review's pane is closed, not left running.
+        self.close_review_window(issue_number, IssueMonitorIdleKind::BindingDead);
         let row_message = format!(
             "independent review for PR #{pr_number} at {reviewed_sha} failed (attempt {count}/{max}): {message}"
         );
@@ -14846,6 +15013,20 @@ impl IssueMonitorState {
         {
             record.review_attempts = None;
         }
+        // Issue #4117 AC-9: every dispatch names its Issue, SHA and attempt.
+        let attempt = record
+            .review_attempts
+            .as_ref()
+            .map_or(0, |attempts| attempts.count)
+            .saturating_add(1);
+        tracing::info!(
+            issue = issue_number,
+            pr = pr_number,
+            reviewed_sha = %dispatch.reviewed_sha,
+            attempt,
+            max_attempts = self.autonomous_tuning.max_attempts,
+            "issue monitor: independent review dispatched"
+        );
         self.review_windows.insert(
             issue_number,
             IssueMonitorReviewWindow {
@@ -14853,6 +15034,8 @@ impl IssueMonitorState {
                 pr_number,
                 dispatched_at: now.to_string(),
                 window_id: None,
+                reviewed_sha: Some(dispatch.reviewed_sha.clone()),
+                attempt,
             },
         );
         self.push_review_dispatch(dispatch);
@@ -14866,6 +15049,12 @@ impl IssueMonitorState {
         &mut self,
         dispatch: &AutonomousReviewDispatch,
     ) -> bool {
+        if self
+            .review_dispatch_exclusion_reason(dispatch.issue_number)
+            .is_some()
+        {
+            return false;
+        }
         let current_review = self
             .autonomous_record(dispatch.issue_number)
             .is_some_and(|record| {
@@ -14901,7 +15090,6 @@ impl IssueMonitorState {
         let now = snapshot.observed_at.as_str();
         for observed in &snapshot.windows {
             if !observed.review_dispatch
-                || !idle_window_is_alive(observed.status)
                 || !issue_monitor_qualified_window_id(&observed.window_id)
                     .is_some_and(|(tab, _)| project_tabs.contains(tab))
             {
@@ -14910,21 +15098,70 @@ impl IssueMonitorState {
             let Some(issue_number) = observed.issue_number else {
                 continue;
             };
+            // Issue #4117 AC-7: a pane already being closed is not a review.
+            if self
+                .idle_pane_closes_requested
+                .contains(&observed.window_id)
+            {
+                continue;
+            }
             match self.review_windows.get_mut(&issue_number) {
                 Some(window) => {
-                    if window.window_id.is_none() {
+                    if window.window_id.is_none() && idle_window_is_alive(observed.status) {
                         window.window_id = Some(observed.window_id.clone());
+                        tracing::info!(
+                            issue = issue_number,
+                            pr = window.pr_number,
+                            reviewed_sha = window.reviewed_sha.as_deref().unwrap_or_default(),
+                            attempt = window.attempt,
+                            window_id = %observed.window_id,
+                            "issue monitor: independent review window bound"
+                        );
+                    } else if window.window_id.as_deref().is_some_and(|bound| {
+                        !issue_monitor_window_ids_match(bound, &observed.window_id)
+                    }) {
+                        self.request_review_pane_close(
+                            issue_number,
+                            observed.window_id.clone(),
+                            IssueMonitorIdleKind::BindingDead,
+                        );
                     }
                 }
                 None => {
-                    let Some(pr_number) = self
-                        .autonomous_records
-                        .get(&issue_number)
-                        .filter(|record| record.review_passed.is_none())
-                        .and_then(|record| record.pr_number)
-                    else {
+                    let Some(record) = self.autonomous_records.get(&issue_number) else {
                         continue;
                     };
+                    // Issue #4117 AC-7: a review pane left after its verdict or
+                    // failure needs cleanup even if it already exited. The implementation
+                    // binding is never a review window to close (AC-3).
+                    let bound_implementation = self
+                        .launched_windows
+                        .get(&issue_number)
+                        .is_some_and(|bound| {
+                            issue_monitor_window_ids_match(bound, &observed.window_id)
+                        });
+                    let awaiting_review = matches!(
+                        record.phase,
+                        AutonomousPhase::Reviewing | AutonomousPhase::Implementing
+                    ) && record.reviewed_sha.is_some()
+                        && record.review_passed.is_none();
+                    if !awaiting_review {
+                        if !bound_implementation {
+                            self.request_review_pane_close(
+                                issue_number,
+                                observed.window_id.clone(),
+                                IssueMonitorIdleKind::ReviewVerdictPublished,
+                            );
+                        }
+                        continue;
+                    }
+                    if !idle_window_is_alive(observed.status) {
+                        continue;
+                    }
+                    let Some(pr_number) = record.pr_number else {
+                        continue;
+                    };
+                    let reviewed_sha = record.reviewed_sha.clone();
                     self.review_windows.insert(
                         issue_number,
                         IssueMonitorReviewWindow {
@@ -14932,6 +15169,8 @@ impl IssueMonitorState {
                             pr_number,
                             dispatched_at: now.to_string(),
                             window_id: Some(observed.window_id.clone()),
+                            reviewed_sha,
+                            attempt: 0,
                         },
                     );
                 }
@@ -14997,12 +15236,21 @@ impl IssueMonitorState {
                     }
                 };
                 if let Some(reason) = reason {
-                    failed.push((*issue_number, reason));
+                    failed.push((*issue_number, reason, window.window_id.clone()));
                 }
                 alive
             });
-        for (issue_number, reason) in failed {
+        for (issue_number, reason, window_id) in failed {
             self.record_review_failure(issue_number, reason, now);
+            // Issue #4117 AC-7: a pane that exited without a verdict is still
+            // on the canvas; close it (a vanished one is a no-op for the GUI).
+            if let Some(window_id) = window_id {
+                self.request_review_pane_close(
+                    issue_number,
+                    window_id,
+                    IssueMonitorIdleKind::BindingDead,
+                );
+            }
         }
     }
 
@@ -15807,6 +16055,9 @@ impl IssueMonitorState {
                 .retain(|entry| !issue_numbers.contains(&entry.number));
             queue.last_seen_at = Some(now.to_string());
         }
+        for issue_number in issue_numbers {
+            self.cancel_pending_review_dispatch(*issue_number);
+        }
         self.reconcile_terminal_queue();
     }
 
@@ -16537,6 +16788,25 @@ impl IssueMonitorState {
     }
 
     fn take_pending_review_dispatches_at(&mut self, now: &str) -> Vec<AutonomousReviewDispatch> {
+        // Controls can arrive while a scan still holds a review proposal.
+        let excluded = self
+            .pending_review_dispatches
+            .iter()
+            .filter_map(|dispatch| {
+                self.review_dispatch_exclusion_reason(dispatch.issue_number)
+                    .map(|reason| (dispatch.issue_number, reason))
+            })
+            .collect::<Vec<_>>();
+        for (issue_number, reason) in excluded {
+            self.cancel_pending_review_dispatch(issue_number);
+            self.hold_review_dispatch(
+                issue_number,
+                AutonomousReviewDispatchHold {
+                    reason,
+                    since: now.to_string(),
+                },
+            );
+        }
         if self.update_drain().is_some() {
             return Vec::new();
         }
@@ -16559,6 +16829,30 @@ impl IssueMonitorState {
             }
         }
         dispatches
+    }
+
+    fn cancel_pending_review_dispatch(&mut self, issue_number: u64) {
+        self.pending_review_dispatches
+            .retain(|dispatch| dispatch.issue_number != issue_number);
+        if self
+            .review_windows
+            .get(&issue_number)
+            .is_some_and(|window| window.window_id.is_none())
+        {
+            self.review_windows.remove(&issue_number);
+            if let Some(record) = self
+                .autonomous_records
+                .get_mut(&issue_number)
+                .filter(|record| {
+                    record.phase == AutonomousPhase::Reviewing && record.review_passed.is_none()
+                })
+            {
+                // Cancellation is not a failed attempt. Queue push can resume
+                // PR discovery, while a late pane has no current review to join.
+                record.phase = AutonomousPhase::Implementing;
+                record.reviewed_sha = None;
+            }
+        }
     }
 
     fn unissued_launch_reservations(&self) -> BTreeSet<u64> {
@@ -21602,7 +21896,8 @@ impl IssueMonitorState {
     }
 
     /// AC-4: an Active record whose pane has been idle for twice
-    /// `stuck_timeout_secs` needs a human; ask the PM, naming the count.
+    /// `stuck_timeout_secs` without an in-force wait needs a human;
+    /// ask the PM, naming the count.
     fn notify_stuck_idle_windows(
         &mut self,
         outcome: &mut IssueMonitorIdleReconciliation,
@@ -21614,6 +21909,12 @@ impl IssueMonitorState {
             .idle_windows()
             .into_iter()
             .filter(|idle| idle.bound && idle.idle_kind == IssueMonitorIdleKind::StuckUnknown)
+            .filter(|idle| {
+                !idle
+                    .issue_number
+                    .and_then(|number| self.autonomous_records.get(&number))
+                    .is_some_and(|record| autonomous_wait_in_force(record, now))
+            })
             .collect::<Vec<_>>();
         let count = stuck.len();
         for idle in stuck {
@@ -22618,7 +22919,7 @@ mod tests {
         assert!(monitor.has_capacity_for_monitor_spawn(41, true));
         assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
         assert!(monitor.take_pending_review_dispatches().is_empty());
-        monitor.forget_review_window(41);
+        monitor.close_review_window(41, IssueMonitorIdleKind::ReviewVerdictPublished);
         assert_eq!(monitor.take_pending_review_dispatches(), vec![second]);
         assert!(monitor.has_capacity_for_monitor_spawn(42, true));
     }
@@ -22807,7 +23108,7 @@ mod tests {
             "tab-1::agent-42",
             |_| false
         ));
-        monitor.forget_review_window(41);
+        monitor.close_review_window(41, IssueMonitorIdleKind::ReviewVerdictPublished);
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
         assert!(monitor.has_capacity_for_monitor_spawn(42, false));
     }
@@ -26454,6 +26755,8 @@ mod tests {
                 pr_number: 5022,
                 dispatched_at: now.to_string(),
                 window_id: None,
+                reviewed_sha: None,
+                attempt: 0,
             },
         );
 
@@ -35152,6 +35455,8 @@ mod tests {
                 pr_number: 410,
                 dispatched_at: "2026-10-06T00:00:00Z".to_string(),
                 window_id: Some("tab-2::review".to_string()),
+                reviewed_sha: None,
+                attempt: 0,
             },
         );
         monitor.record_window_snapshot(pane_snapshot(
@@ -38767,9 +39072,22 @@ mod tests {
         assert!(monitor
             .stuck_autonomous_issues("2026-06-29T02:00:00Z")
             .is_empty());
+        // Issue #5630 AC-4: even a fresh snapshot with stale pane output
+        // cannot reclaim a launch protected by the declared wait.
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T02:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
         assert!(monitor
             .recover_stuck_autonomous("2026-06-29T02:00:00Z")
             .is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
         assert_eq!(
             monitor.attempt_count(42),
             0,
@@ -38809,6 +39127,25 @@ mod tests {
             vec![42],
             "past the cap the stale heartbeat counts again"
         );
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T03:11:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
+        assert!(matches!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T03:11:00Z")
+                .as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].window_id, "tab-1::agent-1");
     }
 
     #[test]
@@ -44020,6 +44357,35 @@ mod tests {
                 .any(|notice| notice.level == "warn" && notice.message.contains("2 idle window")),
             "a PM-facing notice carries the count: {notices:?}"
         );
+
+        // Issue #5630 AC-4: a declared wait suspends timed PM steering too.
+        monitor.declare_autonomous_wait(44, "verification admission", "slot available", after);
+        let waiting = "2026-09-07T04:42:00Z";
+        observe(&mut monitor, waiting);
+        let outcome = monitor.reconcile_idle_windows(&active, waiting);
+        assert_eq!(outcome.steering_requested, vec![45]);
+        assert!(monitor.autonomous_record(44).unwrap().steering.is_none());
+        let notices = monitor.take_autonomous_notices();
+        assert!(notices
+            .iter()
+            .any(|notice| notice.level == "warn" && notice.message.contains("1 idle window")));
+
+        // Once the same declaration expires, both rows need a decision again.
+        let expired = "2026-09-07T07:22:00Z";
+        observe(&mut monitor, expired);
+        let outcome = monitor.reconcile_idle_windows(&active, expired);
+        assert_eq!(outcome.steering_requested, vec![44, 45]);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert!(monitor
+            .autonomous_record(44)
+            .unwrap()
+            .steering
+            .as_ref()
+            .unwrap()
+            .reason
+            .contains("2 idle window"));
     }
 
     #[test]
@@ -45187,6 +45553,7 @@ mod tests {
             last_error: "previous review failed".to_string(),
             last_failed_at: IDLE_NOW.to_string(),
             not_before: None,
+            verdict_failed: false,
         });
         let attempts = review_attempts_of(&monitor, 41);
         let bindings = monitor.prefs().launch_bindings;
@@ -45853,5 +46220,339 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #4117 AC-5..AC-10: a FAIL verdict spends the per-SHA review
+    // ladder, holds the SHA until the head moves, closes the review pane,
+    // and queue.remove / stop refuse every further review dispatch.
+    // ---------------------------------------------------------------------
+
+    /// AC-5/AC-6/AC-9/AC-10: PR #4995 got 152 review windows for one SHA
+    /// because a FAIL verdict wiped the ladder. A FAIL now counts, holds the
+    /// SHA until the head moves, and three of them ask the PM to steer.
+    #[test]
+    fn issue_4117_fail_verdicts_hold_the_sha_until_the_head_moves() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("first dispatch is admitted");
+        assert_eq!(monitor.take_pending_review_dispatches().len(), 1);
+        monitor.record_review_verdict(41, false);
+        let attempts = review_attempts_of(&monitor, 41).expect("AC-5: a FAIL verdict counts");
+        assert_eq!(attempts.reviewed_sha, "sha-410");
+        assert_eq!(attempts.count, 1);
+        assert!(attempts.verdict_failed);
+
+        // AC-6: no backoff elapses a FAIL — only a new head does.
+        for now in ["2026-09-07T04:00:30Z", "2026-09-08T04:00:00Z"] {
+            let hold = monitor
+                .dispatch_review(review_dispatch_for(41, 410), now)
+                .expect_err("a FAILed SHA is not reviewed again");
+            assert!(
+                hold.reason.contains("FAIL verdict")
+                    && hold.reason.contains("PR #410")
+                    && hold.reason.contains("sha-410"),
+                "{}",
+                hold.reason
+            );
+            assert!(monitor.take_pending_review_dispatches().is_empty());
+        }
+
+        // AC-10: three FAIL verdicts injected for the same SHA, then the
+        // fourth dispatch never happens and the PM is asked to steer (AC-9).
+        monitor.record_review_verdict(41, false);
+        monitor.record_review_verdict(41, false);
+        assert_eq!(
+            review_attempts_of(&monitor, 41).map(|attempts| attempts.count),
+            Some(3)
+        );
+        assert!(monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-09T04:00:00Z")
+            .is_err());
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        let steering = monitor
+            .status_view_at("2026-09-09T04:00:00Z")
+            .autonomous_issues
+            .into_iter()
+            .find(|summary| summary.issue_number == 41)
+            .and_then(|summary| summary.steering)
+            .expect("issue.monitor.status carries the steering reason");
+        assert!(
+            steering.reason.contains("PR #410")
+                && steering.reason.contains("sha-410")
+                && steering.reason.contains("3/3"),
+            "{}",
+            steering.reason
+        );
+
+        // A new head is a new review and starts the ladder over.
+        let mut fresh = review_dispatch_for(41, 410);
+        fresh.reviewed_sha = "sha-410-v2".to_string();
+        monitor
+            .dispatch_review(fresh, "2026-09-09T04:00:00Z")
+            .expect("a new head is a new review");
+        assert_eq!(monitor.take_pending_review_dispatches().len(), 1);
+        assert_eq!(review_attempts_of(&monitor, 41), None);
+        // A PASS ends the ladder.
+        monitor.record_review_verdict(41, true);
+        assert_eq!(review_attempts_of(&monitor, 41), None);
+    }
+
+    /// AC-9: every admitted dispatch says which Issue, SHA, attempt and window
+    /// it is, on the ledger `issue.monitor.status` projects.
+    #[test]
+    fn issue_4117_review_window_ledger_names_sha_attempt_and_window() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("dispatch admitted");
+        monitor.record_launch_failed_at(41, "agent exited", "2026-09-07T04:00:05Z");
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:05:00Z")
+            .expect("the backoff elapsed");
+        monitor.record_window_snapshot(idle_snapshot(
+            "2026-09-07T04:05:10Z",
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Running, true),
+            ],
+        ));
+        let status = monitor.agent_status_at("2026-09-07T04:05:10Z");
+        assert_eq!(status.review_windows.len(), 1);
+        let window = &status.review_windows[0];
+        assert_eq!(window.issue_number, 41);
+        assert_eq!(window.reviewed_sha.as_deref(), Some("sha-410"));
+        assert_eq!(window.attempt, 2);
+        assert_eq!(window.window_id.as_deref(), Some("tab-1::review-41"));
+    }
+
+    /// AC-7: the review pane is closed once its verdict is in or its review
+    /// failed, whatever state the pane is in.
+    #[test]
+    fn issue_4117_review_pane_is_closed_after_verdict_or_failure() {
+        let review_close = |monitor: &mut IssueMonitorState| {
+            monitor
+                .take_pending_idle_pane_closes()
+                .into_iter()
+                .filter(|close| close.window_id == "tab-1::review-41")
+                .count()
+        };
+        let running = |at: &str| {
+            idle_snapshot(
+                at,
+                vec![
+                    idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                    idle_observation("tab-1::review-41", Some(41), WindowState::Running, true),
+                ],
+            )
+        };
+        // A verdict while the pane is still Running.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("dispatch admitted");
+        monitor.record_window_snapshot(running("2026-09-07T04:00:10Z"));
+        monitor.record_review_verdict(41, false);
+        assert_eq!(review_close(&mut monitor), 1);
+        // The pane is still on the canvas on the next scan: not adopted back
+        // into the ledger, not closed twice.
+        monitor.record_window_snapshot(running("2026-09-07T04:00:20Z"));
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(review_close(&mut monitor), 0);
+
+        // A failure reported while the pane is still Running.
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("dispatch admitted");
+        monitor.record_window_snapshot(running("2026-09-07T04:00:10Z"));
+        monitor.record_launch_failed_at(41, "agent exited", "2026-09-07T04:00:15Z");
+        assert_eq!(review_close(&mut monitor), 1);
+
+        // A failure can reach the daemon before the first canvas snapshot.
+        for status in [
+            WindowState::Running,
+            WindowState::Error,
+            WindowState::Stopped,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(3);
+            monitor
+                .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+                .expect("dispatch admitted");
+            monitor.record_launch_failed_at(41, "agent exited", "2026-09-07T04:00:05Z");
+            monitor.record_window_snapshot(idle_snapshot(
+                "2026-09-07T04:00:10Z",
+                vec![
+                    idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                    idle_observation("tab-1::review-41", Some(41), status, true),
+                ],
+            ));
+            assert_eq!(
+                review_close(&mut monitor),
+                1,
+                "the late failed {status:?} pane is closed"
+            );
+            assert!(monitor.review_windows().is_empty());
+            assert_eq!(
+                review_attempts_of(&monitor, 41).unwrap().reviewed_sha,
+                "sha-410"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4117_removed_review_cannot_escape_the_outbox() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        let dispatch = review_dispatch_for(41, 410);
+        monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
+        let mut stale_scan = monitor.clone();
+
+        monitor.terminal_queue_remove(&[41], IDLE_NOW);
+        assert!(monitor
+            .take_pending_review_dispatches_at(IDLE_NOW)
+            .is_empty());
+        assert!(monitor.review_windows().is_empty());
+        assert!(!monitor.autonomous_in_flight_issues().contains(&41));
+        assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.requeue_review_dispatch_for_update_drain(&dispatch));
+
+        // An in-flight scan must honor the removal when its controls rebase.
+        stale_scan.rebase_daemon_driver_prefs(&monitor.prefs());
+        assert!(stale_scan
+            .take_pending_review_dispatches_at(IDLE_NOW)
+            .is_empty());
+        assert!(stale_scan.review_windows().is_empty());
+
+        // Explicit re-admission works; a removal after emission still stops spawn.
+        monitor.terminal_queue_push(&[41], "operator", IDLE_NOW);
+        assert_eq!(
+            monitor.autonomous_record(41).unwrap().phase,
+            AutonomousPhase::Implementing,
+            "the worker must discover the PR again instead of waiting for a cancelled review"
+        );
+        monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
+        assert_eq!(monitor.take_pending_review_dispatches_at(IDLE_NOW).len(), 1);
+        monitor.terminal_queue_remove(&[41], IDLE_NOW);
+        assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(!monitor.requeue_review_dispatch_for_update_drain(&dispatch));
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+
+        // Removing a queue entry does not cancel an already running review.
+        monitor.terminal_queue_push(&[41], "operator", IDLE_NOW);
+        monitor.dispatch_review(dispatch, IDLE_NOW).unwrap();
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Running, true),
+            ],
+        ));
+        monitor.terminal_queue_remove(&[41], IDLE_NOW);
+        assert_eq!(
+            monitor.autonomous_record(41).unwrap().phase,
+            AutonomousPhase::Reviewing
+        );
+        assert_eq!(
+            monitor.review_windows()[0].window_id.as_deref(),
+            Some("tab-1::review-41")
+        );
+    }
+
+    #[test]
+    fn issue_4117_closing_review_blocks_the_next_head_and_closes_duplicates() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(4);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .unwrap();
+        monitor.take_pending_review_dispatches_at(IDLE_NOW);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Running, true),
+                idle_observation("tab-1::duplicate-41", Some(41), WindowState::Running, true),
+                idle_observation("tab-1::failed-41", Some(41), WindowState::Error, true),
+            ],
+        ));
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(
+            closes.len(),
+            2,
+            "running and failed duplicate reviewers close"
+        );
+        assert_eq!(closes[0].window_id, "tab-1::duplicate-41");
+        assert_eq!(closes[1].window_id, "tab-1::failed-41");
+
+        monitor.record_review_verdict(41, false);
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].window_id, "tab-1::review-41");
+        let mut fresh = review_dispatch_for(41, 410);
+        fresh.reviewed_sha = "sha-410-v2".to_string();
+        let hold = monitor
+            .dispatch_review(fresh.clone(), IDLE_NOW)
+            .expect_err("closing panes still prevent another living reviewer");
+        assert!(hold.reason.contains("already live"), "{}", hold.reason);
+        assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
+        assert!(monitor
+            .take_pending_review_dispatches_at(IDLE_NOW)
+            .is_empty());
+
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::impl-41",
+                Some(41),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        monitor
+            .dispatch_review(fresh, IDLE_NOW)
+            .expect("the reviewers have exited");
+        assert_eq!(monitor.take_pending_review_dispatches_at(IDLE_NOW).len(), 1);
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+    }
+
+    /// AC-8/AC-10: an Issue removed from the queue or stopped gets no review
+    /// dispatch, whatever its autonomous record says.
+    #[test]
+    fn issue_4117_queue_remove_and_stop_refuse_review_dispatch() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        monitor.terminal_queue_remove(&[41], "2026-09-07T04:00:00Z");
+        let hold = monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:10Z")
+            .expect_err("a removed Issue is not reviewed");
+        assert!(hold.reason.contains("queue.remove"), "{}", hold.reason);
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+        assert!(monitor.review_windows().is_empty());
+
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(3);
+        let target = stop_target(&monitor, 41);
+        assert!(matches!(
+            monitor.stop_only(&target, "operator stop", "2026-09-07T04:00:00Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        let hold = monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:10Z")
+            .expect_err("a stopped Issue is not reviewed");
+        assert!(hold.reason.contains("stop"), "{}", hold.reason);
+        assert!(monitor.take_pending_review_dispatches().is_empty());
     }
 }

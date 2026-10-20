@@ -1212,7 +1212,8 @@ export function createKnowledgeKanbanSurface({
         for (const constraint of capacity.constraints || []) {
           const resource = constraint.resource === "disk" ? "Disk" : String(constraint.resource).toUpperCase();
           const reason = uniqueReason(constraint.reason);
-          lines.push(`${resource}: ${constraint.capacity ?? "unknown"} agent slots${constraint.binding ? " · limiting" : ""}${reason ? ` · ${reason}` : ""}`);
+          const slots = constraint.capacity > Number.MAX_SAFE_INTEGER ? "unlimited" : constraint.capacity ?? "unknown";
+          lines.push(`${resource}: ${slots} agent slots${constraint.binding ? " · limiting" : ""}${reason ? ` · ${reason}` : ""}`);
         }
         if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         return {

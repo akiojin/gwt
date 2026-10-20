@@ -70,3 +70,7 @@ serde_json = { workspace = true }
 # Exposes `gwt_core::test_support` (env lock + ScopedEnvVar) to dependent
 # crates' tests. Enable from dev-dependencies only (SPEC-3016 FR-003).
 test-support = ["gwt-config/test-support"]
+
+[package.metadata.cargo-machete]
+# build.rs parses skill YAML frontmatter with this build dependency.
+ignored = ["serde_yaml"]

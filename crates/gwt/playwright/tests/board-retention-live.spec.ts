@@ -4,6 +4,62 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
+test("Runtime hook refresh preserves Board controls and fences unrelated events", async ({ page }, info) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires an isolated checkout server");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await gotoLiveGwt(page, base!);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent("op:command", { detail: { id: "open-board" } })));
+  const board = page.locator('.workspace-window[data-preset="board"]').last();
+  await expect(board).toBeVisible();
+  await expect(board.locator(".board-status")).not.toContainText("Loading");
+  const id = (await board.getAttribute("data-id"))!;
+  // Controlled inbound frames exercise the app receiver, store and real Board.
+  // Capture load requests so backend replies cannot race the loading assertions.
+  const result = await page.evaluate(id => {
+    const root = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+    const sent: any[] = [];
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      const event = typeof data === "string" ? JSON.parse(data) : null;
+      if (event?.kind === "load_board") { sent.push(event); return; }
+      return originalSend.call(this, data);
+    };
+    const inject = (detail: any) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+    const receive = () => inject({ kind: "board_entries", id,
+      entries: [{ id: "hook-post", author: "Fixture", body: "Retained entry", created_at: "2026-10-20T00:00:00Z" }], has_more_before: false });
+    receive();
+    const card = root.querySelector('[data-board-entry-id="hook-post"]');
+    const input = root.querySelector(".board-textarea") as HTMLTextAreaElement;
+    input.focus(); input.value = "Unsent draft"; input.dispatchEvent(new Event("input")); input.setSelectionRange(2, 5);
+    const hook = (event: any) => inject({ kind: "runtime_hook_event", event });
+    try {
+      hook(null); hook({ kind: "other" });
+      hook({ kind: "coordination_event", project_root: "unrelated-project" });
+      const ignored = sent.length;
+      hook({ kind: "coordination_event" });
+      const loading = root.querySelector(".board-status")!.textContent;
+      hook({ kind: "coordination_event" });
+      const whileLoading = sent.length;
+      receive(); hook({ kind: "coordination_event" }); receive();
+      return { ignored, loading, whileLoading, loads: sent.map(event => event.id),
+        sameCard: !!card && card === root.querySelector('[data-board-entry-id="hook-post"]'),
+        sameInput: input === root.querySelector(".board-textarea"), focused: document.activeElement === input,
+        draft: input.value, selection: [input.selectionStart, input.selectionEnd] };
+    } finally { WebSocket.prototype.send = originalSend; }
+  }, id);
+  expect(result).toEqual({ ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
+    loads: [id, id], sameCard: true, sameInput: true, focused: true,
+    draft: "Unsent draft", selection: [2, 5] });
+  await page.screenshot({ path: info.outputPath("runtime-hook-board.png") });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test("Issue #5403 Board retains 1,000 entries across 10,000 rendered pushes and pages history without rebuilding cards", async ({ page }, info) => {
   test.setTimeout(360_000);
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;

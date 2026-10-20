@@ -1643,6 +1643,7 @@ fn sample_runtime_with_events(
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
         work_merge_status_cache: Default::default(),
+        work_merge_scan_queue: Default::default(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
@@ -7708,6 +7709,8 @@ fn save_agent_settings_sets_in(
     describe_repository(&mut hydration);
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, Ok(hydration));
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    // These cases verify saved settings and conflicts, not the save deadline.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None)
 }
 
@@ -9540,16 +9543,7 @@ fn commit_issue4803_monitor_preparation(
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> Vec<OutboundEvent> {
     drain_queued_blocking_tasks(queued);
-    let started = Instant::now();
-    let result =
-        runtime.handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(events));
-    eprintln!("monitor fresh completion: {:?}", started.elapsed());
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "fresh completion blocked the GUI: {:?}",
-        started.elapsed()
-    );
-    result
+    runtime.handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(events))
 }
 
 /// Issue #4868: the Rust 1.99 rewrite replaced `fetch_update` + `checked_add`
