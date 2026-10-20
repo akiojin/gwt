@@ -23,9 +23,9 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       import {
         attentionForWorkspace,
+        createActiveWorkProjectionModel,
         createIssueOtherSurface,
         formatLifecycleStateLabel,
-        mergeActiveWorkProjectionPatch,
       } from "/issue-other-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -445,6 +445,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // pending action) and wizardInteractionGuard moved to
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
+      const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -5221,6 +5222,20 @@ import { createUiStateStore } from "/ui-state-store.js";
         knowledgeSettingsSurface,
       });
 
+      function renderActiveWorkProjection(snapshot) {
+        if (!snapshot) return;
+        activeWorkProjection = snapshot.projection;
+        cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+        syncCurrentProjectWorkspaceIds(
+          deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+        );
+        refreshBoardCurrentWorkspaceId();
+        workspaceOverviewSurface.renderWindows();
+        scheduleKnowledgeRelatedWorkRefresh();
+        recomputeOperatorTelemetry();
+      }
+      activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
+
       function receive(event) {
         if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
@@ -5293,37 +5308,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
-            activeWorkProjection = event.projection || null;
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
-            break;
           case "active_work_projection_patch":
-            activeWorkProjection = mergeActiveWorkProjectionPatch(
-              activeWorkProjection,
-              event.projection || null,
-            );
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
+            applyActiveWorkProjectionReceiveEvent(event);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":

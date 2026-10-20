@@ -588,7 +588,7 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
   );
   assert.match(
     appSource,
-    /case "active_work_projection":[\s\S]{0,1200}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    /function renderActiveWorkProjection\(snapshot\)[\s\S]{0,1200}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
     "active Work projection changes should refresh Knowledge related Work traces",
   );
   assert.match(
