@@ -144,6 +144,11 @@ fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
 
     for provider in [".claude", ".codex"] {
         let skills_root = dir.path().join(provider).join("skills");
+        // A clean checkout has no runtime-generated coordination guidance.
+        let generated_board = skills_root.join("gwt-coordination/references/board.md");
+        if generated_board.exists() {
+            fs::remove_file(generated_board).expect("exclude locally generated guidance");
+        }
         for entry in fs::read_dir(&skills_root).expect("distributed skills") {
             let skill_dir = entry.expect("skill entry").path();
             if skill_dir.file_name().unwrap() == "gwt-coordination" {
@@ -1224,7 +1229,8 @@ fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
         );
         let ownership = fs::read_to_string(skills.join("gwt-execute/references/ownership.md"))
             .expect("materialized execution ownership");
-        assert!(ownership.contains("../../gwt-coordination/references/board.md"));
+        assert!(ownership.contains("`Autonomous investigation authority`"));
+        assert!(ownership.contains("generated `gwt-coordination` skill's `references/board.md`"));
         assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
         assert!(ownership.contains("first apply the launch-route authority below"));
     }
