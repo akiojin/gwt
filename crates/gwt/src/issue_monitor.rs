@@ -12601,6 +12601,34 @@ impl IssueMonitorState {
         self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
     }
 
+    /// Issue #5077: status phase mapping (the stored lifecycle is unchanged):
+    /// - Idle + inbox Launched + fresh bound pane Running -> Implementing.
+    /// - Idle without that evidence -> Idle.
+    /// - Implementing, Reviewing, Delivering, Merged, NeedsHuman -> stored phase.
+    ///
+    /// Launch ACK's heartbeat can create an Idle record outside autonomous
+    /// eligibility. Reuse the inbox runtime join's owner/binding/freshness gates
+    /// and the same clock so both parts of the status describe one snapshot.
+    fn autonomous_status_phase_at(
+        &self,
+        record: &AutonomousIssueRecord,
+        now: &str,
+    ) -> AutonomousPhase {
+        if record.phase == AutonomousPhase::Idle
+            && self
+                .inbox_item(record.issue_number)
+                .is_some_and(|item| item.state == MonitorInboxState::Launched)
+            && self
+                .runtime_consistency_at(record.issue_number, now)
+                .pane_state
+                == Some(WindowState::Running)
+        {
+            AutonomousPhase::Implementing
+        } else {
+            record.phase
+        }
+    }
+
     fn status_view_with_quota_hold(
         &self,
         now: &str,
@@ -12741,11 +12769,12 @@ impl IssueMonitorState {
                 .autonomous_records
                 .values()
                 .map(|record| {
-                    let needs_human = record.phase == AutonomousPhase::NeedsHuman;
+                    let phase = self.autonomous_status_phase_at(record, now);
+                    let needs_human = phase == AutonomousPhase::NeedsHuman;
                     let handoff = self.open_autonomous_handoff(record.issue_number);
                     AutonomousIssueSummary {
                         issue_number: record.issue_number,
-                        phase: record.phase,
+                        phase,
                         attempts: record.attempts,
                         non_agent_attempts: record.non_agent_attempts,
                         tier_input: record.tier_input(),
@@ -43561,6 +43590,17 @@ mod tests {
                 .cloned()
                 .expect("row present")
         };
+        let phase = |status: &IssueMonitorAgentStatus, number: u64| {
+            status
+                .gui_status
+                .as_ref()
+                .unwrap()
+                .autonomous_issues
+                .iter()
+                .find(|summary| summary.issue_number == number)
+                .expect("autonomous summary present")
+                .phase
+        };
 
         // No fresh canvas observation: the join is reported as unavailable,
         // never guessed.
@@ -43615,7 +43655,23 @@ mod tests {
                 Some(consistency),
                 "#{number}: consistency"
             );
+            // Issue #5077: GUI phase and the inbox runtime join use one snapshot.
+            assert_eq!(row.state, MonitorInboxState::Launched);
+            assert_eq!(
+                phase(&status, number),
+                if pane_state == Some(WindowState::Running) {
+                    AutonomousPhase::Implementing
+                } else {
+                    AutonomousPhase::Idle
+                },
+                "#{number}: phase agrees with the observed pane"
+            );
         }
+        assert_eq!(
+            monitor.autonomous_record(41).unwrap().phase,
+            AutonomousPhase::Idle,
+            "status projection does not mutate the stored lifecycle"
+        );
         let queued_row = {
             let mut with_queued = monitor.clone();
             with_queued.terminal_queue_push(&[45], "test", "2026-08-01T00:00:00Z");
@@ -43636,6 +43692,7 @@ mod tests {
             Some(IssueMonitorRuntimeConsistency::Unavailable)
         );
         assert_eq!(row(&status, 41).pane_state, None);
+        assert_eq!(phase(&status, 41), AutonomousPhase::Idle);
 
         // The wire shape is what the PM reads.
         let json = serde_json::to_value(row(&monitor.agent_status_at(IDLE_NOW), 43))
