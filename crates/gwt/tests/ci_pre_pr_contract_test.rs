@@ -291,7 +291,18 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
     assert!(steps
         .iter()
         .any(|s| s["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")));
-    let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features")).unwrap();
+    let summary = steps
+        .iter()
+        .find(|s| s["name"] == "Run and export coverage shard")
+        .unwrap();
+    assert_eq!(
+        summary["run"].as_str().unwrap(),
+        concat!(
+            "GWT_COVERAGE_REVISION=\"$(git rev-parse HEAD)\"\n",
+            "export GWT_COVERAGE_REVISION\n",
+            "node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features\n"
+        )
+    );
     assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%8m.profraw");
     assert_eq!(summary["env"]["NEXTEST_PROFILE"], "coverage");
     assert!(steps
