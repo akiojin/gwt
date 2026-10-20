@@ -448,15 +448,23 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _run_v2(self) -> dict:
+    def _run_v2(self, finalization_marker: Path | None = None) -> dict:
         env = os.environ.copy()
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
         env["GWT_INDEX_FAKE_EMBEDDING"] = "1"
         env["GWT_INDEX_COORDINATOR_ROOT"] = str(self.coordinator_root)
+        command = [sys.executable]
+        if finalization_marker is not None:
+            # Observe interpreter teardown without depending on its wall time.
+            command.extend(["-c", (
+                "import atexit, pathlib, runpy, sys; "
+                f"atexit.register(lambda: pathlib.Path({str(finalization_marker)!r}).write_text('finalized')); "
+                "script = sys.argv.pop(1); sys.argv[0] = script; "
+                "runpy.run_path(script, run_name='__main__')"
+            )])
         proc = subprocess.run(
-            [
-                sys.executable,
+            command + [
                 str(RUNNER_PATH),
                 "--action",
                 "index-files",
@@ -502,7 +510,12 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
     def test_v2_build_yields_at_the_checkpoint_and_resumes_from_the_cas(self):
         pending = _write_pending_claimant(self.coordinator_root, "interactive-search")
 
-        first = self._run_v2()
+        finalization_marker = self.home / "interpreter-finalized"
+        first = self._run_v2(finalization_marker)
+        self.assertFalse(
+            finalization_marker.exists(),
+            "a durable yielded CLI must reap without unused model teardown",
+        )
         self.assertTrue(first.get("ok"), first)
         self.assertTrue(
             first.get("yielded"),
@@ -558,7 +571,11 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         # 3. With the claimant gone the build finishes, embedding only the
         #    documents no earlier run had reached.
         pending.unlink()
-        final = self._run_v2()
+        final = self._run_v2(finalization_marker)
+        self.assertTrue(
+            finalization_marker.exists(),
+            "a published build must retain normal interpreter teardown",
+        )
         self.assertTrue(final.get("ok"), final)
         self.assertFalse(final.get("yielded"), final)
         self.assertEqual(

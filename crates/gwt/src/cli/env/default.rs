@@ -302,6 +302,13 @@ impl CliEnv for DefaultCliEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         crate::cli::pr::fetch_current_pr_via_gh(&self.repo_path)
     }
+
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        crate::cli::pr::fetch_completion_pr_candidates_via_gh(&self.repo_path, number)
+    }
     fn create_pr(
         &mut self,
         base: &str,

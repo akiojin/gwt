@@ -972,7 +972,14 @@ mod tests {
         );
         assert_eq!(
             status["policy"]["goals"][0]["missing_inputs"],
-            serde_json::json!(["metric_evidence"])
+            serde_json::json!([
+                "metric_evidence",
+                "metric",
+                "target",
+                "horizon",
+                "owner",
+                "status"
+            ])
         );
         assert_eq!(
             status["policy"]["milestones"][0]["observed_issue_states"],

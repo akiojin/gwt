@@ -7,8 +7,8 @@ use serde::Serialize;
 use crate::{
     issue_monitor::IssueMonitorInboxCoverage,
     pm_planning::{
-        PlanningAction, PlanningChangeImpact, PlanningFieldChange, PmPlanningState, RoadmapHorizon,
-        RoadmapItem,
+        Goal, PlanningAction, PlanningChangeImpact, PlanningFieldChange, PmPlanningState,
+        RoadmapHorizon, RoadmapItem,
     },
     IssueMonitorAgentStatus, IssueMonitorStatusSource, MonitorInboxState,
 };
@@ -397,6 +397,7 @@ pub fn assess_planning(
             if !unique_id {
                 missing_inputs.push("unique_goal_id");
             }
+            missing_inputs.extend(missing_goal_metadata(goal));
             let links: Vec<_> = state
                 .roadmap_items
                 .iter()
@@ -497,6 +498,20 @@ pub fn assess_planning(
     }
 }
 
+fn missing_goal_metadata(goal: &Goal) -> Vec<&'static str> {
+    [
+        ("outcome", &goal.outcome),
+        ("metric", &goal.metric),
+        ("target", &goal.target),
+        ("horizon", &goal.horizon),
+        ("owner", &goal.owner),
+        ("status", &goal.status),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.trim().is_empty().then_some(name))
+    .collect()
+}
+
 fn diagnose_link(state: &PmPlanningState, item: &RoadmapItem) -> Vec<&'static str> {
     let mut diagnostics = Vec::new();
     if item.id.trim().is_empty() {
@@ -528,17 +543,7 @@ fn diagnose_link(state: &PmPlanningState, item: &RoadmapItem) -> Vec<&'static st
             match goals.as_slice() {
                 [] => diagnostics.push("missing_goal"),
                 [goal] => {
-                    if [
-                        &goal.outcome,
-                        &goal.metric,
-                        &goal.target,
-                        &goal.horizon,
-                        &goal.owner,
-                        &goal.status,
-                    ]
-                    .iter()
-                    .any(|value| value.trim().is_empty())
-                    {
+                    if !missing_goal_metadata(goal).is_empty() {
                         diagnostics.push("incomplete_goal");
                     }
                 }
@@ -726,7 +731,11 @@ mod tests {
     #[test]
     fn goal_observations_follow_only_explicit_references_without_metric_claims() {
         let state: PmPlanningState = serde_json::from_value(json!({
-            "goals":[{"id":"g"},{"id":"other"}],
+            "goals":[{"id":"g"},
+                {"id":"other","outcome":"Ship","metric":"adoption","target":"10",
+                    "horizon":"quarter","owner":"team","status":"active"},
+                {"id":"unlinked","outcome":" ","metric":"\t","target":"\n",
+                    "horizon":" ","owner":" ","status":" "}],
             "milestones":[{"id":"m","issues":[99]}],
             "roadmap_items":[
                 {"id":"a","goal_id":"g","issues":[2,1,2]},
@@ -761,8 +770,18 @@ mod tests {
                     {"issue_number":2,"states":["needs_human","merged"]},
                     {"issue_number":3,"states":["hold_excluded"]}
                 ],
-                "unobserved_issues":[5], "missing_inputs":["metric_evidence"]
+                "unobserved_issues":[5], "missing_inputs":["metric_evidence",
+                    "outcome","metric","target","horizon","owner","status"]
             })
+        );
+        assert_eq!(
+            report["goals"][1]["missing_inputs"],
+            json!(["metric_evidence"])
+        );
+        assert_eq!(report["goals"][2]["roadmap_item_ids"], json!([]));
+        assert_eq!(
+            report["goals"][2]["missing_inputs"],
+            report["goals"][0]["missing_inputs"]
         );
         assert!(!report.to_string().contains("private reason"));
         assert_eq!(state, before.0);
@@ -808,11 +827,29 @@ mod tests {
         }
         assert_eq!(
             report["goals"][0]["missing_inputs"],
-            json!(["metric_evidence", "unique_goal_id"])
+            json!([
+                "metric_evidence",
+                "unique_goal_id",
+                "outcome",
+                "metric",
+                "target",
+                "horizon",
+                "owner",
+                "status"
+            ])
         );
         assert_eq!(
             report["goals"][2]["missing_inputs"],
-            json!(["metric_evidence", "id"])
+            json!([
+                "metric_evidence",
+                "id",
+                "outcome",
+                "metric",
+                "target",
+                "horizon",
+                "owner",
+                "status"
+            ])
         );
     }
 

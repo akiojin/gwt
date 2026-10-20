@@ -99,6 +99,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_current_pr()
     }
 
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.inner.fetch_completion_pr_candidates(number)
+    }
+
     fn create_pr(
         &mut self,
         base: &str,
