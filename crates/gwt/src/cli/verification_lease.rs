@@ -476,6 +476,7 @@ pub(super) fn run<E: CliEnv>(
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
             observe_holder_activity(&mut status, &worktree)?;
+            status.caller_target = Some(verification_key(env)?.file_stem());
             render(
                 out,
                 "held",
@@ -893,10 +894,107 @@ fn holder_project_relation(target: Option<&str>, current_project: &str) -> Holde
     }
 }
 
+/// Issue #4358: one identity reading for admission and every status slot.
+/// Self-hold is diagnostic evidence, never permission to end a live holder.
+struct HolderDiagnostics {
+    exe: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    has_live_children: Option<bool>,
+    self_hold: bool,
+}
+
+fn holder_is_self(
+    status: &HeavyLeaseStatus,
+    caller_target: Option<&str>,
+    caller_session: Option<&str>,
+) -> bool {
+    status.held
+        && !status.holder_stale
+        && status.holder_alive != Some(false)
+        && status.holder_kind == Some(HeavyHolderKind::Verification)
+        && (caller_target.is_some_and(|target| status.target.as_deref() == Some(target))
+            || caller_session
+                .filter(|session| !session.is_empty())
+                .is_some_and(|session| {
+                    status
+                        .holder_context
+                        .as_ref()
+                        .and_then(|context| context.session_id.as_deref())
+                        == Some(session)
+                }))
+}
+
+impl HolderDiagnostics {
+    fn read(status: &HeavyLeaseStatus, caller_target: Option<&str>) -> Self {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let pid = status.owner.as_ref().map(|owner| Pid::from_u32(owner.pid));
+        if let Some(pid) = pid {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_exe(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always),
+            );
+        }
+        let process = pid.and_then(|pid| system.process(pid));
+        Self {
+            exe: process
+                .and_then(|process| process.exe())
+                .map(Path::to_path_buf),
+            cwd: process
+                .and_then(|process| process.cwd())
+                .map(Path::to_path_buf),
+            has_live_children: process.map(|_| {
+                system.processes().values().any(|child| {
+                    child.parent() == pid && child.status() != sysinfo::ProcessStatus::Zombie
+                })
+            }),
+            self_hold: process.is_some()
+                && holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+        }
+    }
+
+    fn detail(&self, status: &HeavyLeaseStatus) -> String {
+        format!(
+            "holder_pid: {}, holder_exe: {}, acquired_at_ms: {}, holder_has_live_children: {}, self_hold: {}",
+            status.owner.as_ref().map_or_else(|| "unknown".into(), |owner| owner.pid.to_string()),
+            self.exe.as_ref().map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            status.acquired_at_ms.map_or_else(|| "unknown".into(), |at| at.to_string()),
+            self.has_live_children.map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        )
+    }
+
+    fn push_fields(&self, out: &mut String, prefix: &str) {
+        out.push_str(&format!(
+            "{prefix}holder_exe: {}\n{prefix}holder_has_live_children: {}\n{prefix}self_hold: {}\n",
+            self.exe
+                .as_ref()
+                .map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            self.has_live_children
+                .map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        ));
+    }
+}
+
 /// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
     held: bool,
+    #[serde(skip)]
+    caller_target: Option<String>,
     /// Pool diagnostics are additive output, not part of legacy control outcomes.
     #[serde(skip)]
     capacity: Option<usize>,
@@ -1634,28 +1732,18 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
                 holder_project_relation(holder.target.as_deref(), current_project).as_str(),
             ));
             if holder.held || holder.holder_stale {
-                use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-                let mut system = System::new();
-                if let Some(owner) = &holder.owner {
-                    system.refresh_processes_specifics(
-                        ProcessesToUpdate::Some(&[Pid::from_u32(owner.pid)]),
-                        true,
-                        ProcessRefreshKind::nothing()
-                            .with_exe(UpdateKind::Always)
-                            .with_cwd(UpdateKind::Always),
-                    );
-                }
-                let process = holder
-                    .owner
-                    .as_ref()
-                    .and_then(|owner| system.process(Pid::from_u32(owner.pid)));
+                let identity = HolderDiagnostics::read(holder, status.caller_target.as_deref());
                 push_slot_admission_fields(
                     out,
                     &label,
                     holder,
-                    process.and_then(|process| process.exe()),
-                    process.and_then(|process| process.cwd()),
+                    identity.exe.as_deref(),
+                    identity.cwd.as_deref(),
                 );
+                identity.push_fields(out, &format!("slots[{label}]."));
+                if holder.lease_id == status.lease_id {
+                    identity.push_fields(out, "");
+                }
             }
         }
     }
@@ -1828,6 +1916,51 @@ fn unexpected(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn self_hold_matches_session_or_worktree_but_not_foreign_or_stale_holders() {
+        use gwt_core::index_coordinator::{HeavyHolderContext, HeavyHolderKind, HeavyLeaseStatus};
+        let mut holder = HeavyLeaseStatus {
+            held: true,
+            holder_alive: Some(true),
+            holder_kind: Some(HeavyHolderKind::Verification),
+            target: Some("repo--verification--first".into()),
+            holder_context: Some(
+                serde_json::from_value::<HeavyHolderContext>(serde_json::json!({
+                    "project_root": "/work/first", "action": "cargo build", "qos": "exclusive"
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            holder.holder_context.as_ref().unwrap().session_id.is_none(),
+            "legacy context must remain readable"
+        );
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            None
+        ));
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        holder.holder_context.as_mut().unwrap().session_id = Some("caller".into());
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        assert!(!super::holder_is_self(&holder, None, Some("other")));
+        holder.holder_stale = true;
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            Some("caller")
+        ));
+    }
+
+    #[test]
     fn canonical_refusal_names_the_authorized_recovery_operations() {
         let error = super::canonical_refusal("held", None).to_string();
         for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
@@ -1922,6 +2055,14 @@ mod tests {
         );
         assert!(out.contains("slots[0]:"), "{out}");
         assert!(out.contains("slots[1]:"), "{out}");
+        for field in [
+            "holder_exe:",
+            "self_hold: false",
+            "slots[0].holder_exe:",
+            "slots[1].holder_exe:",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
         struct NoWork;
         impl super::OrphanReclaimer for NoWork {
             fn observe(
@@ -2388,6 +2529,8 @@ mod tests {
                 project_root: PathBuf::from("/work/owner"),
                 action: "node scripts/coverage-summary.mjs".into(),
                 qos: "coverage requires exclusive host resources".into(),
+                session_id: None,
+                artifact_lock: None,
             }),
             ..HeavyLeaseStatus::default()
         };
