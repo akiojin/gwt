@@ -10,6 +10,24 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Active Work projection receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const modelFile = 'crates/gwt/web/issue-other-surface.js';
+  const model = readFileSync(new URL('../issue-other-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model]]) }).filter(finding =>
+    /^\/active_work_projection(?:_patch)?(?:\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['active_work_projection', 'active_work_projection_patch']) {
+    for (const bypass of ['document.body.textContent = event.kind;',
+      'workspaceOverviewSurface.renderWindows();']) {
+      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
 test("Runtime hook Board receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');

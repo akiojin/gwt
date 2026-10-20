@@ -1298,7 +1298,6 @@ dependencies = [
  "gwt-skills",
  "gwt-terminal",
  "hex",
- "ignore",
  "image",
  "libc",
  "mac-usernotifications",
@@ -1306,7 +1305,6 @@ dependencies = [
  "notify-debouncer-mini",
  "objc2",
  "objc2-app-kit",
- "objc2-foundation",
  "objc2-service-management",
  "pulldown-cmark",
  "quick-xml 0.42.0",
@@ -2081,9 +2079,9 @@ checksum = "b3a6a8c165077efc8f3a971534c50ea6a1a18b329ef4a66e897a7e3a1494565f"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libdbus-sys"

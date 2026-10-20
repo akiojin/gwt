@@ -83,7 +83,6 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dunce.workspace = true
 dirs.workspace = true
-ignore.workspace = true
 chrono.workspace = true
 semver.workspace = true
 toml.workspace = true
@@ -125,15 +124,14 @@ libc = { workspace = true }
 # autostart entry is registered through the modern `SMAppService` API so the
 # System Settings background/login list attributes it to the app bundle and
 # shows "GWT" instead of the Developer ID team name. macOS 12 and earlier keep
-# the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
-# unregister failures surface a real message instead of a silent fallback.
+# the `auto-launch` LaunchAgent path. Service Management enables its own
+# Foundation error types for register / unregister failures.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = "0.3"
 mac-usernotifications = "0.3.1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", features = ["NSError"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
@@ -169,6 +167,10 @@ ctor = "1.0.13"
 # Issue #4095: client-side vt100 model for the pane snapshot / stream
 # ordering fixture (patched to vendor/vt100 like gwt-terminal).
 vt100 = "0.16"
+
+[package.metadata.cargo-machete]
+# Windows build.rs embeds the icon and application manifest with this build dependency.
+ignored = ["winresource"]
 
 [package.metadata.bundle]
 name = "GWT"

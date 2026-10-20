@@ -308,3 +308,30 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         Some("junit.xml")
     );
 }
+
+#[test]
+fn unused_dependency_check_blocks_the_required_lint_job() {
+    let lint = workflow("lint.yml");
+    let job = &lint["jobs"]["lint"];
+    assert_eq!(job["name"], "Clippy & Rustfmt");
+    let steps = job["steps"].as_sequence().unwrap();
+    let install = steps
+        .iter()
+        .find(|step| step["with"]["tool"].as_str() == Some("cargo-machete@0.9.2"))
+        .expect("install a pinned cargo-machete in the required lint job");
+    assert_eq!(install["uses"], "taiki-e/install-action@v2");
+    let check = steps
+        .iter()
+        .find(|step| step["run"].as_str() == Some("cargo machete --with-metadata crates"))
+        .expect("check unused dependencies with Cargo metadata");
+    for entry in [job, install, check] {
+        assert!(
+            entry.get("if").is_none(),
+            "the dependency gate must always run"
+        );
+        assert!(
+            entry.get("continue-on-error").is_none(),
+            "unused dependencies must fail the required lint job"
+        );
+    }
+}

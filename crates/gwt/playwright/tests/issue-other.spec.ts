@@ -46,6 +46,39 @@ async function messages(page: Page, kind: string) {
   ), kind);
 }
 
+test("Work projection snapshots and patches update Other while retaining session history", async ({ page }, info) => {
+  await boot(page);
+  const other = page.locator("details.issue-other-group");
+  await other.locator("summary").click();
+  await row(page, "other-paused").click();
+  await expect(other.locator('[data-action="resume-session"]')).toBeVisible();
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    projection.active_works.find((work: any) => work.id === "other-paused").title = "Snapshot work";
+    fixture.__otherEmit({ kind: "active_work_projection", projection });
+  });
+  await expect(row(page, "other-paused")).toContainText("Snapshot work");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = structuredClone(fixture.__otherProjection);
+    const work = projection.active_works.find((work: any) => work.id === "other-paused");
+    work.title = "Patched work";
+    delete work.works[0].agents[0].sessions;
+    fixture.__otherEmit({ kind: "active_work_projection_patch", projection });
+  });
+  await expect(row(page, "other-paused")).toContainText("Patched work");
+  await expect(other).toHaveAttribute("open");
+  await other.locator('[data-action="resume-session"]').click();
+  await expect.poll(() => messages(page, "resume_workspace_agent")).toEqual([
+    expect.objectContaining({ session_id: "ledger-other", agent_session_id: "conversation-other" }),
+  ]);
+  await page.screenshot({ path: info.outputPath("work-projection-patch.png") });
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "active_work_projection", projection: null }));
+  await expect(row(page, "other-paused")).toHaveCount(0);
+  await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
+});
+
 test("Other stays authoritative under search and queue columns, with no Workspace surface", async ({ page }) => {
   await boot(page);
   const other = page.locator("details.issue-other-group");
@@ -230,6 +263,8 @@ async function installBackend(page: Page, preset: string) {
         const message = JSON.parse(raw);
         fixture.__otherMessages.push(message);
         if (message.kind === "frontend_ready") {
+          fixture.__otherProjection = projection;
+          fixture.__otherEmit = (payload: unknown) => this.emit(payload);
           this.emit(workspace);
           this.emit({ kind: "active_work_projection", projection });
         } else if (message.kind === "request_remote_start_work_branches") {
