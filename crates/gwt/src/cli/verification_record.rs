@@ -9392,6 +9392,7 @@ fn default_integration_test_builds_a_guarded_binary() {
     #[test]
     fn performance_commands_persist_pid_and_environment_evidence() {
         let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path().join("home"));
         let command = "GWT_VERIFY_PERFORMANCE=1 git --version".to_string();
         let (record, _) = run_verification(dir.path(), "sess-measurement", &[command]).unwrap();
         let value = serde_json::to_value(&record.commands[0]).unwrap();
@@ -9402,6 +9403,11 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(measurement["targets"][0]["pid"], std::process::id());
         assert!(measurement["targets"][0]["cpu_time_ms"].is_u64());
         assert!(measurement["targets"][0]["job_caps"].is_array());
+        #[cfg(not(windows))]
+        assert!(
+            record.all_passed,
+            "an uncapped performance command must remain valid"
+        );
         let saved = load(dir.path()).unwrap().unwrap();
         assert!(integrity_ok(&saved));
         assert_eq!(serde_json::to_value(&saved.commands[0]).unwrap(), value);
