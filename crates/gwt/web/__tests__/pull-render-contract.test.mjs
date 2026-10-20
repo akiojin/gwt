@@ -10,6 +10,21 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Remote branch receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/remote_start_work_branches');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'workspaceOverviewSurface.applyRemoteStartWorkBranches(event);']) {
+    const mutated = app.replace('case "remote_start_work_branches":',
+      `case "remote_start_work_branches": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');

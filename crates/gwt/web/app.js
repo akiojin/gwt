@@ -5304,6 +5304,11 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
       activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
 
+      const remoteStartWorkBranchesModel = createUiStateStore(null);
+      remoteStartWorkBranchesModel.subscribe(state => state, snapshot => {
+        if (snapshot) workspaceOverviewSurface.applyRemoteStartWorkBranches(snapshot);
+      });
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5576,7 +5581,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
           case "remote_start_work_branches":
-            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
+            remoteStartWorkBranchesModel.update(() => ({ ...event }));
             break;
           case "continue_work_outcome":
             continueWorkOutcomeModel.update(() => ({ ...event }));
