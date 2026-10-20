@@ -11,18 +11,82 @@ import { gunzipSync, gzipSync } from "node:zlib";
 const directory = dirname(fileURLToPath(import.meta.url));
 const checkout = resolve(directory, "../../..");
 const json = async name => JSON.parse(await readFile(resolve(directory, name), "utf8"));
+const provenance = await json("provenance.json");
+// PM decision 33031353: validate capped-failure records for the delivery slice;
+// this never certifies the unchanged 100ms latency acceptance criterion.
+const pendingLatency = provenance.latency_acceptance;
+const deferred = pendingLatency !== undefined;
+let environment;
+let deferredLatencyFailure = false;
+if (deferred) {
+  assert.equal(pendingLatency.state, "deferred-environment");
+  assert.equal(pendingLatency.owner_issue, 5816);
+  assert.equal(pendingLatency.decision_id, "33031353-c4f9-4cad-963b-afd327090da2");
+  assert.equal(pendingLatency.budget_ms, 100);
+  assert.equal(createHash("sha256").update(await readFile(resolve(directory, "retained-failures.json")))
+    .digest("hex"), provenance.retained_failure_evidence_sha256, "retained failure evidence differs");
+  const bytes = await readFile(resolve(directory, "after-environment.json"));
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), pendingLatency.environment_sha256);
+  environment = JSON.parse(bytes.toString("utf8"));
+  assert.equal(environment.measured_source.worktree_clean, true);
+  assert.deepEqual(environment.measured_source.source_sha256, provenance.treatment_source_sha256);
+  assert.equal(Object.keys(provenance.treatment_source_sha256).length, 11);
+  assert.ok(Object.hasOwn(provenance.treatment_source_sha256, "crates/gwt-core/src/usage/limit_notice.rs"));
+  assert.ok(environment.job_observations.length >= 2, "multiple cap observations required");
+  assert.equal(new Set(environment.job_observations.map(proof => proof.observed_at_utc)).size,
+    environment.job_observations.length, "cap observations must be distinct");
+}
+function validateResult(arm, run) {
+  if (!deferred || arm !== "after") { assert.equal(run.passed, true, arm + " did not pass"); return; }
+  assert.equal(environment.gui_pid, run.fixture.gui_pid);
+  assert.equal(environment.gui_started_at, run.fixture.gui_started_at);
+  assert.equal(environment.measured_source.head, run.fixture.checkout_head);
+  assert.equal(environment.measured_source.binary_sha256, run.fixture.binary_sha256.toLowerCase());
+  for (const proof of environment.job_observations) {
+    assert.equal(proof.read_only, true);
+    assert.equal(proof.status, "observed");
+    assert.equal(proof.target_pid, run.fixture.gui_pid, "cap proof PID differs");
+    assert.equal(proof.target_started_at_utc, run.fixture.gui_started_at, "cap proof start differs");
+    const at = Date.parse(proof.observed_at_utc);
+    assert.ok(Number.isFinite(at) && at >= Date.parse(run.fixture.gui_started_at)
+      && at <= Date.parse(environment.gui_stopped_at), "cap proof is outside GUI lifetime");
+    assert.ok(proof.matching_jobs.some(job => job.target_membership_confirmed === true
+      && job.cpu_rate.status === "observed" && job.cpu_rate.enabled === true
+      && job.cpu_rate.hard_cap_enabled === true && job.cpu_rate.cpu_rate_raw === 800),
+    "the approved capped environment was not observed");
+  }
+  assert.ok(typeof run.passed === "boolean");
+  const failures = environment.measurement_failures.filter(failure => failure.theme === run.theme);
+  if (run.passed) assert.equal(failures.length, 0, "passing theme has a recorded test error");
+  if (!run.passed) {
+    const output = run.native_dispatch?.events?.find(event => event.event === "RuntimeOutput");
+    assert.ok(output?.max_ms >= 100 || run.native_dispatch?.output_batches?.max_ms >= 100,
+      "only a recorded latency failure can be deferred");
+    assert.ok(failures.length > 0, "original runner latency error is required");
+    for (const failure of failures) assert.ok(
+      failure.message.includes("RuntimeOutput dispatch stays below 100ms")
+      || failure.message.includes("each GUI output batch stays below 100ms"),
+      "a non-latency runner error cannot be deferred");
+    deferredLatencyFailure = true;
+  }
+}
+function validateCleanup(shutdown, arm) {
+  assert.equal(shutdown.owned_gui_stopped, true);
+  assert.deepEqual(shutdown.cleanup_errors, []);
+  assert.equal(shutdown.test_exit_code, deferred && arm === "after" ? 1 : 0);
+  if (deferred && arm === "after") assert.equal(shutdown.stopped_at, environment.gui_stopped_at);
+}
+
 if (process.argv[2] === "--collect") {
   const home = resolve(process.argv[3]);
   const arm = process.argv[4];
   assert.ok(["before", "after"].includes(arm));
   const shutdown = JSON.parse(await readFile(resolve(home, "shutdown.json"), "utf8"));
-  assert.equal(shutdown.owned_gui_stopped, true);
-  assert.deepEqual(shutdown.cleanup_errors, []);
-  assert.equal(shutdown.test_exit_code, 0);
+  validateCleanup(shutdown, arm);
   for (const theme of ["dark", "light"]) {
     const label = arm + "-" + theme;
     const run = JSON.parse(await readFile(resolve(home, label + ".json"), "utf8"));
-    assert.equal(run.passed, true, label);
+    validateResult(arm, run);
     assert.equal(run.duration_seconds, theme === "dark" ? 1800 : 10, label);
     const roots = [resolve(home, ".gwt/logs"), ...run.fixture.projects.map(project =>
       resolve(home, ".gwt/projects", project.project_key, "logs"))];
@@ -45,10 +109,11 @@ if (process.argv[2] === "--collect") {
     if (arm === "after") await writeFile(resolve(directory, label + "-batches.jsonl.gz"), gzipSync(batches.join("\n") + "\n"));
   }
   await writeFile(resolve(directory, arm + "-cleanup.json"), JSON.stringify(shutdown, null, 2) + "\n");
-  console.log("Collected passing " + arm + " evidence and original timing rows.");
+  if (deferred && arm === "after") assert.ok(deferredLatencyFailure, "no deferred latency failure recorded");
+  console.log("Collected " + arm + " evidence and original timing rows; latency acceptance: "
+    + (deferred && arm === "after" ? "pending Issue #5816" : "pass") + ".");
   process.exit(0);
 }
-const provenance = await json("provenance.json");
 assert.match(provenance.baseline_source_sha, /^[a-f0-9]{40}$/i);
 for (const hash of [provenance.baseline_binary_sha256, provenance.treatment_binary_sha256]) {
   assert.match(hash, /^[a-f0-9]{64}$/i);
@@ -83,7 +148,8 @@ for (const arm of ["before", "after"]) for (const theme of ["dark", "light"]) {
   assert.equal(run.issue, 5379, label);
   assert.equal(run.fixture.arm, arm, label);
   assert.equal(run.theme, theme, label);
-  assert.equal(run.passed, true, label + " did not pass");
+  validateCleanup(await json(arm + "-cleanup.json"), arm);
+  validateResult(arm, run);
   assert.equal(run.full_acceptance_observation, theme === "dark", label);
   assert.equal(run.duration_seconds, seconds, label);
   assert.equal(run.workload, provenance.workload, label);
@@ -95,7 +161,7 @@ for (const arm of ["before", "after"]) for (const theme of ["dark", "light"]) {
   assert.equal(run.fixture.binary_sha256.toLowerCase(), binary.toLowerCase(), label + " binary differs");
   assert.deepEqual(run.browser_errors, [], label + " browser errors");
   assert.equal(run.user_verification_result, "n/a (autonomous)", label);
-  assert.equal(run.agent_visual_check, "pass", label);
+  assert.equal(run.agent_visual_check, run.passed ? "pass" : "fail", label);
 
   assert.equal(run.producer_receipts.length, 5, label);
   assert.deepEqual(run.producer_receipts.map(row => row.index).sort(), indices, label + " producer indices");
@@ -163,7 +229,7 @@ for (const arm of ["before", "after"]) for (const theme of ["dark", "light"]) {
   const output = native.events.find(row => row.event === "RuntimeOutput");
   assert.ok(output?.count > 0, label + " RuntimeOutput inactive");
   if (arm === "after") {
-    assert.ok(output.max_ms < 100, label + " RuntimeOutput exceeded 100ms");
+    if (!deferred || run.passed) assert.ok(output.max_ms < 100, label + " RuntimeOutput exceeded 100ms");
     const batchRows = gunzipSync(await readFile(resolve(directory, label + "-batches.jsonl.gz")))
       .toString("utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
     assert.ok(batchRows.length > 0, label + " no actual GUI batch measurements");
@@ -176,7 +242,7 @@ for (const arm of ["before", "after"]) for (const theme of ["dark", "light"]) {
     assert.deepEqual(native.output_batches, { count: batchRows.length,
       stalls: batchRows.filter(row => row.fields.elapsed_ms >= 100).length,
       max_ms: Math.max(...batchRows.map(row => row.fields.elapsed_ms)) }, label + " batch aggregate differs");
-    assert.ok(native.output_batches.max_ms < 100, label + " GUI batch exceeded 100ms");
+    if (!deferred || run.passed) assert.ok(native.output_batches.max_ms < 100, label + " GUI batch exceeded 100ms");
   }
   if (theme === "dark") assert.ok(native.summaries.length > 0, label + " minute summaries missing");
   for (const row of native.summaries) {
@@ -195,5 +261,8 @@ for (const theme of ["dark", "light"]) {
   comparisons[theme] = { before, after, stall_count_delta: after.stalls_ge_100ms - before.stalls_ge_100ms,
     max_ms_delta: after.max_ms - before.max_ms };
 }
-console.log(JSON.stringify({ passed: true, source_files_verified: sources.length,
+if (deferred) assert.ok(deferredLatencyFailure, "no deferred latency failure recorded");
+console.log(JSON.stringify({ record_integrity: "pass",
+  latency_acceptance: deferred ? { state: "pending", owner_issue: 5816, budget_ms: 100 }
+    : { state: "pass", budget_ms: 100 }, source_files_verified: sources.length,
   baseline_source_sha: provenance.baseline_source_sha, comparisons }, null, 2));

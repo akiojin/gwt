@@ -3,18 +3,19 @@
   "baseline_source_sha": "0cc32f2984255f72f55885854d380f1fb780f4d1",
   "baseline_binary_sha256": "8d797e993039583a94068338a8d6da7b09e4c7633948a39a6900fda9a5b6b9fa",
   "treatment_source_base_sha": "f16d1243095672d50fdd7e4b4681d0832ce68a6c",
-  "treatment_binary_sha256": "f1766eafdd187bdd6442f8a0bd4b561ed5ff6b6b93e6cd3e9b175ade8c758afb",
+  "treatment_binary_sha256": "836f34a3b57ea69d3bb6ef9a0544d772d13ef31378c7eba7fa4fe6e86a1f82d6",
   "treatment_source_sha256": {
     "crates/gwt/src/app_runtime/priority_events_tests.rs": "568a37a52372d8161c700cc0c4989f5a01ce85e39620b783c7bfad4d49070871",
     "crates/gwt/src/app_runtime/pty_io.rs": "0e0a7424f90458a73398de0f501b61acfe9b6d8d8e6f337a8500c77acf1761de",
-    "crates/gwt/src/app_runtime/runtime_events.rs": "c87bfce031c93457fb48fa2d3ee4c532122c2197970c257746c008ced3cbc27f",
+    "crates/gwt/src/app_runtime/runtime_events.rs": "cf7789f1852245d34b05931275149d83762d04f516aeee286fdc624adb53f97c",
     "crates/gwt/src/app_runtime/tests.rs": "063ddaf29e47b7b7b066e391fa0339be0c081b3f7f7ab4463314967916ad0664",
     "crates/gwt/src/app_runtime/tests/managed_launch_tests.rs": "d4e4bdc8719afa47793a8045af488bd427def3f7037852d27304fb176196bf57",
-    "crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs": "093a33991d4be850eb8ea0ac3fab160cfc79c011f75271c7bf2f8ade4f41e10e",
+    "crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs": "a7ffd4466c560e3de6d2c52392c0404bf25dc3099724439ef092ab92fb3a6a94",
     "crates/gwt/src/main.rs": "4b1a37742fd48770fc89261c96e0261212662edb6b6b14e317133522695d83e0",
     "crates/gwt/src/pane_runtime.rs": "99be9ba07d98a4603a6edf2501f14c1175f24703c038ee78e3b8a45ffddee5d9",
     "scripts/diagnostics/issue-5379-browser-check.ps1": "04e5329df36d9d3830c6abb2642e651a64576337fe22093fed5cce0cd0539d4f",
-    "crates/gwt/playwright/tests/runtime-output-batch-live.spec.ts": "6aaaf3489e84948ae6353e99ba2b435de00f04ebcb3c42f0054d29b5238af487"
+    "crates/gwt/playwright/tests/runtime-output-batch-live.spec.ts": "6aaaf3489e84948ae6353e99ba2b435de00f04ebcb3c42f0054d29b5238af487",
+    "crates/gwt-core/src/usage/limit_notice.rs": "9c7c8a24ab7124cc260f4bb11a8e14d1a85630f9de4ca1df8742c4f352553d99"
   },
   "workload": "5 custom Agent PTYs; 8192 ASCII bytes per second per Agent",
   "measurement": "native outer GUI dispatch timings; integer ms; direct GUI output-batch timings in treatment; not terminal frame latency",
@@ -27,13 +28,19 @@
     "bytes_per_line": 128,
     "workload_lines_per_second": 64,
     "line_ending": "CRLF",
-    "host_load": "shared host; other worktrees and local builds/tests may run independently"
+    "host_load": "shared host; other worktrees and local builds/tests may run independently",
+    "after_trace": "on",
+    "after_retries": 0,
+    "after_cap_readback": "after-environment.json"
   },
-  "limitations": "Preserved control is 0cc32f298; treatment also integrates 109 develop commits through f16d12430. Whole-loop differences are descriptive, not a single-change causal estimate. Five deterministic custom Agent PTYs do not make provider model/API requests. Dark is 1800 seconds; light is a separate 10-second functional observation. Source fingerprints identify measured source independently of later Work/commit metadata rebuilds.",
-  "post_measurement_test_comments": {
-    "crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs": [
-      "        // test-hygiene: allow-wall-clock-deadline Bound a regressed GUI mutex wait; the ready channel establishes ordering.",
-      "    // test-hygiene: allow-wall-clock-deadline Fail if the lock-holder thread cannot start; elapsed time is not asserted."
-    ]
-  }
+  "limitations": "Preserved control is 0cc32f298; treatment also integrates intervening develop changes through f16d12430. Whole-loop differences are descriptive, not a single-change causal estimate. Five deterministic custom Agent PTYs do not make provider model/API requests. Dark is 1800 seconds; light is a separate 10-second functional observation. Source fingerprints identify measured source independently of later Work/commit metadata rebuilds. Fresh treatment is clean A4E with 11 source fingerprints, trace on/retries0. Its original latency FAIL is retained under PM33031353; record integrity is separate from final AC-1, pending after Issue #5816. Exact GUI cap snapshots observed 8%, without proving every wait or the historical132ms cause.",
+  "treatment_source_sha": "a4e24a94fe1b693d91b84d26b29e11a23411cfc6",
+  "latency_acceptance": {
+    "state": "deferred-environment",
+    "owner_issue": 5816,
+    "decision_id": "33031353-c4f9-4cad-963b-afd327090da2",
+    "budget_ms": 100,
+    "environment_sha256": "f0927a3a571c13fe4c4e9e62ac053d1000fd61ece0dabb59b695410fcfd574ea"
+  },
+  "retained_failure_evidence_sha256": "b2faf02a78f45a9b5f1efde2533b1979f085439c041254561d633debfe39fbd1"
 }

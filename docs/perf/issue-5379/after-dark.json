@@ -1,107 +1,107 @@
 {
   "issue": 5379,
   "fixture": {
+    "arm": "after",
+    "binary_origin": "current checkout target/debug",
+    "gui_started_at": "2026-10-20T09:18:15.9595753Z",
+    "gui_pid": 33388,
     "duration_seconds": 1800,
+    "issue": 5379,
+    "checkout": "E:\\gwt\\work\\issue-5379",
+    "binary": "E:\\gwt\\work\\issue-5379\\target\\debug\\gwt.exe",
+    "checkout_head": "a4e24a94fe1b693d91b84d26b29e11a23411cfc6",
+    "binary_sha256": "836F34A3B57EA69D3BB6EF9A0544D772D13EF31378C7EBA7FA4FE6E86A1F82D6",
     "projects": [
       {
-        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-0",
-        "branch_name": "main",
-        "project_key": "80668b99f28b9db7"
+        "project_key": "d61e390d340808eb",
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8/workload/project-0",
+        "branch_name": "main"
       },
       {
-        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-1",
-        "branch_name": "main",
-        "project_key": "f5ec32b38e30030b"
+        "project_key": "eb4c20fad7a8d8e6",
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8/workload/project-1",
+        "branch_name": "main"
       },
       {
-        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-2",
-        "branch_name": "main",
-        "project_key": "b2cc372f2ad5b0a3"
+        "project_key": "0c9f4cdc39f839d6",
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8/workload/project-2",
+        "branch_name": "main"
       },
       {
-        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-3",
-        "branch_name": "main",
-        "project_key": "052b2315333ad94f"
+        "project_key": "e8032ce1fc1f40cd",
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8/workload/project-3",
+        "branch_name": "main"
       },
       {
-        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-4",
-        "branch_name": "main",
-        "project_key": "b84be104ecda54b7"
+        "project_key": "61a18d8bee19f867",
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8/workload/project-4",
+        "branch_name": "main"
       }
     ],
-    "binary_origin": "current checkout target/debug",
-    "gui_started_at": "2026-10-18T23:32:24.1829761Z",
-    "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b",
-    "issue": 5379,
-    "binary_sha256": "F1766EAFDD187BDD6442F8A0BD4B561ED5FF6B6B93E6CD3E9B175ADE8C758AFB",
-    "binary": "E:\\gwt\\work\\issue-5379\\target\\debug\\gwt.exe",
-    "checkout": "E:\\gwt\\work\\issue-5379",
-    "arm": "after",
-    "checkout_head": "f16d1243095672d50fdd7e4b4681d0832ce68a6c",
-    "gui_pid": 25132
+    "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8"
   },
   "theme": "dark",
-  "passed": true,
+  "passed": false,
   "duration_seconds": 1800,
   "full_acceptance_observation": true,
-  "started_at": "2026-10-18T23:33:21.327Z",
-  "ended_at": "2026-10-19T00:03:22.790Z",
-  "actual_elapsed_ms": 1801463,
+  "started_at": "2026-10-20T09:19:44.792Z",
+  "ended_at": "2026-10-20T09:49:45.805Z",
+  "actual_elapsed_ms": 1801013,
   "workload": "5 custom Agent PTYs; 8192 ASCII bytes per second per Agent",
   "producer_receipts": [
     {
-      "index": 2,
-      "pid": 28136,
-      "started_at": 1792366379338.7378,
-      "session": "dac0e35c-711d-47ae-b861-b1166eb4349d",
-      "run_id": "after-dark",
-      "sequence": 1800,
-      "bytes": 14745600,
-      "observed_at": "2026-10-19T00:03:21.338Z",
-      "complete": true
-    },
-    {
       "index": 4,
-      "pid": 30868,
-      "started_at": 1792366399908.6504,
-      "session": "5604e02e-5e02-4d55-8411-d7f7bef6db48",
+      "pid": 29080,
+      "started_at": 1792487981821.185,
+      "session": "be14ee61-805e-44ac-9600-821d29aa3ded",
       "run_id": "after-dark",
       "sequence": 1800,
       "bytes": 14745600,
-      "observed_at": "2026-10-19T00:03:21.337Z",
+      "observed_at": "2026-10-20T09:49:44.807Z",
       "complete": true
     },
     {
       "index": 0,
-      "pid": 35516,
-      "started_at": 1792366359174.8643,
-      "session": "451421de-f337-48c4-a68a-fbbef85f948d",
+      "pid": 43320,
+      "started_at": 1792487924032.2146,
+      "session": "df23c775-16a7-41c8-8d04-9d5ff36eb0e5",
       "run_id": "after-dark",
       "sequence": 1800,
       "bytes": 14745600,
-      "observed_at": "2026-10-19T00:03:21.338Z",
+      "observed_at": "2026-10-20T09:49:44.805Z",
+      "complete": true
+    },
+    {
+      "index": 2,
+      "pid": 46912,
+      "started_at": 1792487951695.3474,
+      "session": "596b16a7-bf49-458a-bfd9-753192c85360",
+      "run_id": "after-dark",
+      "sequence": 1800,
+      "bytes": 14745600,
+      "observed_at": "2026-10-20T09:49:44.804Z",
       "complete": true
     },
     {
       "index": 1,
-      "pid": 37492,
-      "started_at": 1792366369473.7878,
-      "session": "02274fa9-07e8-43d7-8a11-0a04c3242be9",
+      "pid": 48684,
+      "started_at": 1792487936825.1846,
+      "session": "0374b6c0-f575-4c8f-9f87-bc13f7bf3863",
       "run_id": "after-dark",
       "sequence": 1800,
       "bytes": 14745600,
-      "observed_at": "2026-10-19T00:03:21.338Z",
+      "observed_at": "2026-10-20T09:49:44.806Z",
       "complete": true
     },
     {
       "index": 3,
-      "pid": 51164,
-      "started_at": 1792366390158.4927,
-      "session": "9b00bf6e-6015-47fd-a657-177ce91639ab",
+      "pid": 49400,
+      "started_at": 1792487965513.6128,
+      "session": "f8918161-6dde-4b95-9f74-dbddf9f91c59",
       "run_id": "after-dark",
       "sequence": 1800,
       "bytes": 14745600,
-      "observed_at": "2026-10-19T00:03:21.338Z",
+      "observed_at": "2026-10-20T09:49:44.805Z",
       "complete": true
     }
   ],
@@ -110,7 +110,7 @@
       "index": 0,
       "output_bytes": 16012778,
       "snapshot_bytes": 0,
-      "output_frames": 3594,
+      "output_frames": 3600,
       "snapshot_frames": 0,
       "sequences": [
         1,
@@ -3728,7 +3728,7 @@
       "index": 2,
       "output_bytes": 16012778,
       "snapshot_bytes": 0,
-      "output_frames": 3594,
+      "output_frames": 3600,
       "snapshot_frames": 0,
       "sequences": [
         1,
@@ -5537,7 +5537,7 @@
       "index": 3,
       "output_bytes": 16012778,
       "snapshot_bytes": 0,
-      "output_frames": 3594,
+      "output_frames": 3600,
       "snapshot_frames": 0,
       "sequences": [
         1,
@@ -7346,7 +7346,7 @@
       "index": 4,
       "output_bytes": 16012778,
       "snapshot_bytes": 0,
-      "output_frames": 3594,
+      "output_frames": 3600,
       "snapshot_frames": 0,
       "sequences": [
         1,
@@ -9153,75 +9153,75 @@
     }
   ],
   "native_dispatch": {
-    "samples": 41603,
-    "stalls": 1,
-    "max_ms": 119,
+    "samples": 41428,
+    "stalls": 7,
+    "max_ms": 435,
     "events": [
       {
         "event": "IssueMonitorCapacityChanged",
-        "count": 1385,
-        "stalls": 0,
-        "max_ms": 2
+        "count": 1525,
+        "stalls": 1,
+        "max_ms": 133
       },
       {
         "event": "IssueMonitorClaimRenewalTick",
         "count": 6,
         "stalls": 0,
-        "max_ms": 5
+        "max_ms": 6
       },
       {
         "event": "IssueMonitorScheduledScanComplete",
         "count": 150,
         "stalls": 0,
-        "max_ms": 0
+        "max_ms": 5
       },
       {
         "event": "IssueMonitorScheduledScanPrepared",
         "count": 150,
         "stalls": 0,
-        "max_ms": 0
+        "max_ms": 1
       },
       {
         "event": "IssueMonitorScheduledTick",
         "count": 30,
         "stalls": 0,
-        "max_ms": 11
+        "max_ms": 31
       },
       {
         "event": "LogEntry",
-        "count": 2,
+        "count": 40,
         "stalls": 0,
-        "max_ms": 0
+        "max_ms": 2
       },
       {
         "event": "MainEventsCleared",
-        "count": 7161,
-        "stalls": 1,
-        "max_ms": 119
+        "count": 7035,
+        "stalls": 2,
+        "max_ms": 433
       },
       {
         "event": "NewEvents",
-        "count": 7161,
-        "stalls": 0,
-        "max_ms": 37
+        "count": 7035,
+        "stalls": 1,
+        "max_ms": 435
       },
       {
         "event": "RedrawEventsCleared",
-        "count": 7161,
+        "count": 7035,
         "stalls": 0,
-        "max_ms": 5
+        "max_ms": 6
       },
       {
         "event": "RuntimeDaemonEnsureTick",
         "count": 60,
         "stalls": 0,
-        "max_ms": 19
+        "max_ms": 63
       },
       {
         "event": "RuntimeOutput",
-        "count": 17976,
-        "stalls": 0,
-        "max_ms": 13
+        "count": 18000,
+        "stalls": 3,
+        "max_ms": 345
       },
       {
         "event": "SupportedAgentCatalogReady",
@@ -9233,30 +9233,102 @@
         "event": "TerminalConvergenceObserved",
         "count": 120,
         "stalls": 0,
-        "max_ms": 0
+        "max_ms": 70
       },
       {
         "event": "TerminalConvergenceTick",
         "count": 120,
         "stalls": 0,
-        "max_ms": 24
+        "max_ms": 65
+      },
+      {
+        "event": "UpdateAvailable",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 1
       },
       {
         "event": "UpdateDrainObserved",
         "count": 120,
         "stalls": 0,
-        "max_ms": 5
+        "max_ms": 2
       }
     ],
     "slow_rows": [
       {
-        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b\\.gwt\\logs\\gwt.log.2026-10-18",
-        "timestamp": "2026-10-19T08:59:35.568241300+09:00",
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:19:46.650232400+09:00",
         "level": "WARN",
         "fields": {
-          "message": "MainEventsCleared blocked the GUI event loop for 119ms",
+          "message": "MainEventsCleared blocked the GUI event loop for 433ms",
           "event": "MainEventsCleared",
-          "elapsed_ms": 119
+          "elapsed_ms": 433
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:21:47.174141200+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "RuntimeOutput blocked the GUI event loop for 345ms",
+          "event": "RuntimeOutput",
+          "elapsed_ms": 345
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:22:01.430697200+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "MainEventsCleared blocked the GUI event loop for 312ms",
+          "event": "MainEventsCleared",
+          "elapsed_ms": 312
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:22:37.653358+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "IssueMonitorCapacityChanged blocked the GUI event loop for 133ms",
+          "event": "IssueMonitorCapacityChanged",
+          "elapsed_ms": 133
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:25:52.395234700+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "NewEvents blocked the GUI event loop for 435ms",
+          "event": "NewEvents",
+          "elapsed_ms": 435
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:26:30.998343200+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "RuntimeOutput blocked the GUI event loop for 187ms",
+          "event": "RuntimeOutput",
+          "elapsed_ms": 187
+        },
+        "target": "gwt.frontend.timing"
+      },
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-4563f29215494e67b040c7e99c56a7d8\\.gwt\\logs\\gwt.log.2026-10-20",
+        "timestamp": "2026-10-20T18:36:39.173371300+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "RuntimeOutput blocked the GUI event loop for 260ms",
+          "event": "RuntimeOutput",
+          "elapsed_ms": 260
         },
         "target": "gwt.frontend.timing"
       }
@@ -9265,716 +9337,870 @@
       {
         "schema_version": 1,
         "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:33:24.703408200Z",
+        "timestamp": "2026-10-20T09:20:17.801692100Z",
         "stream": "ui",
         "target": "handler:FrontendReady",
-        "value": 85.2357,
+        "value": 434.57620000000003,
         "unit": "ms",
         "dispatch": {
-          "pid": 25132,
+          "pid": 33388,
           "count": 1,
-          "total_ms": 85.2357,
-          "p95_ms": 85.2357,
-          "max_ms": 85.2357,
-          "pending_max": 2,
+          "total_ms": 434.57620000000003,
+          "p95_ms": 434.57620000000003,
+          "max_ms": 434.57620000000003,
+          "pending_max": 4,
           "pending_unknown_count": 0,
-          "window_ms": 60076.371,
+          "window_ms": 60827.67,
           "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:33:24.703408200Z"
+          "window_ended_at": "2026-10-20T09:20:17.801692100Z"
         }
       },
       {
         "schema_version": 1,
         "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:33:24.703408200Z",
+        "timestamp": "2026-10-20T09:20:17.801692100Z",
         "stream": "ui",
-        "target": "handler:GetIssueMonitorProfiles",
-        "value": 299.4647,
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 203.77700000000002,
         "unit": "ms",
         "dispatch": {
-          "pid": 25132,
+          "pid": 33388,
           "count": 1,
-          "total_ms": 299.4647,
-          "p95_ms": 299.4647,
-          "max_ms": 299.4647,
-          "pending_max": 10,
+          "total_ms": 203.77700000000002,
+          "p95_ms": 203.77700000000002,
+          "max_ms": 203.77700000000002,
+          "pending_max": 4,
           "pending_unknown_count": 0,
-          "window_ms": 60076.371,
+          "window_ms": 60827.67,
           "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:33:24.703408200Z"
+          "window_ended_at": "2026-10-20T09:20:17.801692100Z"
         }
       },
       {
         "schema_version": 1,
         "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:33:24.703408200Z",
-        "stream": "ui",
-        "target": "handler:ListAgentBackends",
-        "value": 335.7019,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 1,
-          "total_ms": 335.7019,
-          "p95_ms": 335.7019,
-          "max_ms": 335.7019,
-          "pending_max": 2,
-          "pending_unknown_count": 0,
-          "window_ms": 60076.371,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:33:24.703408200Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:33:24.703408200Z",
-        "stream": "ui",
-        "target": "handler:StartupAutoResumeReady",
-        "value": 300.88930000000005,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 1,
-          "total_ms": 300.88930000000005,
-          "p95_ms": 300.88930000000005,
-          "max_ms": 300.88930000000005,
-          "pending_max": 5,
-          "pending_unknown_count": 0,
-          "window_ms": 60076.371,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:33:24.703408200Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:34:24.704479400Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.0706,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:34:24.704479400Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:35:24.705387Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.9078,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:35:24.705387Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:36:24.706454500Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.0674,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:36:24.706454500Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:37:24.707304Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.849700000006,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:37:24.707304Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:38:24.707830200Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.5265,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:38:24.707830200Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:39:24.712938100Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60005.1075,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:39:24.712938100Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:40:24.713991400Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.053499999995,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:40:24.713991400Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:41:24.715198300Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.2069,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:41:24.715198300Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:42:24.718535100Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60003.3356,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:42:24.718535100Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:43:24.719400900Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.8663,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:43:24.719400900Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:44:24.720335900Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.935300000005,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:44:24.720335900Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:45:24.721088600Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.7523,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:45:24.721088600Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:46:24.721805900Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.7177,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:46:24.721805900Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:47:24.722641600Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.8359,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:47:24.722641600Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:48:24.723953700Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.3122,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:48:24.723953700Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:49:25.334521700Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60610.5686,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:49:25.334521700Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:50:25.337679500Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60003.157100000004,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:50:25.337679500Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:51:25.340534600Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60002.8552,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:51:25.340534600Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:52:25.340875500Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.3406,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:52:25.340875500Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:53:25.453347500Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60112.472599999994,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:53:25.453347500Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:54:25.497132800Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60043.7859,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:54:25.497132800Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:55:25.500318Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60003.1848,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:55:25.500318Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:56:25.501699Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60001.380900000004,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:56:25.501699Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:57:26.240269600Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60738.569599999995,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:57:26.240269600Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:58:26.240890500Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.6214,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:58:26.240890500Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-18T23:59:26.241804Z",
-        "stream": "ui",
-        "target": "gui:event_loop",
-        "value": 0,
-        "unit": "ms",
-        "dispatch": {
-          "pid": 25132,
-          "count": 0,
-          "total_ms": 0,
-          "p95_ms": 0,
-          "max_ms": 0,
-          "pending_max": null,
-          "pending_unknown_count": 0,
-          "window_ms": 60000.9135,
-          "dropped_windows": 0,
-          "window_ended_at": "2026-10-18T23:59:26.241804Z"
-        }
-      },
-      {
-        "schema_version": 1,
-        "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-19T00:00:26.242233600Z",
+        "timestamp": "2026-10-20T09:20:17.801692100Z",
         "stream": "ui",
         "target": "handler:MainEventsCleared",
-        "value": 119.3601,
+        "value": 433.65999999999997,
         "unit": "ms",
         "dispatch": {
-          "pid": 25132,
+          "pid": 33388,
           "count": 1,
-          "total_ms": 119.3601,
-          "p95_ms": 119.3601,
-          "max_ms": 119.3601,
-          "pending_max": 5,
+          "total_ms": 433.65999999999997,
+          "p95_ms": 433.65999999999997,
+          "max_ms": 433.65999999999997,
+          "pending_max": 3,
           "pending_unknown_count": 0,
-          "window_ms": 60000.4298,
+          "window_ms": 60827.67,
           "dropped_windows": 0,
-          "window_ended_at": "2026-10-19T00:00:26.242233600Z"
+          "window_ended_at": "2026-10-20T09:20:17.801692100Z"
         }
       },
       {
         "schema_version": 1,
         "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-19T00:01:26.243168400Z",
+        "timestamp": "2026-10-20T09:20:17.801692100Z",
+        "stream": "ui",
+        "target": "handler:TerminalConvergenceTick",
+        "value": 107.5054,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 107.5054,
+          "p95_ms": 107.5054,
+          "max_ms": 107.5054,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60827.67,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:20:17.801692100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:20:17.801692100Z",
+        "stream": "ui",
+        "target": "handler:UpdateTerminalGrid",
+        "value": 177.51239999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 177.51239999999999,
+          "p95_ms": 177.51239999999999,
+          "max_ms": 177.51239999999999,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60827.67,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:20:17.801692100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:21:17.809862700Z",
         "stream": "ui",
         "target": "gui:event_loop",
         "value": 0,
         "unit": "ms",
         "dispatch": {
-          "pid": 25132,
+          "pid": 33388,
           "count": 0,
           "total_ms": 0,
           "p95_ms": 0,
           "max_ms": 0,
           "pending_max": null,
           "pending_unknown_count": 0,
-          "window_ms": 60000.934700000005,
+          "window_ms": 60008.170399999995,
           "dropped_windows": 0,
-          "window_ended_at": "2026-10-19T00:01:26.243168400Z"
+          "window_ended_at": "2026-10-20T09:21:17.809862700Z"
         }
       },
       {
         "schema_version": 1,
         "type": "gui_dispatch_summary",
-        "timestamp": "2026-10-19T00:02:26.243579600Z",
+        "timestamp": "2026-10-20T09:22:17.911231300Z",
+        "stream": "ui",
+        "target": "handler:MainEventsCleared",
+        "value": 312.2213,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 312.2213,
+          "p95_ms": 312.2213,
+          "max_ms": 312.2213,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60101.368899999994,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:22:17.911231300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:22:17.911231300Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 53.2754,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 53.2754,
+          "p95_ms": 53.2754,
+          "max_ms": 53.2754,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60101.368899999994,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:22:17.911231300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:22:17.911231300Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 345.5258,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 345.5258,
+          "p95_ms": 345.5258,
+          "max_ms": 345.5258,
+          "pending_max": 4,
+          "pending_unknown_count": 0,
+          "window_ms": 60101.368899999994,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:22:17.911231300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:23:18.036852900Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 133.4988,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 133.4988,
+          "p95_ms": 133.4988,
+          "max_ms": 133.4988,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60125.6214,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:23:18.036852900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:23:18.036852900Z",
+        "stream": "ui",
+        "target": "handler:RuntimeDaemonEnsureTick",
+        "value": 51.5385,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 51.5385,
+          "p95_ms": 51.5385,
+          "max_ms": 51.5385,
+          "pending_max": 13,
+          "pending_unknown_count": 0,
+          "window_ms": 60125.6214,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:23:18.036852900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:23:18.036852900Z",
+        "stream": "ui",
+        "target": "handler:TerminalConvergenceTick",
+        "value": 65.6183,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 65.6183,
+          "p95_ms": 65.6183,
+          "max_ms": 65.6183,
+          "pending_max": 14,
+          "pending_unknown_count": 0,
+          "window_ms": 60125.6214,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:23:18.036852900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:24:18.808482600Z",
         "stream": "ui",
         "target": "gui:event_loop",
         "value": 0,
         "unit": "ms",
         "dispatch": {
-          "pid": 25132,
+          "pid": 33388,
           "count": 0,
           "total_ms": 0,
           "p95_ms": 0,
           "max_ms": 0,
           "pending_max": null,
           "pending_unknown_count": 0,
-          "window_ms": 60000.411,
+          "window_ms": 60771.6292,
           "dropped_windows": 0,
-          "window_ended_at": "2026-10-19T00:02:26.243579600Z"
+          "window_ended_at": "2026-10-20T09:24:18.808482600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:25:18.808698900Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 99.50739999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 99.50739999999999,
+          "p95_ms": 99.50739999999999,
+          "max_ms": 99.50739999999999,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.2151,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:25:18.808698900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:25:18.808698900Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 94.7727,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 94.7727,
+          "p95_ms": 94.7727,
+          "max_ms": 94.7727,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.2151,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:25:18.808698900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:25:18.808698900Z",
+        "stream": "ui",
+        "target": "handler:TerminalConvergenceObserved",
+        "value": 70.9974,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 70.9974,
+          "p95_ms": 70.9974,
+          "max_ms": 70.9974,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.2151,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:25:18.808698900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:25:18.808698900Z",
+        "stream": "ui",
+        "target": "handler:TerminalConvergenceTick",
+        "value": 53.593300000000006,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 53.593300000000006,
+          "p95_ms": 53.593300000000006,
+          "max_ms": 53.593300000000006,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.2151,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:25:18.808698900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:26:19.117822900Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 435.6725,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 435.6725,
+          "p95_ms": 435.6725,
+          "max_ms": 435.6725,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60309.125799999994,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:26:19.117822900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:27:19.802699400Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 187.6308,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 187.6308,
+          "p95_ms": 187.6308,
+          "max_ms": 187.6308,
+          "pending_max": 6,
+          "pending_unknown_count": 0,
+          "window_ms": 60684.8764,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:27:19.802699400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:28:19.803119400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.420900000005,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:28:19.803119400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:29:19.811290300Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60008.1687,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:29:19.811290300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:30:19.811732500Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.4446,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:30:19.811732500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:31:19.812409100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.675899999995,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:31:19.812409100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:32:19.812568Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.1595,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:32:19.812568Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:33:19.956760Z",
+        "stream": "ui",
+        "target": "handler:RuntimeDaemonEnsureTick",
+        "value": 63.4835,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 1,
+          "total_ms": 63.4835,
+          "p95_ms": 63.4835,
+          "max_ms": 63.4835,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 60144.1915,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:33:19.956760Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:34:19.956842600Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.0829,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:34:19.956842600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:35:20.038590400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60081.7469,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:35:20.038590400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:36:20.801008800Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60762.4188,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:36:20.801008800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:37:20.806273500Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 316.7953,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 2,
+          "total_ms": 316.7953,
+          "p95_ms": 260.6696,
+          "max_ms": 260.6696,
+          "pending_max": 6,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.2635,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:37:20.806273500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:38:20.806420200Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.1486,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:38:20.806420200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:39:20.806790100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.368700000006,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:39:20.806790100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:40:20.967149100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60160.3597,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:40:20.967149100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:41:21.800049800Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60832.900100000006,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:41:21.800049800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:42:21.804022600Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60003.973000000005,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:42:21.804022600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:43:21.810000400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.9777,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:43:21.810000400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:44:21.810866300Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.8657,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:44:21.810866300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:45:21.956026400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60145.1609,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:45:21.956026400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:46:21.956637100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.6105,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:46:21.956637100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:47:21.967341400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60010.703499999996,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:47:21.967341400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:48:22.283783900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60316.4435,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:48:22.283783900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-20T09:49:22.807217500Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 33388,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60523.433,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-20T09:49:22.807217500Z"
         }
       }
     ],
     "output_batches": {
-      "count": 9010,
-      "stalls": 0,
-      "max_ms": 21
+      "count": 9002,
+      "stalls": 2,
+      "max_ms": 432
     }
-  },
-  "comparison": {
-    "before_binary_sha256": "8D797E993039583A94068338A8D6DA7B09E4C7633948A39A6900FDA9A5B6B9FA",
-    "after_binary_sha256": "F1766EAFDD187BDD6442F8A0BD4B561ED5FF6B6B93E6CD3E9B175ADE8C758AFB",
-    "before": {
-      "stalls": 19,
-      "max_ms": 437
-    },
-    "after": {
-      "stalls": 1,
-      "max_ms": 119
-    },
-    "stall_count_delta": -18,
-    "max_ms_delta": -318
   },
   "browser_errors": [],
   "dom_snapshot": [
@@ -10026,5 +10252,5 @@
   ],
   "limitations": "Deterministic custom PTYs, no provider inference/hooks/builds. Native outer RuntimeOutput dispatch remains the event label; batching flushes at the beginning of every native callback and can be attributed to any event label. All event counts and maxima are retained rather than treating RuntimeOutput alone as the flush budget. Native timing uses integer milliseconds truncated. Slow raw rows are retained; minute summaries cover >50ms events and may straddle interval boundaries. Light is a separate 10-second functional check. Preserved binary source identity must be established by the owner separately from the current checkout HEAD.",
   "user_verification_result": "n/a (autonomous)",
-  "agent_visual_check": "pass"
+  "agent_visual_check": "fail"
 }
