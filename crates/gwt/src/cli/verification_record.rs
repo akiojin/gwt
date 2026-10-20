@@ -57,6 +57,7 @@ pub mod continuation;
 pub mod driver;
 pub mod headed_e2e;
 pub mod interruption;
+pub mod measurement;
 pub mod nextest;
 pub mod wire;
 
@@ -107,6 +108,9 @@ pub struct VerificationCommandResult {
     pub terminated_by_signal: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<CommandAdmission>,
+    /// Native Job/CPU observations for performance commands (#5816).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<measurement::Evidence>,
 }
 
 /// The signal that ended a process, when one did (Issue #4528).
@@ -129,13 +133,20 @@ pub(crate) struct RunOutcomeCounts {
     pub passed: usize,
     pub failed: usize,
     pub interrupted: usize,
+    pub environment_incompatible: usize,
 }
 
 impl RunOutcomeCounts {
     pub(crate) fn of(commands: &[VerificationCommandResult]) -> Self {
         let mut counts = Self::default();
         for command in commands {
-            if command.terminated_by_signal.is_some() {
+            if command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                counts.environment_incompatible += 1;
+            } else if command.terminated_by_signal.is_some() {
                 counts.interrupted += 1;
             } else if command.exit_code == 0 {
                 counts.passed += 1;
@@ -147,10 +158,17 @@ impl RunOutcomeCounts {
     }
 
     pub(crate) fn summary(&self) -> String {
-        format!(
+        let mut summary = format!(
             "verify: outcome — {} passed, {} failed, {} interrupted by external signal\n",
             self.passed, self.failed, self.interrupted
-        )
+        );
+        if self.environment_incompatible > 0 {
+            summary.push_str(&format!(
+                "verify: {} environment incompatible\n",
+                self.environment_incompatible
+            ));
+        }
+        summary
     }
 }
 
@@ -163,7 +181,9 @@ pub(crate) fn run_status_label(
     commands: &[VerificationCommandResult],
 ) -> &'static str {
     let counts = RunOutcomeCounts::of(commands);
-    if all_passed {
+    if counts.environment_incompatible > 0 && counts.failed == 0 {
+        "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed {
         "PASS"
     } else if quarantined {
         "QUARANTINED"
@@ -4887,26 +4907,69 @@ where
                 .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
                 .unwrap_or(Ok(false))
         };
-        let executed = execute_command_cancellable(
-            worktree,
-            &execution_command,
-            false,
-            capture.as_ref(),
-            &options.host,
-            admission
+        // Only canonical headed commands imply performance verification;
+        // low-level reporter fixtures have no authoritative caller. Explicit
+        // performance assignments also work for non-browser commands.
+        let measurement_capture = measurement::Capture::prepare(
+            command,
+            capture.is_some() && authority.is_some(),
+            command_admission
                 .as_ref()
-                .map(|granted| granted.command_progress())
-                .or(options.command_progress),
-            options
-                .attempt
-                .map(|_| &check_cancelled as &CancellationCheck<'_>),
+                .map_or(0, |admission| admission.queue_wait_ms),
         );
+        let measurement_ready = measurement_capture
+            .as_ref()
+            .is_none_or(|capture| capture.ready());
+        let executed = if measurement_ready {
+            execute_command_cancellable(
+                worktree,
+                &execution_command,
+                false,
+                capture.as_ref(),
+                &options.host,
+                admission
+                    .as_ref()
+                    .map(|granted| granted.command_progress())
+                    .or(options.command_progress),
+                options
+                    .attempt
+                    .map(|_| &check_cancelled as &CancellationCheck<'_>),
+            )
+        } else {
+            Ok((
+                125,
+                None,
+                measurement_capture
+                    .as_ref()
+                    .expect("incompatible environment")
+                    .diagnostic(),
+                Vec::new(),
+            ))
+        };
         if let Some(granted) = &admission {
             granted.publish_progress(1, 1, command_started.elapsed());
         }
-        // Release before processing evidence or admitting the next command.
+        let (mut exit_code, terminated_by_signal, mut tail, mut output_streams) = executed?;
+        let measurement = measurement_capture
+            .map(|capture| capture.finish(measurement_ready.then_some(exit_code)));
+        // The observer's last native readback precedes release/restoration.
         drop(admission);
-        let (mut exit_code, terminated_by_signal, mut tail, output_streams) = executed?;
+        if let Some(evidence) = &measurement {
+            let json = serde_json::to_vec_pretty(evidence).map_err(|error| error.to_string())?;
+            let (diagnostic, streams) = render_streams(Some(worktree), &[("measurement", &json)])?;
+            tail.push_str(&diagnostic);
+            output_streams.extend(streams);
+            if evidence.incompatible() {
+                tail.push_str(&format!(
+                    "\nENVIRONMENT_INCOMPATIBLE: {}\n",
+                    evidence
+                        .reason
+                        .as_deref()
+                        .unwrap_or("measurement environment is unreadable")
+                ));
+                exit_code = 125;
+            }
+        }
         let nextest = nextest_capture
             .as_ref()
             .and_then(|capture| match capture.evidence() {
@@ -4957,8 +5020,12 @@ where
             )),
             None => transcript.push_str(&format!("exit: {exit_code}\n")),
         }
+        let environment_incompatible = measurement
+            .as_ref()
+            .is_some_and(measurement::Evidence::incompatible);
         results.push(VerificationCommandResult {
             admission: command_admission,
+            measurement,
             command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
@@ -4969,7 +5036,8 @@ where
         });
         // A failure a plan-bound quarantine may still waive keeps the matrix
         // going; its verdict is decided after every command has run.
-        let quarantine_candidate = terminated_by_signal.is_none()
+        let quarantine_candidate = !environment_incompatible
+            && terminated_by_signal.is_none()
             && prepared_quarantines.iter().any(|prepared| {
                 prepared.request.failed_command == *command
                     && plan_snapshot
@@ -5030,6 +5098,14 @@ where
         let merge_base_sha = crate::cli::verify_derivation::integration_merge_base(worktree)
             .ok_or_else(|| "integration merge-base is unavailable".to_string());
         for result in results.iter().filter(|result| result.exit_code != 0) {
+            if result
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                transcript.push_str("quarantine: measurement environment is incompatible; repair the environment and rerun instead\n");
+                continue;
+            }
             // Issue #4528: a killed run's output is cut short, so it cannot
             // be read as a verdict about one test.
             if let Some(signal) = result.terminated_by_signal {
@@ -5860,7 +5936,14 @@ fn evaluate_evidence_snapshot_inner(
     }
     // Issue #5094: commands skipped after a raw FAIL never ran, so neither
     // quarantine nor Board adjudication can turn the run into evidence.
-    if !record.skipped_after_failure.is_empty() {
+    if !record.skipped_after_failure.is_empty()
+        || record.commands.iter().any(|command| {
+            command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+        })
+    {
         return EvidenceStatus::Failing;
     }
     let has_typed_quarantine = if record.all_passed {
@@ -7251,6 +7334,7 @@ pub(crate) mod tests {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,
@@ -9261,6 +9345,7 @@ fn default_integration_test_builds_a_guarded_binary() {
     fn run_status_separates_interruption_from_failure() {
         let result = |exit_code, terminated_by_signal| VerificationCommandResult {
             admission: None,
+            measurement: None,
             command: "cmd".to_string(),
             exit_code,
             output_tail: String::new(),
@@ -9280,6 +9365,46 @@ fn default_integration_test_builds_a_guarded_binary() {
             RunOutcomeCounts::of(&mixed).summary(),
             "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
         );
+    }
+
+    #[test]
+    fn performance_environment_is_not_reported_as_a_product_failure() {
+        let result: VerificationCommandResult = serde_json::from_value(serde_json::json!({
+            "command": "GWT_VERIFY_PERFORMANCE=1 git --version",
+            "exit_code": 125,
+            "measurement": {
+                "status": "environment_incompatible",
+                "reason": "ancestor Job remains capped at 8%",
+                "admission_wait_ms": 100,
+                "cap_relief_wait_ms": 15000,
+                "raw_exit_code": null,
+                "targets": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            run_status_label(false, false, std::slice::from_ref(&result)),
+            "ENVIRONMENT_INCOMPATIBLE"
+        );
+        assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
+    }
+
+    #[test]
+    fn performance_commands_persist_pid_and_environment_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = "GWT_VERIFY_PERFORMANCE=1 git --version".to_string();
+        let (record, _) = run_verification(dir.path(), "sess-measurement", &[command]).unwrap();
+        let value = serde_json::to_value(&record.commands[0]).unwrap();
+        let measurement = &value["measurement"];
+        assert!(measurement.is_object(), "{value}");
+        assert!(measurement["cap_relief_wait_ms"].is_u64());
+        assert!(measurement["admission_wait_ms"].is_u64());
+        assert_eq!(measurement["targets"][0]["pid"], std::process::id());
+        assert!(measurement["targets"][0]["cpu_time_ms"].is_u64());
+        assert!(measurement["targets"][0]["job_caps"].is_array());
+        let saved = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&saved));
+        assert_eq!(serde_json::to_value(&saved.commands[0]).unwrap(), value);
     }
 
     /// Issue #4528 AC-1/AC-3: the lease a heavy run was admitted under is part
@@ -9358,6 +9483,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,

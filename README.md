@@ -1831,6 +1831,29 @@ has its own coordinator lane: semantic search and index builds keep excluding
 each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
+### Performance verification environment
+
+Canonical headed E2E commands also record their measurement environment. For a
+non-browser performance command, add the command-local assignment
+`GWT_VERIFY_PERFORMANCE=1` to its entry in `verify.plan` and `verify.run`.
+If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
+(comma-separated PIDs for multiple targets).
+
+On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
+clear before measuring. All canonical slots and the legacy verification lane
+participate; configured caps return after their holders leave. Process priority
+and pane-close cleanup remain in effect. Restart gwt with the updated runtime
+if an older GUI's Job ancestry cannot be inspected.
+
+The command's `measurement` evidence records target PIDs and start times,
+observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief
+wait. The waits are admission/preflight durations, not an estimate of OS thread
+scheduling delay. The runner and nominated GUI have `required_uncapped: true`;
+other descendants provide CPU context and retain their ordinary resource policy.
+A remaining cap or unreadable environment for a required target produces
+`ENVIRONMENT_INCOMPATIBLE`; it cannot authorize completion or a Ready PR.
+Correct the reported environment and rerun the same registered matrix.
+
 ### PR head verification
 
 To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
