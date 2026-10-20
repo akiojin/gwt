@@ -10,6 +10,20 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Runtime hook Board receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file)
+    .filter(finding => finding.context === '/runtime_hook_event');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.event.kind;',
+    'frontendUnits.boardSurface.handleRuntimeHookEvent(event);']) {
+    const mutated = app.replace('case "runtime_hook_event":', `case "runtime_hook_event": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Attachment progress receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const file = 'crates/gwt/web/terminal-attachments.js';

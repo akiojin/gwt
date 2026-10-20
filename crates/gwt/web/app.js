@@ -5093,6 +5093,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       });
 
+      const runtimeHookModel = createUiStateStore(null);
+      runtimeHookModel.subscribe(state => state, state => {
+        if (state) frontendUnits.boardSurface.handleRuntimeHookEvent(state);
+      });
+
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
@@ -5566,7 +5571,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
-            frontendUnits.boardSurface.handleRuntimeHookEvent(event);
+            runtimeHookModel.update(() => ({
+              event: event.event ? { kind: event.event.kind, project_root: event.event.project_root } : null,
+            }));
             break;
           case "update_state":
             if (event.state === "available") {
