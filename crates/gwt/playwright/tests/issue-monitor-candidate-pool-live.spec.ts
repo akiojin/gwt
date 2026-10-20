@@ -150,11 +150,14 @@ test.describe("Issue Monitor candidate pool", () => {
         };
       });
       await saveProfiles(async () => {
+        const responseCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await pool.getByLabel("Model codex", { exact: true }).selectOption("gpt-6-astra");
         await pool.getByLabel("Model codex", { exact: true }).press("Tab");
         await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:");
         await pool.getByLabel("Prefer for codex", { exact: true }).evaluate((input: HTMLInputElement) => input.setSelectionRange(3, 3));
-        await page.waitForFunction(() => (window as any).candidateHeldResponses.length > 0);
+        await page.waitForFunction(cursor => (window as any).candidateHeldResponses.length > 0
+          || ((window as any).__gwtPlaywrightMessages ?? []).some(({ sequence, payload }: any) =>
+            sequence > cursor && payload.kind === "issue_monitor_profiles_write_failed"), responseCursor);
         await page.evaluate(() => (window as any).releaseCandidateResponses());
       }, ["claude", "codex"], true);
       await expect(pool.getByLabel("Prefer for codex", { exact: true })).toBeFocused();

@@ -52,9 +52,11 @@ impl LaunchWizardState {
                     .map(|option| option.value.clone())
                     .unwrap_or_default();
                 let agent_id = agent_id_from_key(&agent.id);
-                let saved = profiles
-                    .iter()
-                    .find(|profile| agent_id_from_key(&profile.agent_id) == agent_id);
+                let saved = profiles.iter().find(|profile| {
+                    gwt_agent::resolve_agent_id(&profile.agent_id)
+                        .unwrap_or_else(|| agent_id_from_key(&profile.agent_id))
+                        == agent_id
+                });
                 state.model = saved
                     .and_then(|profile| profile.model.clone())
                     .unwrap_or_else(|| default_model.clone());

@@ -114,6 +114,19 @@ fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewri
         before,
         "reading choices cannot normalize saved values"
     );
+    profile.agent_id = "Codex".into();
+    profile.reasoning = None;
+    let alias_choices = runtime.issue_monitor_profile_choices(&repo, &[profile]);
+    let alias_codex = alias_choices
+        .agents
+        .iter()
+        .find(|agent| agent.id == "codex")
+        .unwrap();
+    assert_eq!(
+        alias_codex.default_reasoning.as_deref(),
+        Some("medium"),
+        "saved agent aliases retain the reasoning catalog for their unlisted model"
+    );
 }
 
 #[test]
