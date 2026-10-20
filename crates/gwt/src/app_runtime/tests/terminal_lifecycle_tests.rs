@@ -2264,6 +2264,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         .unwrap();
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
+        .readiness
         .base_target(&repo, "work/gwt-writes", &tips)
         .unwrap()
         .is_some());
@@ -2456,6 +2457,179 @@ fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
     assert!(
         targets[0].has_merged_pr,
         "case-insensitive merged PR metadata must request a dirty-worktree guard"
+    );
+}
+
+#[test]
+fn work_merge_scan_unchanged_inputs_spawn_no_git() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "work/reuse"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-reuse",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/reuse".into()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let mut cache = super::super::WorkMergeScanCache::default();
+    let first = AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+    assert!(
+        matches!(first, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    let repeated = AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+    assert!(
+        matches!(repeated, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        0,
+        "a repeated unchanged scan must reuse its complete Git result; cached={:?}, observed={:?}",
+        cache.last_inputs,
+        cache.inputs.current_revision()
+    );
+
+    // Compare the pre-change worker body with the warm input cache on the
+    // same immutable repository, retaining #5116's warm SHA-pair cache.
+    let targets = super::super::work_branch_scan_targets(
+        &gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo).unwrap(),
+    );
+    let control = capture_tracing_events(|| {
+        for _ in 0..10 {
+            let _ = AppRuntime::measure_work_merge_status_scan(
+                repo.clone(),
+                &mut cache.readiness,
+                &targets,
+                HashSet::new(),
+            );
+            gwt_git::refs::branch_tip_subjects(&repo).unwrap();
+        }
+    });
+    let treatment = capture_tracing_events(|| {
+        for _ in 0..10 {
+            AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+            assert!(!cache.measured);
+        }
+    });
+    let counts = |events: &[CapturedTracingEvent]| {
+        let mut labels = std::collections::BTreeMap::<String, usize>::new();
+        for event in events.iter().filter(|event| {
+            event.target == "gwt.process.summary"
+                && event
+                    .fields
+                    .get("phase")
+                    .is_some_and(|phase| phase == "start")
+        }) {
+            *labels.entry(event.fields["label"].clone()).or_default() += 1;
+        }
+        labels
+    };
+    let control = counts(&control);
+    let treatment = counts(&treatment);
+    assert_eq!(
+        control.get("git --no-optional-locks status --porcelain=v1"),
+        Some(&10)
+    );
+    assert!(treatment.is_empty());
+    println!(
+        "merge_scan_process_measurement={}",
+        serde_json::json!({
+            "requests": 10,
+            "scope": "unchanged local merge and tip scans; remote PR-title TTL excluded",
+            "control": control, "treatment": treatment,
+            "normalization": "multiply by 12 for 120 unchanged requests/hour; not a fleet-hour observation"
+        })
+    );
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(repo.join("user-change.txt"), "uncommitted\n").unwrap();
+    // test-hygiene: allow-wall-clock-deadline Real notify-to-Git invalidation contract; only bounds a hung OS delivery probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while cache.inputs.current_revision() == Some(revision) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Real OS delivery liveness bound, not a latency or ordering assertion.
+            std::time::Instant::now() < deadline,
+            "dirty edit must invalidate scan"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dirty = AppRuntime::prepare_work_merge_status_scan(repo, &mut cache).unwrap();
+    assert!(
+        matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
+        if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
+    );
+}
+
+#[test]
+fn work_merge_scan_coalesces_requests_while_worker_is_active() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    let mut worker = runtime
+        .work_merge_scan_queue
+        .workers
+        .request(context.clone())
+        .unwrap();
+    for _ in 0..10 {
+        runtime.spawn_work_merge_status_scan_with_pr_titles(repo.clone(), true);
+    }
+    assert!(
+        !runtime.work_merge_status_cache.borrow()[&repo]
+            .lock()
+            .unwrap()
+            .measured,
+        "a burst cannot start a competing Git worker"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert!(!runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert_eq!(worker.finish_pass(), Some(context.clone()));
+    let mut reopened = context.clone();
+    reopened.generation += 1;
+    assert!(runtime
+        .work_merge_scan_queue
+        .request(reopened.clone(), true)
+        .is_none());
+    assert!(
+        !runtime.work_merge_scan_queue.take_pr_request(&context),
+        "old generations cannot consume reopened PR requests"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&reopened));
+    assert_eq!(worker.finish_pass(), Some(reopened));
+    assert_eq!(
+        worker.finish_pass(),
+        None,
+        "the burst becomes one follow-up"
     );
 }
 

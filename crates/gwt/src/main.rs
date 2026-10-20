@@ -4778,6 +4778,7 @@ mod tests {
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_merge_status_cache: Default::default(),
+            work_merge_scan_queue: Default::default(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
