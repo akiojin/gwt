@@ -642,6 +642,14 @@ impl RuntimeProbe {
     }
 
     fn refresh_projects(&mut self, project_roots: &[PathBuf]) -> io::Result<()> {
+        self.refresh_projects_with_scan(project_roots, TargetWalk::advance)
+    }
+
+    fn refresh_projects_with_scan(
+        &mut self,
+        project_roots: &[PathBuf],
+        mut advance: impl FnMut(&mut TargetWalk, &mut usize, Instant) -> io::Result<Option<u64>>,
+    ) -> io::Result<()> {
         use fs2::FileExt;
         let directory = capacity_directory();
         if self.runtime_dir != directory {
@@ -752,7 +760,7 @@ impl RuntimeProbe {
                 .entry(path.clone())
                 .or_insert_with(|| TargetWalk::new(path.clone()));
             walk.last_requested_at = now;
-            let measurement = match walk.advance(&mut remaining, deadline) {
+            let measurement = match advance(walk, &mut remaining, deadline) {
                 // Missing build output is known zero consumption, not a failed sensor.
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(0)),
                 result => result,
@@ -1028,8 +1036,16 @@ impl TargetWalk {
     }
 
     fn advance(&mut self, remaining: &mut usize, deadline: Instant) -> io::Result<Option<u64>> {
+        self.advance_with(remaining, || Instant::now() >= deadline)
+    }
+
+    fn advance_with(
+        &mut self,
+        remaining: &mut usize,
+        mut should_yield: impl FnMut() -> bool,
+    ) -> io::Result<Option<u64>> {
         loop {
-            if *remaining == 0 || Instant::now() >= deadline {
+            if *remaining == 0 || should_yield() {
                 return Ok(None);
             }
             if self.current.is_none() {
@@ -2044,14 +2060,25 @@ mod tests {
         let root = normalized(&root);
         let target = root.join("target");
         let mut probe = RuntimeProbe::default();
-        let mut snapshot = refresh_target_measurement(&root, || probe.refresh(&root));
+        // Exercise the real filesystem and entry budget without racing the
+        // scheduler against the production scan deadline or retrying a refresh.
+        let mut refresh = || {
+            probe
+                .refresh_projects_with_scan(std::slice::from_ref(&root), |walk, remaining, _| {
+                    walk.advance_with(remaining, || false)
+                })
+                .unwrap();
+            read_snapshot(&snapshot_path()).unwrap()
+        };
+        let mut snapshot = refresh();
+        assert_eq!(snapshot.targets[&target].bytes, 8);
         snapshot.targets.get_mut(&target).unwrap().observed_at =
             epoch_seconds() - TARGET_TTL_SECS / 2 - 1;
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
         std::fs::write(&target, b"not a directory").unwrap();
-        let failed = refresh_target_measurement(&root, || probe.refresh(&root));
+        let failed = refresh();
         assert!(
             !failed.targets.contains_key(&target),
             "I/O failure invalidates a required measured target"
@@ -2061,7 +2088,7 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
-        let recovered = refresh_target_measurement(&root, || probe.refresh(&root));
+        let recovered = refresh();
         assert_eq!(recovered.targets[&target].bytes, 7);
     }
 }
