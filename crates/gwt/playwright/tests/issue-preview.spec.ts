@@ -300,22 +300,35 @@ test.describe("Issue preview placement", () => {
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
     await expect(pair.locator('[data-action="focus-canvas-window"]')).toBeVisible();
 
+    await page.evaluate(() => {
+      window.__patchWindow("tab-issue::issue-1", { preset: "agent_kanban" });
+      window.__patchWindow("tab-issue::agent-preview", { placement: {
+        kind: "agent_kanban", board_id: "tab-issue::issue-1", lane_id: "active", order: 0,
+      } });
+    });
+    const cardAction = page.locator('.agent-kanban-card[data-window-id="tab-issue::agent-preview"] [data-action="undock"]');
+    await expect(cardAction).toHaveAccessibleName("Focus existing Issue window");
+    await expect(cardAction).toBeVisible();
+    expect(await cardAction.evaluate(button => button.scrollWidth <= button.clientWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath("issue-4804-agent-kanban.png") });
+    await cardAction.evaluate(button => { button.click(); button.click(); });
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
+
     await page.locator('.workspace-window[data-id="tab-issue::agent-preview-2"] [data-action="close"]').dispatchEvent("click");
     await page.locator("#window-close-confirm-modal").getByRole("button", { name: "Close window", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "close_window").map(message => message.id)))
       .toEqual(["tab-issue::agent-preview-2"]);
-    await page.locator('.op-rail__surface[data-surface="issues"]').click();
-    await expect(pair).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
-    const windowize = pair.locator('[data-action="windowize-issue-preview"]');
-    await expect(windowize).toBeVisible();
-    await windowize.evaluate(button => { button.click(); button.click(); });
+    await expect(cardAction).toHaveAttribute("aria-label", "Undock agent window");
+    await cardAction.evaluate(button => { button.click(); button.click(); });
     await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview"] .xterm')).toBeVisible();
     await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview-2"]')).toHaveCount(0);
     await expect(page.locator(".agent-tile")).toHaveCount(2);
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window").map(message => message.id)))
       .toEqual(["tab-issue::agent-preview", "tab-issue::agent-preview"]);
+    await page.evaluate(() => window.__patchWindow("tab-issue::issue-1", { preset: "settings" }));
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
     await expect(pair.locator('[data-action="focus-canvas-window"]')).toBeVisible();

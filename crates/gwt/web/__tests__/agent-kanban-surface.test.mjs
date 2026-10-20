@@ -131,6 +131,41 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   assert.equal(launchRequests[0].laneId, "active");
 });
 
+test("Issue #4804 Agent Kanban focuses an existing Issue window until it closes", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].linked_issue_number = 4804;
+  workspace.windows[2].linked_issue_number = 4805;
+  workspace.windows[4].linked_issue_number = 4804;
+  const sent = [];
+  const focused = [];
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    send: message => sent.push(message),
+    onUndockAgent: id => focused.push(id),
+  });
+  const action = id => fixture.body.querySelector(`[data-window-id="${id}"] [data-action="undock"]`);
+  surface.mount(fixture.body, workspace.windows[0]);
+  assert.equal(action("agent-1").textContent, "◎");
+  assert.equal(action("agent-1").title, "Focus existing Issue window");
+  assert.equal(action("agent-1").getAttribute("aria-label"), "Focus existing Issue window");
+  action("agent-1").click();
+  action("agent-1").click();
+  assert.deepEqual(focused, ["agent-free", "agent-free"]);
+  assert.deepEqual(sent, []);
+
+  assert.equal(action("agent-2").title, "Undock", "another Issue can still undock");
+  action("agent-2").click();
+  assert.deepEqual(sent.map(message => message.id), ["agent-2"]);
+  workspace.windows = workspace.windows.filter(window => window.id !== "agent-free");
+  action("agent-1").click();
+  surface.mount(fixture.body, workspace.windows[0]);
+  assert.equal(action("agent-1").title, "Undock");
+  assert.equal(action("agent-1").getAttribute("aria-label"), "Undock agent window");
+  action("agent-1").click();
+  assert.deepEqual(sent.map(message => message.id), ["agent-2", "agent-1", "agent-1"]);
+});
+
 test("Agent Kanban card messages preserve board, lane, order, and geometry", () => {
   assert.deepEqual(placeAgentWindowMessage("agent-1", "kanban-1", "blocked", 2), {
     kind: "place_agent_window_in_kanban",
