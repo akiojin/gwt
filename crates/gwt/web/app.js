@@ -5120,6 +5120,17 @@ import { createUiStateStore } from "/ui-state-store.js";
         },
       });
 
+      const projectOpenErrorModel = createUiStateStore(null);
+      projectOpenErrorModel.subscribe(error => error, error => {
+        if (!error) return;
+        applyProjectOpenReceiveEvent(error);
+        projectError = error.message;
+        frontendUnits.projectWorkspaceShell.renderProjectPicker();
+        frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
+          frontendUnits.projectWorkspaceShell.activeProjectTab(),
+        );
+      });
+
       const projectNotificationModel = createUiStateStore(null);
       projectNotificationModel.subscribe(notice => notice, notice => {
         if (notice) agentCompletionNotifier.handleIntent(notice);
@@ -5541,12 +5552,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyKnowledgeReceiveEvent(event);
             break;
           case "project_open_error":
-            applyProjectOpenReceiveEvent(event);
-            projectError = event.message;
-            frontendUnits.projectWorkspaceShell.renderProjectPicker();
-            frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
-              frontendUnits.projectWorkspaceShell.activeProjectTab(),
-            );
+            projectOpenErrorModel.update(() => ({
+              kind: event.kind, request_id: event.request_id, message: event.message,
+            }));
             break;
           case "project_opened":
             applyProjectOpenReceiveEvent(event);
