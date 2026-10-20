@@ -141,6 +141,11 @@ pub(crate) fn handle_with_input_with_context(
     if open.is_empty() {
         return HookOutput::Silent;
     }
+    // A declared wait lets the watchdog observe an idle pane. The obligations
+    // remain open and resume blocking Stop as soon as the wait ends.
+    if super::execution_control_stop_check::active_monitor_wait(&resolved, Some(session), None) {
+        return HookOutput::Silent;
+    }
     // Issue #4454: an obligation armed before this window lost (or never
     // held) the Work's authority must not strand it either. Release Stop and
     // record why, naming the Session that does hold the record (AC-2).
