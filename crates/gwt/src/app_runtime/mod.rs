@@ -614,8 +614,12 @@ struct RuntimeStopThreads {
 
 mod issue_monitor_delivery_ack;
 mod issue_monitor_list;
+mod issue_monitor_profiles;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
 pub(crate) use issue_monitor_list::PreparedIssueMonitorList;
+pub(crate) use issue_monitor_profiles::{
+    IssueMonitorProfileSaveLane, IssueMonitorProfilesSaveCompletion,
+};
 pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
@@ -1418,14 +1422,23 @@ pub(crate) struct ProjectContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingIssueMonitorMaxActive {
+    context: ProjectContext,
+    ticket: Arc<()>,
     client_id: ClientId,
     max_active_agents: Option<usize>,
     changed_at: String,
 }
 
+#[derive(Default)]
+pub(crate) struct IssueMonitorMaxActiveSaveLane {
+    requests: std::collections::VecDeque<PendingIssueMonitorMaxActive>,
+    deferred_profiles: Vec<UserEvent>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedIssueMonitorMaxActive {
     context: ProjectContext,
+    ticket: Arc<()>,
     result: Result<
         Option<Box<gwt::IssueMonitorState>>,
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
@@ -1454,9 +1467,6 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_inbox_cache:
         std::cell::RefCell<Option<Vec<gwt::IssueMonitorInboxItem>>>,
     pub(crate) issue_monitor_list_requests: HashMap<ClientId, Arc<()>>,
-    /// Keep the running request at the front so explicit settings saves stay FIFO.
-    pub(crate) issue_monitor_max_active_requests:
-        std::collections::VecDeque<PendingIssueMonitorMaxActive>,
     /// One actionable notice shared by PM preparation and Monitor snapshots.
     pub(crate) project_attention_notice:
         std::cell::RefCell<Option<(String, chrono::DateTime<chrono::Utc>)>>,
@@ -1567,7 +1577,6 @@ pub(crate) fn initial_project_states(
                     issue_monitor_inbox_revision: Default::default(),
                     issue_monitor_inbox_cache: Default::default(),
                     issue_monitor_list_requests: Default::default(),
-                    issue_monitor_max_active_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -1861,6 +1870,11 @@ pub struct AppRuntime {
     /// prefs. Injected at construction so a test runtime owns its budget
     /// instead of inheriting the GUI-thread one through process state.
     pub(crate) issue_monitor_fallback_commit_timeout: std::time::Duration,
+    pub(crate) issue_monitor_profile_saves:
+        HashMap<gwt_core::repo_hash::ProjectKey, IssueMonitorProfileSaveLane>,
+    /// Keep Max active saves owned across project close and reopen.
+    pub(crate) issue_monitor_max_active_saves:
+        HashMap<gwt_core::repo_hash::ProjectKey, IssueMonitorMaxActiveSaveLane>,
     pub(crate) runtime_hook_agent_failures_in_flight:
         HashMap<String, RuntimeHookAgentFailureIdentity>,
     /// Issue #3676 AC-2: credential preflight consulted before any Issue
@@ -4529,7 +4543,6 @@ impl AppRuntime {
                     issue_monitor_inbox_revision: Default::default(),
                     issue_monitor_inbox_cache: Default::default(),
                     issue_monitor_list_requests: Default::default(),
-                    issue_monitor_max_active_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -4863,6 +4876,8 @@ impl AppRuntime {
             issue_monitor_launch_preparations: HashSet::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             issue_monitor_fallback_commit_timeout: ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+            issue_monitor_profile_saves: HashMap::new(),
+            issue_monitor_max_active_saves: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             issue_monitor_provider_auth_probe: gwt::issue_monitor::provider_auth_state_from_env,
             daemon_supervisor: Arc::new(gwt::daemon_supervisor::DaemonSupervisor::gwtd()),
@@ -8488,33 +8503,46 @@ impl AppRuntime {
         client_id: ClientId,
         max_active_agents: Option<usize>,
     ) -> Vec<OutboundEvent> {
-        let Some(state) = self.project_state_mut(context) else {
-            return Vec::new();
-        };
-        state
-            .issue_monitor_max_active_requests
-            .push_back(PendingIssueMonitorMaxActive {
-                client_id,
-                max_active_agents,
-                changed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            });
-        if state.issue_monitor_max_active_requests.len() > 1 {
+        if self.project_state(context).is_none() {
             return Vec::new();
         }
-        self.start_issue_monitor_max_active(context)
+        let lane = self
+            .issue_monitor_max_active_saves
+            .entry(context.project_key.clone())
+            .or_default();
+        // The front remains owned until its exact completion, including after reopen.
+        lane.requests.push_back(PendingIssueMonitorMaxActive {
+            context: context.clone(),
+            ticket: Arc::new(()),
+            client_id,
+            max_active_agents,
+            changed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
+        if lane.requests.len() > 1 {
+            return Vec::new();
+        }
+        self.start_issue_monitor_max_active(&context.project_key)
     }
 
-    fn start_issue_monitor_max_active(&mut self, context: &ProjectContext) -> Vec<OutboundEvent> {
+    fn start_issue_monitor_max_active(
+        &mut self,
+        project_key: &gwt_core::repo_hash::ProjectKey,
+    ) -> Vec<OutboundEvent> {
         let Some(request) = self
-            .project_state(context)
-            .and_then(|state| state.issue_monitor_max_active_requests.front())
+            .issue_monitor_max_active_saves
+            .get(project_key)
+            .and_then(|lane| lane.requests.front())
             .cloned()
         else {
             return Vec::new();
         };
+        let context = request.context.clone();
         self.invalidate_issue_monitor_list(&context.project_root);
-        let proxy = self.proxy.for_project(context.clone());
+        // Even a stale generation must deliver its completion to release the lane.
+        let proxy = self.proxy.clone();
         let worker_context = context.clone();
+        let ticket = request.ticket.clone();
+        let worker_ticket = ticket.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match Self::publish_issue_monitor_control_owned(
@@ -8551,6 +8579,7 @@ impl AppRuntime {
             proxy.send(UserEvent::IssueMonitorMaxActivePrepared(Box::new(
                 PreparedIssueMonitorMaxActive {
                     context: worker_context,
+                    ticket: worker_ticket,
                     result,
                 },
             )));
@@ -8558,7 +8587,8 @@ impl AppRuntime {
         match spawn {
             Ok(()) => Vec::new(),
             Err(error) => self.issue_monitor_max_active_prepared_events(PreparedIssueMonitorMaxActive {
-                context: context.clone(),
+                context,
+                ticket,
                 result: Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(error)),
             }),
         }
@@ -8568,31 +8598,57 @@ impl AppRuntime {
         &mut self,
         prepared: PreparedIssueMonitorMaxActive,
     ) -> Vec<OutboundEvent> {
-        let context = prepared.context;
-        let Some(request) = self
-            .project_state_mut(&context)
-            .and_then(|state| state.issue_monitor_max_active_requests.pop_front())
+        let PreparedIssueMonitorMaxActive {
+            context,
+            ticket,
+            result,
+        } = prepared;
+        let Some(lane) = self
+            .issue_monitor_max_active_saves
+            .get_mut(&context.project_key)
         else {
             return Vec::new();
         };
+        if !lane.requests.front().is_some_and(|request| {
+            request.context == context && Arc::ptr_eq(&request.ticket, &ticket)
+        }) {
+            return Vec::new();
+        }
+        let request = lane
+            .requests
+            .pop_front()
+            .expect("matched Max active request");
+        let drained = lane.requests.is_empty();
         // Reads started before this commit must reload the durable result.
         self.invalidate_issue_monitor_list(&context.project_root);
-        let mut events = match prepared.result {
-            Ok(None) => Vec::new(), // The daemon already committed and publishes its snapshot.
-            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
-                Some(&request.client_id),
-                Some(&context.project_root),
-                *monitor,
-            ),
-            Err(error) => self.issue_monitor_control_error_events(
-                Some(&context.project_root),
-                Some(&request.client_id),
-                error,
-                "max-active",
-                None,
-            ),
-        };
-        events.extend(self.start_issue_monitor_max_active(&context));
+        let mut events = Vec::new();
+        if self.project_context_is_current(&context) {
+            events = match result {
+                Ok(None) => Vec::new(), // The daemon already committed and publishes its snapshot.
+                Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                    Some(&request.client_id),
+                    Some(&context.project_root),
+                    *monitor,
+                ),
+                Err(error) => self.issue_monitor_control_error_events(
+                    Some(&context.project_root),
+                    Some(&request.client_id),
+                    error,
+                    "max-active",
+                    None,
+                ),
+            };
+        }
+        if drained {
+            if let Some(lane) = self
+                .issue_monitor_max_active_saves
+                .remove(&context.project_key)
+            {
+                self.proxy.prepend_events(lane.deferred_profiles);
+            }
+        } else {
+            events.extend(self.start_issue_monitor_max_active(&context.project_key));
+        }
         events
     }
 
@@ -8692,104 +8748,6 @@ impl AppRuntime {
                 events
             }
         }
-    }
-
-    fn issue_monitor_profiles_set_events(
-        &mut self,
-        context: &ProjectContext,
-        client_id: &str,
-        patches: Vec<gwt::IssueMonitorLaunchProfilePatch>,
-        usage_threshold_percent: Option<u8>,
-        request_id: Option<u64>,
-    ) -> Vec<OutboundEvent> {
-        let report_failure =
-            |runtime: &Self, error: gwt::runtime_daemon_events::IssueMonitorControlPublishError| {
-                let message = error.to_string();
-                let mut events = runtime.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    Some(client_id),
-                    error,
-                    "profiles-set",
-                    None,
-                );
-                if let Some(request_id) = request_id {
-                    events.push(OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::IssueMonitorProfilesWriteFailed {
-                            project_root: context.project_root.display().to_string(),
-                            request_id,
-                            message,
-                        },
-                    ));
-                }
-                events
-            };
-        let resolve = |prefs: &gwt::IssueMonitorPrefs| {
-            let pool = prefs.launch_profile_pool();
-            let (profiles, _) = gwt::merge_issue_monitor_profiles_set(
-                &pool,
-                prefs.launch_profile.as_ref().or(pool.first()),
-                &patches,
-            );
-            gwt::validate_monitor_profiles_set(&profiles, usage_threshold_percent)
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>(profiles)
-        };
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
-        let profiles = match gwt::load_issue_monitor_prefs(&prefs_path)
-            .map_err(|error| error.to_string())
-            .and_then(|prefs| resolve(&prefs))
-        {
-            Ok(profiles) => profiles,
-            Err(error) => {
-                return report_failure(
-                    self,
-                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(error),
-                );
-            }
-        };
-        let publication = self.publish_project_issue_monitor_control(
-            context,
-            serde_json::json!({ "profiles_set": {
-                "profiles": profiles,
-            }}),
-        );
-        let outcome = match publication {
-            Ok(()) => Ok(None),
-            Err(error) if error.allows_local_fallback() => self
-                .commit_local_issue_monitor_authorizing_control(context, |monitor| {
-                    // Re-resolve omitted fields against the locked current prefs;
-                    // a concurrent settings save must not be replaced by our read.
-                    let profiles = resolve(&monitor.prefs())?;
-                    monitor
-                        .advance_effect_authority_epoch()
-                        .ok_or_else(|| "authority epoch exhausted".to_string())?;
-                    monitor.set_launch_profile_pool(profiles);
-                    Ok(())
-                })
-                .map(|(monitor, ())| Some(monitor)),
-            Err(error) => Err(error),
-        };
-        let mut events = match outcome {
-            Ok(None) => Vec::new(),
-            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
-                Some(client_id),
-                Some(&context.project_root),
-                monitor,
-            ),
-            Err(error) => return report_failure(self, error),
-        };
-        if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::IssueMonitorProfiles {
-                    project_root: context.project_root.display().to_string(),
-                    profiles: prefs.launch_profile_pool(),
-                    request_id,
-                },
-            ));
-        }
-        events
     }
 
     fn issue_monitor_authorizing_control_result_events(
@@ -8907,16 +8865,26 @@ impl AppRuntime {
         (gwt::IssueMonitorState, T),
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
-        let project_root = Some(context.project_root.as_path()).ok_or_else(|| {
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
-                "local fallback control commit failed: no active project".to_string(),
-            )
-        })?;
+        Self::commit_local_issue_monitor_authorizing_control_with_timeout(
+            &context.project_root,
+            self.issue_monitor_fallback_commit_timeout,
+            mutation,
+        )
+    }
+
+    fn commit_local_issue_monitor_authorizing_control_with_timeout<T>(
+        project_root: &Path,
+        timeout: std::time::Duration,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> Result<T, String>,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + self.issue_monitor_fallback_commit_timeout,
+            gwt_core::operation_deadline::now() + timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -12209,6 +12177,36 @@ impl AppRuntime {
                 | FrontendEvent::IssueMonitorLaunchNow { .. }
                 | FrontendEvent::IssueMonitorRequeue { .. }
         ) {
+            let revocation = matches!(
+                event,
+                FrontendEvent::SetIssueMonitorEnabled { enabled: false }
+                    | FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false }
+            );
+            if !revocation
+                && self
+                    .issue_monitor_profile_saves
+                    .contains_key(&context.project_key)
+            {
+                self.defer_issue_monitor_control_during_profile_save(context, &client_id, event);
+                return Vec::new();
+            }
+            if matches!(event, FrontendEvent::IssueMonitorProfilesSet { .. }) {
+                if let Some(lane) = self
+                    .issue_monitor_max_active_saves
+                    .get_mut(&context.project_key)
+                {
+                    lane.deferred_profiles.push(UserEvent::ProjectCompletion {
+                        context: context.clone(),
+                        event: Box::new(UserEvent::Frontend {
+                            client_id: client_id.clone(),
+                            client_scope: Some(ClientScope::Project(context.project_key.clone())),
+                            event,
+                            received_at: Instant::now(),
+                        }),
+                    });
+                    return Vec::new();
+                }
+            }
             self.invalidate_issue_monitor_list(&context.project_root);
         }
         match event {
@@ -12859,14 +12857,20 @@ impl AppRuntime {
             FrontendEvent::GetIssueMonitorProfiles => {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
                 match gwt::load_issue_monitor_prefs(&prefs_path) {
-                    Ok(prefs) => vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::IssueMonitorProfiles {
-                            project_root: context.project_root.display().to_string(),
-                            profiles: prefs.launch_profile_pool(),
-                            request_id: None,
-                        },
-                    )],
+                    Ok(prefs) => {
+                        let profiles = prefs.launch_profile_pool();
+                        let choices =
+                            self.issue_monitor_profile_choices(&context.project_root, &profiles);
+                        vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::IssueMonitorProfiles {
+                                project_root: context.project_root.display().to_string(),
+                                profiles,
+                                choices,
+                                request_id: None,
+                            },
+                        )]
+                    }
                     Err(error) => self.issue_monitor_control_error_events(
                         Some(&context.project_root),
                         Some(&client_id),

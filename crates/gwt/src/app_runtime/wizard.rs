@@ -2738,6 +2738,30 @@ impl AppRuntime {
         ]
     }
 
+    pub(super) fn issue_monitor_profile_choices(
+        &self,
+        project_root: &Path,
+        profiles: &[gwt::IssueMonitorLaunchProfile],
+    ) -> gwt::launch_wizard::IssueMonitorProfileChoices {
+        let mut wizard = self.issue_monitor_settings_wizard(
+            project_root.to_path_buf(),
+            gwt::LaunchWizardPreviousProfiles::default(),
+        );
+        // Settings can configure a known agent before it is installed. Keep
+        // cached detection/version data and fill only missing built-in rows.
+        for agent in gwt::build_builtin_agent_options(Vec::new()) {
+            if !wizard
+                .detected_agents
+                .iter()
+                .any(|known| known.id == agent.id)
+            {
+                wizard.detected_agents.push(agent);
+            }
+        }
+        wizard.context.docker_context = detect_wizard_docker_context_and_status(project_root).0;
+        wizard.issue_monitor_profile_choices(profiles)
+    }
+
     /// The Issue Monitor settings form, pre-filled from one saved profile. It
     /// configures a launch profile rather than a launch, so it has no branch,
     /// session or Docker context of its own.

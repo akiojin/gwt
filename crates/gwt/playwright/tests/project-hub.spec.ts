@@ -181,6 +181,49 @@ async function installRouteBackend(page: Page) {
 }
 
 test.describe("Project Hub and routes", () => {
+  test("Work Projection Prune feedback preserves results and repeated errors", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    const messages: string[] = [];
+    page.on("dialog", async dialog => {
+      expect(dialog.type()).toBe("alert");
+      messages.push(dialog.message());
+      await dialog.accept();
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL(`/p/${projectA.project_key}`, base || ORIGIN_URL).href);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    expect(messages).toEqual([]);
+    const emit = (event: Record<string, unknown>) => page.evaluate(({ event, projectKey }) => {
+      const socket = (window as any).__gwtRouteSockets.find((socket: any) =>
+        socket.projectKey === projectKey && socket.readyState === 1);
+      if (!socket) throw new Error("Project socket is not open");
+      socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
+    }, { event, projectKey: projectA.project_key });
+    for (const mode of ["dry_run", "apply"]) {
+      await emit({ kind: "workspace_projection_prune_result", mode, archived: 2, deleted: 0, skipped: 1 });
+      await expect.poll(() => messages.length).toBe(mode === "dry_run" ? 1 : 2);
+    }
+    for (let count = 3; count <= 4; count += 1) {
+      await emit({ kind: "workspace_projection_prune_error", message: "Prune was refused" });
+      await expect.poll(() => messages.length).toBe(count);
+    }
+    await emit({ kind: "window_list", windows: [] });
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    expect(messages).toEqual([
+      "Work Projection Prune (dry-run)\n  archived: 2\n  deleted: 0\n  skipped: 1",
+      "Work Projection Prune (applied)\n  archived: 2\n  deleted: 0\n  skipped: 1",
+      "Work Projection Prune error: Prune was refused",
+      "Work Projection Prune error: Prune was refused",
+    ]);
+    await page.screenshot({ path: testInfo.outputPath("work-projection-prune-feedback.png") });
+    expect(errors).toEqual([]);
+  });
+
   test("Project not-found state fences other projects and closes route connections", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),

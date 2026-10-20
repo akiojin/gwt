@@ -277,11 +277,23 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
         1,
         "Auto waits for the preceding Manual save"
     );
+    let profile_edit = serde_json::from_value(serde_json::json!({
+        "kind": "issue_monitor_profiles_set",
+        "profiles": [{"agent_id": "codex", "reasoning": "high"}],
+        "request_id": 5026,
+    }))
+    .expect("profile edit");
+    assert!(runtime
+        .handle_frontend_event("client-1".to_string(), profile_edit)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "profile save must wait for every preceding Max active request"
+    );
     tasks.lock().unwrap().pop().unwrap()();
     let completion = recorded.lock().unwrap().pop().unwrap();
-    let Some(UserEvent::IssueMonitorMaxActivePrepared(prepared)) =
-        runtime.accept_project_completion(completion)
-    else {
+    let UserEvent::IssueMonitorMaxActivePrepared(prepared) = completion else {
         panic!("Max active completion expected");
     };
     let max_events = runtime.issue_monitor_max_active_prepared_events(*prepared);
@@ -319,9 +331,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
 
     tasks.lock().unwrap().pop().unwrap()();
     let completion = recorded.lock().unwrap().pop().unwrap();
-    let Some(UserEvent::IssueMonitorMaxActivePrepared(prepared)) =
-        runtime.accept_project_completion(completion)
-    else {
+    let UserEvent::IssueMonitorMaxActivePrepared(prepared) = completion else {
         panic!("Auto completion expected");
     };
     runtime.issue_monitor_max_active_prepared_events(*prepared);
@@ -338,12 +348,68 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(change.max_active_agents_override, None);
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.pending_effects, journal);
-    assert!(runtime
-        .project_state(&runtime.test_context())
-        .unwrap()
-        .issue_monitor_max_active_requests
-        .is_empty());
+    assert!(runtime.issue_monitor_max_active_saves.is_empty());
     assert!(tasks.lock().unwrap().is_empty());
+
+    let deferred = recorded
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("deferred profile edit");
+    assert!(matches!(&deferred, UserEvent::ProjectCompletion { .. }));
+    let Some(UserEvent::Frontend {
+        client_id,
+        client_scope: Some(scope),
+        event,
+        ..
+    }) = runtime.accept_project_completion(deferred)
+    else {
+        panic!("profile edit must retain its project generation and scope");
+    };
+    assert!(runtime
+        .handle_frontend_event_in_scope(client_id, event, &scope)
+        .is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        drain_queued_blocking_tasks(&tasks);
+    }
+    let UserEvent::IssueMonitorProfilesSaved(completion) = recorded
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("profile save completion")
+    else {
+        panic!("profile save completion expected");
+    };
+    let profile_events = runtime.handle_issue_monitor_profiles_saved(*completion);
+    let status = profile_events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("profile completion publishes the current Monitor settings");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("profile save prefs");
+    assert_eq!(persisted.max_active_agents, 3);
+    assert_eq!(status.max_active_agents, persisted.max_active_agents);
+    assert_eq!(status.max_active_agents_override, None);
+    assert_eq!(
+        status.max_active_last_change,
+        persisted.max_active_last_change
+    );
+    let change = persisted.max_active_last_change.as_ref().unwrap();
+    assert_eq!(
+        change.source,
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui
+    );
+    assert_eq!(change.max_active_agents_override, None);
+    assert_eq!(
+        persisted.launch_profile_pool()[0].reasoning.as_deref(),
+        Some("high")
+    );
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
 
     runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
     let failed = runtime.handle_frontend_event(
@@ -356,11 +422,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
         &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains("worker unavailable")
     )));
-    assert!(runtime
-        .project_state(&runtime.test_context())
-        .unwrap()
-        .issue_monitor_max_active_requests
-        .is_empty());
+    assert!(runtime.issue_monitor_max_active_saves.is_empty());
     assert_eq!(
         gwt::load_issue_monitor_prefs(&prefs_path)
             .unwrap()
@@ -369,6 +431,125 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
             .max_active_agents_override,
         None
     );
+}
+
+#[test]
+fn app_runtime_max_active_save_orders_reopened_profile_after_old_worker() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+        max_active_agents: 6,
+        ..Default::default()
+    };
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_frontend_event(
+        "old-client".into(),
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: Some(3),
+        },
+    );
+    let old_context = runtime.test_context();
+    runtime
+        .project_tab_incarnations
+        .get_mut("tab-1")
+        .unwrap()
+        .generation += 1;
+    runtime.refresh_project_state("tab-1");
+    assert!(!runtime.project_context_is_current(&old_context));
+    let profile_edit = serde_json::from_value(serde_json::json!({
+        "kind": "issue_monitor_profiles_set",
+        "profiles": [{"agent_id": "codex", "reasoning": "high"}],
+        "request_id": 5026,
+    }))
+    .unwrap();
+    runtime.handle_frontend_event("new-client".into(), profile_edit);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "reopening must not let a profile worker overtake the old Max active save"
+    );
+
+    tasks.lock().unwrap().pop().unwrap()();
+    let UserEvent::IssueMonitorMaxActivePrepared(prepared) =
+        recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("the runtime must receive the old completion to release its lane");
+    };
+    assert!(runtime
+        .issue_monitor_max_active_prepared_events(*prepared)
+        .is_empty());
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .max_active_agents,
+        3
+    );
+    assert!(tasks.lock().unwrap().is_empty());
+
+    let deferred = recorded
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("new generation profile edit");
+    assert!(matches!(&deferred, UserEvent::ProjectCompletion { .. }));
+    let Some(UserEvent::Frontend {
+        client_id,
+        client_scope: Some(scope),
+        event,
+        ..
+    }) = runtime.accept_project_completion(deferred)
+    else {
+        panic!("the new generation profile request must retain its scope");
+    };
+    assert_eq!(client_id, "new-client");
+    assert!(runtime
+        .handle_frontend_event_in_scope(client_id, event, &scope)
+        .is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        drain_queued_blocking_tasks(&tasks);
+    }
+    let UserEvent::IssueMonitorProfilesSaved(completion) = recorded.lock().unwrap().pop().unwrap()
+    else {
+        panic!("profile save completion expected");
+    };
+    let events = runtime.handle_issue_monitor_profiles_saved(*completion);
+    let status = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("current profile snapshot");
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(saved.max_active_agents, 3);
+    assert_eq!(status.max_active_agents, saved.max_active_agents);
+    assert_eq!(status.max_active_agents_override, Some(3));
+    assert_eq!(status.max_active_last_change, saved.max_active_last_change);
+    let change = saved.max_active_last_change.as_ref().unwrap();
+    assert_eq!(
+        change.source,
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui
+    );
+    assert_eq!(change.max_active_agents_override, Some(3));
+    assert_eq!(
+        saved.launch_profile_pool()[0].reasoning.as_deref(),
+        Some("high")
+    );
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
+    assert!(tasks.lock().unwrap().is_empty());
 }
 
 #[test]

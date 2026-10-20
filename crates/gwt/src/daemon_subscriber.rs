@@ -336,7 +336,7 @@ mod tests {
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            mpsc, Arc, Mutex,
         },
         time::Duration,
     };
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn subscriber_forwards_events_through_callback() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -416,47 +416,46 @@ mod tests {
                 server::spawn_server(server_endpoint, server_socket, server_endpoint_path, hub)
                     .expect("bind test server");
 
-            let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
-                Arc::new(Mutex::new(Vec::new()));
-            let received_for_cb = Arc::clone(&received);
+            let (received_for_cb, received) = mpsc::channel();
             let subscriber = DaemonSubscriber::spawn(
                 endpoint,
                 vec!["board".to_string()],
                 move |channel, payload| {
-                    received_for_cb.lock().unwrap().push((channel, payload));
+                    received_for_cb
+                        .send((channel, payload))
+                        .expect("callback receiver");
                 },
             );
 
-            // Publish must be retried briefly: the per-connection forwarder
-            // task on the daemon side races with the test's first publish.
+            // This fresh hub has only our board subscriber. Its channel becomes
+            // visible after the receiver is registered, so wait for that event
+            // instead of exhausting a publish window before the thread connects.
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let ready_hub = publisher.clone();
+            let ready = tokio::spawn(async move {
+                while ready_hub.channel_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                ready_tx.send(()).expect("subscription observer receiver");
+            });
+            gwt_core::test_support::recv_event(&ready_rx, "subscriber registration");
+            ready.await.expect("subscription observer");
+
             let event = DaemonFrame::Event {
                 channel: "board".to_string(),
                 payload: json!({"entries": 5}),
             };
-            for _ in 0..50 {
-                if publisher.publish("board", event.clone()) > 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            assert_eq!(publisher.publish("board", event), 1);
 
-            // Wait up to 1 s for the callback to record the event.
-            let mut delivered = false;
-            for _ in 0..100 {
-                if !received.lock().unwrap().is_empty() {
-                    delivered = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert!(delivered, "expected callback to receive at least one event");
-
-            let captured = received.lock().unwrap().clone();
-            assert_eq!(captured.len(), 1);
-            assert_eq!(captured[0].0, "board");
-            assert_eq!(captured[0].1, json!({"entries": 5}));
+            let (channel, payload) =
+                gwt_core::test_support::recv_event(&received, "subscriber callback");
+            assert_eq!(channel, "board");
+            assert_eq!(payload, json!({"entries": 5}));
 
             subscriber.stop();
+            // The joined callback thread has dropped its sender; any remaining
+            // message would be an unexpected duplicate delivery.
+            assert_eq!(received.try_recv(), Err(mpsc::TryRecvError::Disconnected));
             server_handle.abort();
             let _ = server_handle.await;
         });
@@ -465,7 +464,7 @@ mod tests {
     #[test]
     fn subscriber_stop_unblocks_thread_even_without_events() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -496,7 +495,7 @@ mod tests {
     #[test]
     fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -542,14 +541,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn materializer_subscriber_reasserts_role_after_forced_disconnect() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(
             sample_scope(&temp),
             &socket_path,
             "materializer-reconnect-secret",
         );
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind fake daemon");
         let accepted_sessions = Arc::new(AtomicUsize::new(0));
         let accepted_sessions_for_server = Arc::clone(&accepted_sessions);
         let server_endpoint = endpoint.clone();
@@ -625,7 +626,7 @@ mod tests {
             // the live endpoint and the subscriber starts receiving
             // events without needing a re-spawn.
 
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -730,7 +731,7 @@ mod tests {
             // resolver's state to the live token, the next session
             // (driven by run_loop's reconnect-on-error path) succeeds and
             // events flow through.
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");

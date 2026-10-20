@@ -1574,6 +1574,8 @@ fn sample_runtime_with_events(
         // Issue #3878: own the fallback commit budget instead of inheriting
         // the GUI-thread one; tests that assert that budget set it explicitly.
         issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        issue_monitor_profile_saves: HashMap::new(),
+        issue_monitor_max_active_saves: HashMap::new(),
         runtime_hook_agent_failures_in_flight: HashMap::new(),
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests

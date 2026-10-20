@@ -47,7 +47,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         // Nested verification TMPDIRs can exceed the Unix socket path limit.
-        let root = TempDir::new_in("/tmp").expect("short fixture tempdir");
+        let root = gwt_core::test_support::socket_tempdir().expect("short fixture tempdir");
         let home = root.path().join("home");
         let gwt_home = home.join(".gwt");
         let caller = root.path().join("caller");
@@ -151,8 +151,9 @@ impl FakeDaemon {
             .unwrap_or_else(|error| panic!("resolve {label} scope: {error}"));
         let socket_path = project_root.join(format!("{label}.sock"));
         let _ = fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path)
-            .unwrap_or_else(|error| panic!("bind {label} socket: {error}"));
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .unwrap_or_else(|error| panic!("bind {label} socket: {error}"));
         listener
             .set_nonblocking(true)
             .expect("set fake daemon listener nonblocking");

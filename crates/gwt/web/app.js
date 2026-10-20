@@ -4111,6 +4111,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         alertsToasts.push(alert);
       }
 
+      const continueWorkOutcomeModel = createUiStateStore(null);
+      continueWorkOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleContinueWorkOutcome(outcome);
+      });
+
       function handleContinueWorkOutcome(event) {
         const exact = continueWorkDispatcher.handleOutcome(event);
         if (!exact) {
@@ -5087,6 +5092,23 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const workspaceProjectionPruneModel = createUiStateStore(null);
+      function renderWorkspaceProjectionPruneFeedback(feedback) {
+        if (!feedback) return;
+        if (feedback.kind === "workspace_projection_prune_error") {
+          window.alert(`Work Projection Prune error: ${feedback.message}`);
+          return;
+        }
+        const modeLabel = feedback.mode === "dry_run" ? "dry-run" : "applied";
+        window.alert(
+          `Work Projection Prune (${modeLabel})\n` +
+            `  archived: ${feedback.archived}\n` +
+            `  deleted: ${feedback.deleted}\n` +
+            `  skipped: ${feedback.skipped}`,
+        );
+      }
+      workspaceProjectionPruneModel.subscribe(feedback => feedback, renderWorkspaceProjectionPruneFeedback);
+
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
@@ -5293,23 +5315,14 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "workspace_projection_prune_result": {
-            // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
-            // A richer Drawer surface lands in a follow-up; for now an alert
-            // keeps the loop closed so users see the count summary.
-            const modeLabel =
-              event.mode === "dry_run" ? "dry-run" : "applied";
-            window.alert(
-              `Work Projection Prune (${modeLabel})\n` +
-                `  archived: ${event.archived}\n` +
-                `  deleted: ${event.deleted}\n` +
-                `  skipped: ${event.skipped}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({
+              kind: event.kind, mode: event.mode, archived: event.archived,
+              deleted: event.deleted, skipped: event.skipped,
+            }));
             break;
           }
           case "workspace_projection_prune_error":
-            window.alert(
-              `Work Projection Prune error: ${event.message}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({ kind: event.kind, message: event.message }));
             break;
           case "ui_trace_saved":
           case "ui_trace_error":
@@ -5533,7 +5546,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "continue_work_outcome":
-            handleContinueWorkOutcome(event);
+            continueWorkOutcomeModel.update(() => ({ ...event }));
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);

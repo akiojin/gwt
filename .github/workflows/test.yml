@@ -424,6 +424,11 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+        timeout-minutes: 5
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
