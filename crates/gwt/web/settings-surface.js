@@ -475,6 +475,7 @@ function positionIssuesLaunchControls(body) {
 
 export function renderAgentsSettingsPanel(panel, options) {
   const { project, profiles, send, availableAgents = null, choices = null } = options;
+  const agentCatalog = availableAgents ?? choices?.agents ?? null;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -607,7 +608,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     panel.appendChild(row);
     rows.push({ row, profile });
     const agent = field(row, "Agent", "agent_id", profile.agent_id, "text",
-      (availableAgents || []).map(agent => ({ value: agent.id, label: agent.name || agent.id })));
+      (agentCatalog || []).map(agent => ({ value: agent.id, label: agent.name || agent.id })));
     const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(agent.value));
     const initial = capabilities();
     let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
@@ -685,7 +686,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
+  const remaining = (agentCatalog || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
   const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
   candidate.options[0].textContent = "Select an agent…";
   for (const option of candidate.options) {
@@ -697,11 +698,11 @@ export function renderAgentsSettingsPanel(panel, options) {
     const next = draft();
     if (!agent) showFeedback("Select an agent to add.", true);
     else if (next.some(profile => provider(profile.agent_id) === provider(agent))) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
-    else if (!availableAgents?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
+    else if (!agentCatalog?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
     else submit([...next, { agent_id: agent }]);
   });
-  candidate.disabled = addButton.disabled = availableAgents === null || remaining.length === 0;
-  showFeedback(availableAgents === null ? "Loading available agents…"
+  candidate.disabled = addButton.disabled = agentCatalog === null || remaining.length === 0;
+  showFeedback(agentCatalog === null ? "Loading available agents…"
     : remaining.length === 0 ? "All known agents are already in the candidate pool." : "Select an agent to add.");
   add.appendChild(feedback);
 }

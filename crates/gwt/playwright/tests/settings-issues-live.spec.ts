@@ -58,17 +58,21 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
       expect(result.kind, result.message).toBe("issue_monitor_profiles");
       await expect(candidates).toHaveAttribute("data-saving", "false");
     };
-    await save(() => control("Model").selectOption("gpt-6-astra"));
+    const select = (field: Locator, value: string) => save(async () => {
+      await field.focus();
+      await field.selectOption(value);
+    });
+    await select(control("Model"), "gpt-6-astra");
     await expect(control("Reasoning")).toHaveValue("medium");
-    await save(() => control("Reasoning").selectOption("high"));
-    await save(() => control("Runtime").selectOption("Docker"));
+    await select(control("Reasoning"), "high");
+    await select(control("Runtime"), "Docker");
     await expect(control("Docker service")).toBeEnabled();
     // The checkout has a Compose service; use the detected option rather than
     // injecting a choice or contacting Docker.
     const service = await control("Docker service").locator("option").evaluateAll(options =>
       options.map(option => (option as HTMLOptionElement).value).find(value => value && value !== "saved-service"));
     expect(service).toBeTruthy();
-    await save(() => control("Docker service").selectOption(service!));
+    await select(control("Docker service"), service!);
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     await open();
     await expect(control("Model")).toHaveValue("gpt-6-astra");
@@ -76,11 +80,11 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await expect(control("Docker service")).toHaveValue(service!);
     await expect(control("Windows shell")).toBeDisabled();
     await info.attach(`candidate-selects-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
-    await save(() => control("Agent").selectOption("openclaw"));
+    await select(control("Agent"), "openclaw");
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
     await expect(candidates.getByLabel("Reasoning openclaw", { exact: true })).toBeDisabled();
     await expect(candidates.getByLabel("Fast mode openclaw", { exact: true })).toBeDisabled();
-    await save(() => candidates.getByLabel("Agent openclaw", { exact: true }).selectOption("hermes"));
+    await select(candidates.getByLabel("Agent openclaw", { exact: true }), "hermes");
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
     const hermesModel = candidates.getByLabel("Model hermes", { exact: true });
     await expect(hermesModel).toHaveJSProperty("tagName", "INPUT");

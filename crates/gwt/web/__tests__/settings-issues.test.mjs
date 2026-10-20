@@ -355,7 +355,7 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   load("renderAgentsSettingsPanel")(panel, {
     profiles: [{ agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
       { agent_id: "custom", fast_mode: true }, { agent_id: "saved-unknown-agent", model: "historic" }],
-    availableAgents: candidateChoices.agents.map(agent => ({ id: agent.id })), choices: candidateChoices,
+    availableAgents: null, choices: candidateChoices,
     send: message => sent.push(message),
   });
   const control = key => panel.querySelector(`fieldset [data-profile-field="${key}"]`);
@@ -365,6 +365,8 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   }
   assert.equal(control("model").value, "retired-model");
   assert.equal(control("reasoning").value, "retired-effort");
+  assert.ok([...control("agent_id").options].some(option => option.value === "hermes"),
+    "shared choices populate Agent before the separate catalog response arrives");
   const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
   assert.equal(unknown.querySelector('[data-profile-field="agent_id"]').value, "saved-unknown-agent");
   assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");

@@ -73,6 +73,14 @@ $isolatedEnv['GWT_HOOK_BIN'] = $hookBin
 $isolatedEnv['GIT_TERMINAL_PROMPT'] = '0'
 if ($CandidateSettings) {
     $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1'
+    # Load custom-agent configuration before either runtime caches its catalog.
+    @'
+[tools.customCodingAgents.fixture-candidate]
+id = "fixture-candidate"
+displayName = "Fixture Candidate"
+agentType = "command"
+command = "fixture-candidate-cli"
+'@ | Set-Content -LiteralPath (Join-Path $checkHome '.gwt/config.toml')
     $isolatedEnv['HERMES_HOME'] = Join-Path $checkHome 'hermes-fixture'
     New-Item -ItemType Directory -Path $isolatedEnv['HERMES_HOME'] -Force | Out-Null
     "model:`n  provider: fixture`n  default: fixture-model`nproviders:`n  fixture:`n    models: [fixture-model, fixture-alternative]" |
@@ -83,11 +91,38 @@ $isolatedEnv['CODEX_HOME'] = Join-Path $checkHome 'codex-fixture'
 $isolatedEnv['CLAUDE_CONFIG_DIR'] = Join-Path $checkHome 'claude-fixture'
 New-Item -ItemType Directory -Path $isolatedEnv['CODEX_HOME'], $isolatedEnv['CLAUDE_CONFIG_DIR'] -Force | Out-Null
 $ownedGui = $null
+$ownedDaemon = $null
+$daemonStdoutTask = $null
+$daemonStderrTask = $null
 $stdoutTask = $null
 $stderrTask = $null
 $anchorSocket = $null
 $savedVars = @{}
 try {
+    if ($CandidateSettings) {
+        # Profile writes use the production daemon transport. The 250ms GUI
+        # fallback is a separate bounded recovery path, not this fixture's subject.
+        $daemonInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwtd)
+        $daemonInfo.WorkingDirectory = $repoRoot
+        $daemonInfo.UseShellExecute = $false
+        $daemonInfo.CreateNoWindow = $true
+        $daemonInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+        $daemonInfo.RedirectStandardInput = $true
+        $daemonInfo.RedirectStandardOutput = $true
+        $daemonInfo.RedirectStandardError = $true
+        $daemonInfo.Environment.Clear()
+        foreach ($name in $isolatedEnv.Keys) { $daemonInfo.Environment[$name] = $isolatedEnv[$name] }
+        $ownedDaemon = [Diagnostics.Process]::Start($daemonInfo)
+        $daemonStderrTask = $ownedDaemon.StandardError.ReadToEndAsync()
+        $ownedDaemon.StandardInput.WriteLine('{"schema_version":1,"operation":"daemon.start","params":{}}')
+        $ownedDaemon.StandardInput.Close()
+        foreach ($expected in @('gwtd daemon start: bind=', "gwtd daemon start: pid=$($ownedDaemon.Id) ")) {
+            $lineTask = $ownedDaemon.StandardOutput.ReadLineAsync()
+            if (!$lineTask.Wait(30000) -or !$lineTask.Result -or !$lineTask.Result.StartsWith($expected)) { throw 'Isolated daemon did not become ready.' }
+        }
+        $daemonStdoutTask = $ownedDaemon.StandardOutput.ReadToEndAsync()
+        Write-Output "Fresh checkout daemon PID: $($ownedDaemon.Id); isolated HOME: $checkHome"
+    }
     $startInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwt)
     $startInfo.WorkingDirectory = $repoRoot
     $startInfo.UseShellExecute = $false
@@ -170,9 +205,20 @@ Module._resolveFilename = function(request, parent, ...rest) {
     if ($LASTEXITCODE) { throw 'Issue #5503 headed verification failed.' }
 } finally {
     foreach ($name in $savedVars.Keys) { [Environment]::SetEnvironmentVariable($name, $savedVars[$name], 'Process') }
+    foreach ($ownedProcess in @($ownedGui, $ownedDaemon)) {
+        if (!$ownedProcess) { continue }
+        try {
+            if (!$ownedProcess.HasExited) { $ownedProcess.Kill(); $ownedProcess.WaitForExit(10000) | Out-Null }
+        } catch {
+            # A child can exit between HasExited and Kill. Check both children
+            # after attempting every owned handle, even if one stop failed.
+        }
+    }
     if ($anchorSocket) { $anchorSocket.Abort(); $anchorSocket.Dispose() }
-    if ($ownedGui -and !$ownedGui.HasExited) { Stop-Process -Id $ownedGui.Id -Force; $ownedGui.WaitForExit(10000) | Out-Null }
-    if ($ownedGui -and !$ownedGui.HasExited) { throw "Owned GUI PID $($ownedGui.Id) remains alive." }
+    $remaining = @(@($ownedGui, $ownedDaemon) | Where-Object { $_ -and !$_.HasExited })
+    if ($remaining.Count) { throw "Owned PID(s) remain alive: $(($remaining | ForEach-Object { $_.Id }) -join ', ')." }
     if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'startup.log') }
     if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'stderr.log') }
+    if ($daemonStdoutTask) { $daemonStdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'daemon-startup.log') }
+    if ($daemonStderrTask) { $daemonStderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'daemon-stderr.log') }
 }
