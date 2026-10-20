@@ -1332,11 +1332,10 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         // PTY and burns the Issue Monitor retry budget. A heal failure is
         // logged and the strict read reports the real state.
         heal_lost_generation_publication_best_effort(worktree, owner);
-        // Issue #5288: the shared Host may still be alive after this owner's
-        // PTY child exited. Reap that exact holder before the duplicate gate,
-        // so launch cannot race the scan reaper and strand a recoverable owner.
-        // Invalid authority sentinels and every other runtime disposition keep
-        // the existing fail-closed gate; the reaper rechecks under its leases.
+        // Issue #5288 / #5840: reconcile exited children and stopped holders
+        // before the duplicate gate, including an audited reaper commit whose
+        // publication was interrupted. The scanner and reaper validate exact
+        // authority under their leases; arbitrary invalid authority stays closed.
         if session.launch_route == gwt_agent::LaunchRoute::Autonomous
             && gwt::cli::execution_state::load(worktree)
                 .map_err(|error| error.to_string())?
@@ -1345,7 +1344,6 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                         && record.owner_number == owner.number
                         && record.status
                             == gwt::cli::execution_state::ExecutionControlStatus::Active
-                        && gwt::cli::execution_state::integrity_ok(&record)
                 })
         {
             let scan = gwt::cli::execution_state::inspect_startup_active_generation_ledgers(&[
@@ -1356,6 +1354,11 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 .into_iter()
                 .filter(|candidate| candidate.owner == owner)
             {
+                if candidate.replay_operation_id.is_some() {
+                    gwt::cli::execution_state::repair_startup_defunct_active_generation(&candidate)
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                }
                 let Some(holder) = gwt::cli::execution_state::startup_candidate_holder_identity(
                     sessions_dir,
                     &candidate,
@@ -1364,10 +1367,15 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 else {
                     continue;
                 };
-                if gwt::cli::execution_state::classify_exact_session_runtime(sessions_dir, &holder)
-                    .map_err(|error| error.to_string())?
-                    == gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
-                {
+                if matches!(
+                    gwt::cli::execution_state::classify_exact_session_runtime(
+                        sessions_dir,
+                        &holder
+                    )
+                    .map_err(|error| error.to_string())?,
+                    gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
+                        | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_)
+                ) {
                     gwt::cli::execution_state::reap_startup_defunct_active_generation(
                         &candidate,
                         sessions_dir,
@@ -9019,98 +9027,176 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
-    fn autonomous_fresh_launch_reaps_exited_child_before_active_owner_gate() {
+    fn autonomous_fresh_launch_recovers_stopped_holder_before_active_owner_gate() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("home tempdir");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let (launch, issuer, _) = rebound_relaunch_fixture(home.path());
-        let holder_path = launch
-            .sessions_dir
-            .join(format!("{}.toml", launch.session.id));
-        let mut holder = gwt_agent::Session::load(&holder_path).expect("reload holder");
-        holder.update_status(gwt_agent::AgentStatus::Running);
-        holder
-            .save(&launch.sessions_dir)
-            .expect("persist Running holder");
-        let holder_bytes = std::fs::read(&holder_path).expect("read Running holder");
-        let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
-            .expect("holder identity")
-            .expect("bound holder");
-        let host_started_at = gwt::process::host_process_start_time(std::process::id())
-            .expect("test Host process identity");
-        gwt_agent::SessionRuntimeState::for_execution_process(
-            gwt_agent::AgentStatus::Running,
-            &identity,
-            1,
-            host_started_at,
-            i32::MAX as u32,
-            1,
-        )
-        .save(&gwt_agent::runtime_state_path(
-            &launch.sessions_dir,
-            &holder.id,
-        ))
-        .expect("persist exited child under a live Host");
-        assert_eq!(
-            gwt::cli::execution_state::classify_exact_session_runtime(
-                &launch.sessions_dir,
-                &identity
+        for recovery in ["exited-child", "stopped-holder", "interrupted-reaper"] {
+            let home = tempfile::tempdir().expect("home tempdir");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let (launch, issuer, _) = rebound_relaunch_fixture(home.path());
+            let holder_path = launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id));
+            let mut holder = gwt_agent::Session::load(&holder_path).expect("reload holder");
+            let holder_status = if recovery == "exited-child" {
+                gwt_agent::AgentStatus::Running
+            } else {
+                gwt_agent::AgentStatus::Stopped
+            };
+            holder.update_status(holder_status);
+            holder
+                .save(&launch.sessions_dir)
+                .expect("persist holder status");
+            let holder_bytes = std::fs::read(&holder_path).expect("read holder");
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+                .expect("holder identity")
+                .expect("bound holder");
+            let host_started_at = gwt::process::host_process_start_time(std::process::id())
+                .expect("test Host process identity");
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                holder_status,
+                &identity,
+                1,
+                host_started_at,
+                i32::MAX as u32,
+                1,
             )
-            .expect("classify holder"),
-            gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited,
-        );
+            .save(&gwt_agent::runtime_state_path(
+                &launch.sessions_dir,
+                &holder.id,
+            ))
+            .expect("persist exited child under a live Host");
+            let runtime = gwt::cli::execution_state::classify_exact_session_runtime(
+                &launch.sessions_dir,
+                &identity,
+            )
+            .expect("classify holder");
+            assert!(if recovery == "exited-child" {
+                runtime == gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
+            } else {
+                matches!(
+                    runtime,
+                    gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_)
+                )
+            });
 
-        let mut successor = gwt_agent::Session::new(
-            &launch.project,
-            "work/issue-2359",
-            gwt_agent::AgentId::Codex,
-        );
-        successor.project_state_root = Some(launch.project.clone());
-        successor.linked_issue_number = Some(launch.owner.number);
-        successor.launch_route = gwt_agent::LaunchRoute::Autonomous;
-        let mut env = HashMap::new();
-        FinalizedAgentCapabilityLaunch {
-            issuer: Some(&issuer),
-            sessions_dir: &launch.sessions_dir,
-            session: &mut successor,
-            project_root: &launch.project,
-            worktree: &launch.project,
-            producing_owner: Some(launch.owner),
-            prepared_continuation: None,
-            rebound_continuation: None,
-            execution_entrypoint: "$gwt-execute #2359",
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            container_runtime: None,
-            permission_decision: None,
+            if recovery == "interrupted-reaper" {
+                let projection =
+                    gwt::cli::trusted_store::read(&launch.project, "execution-control.json")
+                        .expect("read Active projection")
+                        .expect("Active projection");
+                let pointer = gwt::cli::trusted_store::read(
+                    &launch.project,
+                    "execution-generation-pointer.json",
+                )
+                .expect("read Active pointer")
+                .expect("Active pointer");
+                let candidate =
+                    gwt::cli::execution_state::inspect_startup_active_generation_ledgers(
+                        std::slice::from_ref(&launch.project),
+                    )
+                    .candidates
+                    .into_iter()
+                    .find(|candidate| candidate.owner == launch.owner)
+                    .expect("exact Active holder candidate");
+                gwt::cli::execution_state::reap_startup_defunct_active_generation(
+                    &candidate,
+                    &launch.sessions_dir,
+                    &identity,
+                    &[],
+                )
+                .expect("commit the audited Blocked reaper event");
+                // Keep the committed ledger but restore the publication that an
+                // interrupted ledger-first write leaves behind.
+                gwt::cli::trusted_store::write(
+                    &launch.project,
+                    "execution-control.json",
+                    projection.as_bytes(),
+                )
+                .expect("restore pre-reaper projection");
+                gwt::cli::trusted_store::write(
+                    &launch.project,
+                    "execution-generation-pointer.json",
+                    pointer.as_bytes(),
+                )
+                .expect("restore pre-reaper pointer");
+                assert_eq!(
+                    gwt::cli::execution_state::load(&launch.project)
+                        .expect("read sentinel")
+                        .expect("sentinel")
+                        .content_hash,
+                    "invalid-generation-authority"
+                );
+                assert_eq!(
+                    gwt::cli::execution_state::load_owner_generation_ledger(
+                        &launch.project,
+                        launch.owner
+                    )
+                    .expect("read committed ledger")
+                    .expect("committed ledger")
+                    .current_effective_status(),
+                    Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+                );
+            }
+
+            let mut successor = gwt_agent::Session::new(
+                &launch.project,
+                "work/issue-2359",
+                gwt_agent::AgentId::Codex,
+            );
+            successor.project_state_root = Some(launch.project.clone());
+            successor.linked_issue_number = Some(launch.owner.number);
+            successor.launch_route = gwt_agent::LaunchRoute::Autonomous;
+            let mut env = HashMap::new();
+            FinalizedAgentCapabilityLaunch {
+                issuer: Some(&issuer),
+                sessions_dir: &launch.sessions_dir,
+                session: &mut successor,
+                project_root: &launch.project,
+                worktree: &launch.project,
+                producing_owner: Some(launch.owner),
+                prepared_continuation: None,
+                rebound_continuation: None,
+                execution_entrypoint: "$gwt-execute #2359",
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                container_runtime: None,
+                permission_decision: None,
+            }
+            .install(&mut env)
+            .unwrap_or_else(|error| {
+                panic!("Monitor must recover {recovery} and prepare its Blocked successor: {error}")
+            });
+
+            let ledger =
+                gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                    .expect("read reaped ledger")
+                    .expect("owner ledger");
+            assert!(ledger.current_generation_settled_by_host_reaper());
+            assert_eq!(
+                ledger.lifecycle_events.len(),
+                1,
+                "replay must preserve the exact audited settlement"
+            );
+            assert_eq!(
+                ledger.current_effective_status(),
+                Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+            );
+            assert_eq!(
+                ledger
+                    .continuation_attempts
+                    .last()
+                    .expect("Prepared successor")
+                    .status,
+                gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+            );
+            assert!(env.contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV));
+            assert_eq!(
+                std::fs::read(&holder_path).expect("read holder after reaping"),
+                holder_bytes
+            );
         }
-        .install(&mut env)
-        .expect("Monitor launch must reap the exited child and prepare its Blocked successor");
-
-        let ledger =
-            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                .expect("read reaped ledger")
-                .expect("owner ledger");
-        assert!(ledger.current_generation_settled_by_host_reaper());
-        assert_eq!(
-            ledger.current_effective_status(),
-            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
-        );
-        assert_eq!(
-            ledger
-                .continuation_attempts
-                .last()
-                .expect("Prepared successor")
-                .status,
-            gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
-        );
-        assert!(env.contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV));
-        assert_eq!(
-            std::fs::read(&holder_path).expect("read holder after reaping"),
-            holder_bytes
-        );
     }
 
     /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse
@@ -11037,6 +11123,15 @@ mod agent_endpoint_env_tests {
         .expect("read blocked predecessor binding")
         .expect("blocked predecessor generation");
 
+        let holder_path = predecessor
+            .sessions_dir
+            .join(format!("{}.toml", predecessor.session.id));
+        let mut holder = gwt_agent::Session::load(&holder_path).expect("reload Blocked holder");
+        holder.update_status(gwt_agent::AgentStatus::Stopped);
+        holder
+            .save(&predecessor.sessions_dir)
+            .expect("persist stopped Blocked holder");
+
         let mut successor = gwt_agent::Session::new(
             &predecessor.project,
             "work/issue-2359",
@@ -11044,6 +11139,7 @@ mod agent_endpoint_env_tests {
         );
         successor.project_state_root = Some(predecessor.project.clone());
         successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.launch_route = gwt_agent::LaunchRoute::Autonomous;
         successor.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
         persist_finalized_launch_session(
