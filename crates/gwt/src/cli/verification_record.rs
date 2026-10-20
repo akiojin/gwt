@@ -9650,7 +9650,9 @@ fn default_integration_test_builds_a_guarded_binary() {
     // hangs on it again.
     #[test]
     fn verify_run_child_environment_contract_is_declared_in_one_place() {
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
         assert_eq!(
             child_environment_contract()
@@ -9660,6 +9662,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("GIT_ASKPASS", Some("")),
                 ("GCM_INTERACTIVE", Some("never")),
                 ("GIT_CONFIG_PARAMETERS", Some("'credential.helper='")),
             ],
@@ -9701,9 +9704,27 @@ fn default_integration_test_builds_a_guarded_binary() {
     fn verify_run_fake_remote_fetch_fails_without_invoking_credentials() {
         use std::io::{Read, Write};
 
-        let _lock = crate::env_test_lock().lock().unwrap();
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("helper-invoked");
+        let askpass_marker = dir.path().join("askpass-invoked");
+        let askpass = dir.path().join("fixture-askpass");
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho invoked > '{}'\n",
+                askpass_marker.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _askpass = ScopedEnvVar::set("GIT_ASKPASS", &askpass);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -9781,6 +9802,10 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(
             !marker.exists(),
             "credential helper was invoked: {transcript}"
+        );
+        assert!(
+            !askpass_marker.exists(),
+            "inherited askpass was invoked: {transcript}"
         );
     }
 

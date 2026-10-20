@@ -419,7 +419,7 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
 /// Authentication must fail instead of opening a terminal or credential GUI.
 /// Keep inherited settings and append an empty helper to the highest-priority
 /// inherited configuration, including Git -c settings propagated into hooks.
-pub fn noninteractive_git_environment() -> [(String, String); 3] {
+pub fn noninteractive_git_environment() -> [(String, String); 4] {
     let mut parameters = std::env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
     if !parameters.is_empty() {
         parameters.push(' ');
@@ -427,6 +427,8 @@ pub fn noninteractive_git_environment() -> [(String, String); 3] {
     parameters.push_str("'credential.helper='");
     [
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        // Empty also blocks fallback to core.askpass and SSH_ASKPASS.
+        ("GIT_ASKPASS".into(), String::new()),
         ("GCM_INTERACTIVE".into(), "never".into()),
         ("GIT_CONFIG_PARAMETERS".into(), parameters),
     ]
@@ -629,6 +631,8 @@ mod tests {
             "GIT_CONFIG_PARAMETERS",
             "'test.alsoRetained=kept'",
         );
+        let _askpass =
+            crate::test_support::ScopedEnvVar::set("GIT_ASKPASS", "inherited-askpass-must-not-run");
         let mut command = hidden_command("git");
         let environment: std::collections::HashMap<_, _> = command.get_envs().collect();
         assert_eq!(
@@ -638,6 +642,10 @@ mod tests {
         assert_eq!(
             environment.get(OsStr::new("GCM_INTERACTIVE")),
             Some(&Some(OsStr::new("never")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_ASKPASS")),
+            Some(&Some(OsStr::new("")))
         );
         assert_eq!(
             environment.get(OsStr::new("GIT_CONFIG_COUNT")),
