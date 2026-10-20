@@ -79,6 +79,16 @@ Read the enclosing Monitor source, scan time and coverage alongside these observ
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
 This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
 
+`launch_activity` reports only Launching/Launched inbox rows in supplied order,
+including repeated owners; it is not a complete process census.
+`inactivity_seconds_at_scan` uses the supplied scan time minus valid RFC3339 activity time,
+with offsets respected and nonnegative fractions rounded down to whole seconds.
+It never uses the current clock. Missing or invalid timestamps and activity after the scan
+produce unknown duration and named missing inputs; invalid activity strings are not copied.
+Absent Monitor yields null, while an observed snapshot with no matching rows yields [].
+Keep the enclosing Monitor provenance: an old or degraded scan is not fresh activity evidence.
+Activity timing does not establish queue age, SLA breaches or liveness, and authorizes no action.
+
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
 and, for goals and milestones, referencing roadmap links.
@@ -3774,6 +3784,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",
+            "`launch_activity` reports only Launching/Launched inbox rows",
+            "`inactivity_seconds_at_scan` uses the supplied scan time",
+            "Activity timing does not establish queue age, SLA breaches or liveness",
             "Never recompute occupied slots or available capacity from Issue lists",
             "`observed_work_issues` is a lower-bound owner set, not an active count or full WIP",
             "`verification_observation` and `end_to_end_wip` remain missing",

@@ -800,6 +800,11 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+Activity observations show elapsed whole seconds since the last activity of Launching/Launched
+Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
+Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable
+Monitor returns null rather than an observed empty list. Keep the scan's source and age in mind:
+these values do not establish queue age, SLA breaches or liveness, or trigger any action.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
