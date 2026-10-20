@@ -1281,8 +1281,17 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // Issue #4538 AC-1: the route's hash resolved to no open or Recent
       // Project. Show the path-free not-found view and stop reconnecting.
+      const projectRouteNotFoundModel = createUiStateStore(false);
+      projectRouteNotFoundModel.subscribe(missing => missing, missing => {
+        if (missing) showProjectRouteNotFound();
+      });
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
+        connectionOverlay.dispose();
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+        hubReconnectTimer = null;
         for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
@@ -1444,10 +1453,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
-        setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
+        reconnectTimer = null;
+        if (routeProjectMissing) return;
+        setConnectionState(false);
         reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
@@ -1508,7 +1519,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           clearPickerPending();
           if (socket === connection) handleSocketClose();
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
-          hubReconnectTimer = window.setTimeout(connectSocket, 1000);
+          hubReconnectTimer = null;
+          if (!routeProjectMissing) hubReconnectTimer = window.setTimeout(connectSocket, 1000);
         });
       }
 
@@ -2099,6 +2111,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         startupAutoResumeReadySent = true;
         requestAnimationFrame(() => {
+          if (routeProjectMissing) return;
           send({
             kind: "startup_auto_resume_ready",
             bounds: visibleBounds(),
@@ -5237,6 +5250,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
 
       function receive(event) {
+        if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
           return;
@@ -5248,7 +5262,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "project_not_found": {
-            if (event.project_key === routeProjectKey) showProjectRouteNotFound();
+            if (event.project_key === routeProjectKey) projectRouteNotFoundModel.update(() => true);
             break;
           }
           case "project_agent_aggregate": {
