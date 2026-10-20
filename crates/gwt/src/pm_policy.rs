@@ -195,6 +195,7 @@ pub struct MonitorEvidence {
 pub struct IssueTrace {
     pub issue_number: u64,
     pub observed_queued_or_active: bool,
+    pub observed_inbox_states: Vec<MonitorInboxState>,
     pub roadmap_item_ids: Vec<String>,
     pub alignment: &'static str,
     pub diagnostics: Vec<&'static str>,
@@ -244,6 +245,19 @@ pub struct MilestoneIssueStates {
     pub states: Vec<MonitorInboxState>,
 }
 
+fn observe_inbox_states(
+    issue_number: u64,
+    monitor: Option<&IssueMonitorAgentStatus>,
+) -> Vec<MonitorInboxState> {
+    let mut states = Vec::new();
+    for row in monitor.into_iter().flat_map(|status| &status.inbox) {
+        if row.issue_number == issue_number && !states.contains(&row.state) {
+            states.push(row.state);
+        }
+    }
+    states
+}
+
 fn observe_issues(
     members: &BTreeSet<u64>,
     monitor: Option<&IssueMonitorAgentStatus>,
@@ -251,12 +265,7 @@ fn observe_issues(
     let mut observed_issue_states = Vec::new();
     let mut unobserved_issues = Vec::new();
     for &issue_number in members {
-        let mut states = Vec::new();
-        for row in monitor.into_iter().flat_map(|status| &status.inbox) {
-            if row.issue_number == issue_number && !states.contains(&row.state) {
-                states.push(row.state);
-            }
-        }
+        let states = observe_inbox_states(issue_number, monitor);
         if states.is_empty() {
             unobserved_issues.push(issue_number);
         } else {
@@ -373,6 +382,7 @@ pub fn assess_planning(
             IssueTrace {
                 issue_number,
                 observed_queued_or_active: observed.contains(&issue_number),
+                observed_inbox_states: observe_inbox_states(issue_number, monitor),
                 roadmap_item_ids: links.iter().map(|(_, item)| item.id.clone()).collect(),
                 alignment,
                 diagnostics: diagnostics.into_iter().collect(),
@@ -611,6 +621,15 @@ mod tests {
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
         monitor.queue = vec![1, 2, 4];
         monitor.active_launches = vec![3, 3, 5];
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
+            {"issue_number":2,"state":"hold_excluded","attempts":0},
+            {"issue_number":2,"state":"needs_human","attempts":0},
+            {"issue_number":4,"state":"blocked_by_claim","attempts":0},
+            {"issue_number":5,"state":"agent_failed","attempts":0},
+            {"issue_number":99,"state":"agent_failed","attempts":0}
+        ]))
+        .unwrap();
         let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(state, before);
         assert_eq!(report["planning_revision"], 7);
@@ -634,6 +653,25 @@ mod tests {
         }
         assert_eq!(row(&report, 4)["observed_queued_or_active"], true);
         assert_eq!(row(&report, 10)["observed_queued_or_active"], false);
+        assert_eq!(row(&report, 1)["observed_inbox_states"], json!([]));
+        assert_eq!(
+            row(&report, 2)["observed_inbox_states"],
+            json!(["needs_human", "hold_excluded"])
+        );
+        assert_eq!(
+            row(&report, 4)["observed_inbox_states"],
+            json!(["blocked_by_claim"])
+        );
+        assert_eq!(
+            row(&report, 5)["observed_inbox_states"],
+            json!(["agent_failed"])
+        );
+        assert!(!report.to_string().contains("private reason"));
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["issue_traces"], report["issue_traces"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
         assert_eq!(report["roadmap"]["now"], json!(["a"]));
         assert_eq!(report["roadmap"]["next"], json!(["b"]));
         assert!(report["roadmap_items"][9]["diagnostics"]
@@ -875,6 +913,7 @@ mod tests {
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(row(&absent, 1)["observed_inbox_states"], json!([]));
         assert_eq!(absent["monitor"]["source"], Value::Null);
         assert_eq!(absent["monitor"]["active_launches_incomplete"], true);
         assert!(absent["missing_inputs"]

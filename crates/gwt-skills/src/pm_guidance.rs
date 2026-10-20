@@ -60,6 +60,11 @@ key. Link each queued/active Issue to one complete goal or an explicit
 maintenance/compliance category. Never justify priority from an orphan or invalid trace.
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
+Issue traces expose `observed_inbox_states` even for orphan or maintenance work.
+These are the exact supplied inbox states, deduplicated in observation order.
+Queue or active membership alone does not supply an inbox state; absent rows return an empty list.
+Use the states to explain claim contention, holds or failures, retaining Monitor provenance.
+They do not change structural alignment or prove priority, readiness, health or completion.
 
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
@@ -3734,6 +3739,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`observed_issue_states` and `unobserved_issues`",
             "Merged or Released does not prove milestone completion",
             "Never justify priority from an orphan or invalid trace",
+            "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
+            "Queue or active membership alone does not supply an inbox state",
             "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`change_impact`",
             "`directly_affected_issues`",
