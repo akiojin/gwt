@@ -16,6 +16,7 @@ use gwt_core::process::hidden_command;
 use tempfile::TempDir;
 
 const SESSION: &str = "session-admission-test";
+const FOREIGN_SESSION: &str = "session-admission-foreign";
 
 fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path)]) -> Child {
     spawn_gwtd_for_session(home, cwd, envelope, extra_env, SESSION)
@@ -207,10 +208,14 @@ struct CanonicalRun {
 
 impl CanonicalRun {
     fn start(arena: &Arena, cwd: &Path) -> Self {
-        Self::start_command(arena, cwd, "canonical_command_parks")
+        Self::start_for_session(arena, cwd, SESSION)
     }
 
-    fn start_command(arena: &Arena, cwd: &Path, fixture: &str) -> Self {
+    fn start_for_session(arena: &Arena, cwd: &Path, session: &str) -> Self {
+        Self::start_command(arena, cwd, "canonical_command_parks", session)
+    }
+
+    fn start_command(arena: &Arena, cwd: &Path, fixture: &str, session: &str) -> Self {
         let ready = arena.home.path().join("canonical-ready");
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
@@ -218,11 +223,12 @@ impl CanonicalRun {
             "\"{}\" --ignored --exact verification_admission_cli_test::{fixture}",
             exe.display()
         );
-        let child = spawn_gwtd(
+        let child = spawn_gwtd_for_session(
             arena.home.path(),
             cwd,
             &verify_command(&command, 0),
             &[("ADMISSION_READY", &ready), ("ADMISSION_RELEASE", &release)],
+            session,
         );
         let mut run = Self {
             child: Some(child),
@@ -305,7 +311,12 @@ fn verify_run_does_not_wait_for_sibling_development_tests() {
 
 fn assert_canonical_runs_are_serialized(same_worktree: bool) {
     let arena = Arena::new();
-    let first = CanonicalRun::start(&arena, &arena.repo);
+    let session = if same_worktree {
+        SESSION
+    } else {
+        FOREIGN_SESSION
+    };
+    let first = CanonicalRun::start_for_session(&arena, &arena.repo, session);
     let contender = if same_worktree {
         &arena.repo
     } else {
@@ -521,7 +532,7 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     assert!(ok, "initial successful run: {output}");
     let predecessor_path = arena.repo.join(".gwt/skill-state/verification-run.json");
     let predecessor = std::fs::read(&predecessor_path).unwrap();
-    let holder = CanonicalRun::start(&arena, &arena.sibling);
+    let holder = CanonicalRun::start_for_session(&arena, &arena.sibling, FOREIGN_SESSION);
     let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
     let waiting = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
     let id = waiting["attempt_id"].as_str().unwrap();
@@ -670,8 +681,12 @@ fn fixture_process_is_running(pid: u64) -> bool {
 fn caller_cancellation_reclaims_its_command_tree_and_preserves_an_unrelated_process() {
     let arena = Arena::new();
     let mut survivor = arena.spawn_sibling_heavy();
-    let mut run =
-        CanonicalRun::start_command(&arena, &arena.repo, "cancellation_command_tree_parks");
+    let mut run = CanonicalRun::start_command(
+        &arena,
+        &arena.repo,
+        "cancellation_command_tree_parks",
+        SESSION,
+    );
     let tree: serde_json::Value =
         serde_json::from_slice(&std::fs::read(arena.home.path().join("canonical-ready")).unwrap())
             .unwrap();
@@ -904,7 +919,7 @@ fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value
     };
     continuation_wait_ready(&mut first, &signals, "a-first");
     let mut blocker = CanonicalRun {
-        child: Some(spawn_gwtd(
+        child: Some(spawn_gwtd_for_session(
             arena.home.path(),
             &arena.sibling,
             &continuation_run(
@@ -914,6 +929,7 @@ fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value
                 30,
             ),
             &extra_env,
+            FOREIGN_SESSION,
         )),
         release: signals.join("b-heavy.release"),
     };
