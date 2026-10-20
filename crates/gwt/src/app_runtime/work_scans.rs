@@ -538,6 +538,9 @@ mod tests {
 
     #[test]
     fn external_inputs_notice_creation_and_same_size_edits() {
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("global-config");
         let mut inputs = ExternalGitInputs {
