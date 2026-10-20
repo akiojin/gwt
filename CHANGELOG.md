@@ -1,6 +1,124 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.131.0] - 2026-10-20
+
+### Bug Fixes
+
+- **ci:** Invalidate cache when embedded inputs change
+- **ci:** Stabilize Cargo cache fixture log assertions
+- **test:** Freeze clock for stale pool settings save
+- **issue-monitor:** FAIL verdict でレビュー窓を同一 SHA に再 dispatch しない
+- **issue-monitor:** Release settled idle review capacity
+- **issue-monitor:** Retain stopped review pane accounting
+- **issue-monitor:** Close late terminal review panes
+- **guidance:** Continue autonomous in-scope repairs
+- **skills:** Avoid links to runtime-generated guidance
+- **ui:** Settle missing project routes through shared state
+- **issue-monitor:** Keep capacity available without build targets
+- **index:** Stabilize Windows unified store access
+- **scan:** Invalidate cached metadata across input changes
+- **scan:** Reuse absent worktree verdicts safely
+- **test:** Share short socket fixture paths and detect unsafe binds
+- **test:** Isolate TMPDIR regression and install flake prerequisites
+- **hooks:** 起動時の名前取得を identity gate で許可する
+- **monitor:** Align status phase with running launch observations
+- **monitor:** Live 窓の結合を維持して Gate 修正を継続
+- **verify:** Remove measurement CPU caps across verification slots
+- **settings:** Restore candidate agent input choices
+- **settings:** Retain Hermes model suggestions
+- **settings:** Retain agent choices during catalog loading
+- **settings:** Avoid secure-context dependency for model choices
+- **settings:** Wait for named candidate catalog
+- **settings:** Match saved agent aliases in model choices
+- **settings:** Keep candidate saves and choices responsive
+- **test:** Synchronize daemon subscriber callback fixture
+- **gui:** Align launch feedback with notification transitions
+- **gui:** Reuse fresh monitor facts during admission retries
+- **gui:** Serialize monitor launch materialization per project
+- **gui:** Preserve launch identity and bound monitor materialization
+- **gui:** Prefetch queued monitor launch facts
+- **gui:** Skip launch facts for existing delivery panes
+- **gui:** Unblock monitor launch logging and hook replay
+- **test:** Dispatch monitor preparation stages in relaunch fixture
+- **gui:** Emit monitor phase diagnostics from workers
+- **test:** Skip monitor perf fixture before browser setup
+- **test:** Observe the monitor window list response
+- **test:** Require durable monitor launch acknowledgements
+
+### Features
+
+- **search:** Share the SPEC and Issue index
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #5566 PR handoff
+- **work:** PR #5800 の関連付けを記録
+- **work:** Record Issue #5377 pull request
+- **work:** Record issue-4117 pull request
+- **work:** Link Issue #5380 to PR #5808
+- **work:** Link project not-found delivery PR
+- **work:** Record PR #5812 association
+- **work:** Record unified index delivery handoff
+- **work:** Record Issue 5562 verification and delivery
+- **work:** Record PR #5814 association
+- **work:** Record merged project route PR
+- **work:** Link work prune delivery PR
+- **work:** PR #5819 の関連付けを記録する
+- **work:** Record PR #5822 association
+- **work:** PR #5818 の配信記録を保存
+- **work:** Link continue work state migration to PR
+- **work:** PR #5826 の関連付けを記録する
+- **work:** Record candidate settings pull request
+- **work:** Record PR #5827 delivery link
+- **work:** Link session resume state migration to PR
+
+### Performance
+
+- **ci:** Reuse content-verified coverage builds
+- **memory:** Release decoded Work events across source aliases
+- **git:** Share worktree inventories across repository callers
+- **ci:** Preserve same-revision coverage artifacts
+- **work:** Report containerless intake events once
+- **scan:** Reuse unchanged workspace metadata scans
+- **gui:** Prepare Issue Monitor launches off the event loop
+- **gui:** Defer home fallback and share materialization lock
+- **gui:** Reserve monitor agent names on worker
+
+### Refactor
+
+- **rust:** Remove proven unused code and dependencies
+- **ui:** Work 投影を共有状態から描画する
+- **index:** Keep ASCII store paths unchanged
+- **scan:** Clone input paths after fingerprinting
+- **ui:** Render work prune feedback from shared state
+- **ui:** Render continue work outcomes from shared state
+- **ui:** Render session resume outcomes from shared state
+
+### Testing
+
+- **git:** Use repository process helpers in inventory checks
+- **pm:** 準備完了fixtureの実時間依存を除去
+- **monitor:** Assert launch registration without wall clock
+- **search:** Update shared publisher failure coverage
+- **search:** Expect shared writer for SPEC repairs
+- **search:** Target the Issues navigation button
+- **search:** Cover the shared SPEC rebuild writer
+- **scan:** Lock environment while comparing external inputs
+- **issue-monitor:** Synchronize refused launch scan assertions
+- **verify:** 計測記録 fixture の HOME を固定する
+- **settings:** Synchronize live candidate assertions
+- **settings:** Fence candidate fixture startup
+- **settings:** Align embedded candidates with native selects
+- **gui:** Verify live prompt receipt in launch performance fixture
+- **gui:** Isolate terminal predecessor launch scenarios
+- **gui:** Keep launch fixture cache outside isolated temp
+- **gui:** Isolate provider resume availability cases
+
+### Ci
+
+- **rust:** Enforce unused dependency checks in required lint
+
 ## [9.130.0] - 2026-10-20
 
 ### Bug Fixes
