@@ -789,6 +789,11 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
+work, so the PM can explain claim contention, holds or failures. States retain
+observation order without duplicates; missing inbox rows return an empty list,
+even for queued or active Issues. These observations do not change goal alignment
+or determine priority, readiness, health or completion.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
