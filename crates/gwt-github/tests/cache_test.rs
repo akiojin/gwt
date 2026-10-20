@@ -8,7 +8,7 @@ use std::{
 };
 
 use gwt_github::{
-    body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    body::{SectionLocation, SectionsIndex, SpecBody, SpecMeta},
     cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
@@ -647,12 +647,6 @@ fn write_snapshot_prunes_stale_comment_files() {
         "v2 must prune the dropped 200.md"
     );
     assert!(comments_dir.join("300.md").exists());
-}
-
-// Keep Comment in use so the import is not a lint warning.
-#[allow(dead_code)]
-fn _ensure_comment_is_used(c: Comment) -> Comment {
-    c
 }
 
 // SPEC-2017 T-008: apply_phase_change rewrites the labels array on the cached
