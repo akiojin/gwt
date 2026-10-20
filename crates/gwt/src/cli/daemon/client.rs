@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_connects_to_daemon_and_round_trips_a_frame() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -240,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_handshake_fails_when_auth_token_mismatches() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_handshake_fails_when_protocol_version_mismatches() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -311,7 +311,7 @@ mod tests {
         // The initial monitor load runs after spawn_server returns, on this
         // current-thread runtime. Keep its fixture budget pinned through Status.
         let _prefs_budget = server::pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -376,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_frame_fans_out_to_subscriber_through_daemon() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -447,7 +447,7 @@ mod tests {
         // subscribed to the same channel. Phase H2-H4 will rely on
         // this — runtime status / hook events / launch lifecycle all
         // assume "broadcast to N gwt instances" is the default.
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -524,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribed_client_receives_published_broadcast_events() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");

@@ -670,7 +670,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let gwt_home = temp.path().join(".gwt");
             let caller = scope(&temp, "caller");
             Self {
@@ -692,7 +692,8 @@ mod tests {
 
         fn socket_path(&self, name: &str) -> PathBuf {
             let path = self.temp.path().join(format!("{name}.sock"));
-            let listener = UnixListener::bind(&path).expect("bind test socket");
+            let listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&path))
+                .expect("bind test socket");
             drop(listener);
             path
         }
@@ -1226,7 +1227,9 @@ mod tests {
                 "test-daemon".to_string(),
             );
             let slow_socket = fixture.temp.path().join("slow.sock");
-            let slow_listener = UnixListener::bind(&slow_socket).expect("bind slow socket");
+            let slow_listener =
+                UnixListener::bind(gwt_core::test_support::checked_socket_path(&slow_socket))
+                    .expect("bind slow socket");
             let slow = DaemonEndpoint::new(
                 scope(&fixture.temp, "slow"),
                 std::process::id(),
