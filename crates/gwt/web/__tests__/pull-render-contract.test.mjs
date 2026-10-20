@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Project open error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.context === '/project_open_error');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'frontendUnits.projectWorkspaceShell.renderProjectPicker();']) {
+    const mutated = app.replace('case "project_open_error":', `case "project_open_error": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Remote branch receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
