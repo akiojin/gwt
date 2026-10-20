@@ -6725,12 +6725,30 @@ fn prepare_monitor_relaunch(
             strategy,
         );
     drain_queued_blocking_tasks(&queued);
+    let mut events =
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    // Answer delivery prepares another completion, just as the real GUI dispatches it.
+    loop {
+        drain_queued_blocking_tasks(&queued);
+        let has_prepared = {
+            let recorded = fixture.recorded_events.lock().expect("recorded events");
+            recorded
+                .iter()
+                .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
+        };
+        if !has_prepared {
+            break;
+        }
+        events.extend(fixture.runtime.handle_issue_monitor_launch_prepared(
+            take_issue4803_monitor_preparation(&fixture.recorded_events),
+        ));
+    }
     fixture.runtime.blocking_tasks = previous_spawner;
-    fixture
-        .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ))
+    events
 }
 
 fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
