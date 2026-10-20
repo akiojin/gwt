@@ -144,6 +144,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expect(input).toBeEnabled();
         await input.fill(String(manual));
         await input.press("Tab");
+        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expectOverride(page, manual);
         await expect(mode).toHaveValue("manual");
         await expect(input).toHaveValue(String(manual));

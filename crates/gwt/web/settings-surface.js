@@ -279,7 +279,12 @@ function renderIssuesSettingsPanel(panel, options) {
     if (control) slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
-  const max = field(launch, "Max active", "number", status?.max_active_agents ?? 0);
+  if (panel.dataset.maxActiveProject !== project?.project_root) delete panel.dataset.maxActiveDraft;
+  panel.dataset.maxActiveProject = project?.project_root || "";
+  let committedMax = status?.max_active_agents_override;
+  const max = field(launch, "Max active", "number", committedMax == null
+    ? status?.max_active_agents ?? 0
+    : panel.dataset.maxActiveDraft ?? committedMax);
   const capacityExplanation = "Maximum number of issue agents the monitor may run at once. Auto uses the current recommended capacity; Manual sets a fixed maximum.";
   setControlExplanation(max, capacityExplanation, "settings-max-active");
   launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
@@ -301,16 +306,67 @@ function renderIssuesSettingsPanel(panel, options) {
   capacity.className = "settings-issues-capacity";
   setControlExplanation(capacity, capacityExplanation, "settings-capacity");
   max.replaceWith(capacity);
-  capacity.append(mode, max);
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.className = "wizard-button";
+  apply.textContent = "Apply";
+  apply.setAttribute("aria-label", "Apply Max active");
+  setControlExplanation(apply, "Save the final Manual limit. Editing the number does not save intermediate values.", "settings-max-active-apply");
+  const updateApply = () => {
+    const value = Number(max.value);
+    apply.disabled = max.disabled || !Number.isInteger(value) || value < 1 || value === committedMax;
+  };
+  updateApply();
+  capacity.append(mode, max, apply);
+  const message = document.createElement("span");
+  message.className = "settings-help";
+  message.setAttribute("role", "status");
+  capacity.appendChild(message);
+  let latestStatus = status;
+  panel.updateMaxActiveStatus = nextStatus => {
+    latestStatus = nextStatus;
+    const wasAuto = max.disabled;
+    committedMax = nextStatus?.max_active_agents_override ?? null;
+    max.disabled = committedMax == null;
+    mode.querySelector(`[value="${max.disabled ? "auto" : "manual"}"]`).selected = true;
+    if (max.disabled || wasAuto || panel.dataset.maxActiveDraft == null) {
+      delete panel.dataset.maxActiveDraft;
+      max.value = String(committedMax ?? nextStatus?.max_active_agents ?? 0);
+    }
+    updateApply();
+    message.textContent = max.disabled && !nextStatus?.agent_capacity?.measurement_complete
+      ? "Measuring capacity…"
+      : Number(nextStatus?.active_count) > Number(nextStatus?.max_active_agents)
+        ? "Existing agents continue; new launches wait until active agents fall below this limit."
+        : "";
+    message.hidden = !message.textContent;
+  };
+  panel.updateMaxActiveStatus(status);
   mode.addEventListener("change", () => {
+    delete panel.dataset.maxActiveDraft;
     max.disabled = mode.value === "auto";
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
+    committedMax = max.disabled ? null : Number(max.value);
+    updateApply();
+    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax,
+      max_active_agents: committedMax ?? latestStatus?.max_active_agents });
     send({ kind: "set_issue_monitor_max_active_agents",
-      max_active_agents: mode.value === "auto" ? null : Number(max.value) });
+      max_active_agents: committedMax });
   });
-  max.addEventListener("change", () => {
+  const editMax = () => {
+    if (max.disabled) return;
+    panel.dataset.maxActiveDraft = max.value;
+    updateApply();
+  };
+  max.addEventListener("input", editMax);
+  max.addEventListener("change", editMax);
+  apply.addEventListener("click", () => {
+    if (apply.disabled || latestStatus?.max_active_agents_override == null) return;
     const value = Number(max.value);
-    if (!max.disabled && Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
+    committedMax = value;
+    delete panel.dataset.maxActiveDraft;
+    updateApply();
+    send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
   });
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
@@ -897,7 +953,8 @@ export function createSettingsSurface({
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
-            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea");
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea, [aria-label='Apply Max active']");
+          if (section === "issues") panel?.updateMaxActiveStatus?.(current.status);
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,

@@ -35,10 +35,23 @@ pub(crate) fn cached_list_response_with(
     now: DateTime<Utc>,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
+    cached_list_response_at_with(cache_dir, key, now, LIST_CACHE_TTL_SECS, fetch)
+        .map(|(_, stdout)| stdout)
+}
+
+/// Cache a list within the caller's freshness limit and return its acquisition
+/// time, so a failed full refresh cannot renew the age of reused pages.
+pub fn cached_list_response_at_with(
+    cache_dir: &Path,
+    key: &str,
+    now: DateTime<Utc>,
+    ttl_secs: i64,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<(DateTime<Utc>, String), String> {
     // A short common lock prevents cleanup from deleting a concurrently
     // refreshed page. Never hold it across the live fetch.
     if let Some(_lock) = list_cache_lock(cache_dir) {
-        reclaim_expired_list_pages(cache_dir, now, LIST_CACHE_TTL_SECS);
+        reclaim_expired_list_pages(cache_dir, now, ttl_secs);
     }
     let path = cache_dir.join(list_cache_file_name(key));
     if let Some(cached) = std::fs::read(&path)
@@ -46,11 +59,9 @@ pub(crate) fn cached_list_response_with(
         .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
     {
         let age = now.signed_duration_since(cached.fetched_at).num_seconds();
-        if cached.key == key
-            && (0..LIST_CACHE_TTL_SECS).contains(&age)
-            && valid_list_response(&cached.stdout)
+        if cached.key == key && (0..ttl_secs).contains(&age) && valid_list_response(&cached.stdout)
         {
-            return Ok(cached.stdout);
+            return Ok((cached.fetched_at, cached.stdout));
         }
     }
     // Expired or unreadable entries never hide a failed live read. Cache only
@@ -68,7 +79,7 @@ pub(crate) fn cached_list_response_with(
             }
         }
     }
-    Ok(stdout)
+    Ok((now, stdout))
 }
 
 fn list_cache_file_name(key: &str) -> String {
@@ -77,7 +88,19 @@ fn list_cache_file_name(key: &str) -> String {
     format!("{:016x}.json", hasher.finish())
 }
 
-fn list_cache_lock(cache_dir: &Path) -> Option<std::fs::File> {
+struct ListCacheLock {
+    file: std::fs::File,
+}
+
+impl Drop for ListCacheLock {
+    fn drop(&mut self) {
+        // A fork/dup can retain the open file description after our File closes.
+        // Release the lock when this critical section ends, before closing it.
+        let _ = self.file.unlock();
+    }
+}
+
+fn list_cache_lock(cache_dir: &Path) -> Option<ListCacheLock> {
     std::fs::create_dir_all(cache_dir).ok()?;
     // Do not create diagnostic sidecars that could replace unknown files.
     let file = std::fs::File::options()
@@ -88,7 +111,7 @@ fn list_cache_lock(cache_dir: &Path) -> Option<std::fs::File> {
         .open(cache_dir.join(".cache.lock"))
         .ok()?;
     file.try_lock().ok()?;
-    Some(file)
+    Some(ListCacheLock { file })
 }
 
 /// Called only under the same lock as publication. Unrecognized files and
@@ -465,6 +488,74 @@ mod tests {
         assert!(
             !new_page.exists(),
             "publication must honor the cleanup lock"
+        );
+    }
+
+    #[test]
+    fn issue_5730_failed_refresh_pages_keep_their_original_freshness() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut calls = 0;
+        // Two readers retry the same ten-page refresh every 30 seconds after
+        // downstream work fails. Nine continuation pages caused `https:` spend.
+        for tick in 0..120 {
+            let now = start + chrono::Duration::seconds(tick * 30);
+            for _reader in 0..2 {
+                for page in 1..=10 {
+                    let (fetched_at, _) = cached_list_response_at_with(
+                        cache.path(),
+                        &format!("page-{page}"),
+                        now,
+                        900,
+                        || {
+                            calls += 1;
+                            Ok("HTTP/2.0 200 OK\n\r\n[]".into())
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fetched_at,
+                        start + chrono::Duration::seconds(tick / 30 * 900)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            calls, 40,
+            "four acquisitions per page per hour, shared by readers"
+        );
+        println!("Issue #5730 replay: 2 readers, 120 scans/hour, 10 general pages: 2400 -> {calls} fetches; https continuations 2160 -> 36");
+
+        let failure = cached_list_response_at_with(
+            cache.path(),
+            "page-1",
+            start + chrono::Duration::seconds(3600),
+            900,
+            || Err("live failure".into()),
+        );
+        assert_eq!(
+            failure.unwrap_err(),
+            "live failure",
+            "expiry must not hide a failed refresh"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn list_cache_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let cache = tempfile::tempdir().unwrap();
+        let lock = list_cache_lock(cache.path()).unwrap();
+        // dup models a parallel fork retaining the same open file description.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(list_cache_lock(cache.path()).is_none());
+        drop(lock);
+        let reacquired = list_cache_lock(cache.path());
+        drop(inherited);
+        assert!(
+            reacquired.is_some(),
+            "a completed cache operation must unlock"
         );
     }
 

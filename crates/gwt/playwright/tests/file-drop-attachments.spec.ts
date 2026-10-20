@@ -23,6 +23,91 @@ test.describe("Browser file drop attachments", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("runtime status receivers preserve details and isolate windows", async ({ page }, testInfo) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+    await expect(tile).toBeVisible();
+    const tileNode = await tile.elementHandle();
+    const agent = page.locator(".workspace-window[data-id='agent-1']");
+    const chip = agent.locator(".status-chip");
+    const chipNode = await chip.elementHandle();
+    const message = agent.locator(".overlay-message");
+    const shellChip = page.locator(".workspace-window[data-id='shell-1'] .status-chip");
+    const shellBefore = await shellChip.getAttribute("class");
+    const emit = (event: Record<string, unknown>) => page.evaluate(event => {
+      window.__emitFileDropBackendEvent?.(event);
+    }, event);
+
+    // Controlled inbound frames exercise the checkout receiver and real renderers.
+    await emit({ kind: "terminal_status", id: "agent-1", status: "error", detail: "Launch <failed> & retry" });
+    await expect(chip).toHaveClass(/\berror\b/);
+    await expect(chip).toHaveAttribute("title", /Launch <failed> & retry/);
+    await expect(message).toHaveText("Launch <failed> & retry");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "window_state", window_id: "agent-1", state: "stopped" });
+    await expect(chip).toHaveClass(/\bstopped\b/);
+    await expect(message).toHaveText("Launch <failed> & retry");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "window_state", window_id: "agent-1", state: "running" });
+    await expect(chip).toHaveClass(/\brunning\b/);
+    await expect(message).toBeEmpty();
+    await expect(chip).not.toHaveAttribute("title", /Launch <failed> & retry/);
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "terminal_status", id: "agent-1", status: "starting", detail: "Preparing runtime" });
+    await expect(chip).toHaveClass(/\bstarting\b/);
+    await expect(message).toHaveText("Preparing runtime");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "terminal_status", id: "agent-1", status: "running", detail: null });
+    await expect(chip).toHaveClass(/\brunning\b/);
+    await expect(message).toBeEmpty();
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    expect(await chip.evaluate((node, original) => node === original, chipNode)).toBe(true);
+    expect(await tile.evaluate((node, original) => node === original, tileNode)).toBe(true);
+    await expect(agent.locator(".terminal-overlay")).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath("terminal-status.png") });
+  });
+
+  test("launch progress updates only its window message and copy state", async ({ page }, testInfo) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.evaluate(() => window.__emitFileDropBackendEvent?.({
+      kind: "terminal_status", id: "agent-1", status: "starting", detail: null,
+    }));
+    // Legacy overlays stay parked and hidden; progress must not cover the TTY.
+    const overlay = page.locator(".workspace-window[data-id='agent-1'] .terminal-overlay");
+    await expect(overlay).toHaveCount(1);
+    await expect(overlay).toBeHidden();
+    const message = overlay.locator(".overlay-message");
+    const copy = overlay.locator(".overlay-copy-button");
+    const messageNode = await message.elementHandle();
+    const otherBefore = await page.locator(".workspace-window[data-id='shell-1'] .overlay-message").textContent();
+    const emit = (id: string, text: string) => page.evaluate(({ id, text }) => {
+      window.__emitFileDropBackendEvent?.({ kind: "launch_progress", id, message: text });
+    }, { id, text });
+
+    await emit("agent-1", "Preparing <workspace> & runtime");
+    await expect(message).toHaveText("Preparing <workspace> & runtime");
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(false);
+    await expect(copy).toBeEnabled();
+    await emit("agent-1", "");
+    await expect(message).toBeEmpty();
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(true);
+    await expect(copy).toBeDisabled();
+    await emit("missing-window", "Ignore this unknown window");
+    await emit("agent-1", "Starting Agent — progress received");
+    await expect(message).toHaveText("Starting Agent — progress received");
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(false);
+    await expect(copy).toBeEnabled();
+    expect(await message.evaluate((node, original) => node === original, messageNode)).toBe(true);
+    await expect(page.locator(".workspace-window[data-id='shell-1'] .overlay-message")).toHaveText(otherBefore || "");
+    await expect(overlay).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath("launch-progress.png") });
+  });
+
   test("dropping a file on an Agent window body uploads and sends uploaded attach_files", async ({
     page,
   }) => {
@@ -242,7 +327,7 @@ test.describe("Browser file drop attachments", () => {
 
   test("the attachment surface auto-hides after the backend reports Attached (Issue #3315)", async ({
     page,
-  }) => {
+  }, testInfo) => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
 
@@ -253,15 +338,30 @@ test.describe("Browser file drop attachments", () => {
       ".agent-tile[data-agent-id='agent-1'] .attachment-progress",
     );
 
+    await emitAttachmentProgress(page, { operationId: "", phase: "failed", message: "ignored" });
+    await expect(agentProgress).toHaveCount(0);
     await emitAttachmentProgress(page, {
       operationId: "op-attach",
       phase: "staging",
-      filename: "notes.txt",
+      filename: "/workspace/notes.txt",
       bytesDone: 8,
       bytesTotal: 16,
     });
     await expect(agentProgress).toBeVisible();
     await expect(agentProgress).toContainText("Staging");
+    await expect(agentProgress).toContainText("notes.txt");
+    await expect(agentProgress).not.toContainText("/workspace/");
+    const surfaceNode = await agentProgress.elementHandle();
+    const progressbar = agentProgress.locator('[role="progressbar"]');
+    await expect(progressbar).toHaveAttribute("aria-valuenow", "50");
+    await emitAttachmentProgress(page, {
+      operationId: "op-attach", phase: "injecting", filename: "notes.txt", bytesDone: 12, bytesTotal: 16,
+    });
+    await expect(agentProgress).toContainText("Injecting");
+    await expect(progressbar).toHaveAttribute("aria-valuenow", "75");
+    expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
+    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("attachment-progress.png") });
 
     await emitAttachmentProgress(page, {
       operationId: "op-attach",
@@ -283,7 +383,7 @@ test.describe("Browser file drop attachments", () => {
 
   test("a Failed phase persists until the next attachment replaces it (Issue #3315)", async ({
     page,
-  }) => {
+  }, testInfo) => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
 
@@ -305,6 +405,7 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toBeVisible();
     await expect(agentProgress).toContainText("disk full");
     await expect(agentProgress).toHaveAttribute("data-state", "error");
+    const surfaceNode = await agentProgress.elementHandle();
 
     // Unlike Attached, a failure has no auto-hide timer — it must stay visible
     // past the success dwell so the user can read it.
@@ -325,6 +426,9 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toContainText("Staging");
     await expect(agentProgress).toContainText("report.pdf");
     await expect(agentProgress).not.toContainText("disk full");
+    expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
+    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("attachment-replacement.png") });
   });
 
   test("pasting an image on an Agent terminal uploads and shows progress", async ({ page }) => {

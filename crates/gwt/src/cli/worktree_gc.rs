@@ -1346,6 +1346,9 @@ mod tests {
             );
         };
         git(&repo, &["init", "-q", "-b", "develop"]);
+        // Fixture commits must not leave detached Git maintenance in the process census.
+        git(&repo, &["config", "maintenance.auto", "false"]);
+        git(&repo, &["config", "gc.auto", "0"]);
         git(&repo, &["config", "user.email", "t@example.com"]);
         git(&repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("README.md"), "x").expect("write");
@@ -1489,19 +1492,22 @@ mod tests {
         assert!(held.removed.is_empty(), "{held:?}");
         let held_json = serde_json::to_value(&held).expect("held report");
         assert_eq!(held_json["unreclaimed_bytes"], 4096, "{held_json}");
-        assert!(held_json["kept"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["bytes"] == 4096)
-            .unwrap()["reason"]
-            .as_str()
-            .unwrap()
-            .contains(if legacy_exclusive {
-                "legacy global verification barrier"
-            } else {
-                "target lock"
-            }));
+        assert!(
+            held_json["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["bytes"] == 4096)
+                .unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .contains(if legacy_exclusive {
+                    "legacy global verification barrier"
+                } else {
+                    "target lock"
+                }),
+            "{held_json}"
+        );
         let unrelated_target = tmp.path().join("unrelated-target");
         std::fs::create_dir_all(&unrelated_target).expect("unrelated target");
         assert_eq!(

@@ -7,7 +7,31 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
-import { renderProjectCloneModal, createOpenProjectPathDialog } from "../project-clone-modal.js";
+import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathDialog } from "../project-clone-modal.js";
+
+test("folder picker callbacks read immutable authority and selected data in order", () => {
+  const changes = [], selected = [], sends = [];
+  const picker = createFolderPickerController({
+    send: event => sends.push(event),
+    onChange: (pending, message) => changes.push({ pending, message }),
+    onSelected: event => selected.push({ event, pending: changes.at(-1).pending }),
+  });
+  assert.equal(changes.length, 0, "mount does not notify existing callbacks");
+  picker.begin("clone_parent");
+  const pending = changes.at(-1).pending;
+  assert.ok(Object.isFrozen(pending), "observers cannot mutate request authority");
+  picker.receive({ kind: "picker_started", purpose: "clone_parent", request_id: 7 });
+  assert.equal(changes.length, 1, "request acknowledgement does not rebuild the form");
+  assert.equal(pending.request_id, null, "previous snapshots stay unchanged");
+  const event = { kind: "picker_selected", purpose: "clone_parent", request_id: 7, path: "/projects" };
+  picker.receive(event);
+  event.path = "/mutated";
+  assert.equal(selected[0].event.path, "/projects");
+  assert.ok(Object.isFrozen(selected[0].event));
+  assert.equal(selected[0].pending, null, "clear busy state before delivering the destination");
+  assert.deepEqual(sends, [{ kind: "select_clone_project_parent" }]);
+  picker.dispose();
+});
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(resolve(here, "..", "index.html"), "utf8");
@@ -85,15 +109,17 @@ test("manual open retains its path on failure and closes only after open success
 
 test("url mode renders URL and destination controls", () => {
   const { modalEl, dialogEl, createNode } = mount();
+  const snapshot = Object.freeze(state());
+  let draftUrl;
 
   renderProjectCloneModal({
     modalEl,
     dialogEl,
-    state: state(),
+    state: snapshot,
     createNode,
     onClose: noop,
     onModeChange: noop,
-    onUrlChange: noop,
+    onUrlChange: value => { draftUrl = value; },
     onParentSelect: noop,
     onSearchQueryChange: noop,
     onSearch: noop,
@@ -106,6 +132,12 @@ test("url mode renders URL and destination controls", () => {
   assert.ok(dialogEl.querySelector("#clone-project-url-input"));
   assert.ok(dialogEl.querySelector("#clone-project-parent-button"));
   assert.ok(dialogEl.querySelector("#clone-project-start"));
+  const input = dialogEl.querySelector("#clone-project-url-input");
+  input.value = "";
+  input.dispatchEvent(new modalEl.ownerDocument.defaultView.Event("input"));
+  assert.equal(draftUrl, "");
+  assert.equal(dialogEl.querySelector("#clone-project-start").disabled, true);
+  assert.equal(snapshot.url, "https://github.com/akiojin/gwt.git");
 });
 
 test("search mode renders candidates and selects repository URL", () => {

@@ -482,6 +482,7 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
         .insert(
             "handle-a".to_string(),
             super::super::RecoveryCenterAction {
+                client_id: "client-a".to_string(),
                 generation: 1,
                 board_entry_id: Some("entry-a".to_string()),
             },
@@ -500,6 +501,80 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
             board_entry_id: None,
             ..
         }
+    ));
+}
+
+#[test]
+fn recovery_center_missing_authority_is_not_found_without_creating_storage() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = gwt_agent::Session::new(&repo, "work/issue-4252", gwt_agent::AgentId::Codex);
+    session.save(&runtime.sessions_dir).unwrap();
+    // The project has recovery storage, but this Session has none.
+    RecoveryStore::for_repo(&repo, "another-session").unwrap();
+    let intents = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("recovery/intents");
+    for _ in 0..2 {
+        let context = runtime.project_context("tab-1").unwrap();
+        let events = runtime.load_recovery_center_events(&context, "client", "load");
+        assert_eq!(
+            serde_json::to_value(&events[0].event).unwrap()["status"],
+            "not_found"
+        );
+        assert_eq!(fs::read_dir(&intents).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn recovery_center_discovers_saved_project_store_after_worktree_deletion() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let worktree = temp.path().join("deleted-worktree");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/recovery",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
+    session.project_state_root = Some(repo.clone());
+    session.repo_hash = Some(
+        gwt_core::paths::project_scope_hash(&repo)
+            .as_str()
+            .to_owned(),
+    );
+    session.save(&runtime.sessions_dir).unwrap();
+    RecoveryStore::for_repo(&worktree, &session.id)
+        .unwrap()
+        .prepare(
+            "prepare-deleted",
+            recovery_center_test_intent(
+                &session.id,
+                "recovery-deleted",
+                "board-deleted",
+                BoardWorktreeForm::BranchBacked,
+                "Retained delivery",
+            ),
+        )
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let context = runtime.project_context("tab-1").unwrap();
+    let events = runtime.load_recovery_center_events(&context, "client", "load");
+    assert!(matches!(&events[0].event,
+        BackendEvent::RecoveryCenterState { items, .. } if items.len() == 1
     ));
 }
 
@@ -769,10 +844,34 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         } if entry_id == "board-ack-action"
     ));
+
+    let context = runtime.project_context("tab-1").unwrap();
+    let foreign_result = runtime.open_recovery_center_board_entry_events(
+        &context,
+        "client-other",
+        "foreign-open",
+        generation,
+        &acknowledged_handle,
+    );
+    let foreign_wire = serde_json::to_value(&foreign_result[0].event).unwrap();
+    assert!(foreign_wire.get("board_entry_id").is_none());
+    assert!(foreign_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("client")));
+
+    runtime.load_recovery_center_events(&context, "client-other", "other-load");
+    assert!(
+        matches!(
+            &open(&mut runtime, generation, acknowledged_handle.clone())[0].event,
+            BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. }
+                if id == "board-ack-action"
+        ),
+        "another client's load must preserve the original client's handle"
+    );
     let stale_result = open(
         &mut runtime,
         generation.saturating_sub(1),
-        acknowledged_handle,
+        acknowledged_handle.clone(),
     );
     assert!(matches!(
         &stale_result[0].event,
@@ -781,6 +880,53 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         }
     ));
+    let stale_wire = serde_json::to_value(&stale_result[0].event).unwrap();
+    assert!(stale_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("generation")));
+
+    runtime.load_recovery_center_events(&context, "client-recovery", "reload");
+    let reloaded = open(&mut runtime, generation, acknowledged_handle.clone());
+    let reloaded_wire = serde_json::to_value(&reloaded[0].event).unwrap();
+    assert!(reloaded_wire.get("board_entry_id").is_none());
+    assert!(reloaded_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("handle")));
+
+    // A captured context cannot authorize actions after the tab is closed.
+    runtime.project_tab_incarnations.remove("tab-1");
+    for closed in [
+        runtime.handle_frontend_event_in_scope(
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "closed-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+            &ClientScope::Project(context.project_key.clone()),
+        ),
+        runtime.handle_frontend_event_for_project(
+            &context,
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "stale-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            closed.len(),
+            1,
+            "closed project actions require an explicit refusal"
+        );
+        let closed_wire = serde_json::to_value(&closed[0].event).unwrap();
+        assert!(
+            closed_wire["error"].as_str().is_some_and(
+                |error| error.contains(&acknowledged_handle) && error.contains("project")
+            )
+        );
+    }
     assert_eq!(pending.state, RecoveryState::Pending);
 }
 

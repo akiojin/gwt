@@ -851,6 +851,7 @@ pub use gwt::project_transport::{ClientScope, DispatchTarget, OutboundEvent};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecoveryCenterAction {
+    pub(crate) client_id: String,
     pub(crate) generation: u64,
     pub(crate) board_entry_id: Option<String>,
 }
@@ -11674,7 +11675,8 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        _ => Vec::new(),
+                        event => recovery_center::rejected_action_events(&client_id, &event)
+                            .unwrap_or_default(),
                     };
                 };
                 self.handle_frontend_event_for_project(&context, client_id, event)
@@ -11981,7 +11983,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return Vec::new();
+            return recovery_center::rejected_action_events(&client_id, &event).unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
@@ -12684,6 +12686,8 @@ impl AppRuntime {
                 request_id,
             ),
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
+                let changed_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let publication = self.publish_project_issue_monitor_control(
                     context,
                     serde_json::json!({ "max_active_agents": max_active_agents }),
@@ -12694,7 +12698,11 @@ impl AppRuntime {
                     publication,
                     "max-active",
                     |monitor| {
-                        monitor.set_max_active_agents_override(max_active_agents);
+                        monitor.set_max_active_agents_override_with_source(
+                            max_active_agents,
+                            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                            &changed_at,
+                        );
                         monitor.refresh_agent_capacity(&context.project_root);
                     },
                 )

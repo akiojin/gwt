@@ -262,6 +262,12 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(persisted.max_active_agents, 4);
+    let change =
+        serde_json::to_value(&persisted).expect("prefs json")["max_active_last_change"].clone();
+    assert_eq!(change["source"], "gui");
+    assert_eq!(change["max_active_agents_override"], 4);
+    chrono::DateTime::parse_from_rfc3339(change["changed_at"].as_str().expect("change time"))
+        .expect("RFC3339 change time");
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.effect_authority_epoch, 7);
     assert_eq!(persisted.pending_effects, journal);

@@ -10,6 +10,168 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Runtime hook Board receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file)
+    .filter(finding => finding.context === '/runtime_hook_event');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.event.kind;',
+    'frontendUnits.boardSurface.handleRuntimeHookEvent(event);']) {
+    const mutated = app.replace('case "runtime_hook_event":', `case "runtime_hook_event": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Attachment progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/terminal-attachments.js';
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([[file, source]]),
+  }).filter(finding => finding.context === '/attachment_progress');
+  assert.deepEqual(findings(attachments), []);
+  for (const bypass of ['document.body.textContent = event.phase;',
+    'renderAttachmentProgress(event);']) {
+    const mutated = attachments.replace('function handleAttachmentProgress(event) {',
+      `function handleAttachmentProgress(event) { ${bypass}`);
+    assert.notEqual(mutated, attachments);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Terminal status receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => ['/terminal_status', '/window_state'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['terminal_status', 'window_state']) {
+    for (const bypass of ['document.body.textContent = event.status;',
+      'applyStatus(event.id, event.status, event.detail);']) {
+      const mutated = app.replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
+test("Launch progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/terminal-attachments.js', attachments]]),
+  }).filter(finding => finding.context === '/launch_progress');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'updateTerminalOverlayCopyState(document.body);']) {
+    const mutated = app.replace('case "launch_progress": {', `case "launch_progress": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Open Project result receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  const findings = code => scanModule(code, file)
+    .filter(finding => finding.root === 'applyOpenProjectPathResultReceiveEvent');
+  assert.match(source, /receive: applyOpenProjectPathResultReceiveEvent/);
+  assert.deepEqual(findings(source), []);
+  const bypass = source.replace('function applyOpenProjectPathResultReceiveEvent(event) {',
+    'function applyOpenProjectPathResultReceiveEvent(event) { status.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Clone Project receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/project-clone-modal.js', readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyCloneProjectReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['clone_project_parent_selected', 'github_repository_search_results', 'github_repository_search_error', 'clone_project_progress', 'clone_project_done', 'clone_project_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderProjectCloneModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Migration receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/migration-modal.js', readFileSync(new URL('../migration-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyMigrationReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['migration_detected', 'migration_progress', 'migration_done', 'migration_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderMigrationModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update availability and auto-apply receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_state', '/update_auto_apply'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_state', 'update_auto_apply']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update staged-ready receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_ready', '/update_apply_pending_persisted'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_ready', 'update_apply_pending_persisted']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update apply error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_apply_error');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_apply_error":',
+    'case "update_apply_error": document.body.textContent = event.reason;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Update progress receiver commits model data and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_progress');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_progress":',
+    'case "update_progress": document.body.textContent = event.downloaded;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Project metadata receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const metadata = readFileSync(new URL('../project-page-metadata.js', import.meta.url), 'utf8');
@@ -519,4 +681,17 @@ test("Close Project receiver commits shared data and rejects direct rendering", 
     "if (event.kind === 'project_closed') { hide();");
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
+});
+
+
+test("folder picker receiver commits shared state and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  assert.match(source, /receive: applyFolderPickerReceiveEvent/);
+  const options = { rootName: 'applyFolderPickerReceiveEvent' };
+  assert.deepEqual(scanModule(source, file, options), []);
+  const bypass = source.replace('function applyFolderPickerReceiveEvent(event) {',
+    'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
 });

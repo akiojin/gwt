@@ -3181,8 +3181,19 @@ where
 fn spawn_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     let hub = gwt_core::process_console::global();
     let label = format!("gh {}", args.join(" "));
-    let options =
+    let mut options =
         gwt_core::process_console::SpawnOptions::new(label.clone()).current_dir(repo_path);
+    if let ["api", path, ..] = args {
+        if path.contains("/pulls?") {
+            options = options.github_caller(if path.contains("state=closed") {
+                "pr-status.closed-pulls"
+            } else if path.contains("state=open") {
+                "pr-status.open-pulls"
+            } else {
+                "pr-status.pulls"
+            });
+        }
+    }
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,
@@ -7617,7 +7628,8 @@ mod tests {
         cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
         gh.calls.clear();
 
-        // The account's GraphQL budget is nearly gone (observed by any process).
+        // The account's GraphQL budget is nearly gone in the warm probe's
+        // same reset window (observed by any process).
         let exhausted_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
         let mut resources = BTreeMap::new();
         resources.insert(
@@ -7625,7 +7637,7 @@ mod tests {
             ResourceWindow {
                 limit: 5000,
                 remaining: 120,
-                reset_at: exhausted_at + chrono::Duration::minutes(30),
+                reset_at: now_3891() + chrono::Duration::hours(1),
             },
         );
         ledger.record_probe(&ProbeSnapshot {

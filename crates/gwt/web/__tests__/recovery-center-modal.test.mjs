@@ -93,6 +93,39 @@ function choose(select, value, window) {
   select.dispatchEvent(new window.Event("change"));
 }
 
+test("missing storage is distinct from an empty existing Store", () => {
+  const { document, controller } = fixture();
+  controller.open();
+  ready(controller, { status: "not_found", items: [] });
+  assert.equal(document.querySelector(".recovery-center-status").textContent,
+    "No recovery Store was found for this project.");
+  assert.equal(document.querySelector(".recovery-center-status").getAttribute("role"), "status");
+});
+
+test("rejected action shows its handle and reason without opening Board", () => {
+  const { document, controller, focused } = fixture();
+  controller.open();
+  ready(controller);
+  controller.handleBoardEntry({ request_id: "action-1", generation: 11,
+    error: "Recovery action handle opaque-acknowledged is invalid: generation mismatch" });
+  assert.equal(focused.length, 0);
+  // Only the exact outstanding action can report its rejection.
+  assert.equal(document.querySelector(".recovery-center-status").hidden, true);
+  const select = document.getElementById("recovery-center-state-filter");
+  for (const option of select.querySelectorAll("option")) {
+    if (option.value === "all") option.setAttribute("selected", "");
+    else option.removeAttribute("selected");
+  }
+  select.dispatchEvent(new document.defaultView.Event("change"));
+  document.querySelector(".recovery-center-row__board-action").click();
+  controller.handleBoardEntry({ request_id: "action-1", generation: 11,
+    error: "Recovery action handle opaque-acknowledged is invalid: generation mismatch" });
+  assert.equal(document.querySelector(".recovery-center-status").getAttribute("role"), "alert");
+  assert.match(document.querySelector(".recovery-center-status").textContent,
+    /opaque-acknowledged.*generation mismatch/);
+  assert.equal(focused.length, 0);
+});
+
 test("Recovery Center CSS references defined Operator tokens", () => {
   const components = readFileSync(resolve(here, "..", "styles", "components.css"), "utf8");
   const recoveryCss = components.split("/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */")[1];

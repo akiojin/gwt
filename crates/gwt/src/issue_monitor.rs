@@ -935,12 +935,29 @@ pub enum IssueMonitorMaxActiveMode {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorMaxActiveChangeSource {
+    Gui,
+    JsonOperation,
+}
+
+/// Last explicit setting change; automatic capacity observations preserve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorMaxActiveChange {
+    pub changed_at: String,
+    pub source: IssueMonitorMaxActiveChangeSource,
+    pub max_active_agents_override: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_mode: IssueMonitorMaxActiveMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     pub priority_order: Vec<u64>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
@@ -1224,6 +1241,7 @@ impl Default for IssueMonitorPrefs {
             enabled: false,
             max_active_agents: 1,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
+            max_active_last_change: None,
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
@@ -3453,6 +3471,8 @@ pub struct IssueMonitorStatusView {
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_override: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     #[serde(default)]
     pub agent_capacity: AgentCapacity,
     pub total_candidates: usize,
@@ -3658,6 +3678,8 @@ pub struct IssueMonitorAgentStatus {
     pub max_active: usize,
     #[serde(default)]
     pub max_active_agents_override: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     #[serde(default)]
     pub agent_capacity: AgentCapacity,
     pub enabled: bool,
@@ -4605,6 +4627,8 @@ pub struct IssueMonitorState {
     pub config: IssueMonitorConfig,
     #[serde(default)]
     max_active_agents_mode: IssueMonitorMaxActiveMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     /// Machine observations are refreshed separately and never stored in prefs.
     #[serde(skip)]
     agent_capacity: AgentCapacity,
@@ -7183,6 +7207,7 @@ impl IssueMonitorState {
             queue_label_observation: None,
             config,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            max_active_last_change: None,
             agent_capacity: AgentCapacity::default(),
             gui_connected: false,
             inbox: Vec::new(),
@@ -7278,6 +7303,7 @@ impl IssueMonitorState {
         };
         let mut state = Self::new(config);
         state.max_active_agents_mode = prefs.max_active_agents_mode;
+        state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
@@ -7451,6 +7477,7 @@ impl IssueMonitorState {
             // Auto persists its accepted limit for incomplete measurements and restarts.
             max_active_agents: self.effective_max_active_agents(),
             max_active_agents_mode: self.max_active_agents_mode,
+            max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
@@ -9898,6 +9925,21 @@ impl IssueMonitorState {
         }
     }
 
+    /// Record only explicit GUI/JSON changes, independently of measured limits.
+    pub fn set_max_active_agents_override_with_source(
+        &mut self,
+        max_active_agents: Option<usize>,
+        source: IssueMonitorMaxActiveChangeSource,
+        changed_at: &str,
+    ) {
+        self.set_max_active_agents_override(max_active_agents);
+        self.max_active_last_change = Some(IssueMonitorMaxActiveChange {
+            changed_at: changed_at.to_string(),
+            source,
+            max_active_agents_override: self.max_active_agents_override(),
+        });
+    }
+
     pub fn max_active_agents_override(&self) -> Option<usize> {
         (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
             .then_some(self.config.max_active.max(1))
@@ -10394,6 +10436,7 @@ impl IssueMonitorState {
             };
         }
         self.max_active_agents_mode = disk.max_active_agents_mode;
+        self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
@@ -12653,6 +12696,7 @@ impl IssueMonitorState {
             active_count: self.active_count(),
             max_active_agents: self.effective_max_active_agents(),
             max_active_agents_override: self.max_active_agents_override(),
+            max_active_last_change: self.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
@@ -12943,6 +12987,7 @@ impl IssueMonitorState {
             active_launches_incomplete: false,
             max_active: self.effective_max_active_agents(),
             max_active_agents_override: self.max_active_agents_override(),
+            max_active_last_change: self.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
@@ -21557,7 +21602,8 @@ impl IssueMonitorState {
     }
 
     /// AC-4: an Active record whose pane has been idle for twice
-    /// `stuck_timeout_secs` needs a human; ask the PM, naming the count.
+    /// `stuck_timeout_secs` without an in-force wait needs a human;
+    /// ask the PM, naming the count.
     fn notify_stuck_idle_windows(
         &mut self,
         outcome: &mut IssueMonitorIdleReconciliation,
@@ -21569,6 +21615,12 @@ impl IssueMonitorState {
             .idle_windows()
             .into_iter()
             .filter(|idle| idle.bound && idle.idle_kind == IssueMonitorIdleKind::StuckUnknown)
+            .filter(|idle| {
+                !idle
+                    .issue_number
+                    .and_then(|number| self.autonomous_records.get(&number))
+                    .is_some_and(|record| autonomous_wait_in_force(record, now))
+            })
             .collect::<Vec<_>>();
         let count = stuck.len();
         for idle in stuck {
@@ -22390,6 +22442,44 @@ mod tests {
     }
 
     #[test]
+    fn max_active_change_survives_refresh_restore_and_stale_writer_rebase() {
+        let old_change = serde_json::json!({
+            "changed_at": "2026-10-19T00:00:00Z",
+            "source": "json_operation",
+            "max_active_agents_override": 7,
+        });
+        let mut original = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        original["max_active_agents_mode"] = "manual".into();
+        original["max_active_agents"] = 7.into();
+        original["max_active_last_change"] = old_change.clone();
+        let original: IssueMonitorPrefs = serde_json::from_value(original).unwrap();
+        let mut stale = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original);
+        stale.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(
+            serde_json::to_value(stale.agent_status()).unwrap()["max_active_last_change"],
+            old_change,
+            "refresh and restore retain the last explicit change"
+        );
+
+        let new_change = serde_json::json!({
+            "changed_at": "2026-10-19T00:01:00Z",
+            "source": "gui",
+            "max_active_agents_override": 3,
+        });
+        let mut latest = serde_json::to_value(stale.prefs()).unwrap();
+        latest["max_active_agents"] = 3.into();
+        latest["max_active_last_change"] = new_change.clone();
+        let latest: IssueMonitorPrefs = serde_json::from_value(latest).unwrap();
+        stale.rebase_daemon_driver_prefs(&latest);
+        assert_eq!(stale.effective_max_active_agents(), 3);
+        assert_eq!(
+            serde_json::to_value(stale.prefs()).unwrap()["max_active_last_change"],
+            new_change,
+            "a stale writer rebases the limit and its audit together"
+        );
+    }
+
+    #[test]
     fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
@@ -23082,6 +23172,7 @@ mod tests {
                 pending_claim_issues: Some(Vec::new()),
                 max_active: 3,
                 max_active_agents_override: Some(3),
+                max_active_last_change: None,
                 agent_capacity: AgentCapacity::default(),
                 enabled: true,
                 gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
@@ -38683,9 +38774,22 @@ mod tests {
         assert!(monitor
             .stuck_autonomous_issues("2026-06-29T02:00:00Z")
             .is_empty());
+        // Issue #5630 AC-4: even a fresh snapshot with stale pane output
+        // cannot reclaim a launch protected by the declared wait.
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T02:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
         assert!(monitor
             .recover_stuck_autonomous("2026-06-29T02:00:00Z")
             .is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
         assert_eq!(
             monitor.attempt_count(42),
             0,
@@ -38725,6 +38829,25 @@ mod tests {
             vec![42],
             "past the cap the stale heartbeat counts again"
         );
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T03:11:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
+        assert!(matches!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T03:11:00Z")
+                .as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].window_id, "tab-1::agent-1");
     }
 
     #[test]
@@ -43936,6 +44059,35 @@ mod tests {
                 .any(|notice| notice.level == "warn" && notice.message.contains("2 idle window")),
             "a PM-facing notice carries the count: {notices:?}"
         );
+
+        // Issue #5630 AC-4: a declared wait suspends timed PM steering too.
+        monitor.declare_autonomous_wait(44, "verification admission", "slot available", after);
+        let waiting = "2026-09-07T04:42:00Z";
+        observe(&mut monitor, waiting);
+        let outcome = monitor.reconcile_idle_windows(&active, waiting);
+        assert_eq!(outcome.steering_requested, vec![45]);
+        assert!(monitor.autonomous_record(44).unwrap().steering.is_none());
+        let notices = monitor.take_autonomous_notices();
+        assert!(notices
+            .iter()
+            .any(|notice| notice.level == "warn" && notice.message.contains("1 idle window")));
+
+        // Once the same declaration expires, both rows need a decision again.
+        let expired = "2026-09-07T07:22:00Z";
+        observe(&mut monitor, expired);
+        let outcome = monitor.reconcile_idle_windows(&active, expired);
+        assert_eq!(outcome.steering_requested, vec![44, 45]);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert!(monitor
+            .autonomous_record(44)
+            .unwrap()
+            .steering
+            .as_ref()
+            .unwrap()
+            .reason
+            .contains("2 idle window"));
     }
 
     #[test]

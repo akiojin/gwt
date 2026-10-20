@@ -499,7 +499,10 @@ expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Autonomous and Start / Stop return to the summary when collapsed.
 Auto-apply updates is in **System**. Select **Manual** to edit
-Max active; **Auto** displays the calculated value without editing. Auto-refill is
+Max active, then select **Apply** to save the final number. **Auto** disables editing
+and shows the effective limit, with **Measuring capacity…** while measurement is pending.
+Lowering the limit below the active count keeps existing agents running; new launches
+wait until the active count falls below the limit. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
@@ -519,13 +522,15 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
 follow the recommendation again. Existing saved limits remain Manual. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_last_change` records the last explicit setting change with `changed_at`
+and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
 **Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
@@ -776,6 +781,33 @@ PM decomposes it into Issues, registers them, plans the design-required ones,
 decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
+
+Ask the PM to link planned Issues to a project goal or an explicit maintenance
+or compliance category. `pm.plan.status` shows the saved planning revision and a
+`policy` assessment with unlinked or invalid work, Now/Next/Later items, and
+missing milestone information. Monitor observations include their source and
+scan time; unavailable or incomplete observations do not prove full coverage.
+Reported milestone health and confidence remain unverified until supporting
+evidence is connected.
+Milestone diagnostics also show the observed Monitor inbox states and unobserved
+Issues from explicit milestone membership and roadmap references to a unique,
+nonempty milestone ID. These are reference facts, not proof of goal alignment.
+Use the states to inspect holds, failures or claim contention; missing observations
+and Merged/Released states do not prove milestone health or completion.
+Goal diagnostics list roadmap references, Issue numbers, observed inbox states and
+unobserved Issues for links explicitly naming a unique, nonempty exact goal ID.
+Invalid links remain reference facts; milestone-only or category-only links do
+not expand membership, and empty or duplicate goal IDs resolve no links.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` remains missing until a supporting source is connected.
+Goal, milestone and roadmap changes also retain their reason, revision, changed
+values and directly affected Issues in the planning audit receipts. Goal changes
+include only Issues explicitly linked to that goal through roadmap items. These records do
+not confirm that dependent work or its agents have been notified.
+Risk, decision and policy edits also retain their redacted changed values in these
+receipts. They have no direct Issue mapping, which is explicitly marked as missing;
+an empty affected-Issue set does not mean the change has no impact. Recurring edits
+remain outside this change evidence.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
@@ -1867,6 +1899,11 @@ a local estimate of the per-minute secondary limit (GitHub does not expose
 it; the estimate comes from this machine's spawn ledger under
 `~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
 decision a periodic read would get right now.
+
+The source breakdown identifies callers such as `issue-cache.refresh` and
+`issue-monitor.queued-issues`, including paginated requests. Failed Monitor
+cache refreshes reuse general pages within the existing 15-minute freshness
+window; queue reads and explicit refreshes still fetch live data.
 
 ### Releasing
 

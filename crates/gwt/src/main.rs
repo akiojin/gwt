@@ -3292,6 +3292,7 @@ mod tests {
         let status = gwt::IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),

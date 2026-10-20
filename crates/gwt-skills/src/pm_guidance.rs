@@ -51,6 +51,56 @@ session. Do not change the provider's working directory to that checkout or
 import its configuration. Only the explicitly opted-in project policy copied
 into this generated skill supplements the PM contract.
 
+## Goal and roadmap diagnostics
+
+Use `pm.plan.status` to read the saved planning revision and its additive
+`policy` diagnostics before explaining planned work. Use `pm.plan.apply`
+for bounded planning upserts with expected revision, reason and idempotency
+key. Link each queued/active Issue to one complete goal or an explicit
+maintenance/compliance category. Never justify priority from an orphan or invalid trace.
+Resolve missing goals, conflicting links and missing milestone metadata
+through the existing protected planning operation, then read back the result.
+
+Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
+changed fields before/after and `directly_affected_issues` from old/new membership
+and, for goals and milestones, referencing roadmap links.
+Goal changes use only roadmap links explicitly naming the goal, including invalid
+links as reference facts, without expanding milestone membership or proving alignment.
+Read these receipts in
+`pm.plan.status` alongside their reason and revisions when explaining a date,
+goal, scope or reported-health change. An identical upsert has no direct impact;
+an exact retry returns the original receipt. Older receipts lack this evidence.
+This record does not prove dependency propagation or owner notification:
+`missing_inputs` names the absent dependency graph and active-owner handoff.
+Risk, Decision and Policy changes retain redacted before/after values
+in the same receipt, including decision source revision and policy version/budgets.
+These records have no direct Issue mapping:
+`direct_issue_mapping` is missing; an empty Issue set does not mean no impact.
+Use the recorded values and reason when explaining a revised decision or policy;
+they do not prove downstream propagation or notification. Recurring changes remain outside this evidence.
+
+The policy groups Now/Next/Later and explains missing milestone inputs;
+authored health and confidence are not verified evidence. Effective health
+and confidence remain unknown until exit/metric evidence is connected.
+Each milestone's `observed_issue_states` and `unobserved_issues` cover its
+explicit Issues plus roadmap Issues referencing its unique, nonempty ID.
+These are reference facts, including invalid goal links, not proof of alignment.
+Read the exact inbox states to explain a hold, failure or claim contention;
+an empty list does not prove health. Merged or Released does not prove milestone completion.
+Absent inbox rows stay unobserved even when other Monitor lists mention the Issue.
+Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references
+to its unique, nonempty exact ID, including invalid links as reference facts.
+Milestone-only or category-only references do not expand Goal membership;
+empty or duplicate Goal IDs resolve no links and name the missing identity input.
+The Goal's `observed_issue_states` and `unobserved_issues` use the same inbox boundary.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` stays missing until a canonical source is connected.
+Monitor source, last scan time and incomplete coverage are separate from the
+planning revision: no observation, an old scan or a cache projection cannot
+prove full fleet alignment. This read-only assessment never launches work
+or changes priority; deadline/scope impact propagation and FR-045 delivery remain separate.
+Do not claim a change handoff was delivered or acknowledged from diagnostics.
+
 ## Direct messages to peer PMs
 
 Use `pm.peer.send {project, kind, text, reply_to?}` to contact another
@@ -3668,6 +3718,21 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`pm.plan.status`",
+            "`pm.plan.apply`",
+            "authored health and confidence are not verified evidence",
+            "`observed_issue_states` and `unobserved_issues`",
+            "Merged or Released does not prove milestone completion",
+            "Never justify priority from an orphan or invalid trace",
+            "deadline/scope impact propagation and FR-045 delivery remain separate",
+            "`change_impact`",
+            "`directly_affected_issues`",
+            "Goal changes use only roadmap links explicitly naming the goal",
+            "Risk, Decision and Policy changes retain redacted before/after values",
+            "`direct_issue_mapping` is missing; an empty Issue set does not mean no impact",
+            "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
+            "Goal observations do not prove outcome achievement or metric evidence",
+            "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",
             "`released` array from `issue.monitor.status`",

@@ -1157,7 +1157,15 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      const updateCtaController = createUpdateCtaController({
+      const {
+        handleUpdateState: applyUpdateState,
+        handleUpdateAutoApply: applyUpdateAutoApply,
+        handleUpdateProgress: applyUpdateProgress,
+        handleUpdateApplyError: applyUpdateApplyError,
+        handleUpdateReady: applyUpdateReady,
+        handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted,
+        ...updateCtaController
+      } = createUpdateCtaController({
         document,
         send,
         setVersionState,
@@ -5065,6 +5073,31 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const terminalStatusModel = createUiStateStore(null);
+      terminalStatusModel.subscribe(state => state, state => {
+        if (!state) return;
+        applyStatus(state.id, state.status, state.detail);
+        if (state.kind === "terminal_status") {
+          startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
+        }
+      });
+
+      const launchProgressModel = createUiStateStore(null);
+      launchProgressModel.subscribe(progress => progress, progress => {
+        if (!progress) return;
+        const element = windowMap.get(progress.id);
+        const messageEl = element?.querySelector(".terminal-overlay .overlay-message");
+        if (messageEl) {
+          messageEl.textContent = progress.message;
+          updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
+        }
+      });
+
+      const runtimeHookModel = createUiStateStore(null);
+      runtimeHookModel.subscribe(state => state, state => {
+        if (state) frontendUnits.boardSurface.handleRuntimeHookEvent(state);
+      });
+
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
@@ -5346,28 +5379,20 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
-            frontendUnits.terminalHost.applyStatus(
-              event.id,
-              event.status,
-              event.detail,
-            );
-            startupMetrics.onTerminalStatus(event.id, event.status, terminalMap.get(event.id));
+            terminalStatusModel.update(() => ({
+              kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+            }));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);
             break;
           case "window_state":
-            frontendUnits.terminalHost.applyStatus(event.window_id, event.state);
+            terminalStatusModel.update(() => ({
+              kind: event.kind, id: event.window_id, status: event.state,
+            }));
             break;
           case "launch_progress": {
-            const element = windowMap.get(event.id);
-            if (element) {
-              const messageEl = element.querySelector(".terminal-overlay .overlay-message");
-              if (messageEl) {
-                messageEl.textContent = event.message;
-                updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
-              }
-            }
+            launchProgressModel.update(() => ({ id: event.id, message: event.message }));
             break;
           }
           case "project_index_status":
@@ -5546,15 +5571,17 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
-            frontendUnits.boardSurface.handleRuntimeHookEvent(event);
+            runtimeHookModel.update(() => ({
+              event: event.event ? { kind: event.event.kind, project_root: event.event.project_root } : null,
+            }));
             break;
           case "update_state":
             if (event.state === "available") {
-              updateCtaController.handleUpdateState(event);
+              applyUpdateState(event);
             }
             break;
           case "update_progress":
-            updateCtaController.handleUpdateProgress({
+            applyUpdateProgress({
               downloaded: event.downloaded,
               total: event.total,
               asset: event.asset,
@@ -5562,20 +5589,20 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "update_ready":
-            updateCtaController.handleUpdateReady({
+            applyUpdateReady({
               version: event.version,
               asset_path: event.asset_path,
             });
             break;
           case "update_apply_error":
-            updateCtaController.handleUpdateApplyError({
+            applyUpdateApplyError({
               stage: event.stage,
               reason: event.reason || event.message,
               log_path: event.log_path,
             });
             break;
           case "update_apply_pending_persisted":
-            updateCtaController.handleUpdateApplyPendingPersisted({
+            applyUpdateApplyPendingPersisted({
               version: event.version,
             });
             break;
@@ -5584,7 +5611,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
-            updateCtaController.handleUpdateAutoApply({
+            applyUpdateAutoApply({
               version: event.version,
               phase: event.phase,
               grace_secs: event.grace_secs,
