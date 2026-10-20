@@ -392,6 +392,7 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
 
+    let config_write = crate::repository::lock_repository_config_write(repo)?;
     let read = hidden_command("git")
         .args(["config", "--get", "remote.origin.fetch"])
         .current_dir(repo)
@@ -440,6 +441,7 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
             "normalize_fetch_refspec: write failed: {stderr}"
         )));
     }
+    drop(config_write);
 
     let fetch = hidden_command("git")
         .args(["fetch", "origin", "--prune"])
@@ -465,6 +467,12 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
 /// (e.g. local-only branches), so we treat any non-zero git exit as a no-op.
 pub fn set_upstream(worktree: &Path, branch: &str) -> Result<()> {
     let upstream = format!("origin/{branch}");
+    // Preserve the existing no-op for non-repository Git failures.
+    let _config_write = if gwt_core::repo_hash::resolve_repository_common_dir(worktree).is_some() {
+        Some(crate::repository::lock_repository_config_write(worktree)?)
+    } else {
+        None
+    };
     let output = hidden_command("git")
         .args(["branch", "--set-upstream-to", &upstream, branch])
         .current_dir(worktree)

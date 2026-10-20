@@ -1,0 +1,224 @@
+{
+  "issue": 5596,
+  "phase": "before",
+  "workload": "12 pre-admitted Monitor deliveries; offline provider; real checkout GUI, PTY, SessionStart; same batch observed in headed dark and light Chromium",
+  "source_sha": "0b087f0b79dd5578dacadea51165caf467e43598",
+  "binary_sha256": "9A8FE8434B5B97C70E05F2984CE91D73545A3CAE07244D6839AE3DF459EF6895",
+  "gui_pid": 22044,
+  "started_at": "2026-10-16T03:18:53.3813607Z",
+  "source_snapshot": [
+    {
+      "source": "0b087f0b79dd5578dacadea51165caf467e43598",
+      "path": "crates/gwt/src/main.rs",
+      "blob_sha": "ec03bd6c0c2f00d9bb0824b27bf46004c34d012d"
+    },
+    {
+      "source": "0b087f0b79dd5578dacadea51165caf467e43598",
+      "path": "crates/gwt/src/app_runtime/mod.rs",
+      "blob_sha": "7b7561c034e85699d2a46242cf3a6b2a41cceddd"
+    },
+    {
+      "source": "0b087f0b79dd5578dacadea51165caf467e43598",
+      "path": "crates/gwt/src/app_runtime/wizard.rs",
+      "blob_sha": "c05433540b000f11e0831ea2dd2f6aa4b082097b"
+    },
+    {
+      "source": "0b087f0b79dd5578dacadea51165caf467e43598",
+      "path": "crates/gwt/src/app_runtime/launch.rs",
+      "blob_sha": "3f334305d0f09bcae7b9f703d34e2d8c00ab7282"
+    },
+    {
+      "source": "0b087f0b79dd5578dacadea51165caf467e43598",
+      "path": "crates/gwt/src/perf/dispatch.rs",
+      "blob_sha": "b2cc147e72aeb48d84df4c4ac67324f5054b92fc"
+    }
+  ],
+  "full_handler_timing": {
+    "event": "IssueMonitorLaunchPrepared",
+    "count": 36,
+    "total_ms": 17427,
+    "max_ms": 2258
+  },
+  "rolling_minute_upper_bound_ms": 17463,
+  "precise_slow_handler_rows": [
+    {
+      "schema_version": 1,
+      "type": "gui_dispatch_summary",
+      "timestamp": "2026-10-16T03:19:54.352183400Z",
+      "stream": "ui",
+      "target": "handler:IssueMonitorLaunchPrepared",
+      "value": 17087.5994,
+      "unit": "ms",
+      "dispatch": {
+        "pid": 22044,
+        "count": 23,
+        "total_ms": 17087.5994,
+        "p95_ms": 2236.0552000000002,
+        "max_ms": 2258.8397000000004,
+        "pending_max": 652,
+        "pending_unknown_count": 0,
+        "window_ms": 60527.446599999996,
+        "dropped_windows": 0,
+        "window_ended_at": "2026-10-16T03:19:54.352183400Z"
+      }
+    }
+  ],
+  "integer_handler_rows": [
+    {
+      "timestamp": "2026-10-16T12:19:01.738745900+09:00",
+      "elapsed_ms": 423
+    },
+    {
+      "timestamp": "2026-10-16T12:19:02.284122100+09:00",
+      "elapsed_ms": 544
+    },
+    {
+      "timestamp": "2026-10-16T12:19:02.851879+09:00",
+      "elapsed_ms": 567
+    },
+    {
+      "timestamp": "2026-10-16T12:19:03.393647800+09:00",
+      "elapsed_ms": 541
+    },
+    {
+      "timestamp": "2026-10-16T12:19:04.244643100+09:00",
+      "elapsed_ms": 850
+    },
+    {
+      "timestamp": "2026-10-16T12:19:05.030524100+09:00",
+      "elapsed_ms": 784
+    },
+    {
+      "timestamp": "2026-10-16T12:19:06.406361+09:00",
+      "elapsed_ms": 1374
+    },
+    {
+      "timestamp": "2026-10-16T12:19:08.642774300+09:00",
+      "elapsed_ms": 2236
+    },
+    {
+      "timestamp": "2026-10-16T12:19:10.901962400+09:00",
+      "elapsed_ms": 2258
+    },
+    {
+      "timestamp": "2026-10-16T12:19:12.555292400+09:00",
+      "elapsed_ms": 1652
+    },
+    {
+      "timestamp": "2026-10-16T12:19:13.144096+09:00",
+      "elapsed_ms": 586
+    },
+    {
+      "timestamp": "2026-10-16T12:19:13.727985800+09:00",
+      "elapsed_ms": 583
+    },
+    {
+      "timestamp": "2026-10-16T12:19:17.926015100+09:00",
+      "elapsed_ms": 275
+    },
+    {
+      "timestamp": "2026-10-16T12:19:17.975021500+09:00",
+      "elapsed_ms": 46
+    },
+    {
+      "timestamp": "2026-10-16T12:19:18.576341300+09:00",
+      "elapsed_ms": 7
+    },
+    {
+      "timestamp": "2026-10-16T12:19:18.631189+09:00",
+      "elapsed_ms": 3
+    },
+    {
+      "timestamp": "2026-10-16T12:19:18.755236600+09:00",
+      "elapsed_ms": 123
+    },
+    {
+      "timestamp": "2026-10-16T12:19:18.851120900+09:00",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-16T12:19:20.879252700+09:00",
+      "elapsed_ms": 1647
+    },
+    {
+      "timestamp": "2026-10-16T12:19:20.914985800+09:00",
+      "elapsed_ms": 29
+    },
+    {
+      "timestamp": "2026-10-16T12:19:20.959777200+09:00",
+      "elapsed_ms": 43
+    },
+    {
+      "timestamp": "2026-10-16T12:19:22.180991700+09:00",
+      "elapsed_ms": 1187
+    },
+    {
+      "timestamp": "2026-10-16T12:19:22.245291100+09:00",
+      "elapsed_ms": 11
+    },
+    {
+      "timestamp": "2026-10-16T12:19:22.248459500+09:00",
+      "elapsed_ms": 2
+    },
+    {
+      "timestamp": "2026-10-16T12:19:28.076196600+09:00",
+      "elapsed_ms": 63
+    },
+    {
+      "timestamp": "2026-10-16T12:19:28.641224300+09:00",
+      "elapsed_ms": 70
+    },
+    {
+      "timestamp": "2026-10-16T12:19:28.701663900+09:00",
+      "elapsed_ms": 37
+    },
+    {
+      "timestamp": "2026-10-16T12:19:28.738053700+09:00",
+      "elapsed_ms": 33
+    },
+    {
+      "timestamp": "2026-10-16T12:19:29.789035400+09:00",
+      "elapsed_ms": 1019
+    },
+    {
+      "timestamp": "2026-10-16T12:19:29.849623600+09:00",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-16T12:19:29.893754300+09:00",
+      "elapsed_ms": 43
+    },
+    {
+      "timestamp": "2026-10-16T12:19:29.939899900+09:00",
+      "elapsed_ms": 45
+    },
+    {
+      "timestamp": "2026-10-16T12:19:30.058304900+09:00",
+      "elapsed_ms": 33
+    },
+    {
+      "timestamp": "2026-10-16T12:19:30.437186900+09:00",
+      "elapsed_ms": 78
+    },
+    {
+      "timestamp": "2026-10-16T12:19:30.569534700+09:00",
+      "elapsed_ms": 107
+    },
+    {
+      "timestamp": "2026-10-16T12:19:30.590405300+09:00",
+      "elapsed_ms": 20
+    }
+  ],
+  "continuous_summary_coverage": true,
+  "dropped_summary_windows": 0,
+  "gui_event_loop_stall_count": 0,
+  "provider_receipts": 12,
+  "browser_error_count_dark": 0,
+  "browser_error_count_light": 0,
+  "expected_performance_red": true,
+  "limitations": [
+    "Offline already-admitted delivery replay measures real GUI completion and PTY materialization. It excludes upstream claim/admission and model execution. gui_dispatch_summary retains only handlers over 50 ms; debug dispatch timing provides all event totals/max at integer millisecond resolution. The 200 ms assertion uses a conservative +1 ms per handler upper bound. Both themes inspect the same owned launch batch.",
+    "36 handler completions include replays for 12 producers. Upstream admission is excluded. The 5 s formal stall watchdog is distinct from the 50 ms handler gate.",
+    "Acknowledgements had not fully converged at shutdown (3 launched, 9 pending); this fixture asserts unique materialization rather than changing the existing ACK protocol."
+  ]
+}

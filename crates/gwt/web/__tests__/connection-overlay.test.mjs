@@ -48,6 +48,23 @@ function createFixture() {
   return { document };
 }
 
+test("dispose cancels pending or visible overlays and prevents later reconnect UI", () => {
+  for (const visible of [false, true]) {
+    const { document } = createFixture();
+    const timers = createFakeTimers();
+    const overlay = createConnectionOverlay({ document, ...timers });
+    overlay.setConnected(false);
+    if (visible) timers.fireAll();
+    overlay.dispose();
+    assert.equal(timers.size(), 0);
+    assert.equal(document.querySelector('.connection-overlay'), null);
+    overlay.setConnected(false);
+    timers.fireAll();
+    assert.equal(timers.size(), 0);
+    assert.equal(document.querySelector('.connection-overlay'), null);
+  }
+});
+
 test("disconnect shows the overlay only after the grace period", () => {
   const fixture = createFixture();
   const timers = createFakeTimers();

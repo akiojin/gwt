@@ -162,7 +162,6 @@ crates/gwt/src/app_runtime/persist_dispatcher.rs|enqueue_burst_does_not_wait_for
 crates/gwt/src/app_runtime/persist_dispatcher.rs|wait_idle|letdeadline=Instant::now()+timeout|1
 crates/gwt/src/app_runtime/persist_dispatcher.rs|worker_waits_full_coalesce_window_before_writing|assert!(elapsed>=Duration::from_millis(50),,)|1
 crates/gwt/src/app_runtime/pty_io.rs|hold_process_close_finalizer_worker_for_test|started_receiver.recv_timeout(Duration::from_secs(5)).expect()|1
-crates/gwt/src/app_runtime/tests.rs|commit_issue4803_monitor_preparation|assert!(started.elapsed()<Duration::from_millis(500),,started.elapsed())|1
 crates/gwt/src/app_runtime/tests.rs|continue_work_activated_successor_recovery_case|assert!(Instant::now()<retry_deadline,)|1
 crates/gwt/src/app_runtime/tests.rs|continue_work_activated_successor_recovery_case|letretry_deadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/src/app_runtime/tests.rs|dispatch_launch_materialization_request|wait_for_recorded_event(label,recorded_events,|events||1

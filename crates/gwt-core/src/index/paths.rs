@@ -9,10 +9,7 @@
 //!     chroma.sqlite3
 //!     .lock
 //!     meta.json
-//!   manifest-specs.json
-//!   specs/
-//!     chroma.sqlite3
-//!     .lock
+//!   manifest-issues.json
 //!   memory/
 //!     chroma.sqlite3
 //!     .lock
@@ -44,7 +41,7 @@ use crate::{
 pub enum Scope {
     /// Worktree-independent: GitHub Issues.
     Issues,
-    /// Repo-scoped: cached SPEC Issue search index.
+    /// Repo-scoped: SPEC filter of the shared Issue index.
     Specs,
     /// Repo-scoped: post-mortem fix knowledge sourced from
     /// `.gwt/work/memory.md`.
@@ -72,8 +69,7 @@ impl Scope {
     /// Subdirectory leaf name relative to the worktree-or-repo prefix.
     pub fn subdir(self) -> &'static str {
         match self {
-            Scope::Issues => "issues",
-            Scope::Specs => "specs",
+            Scope::Issues | Scope::Specs => "issues",
             Scope::Memory => "memory",
             Scope::Discussions => "discussions",
             Scope::Works => "works",

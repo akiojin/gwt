@@ -29,10 +29,21 @@ pub const SKILL_NAME: &str = "gwt-coordination";
 /// gwt-managed worktree, independent of project documentation.
 pub const SKILL_DESCRIPTION: &str = "Use at the start of a gwt-managed session and when coordinating Board or Work updates, regardless of project AGENTS.md / CLAUDE.md content.";
 
+// Keep the first operation shared by the startup command and identity gate.
+macro_rules! pane_name_first_action_operation {
+    () => {
+        "pane.name"
+    };
+}
+
+/// Startup operation admitted before an Agent has set its Workspace identity.
+pub const PANE_NAME_FIRST_ACTION_OPERATION: &str = pane_name_first_action_operation!();
+
 // Expand the same literal into the generated skill and the hook reminder.
 macro_rules! pane_name_first_action_guidance {
     () => {
-        r#"## Agent name — first action
+        concat!(
+            r#"## Agent name — first action
 
 For every new non-PM Agent, your first action must read your own window's name
 before responding to the user or starting normal work.
@@ -40,7 +51,9 @@ gwt assigns a random, project-unique name in the project's output language
 when the window starts. Do not invent or submit an AI-generated candidate.
 
     gwtd <<'JSON'
-    {"schema_version":1,"operation":"pane.name","params":{}}
+    {"schema_version":1,"operation":""#,
+            pane_name_first_action_operation!(),
+            r#"","params":{}}
     JSON
 
 Use the exact assigned name returned by `pane.name` in reports and handoffs,
@@ -49,6 +62,7 @@ retrying returns that existing name without renaming it.
 
 The PM is exempt: do not call `pane.name` from the PM window.
 "#
+        )
     };
 }
 
@@ -78,6 +92,38 @@ Always write numbers as `Issue #N` / `PR #N` in Board posts, Work summaries,
 window titles, and reports. Never use bare `#N`: GitHub shares one number
 space between Issues and pull requests. Preserve the resource kind when
 copying output; use the `kind` field rather than guessing from a number.
+
+## Autonomous investigation authority
+
+Read the launch route from `execution.status`. When it reports
+`launch_route: autonomous`, Investigation-First still requires investigating
+the root cause, upstream assumptions, downstream impact, and files that must
+change together. Pause edits during investigation, then compare the proposed
+fix with the owner Issue's purpose and acceptance criteria.
+
+If the root-cause fix stays within that scope, do not wait for `進めて` or
+new PM approval. Update the plan/tasks before resuming implementation,
+including any newly required file boundaries, and continue the same owner
+through verification and delivery. An Investigation-First trigger alone does
+not require entering `gwt-discussion`; continue the implementation workflow
+directly rather than entering its approval handoff for an in-scope fix.
+Do not call `execution.blocked` merely to wait for approval of such a fix.
+Do not change the owner's purpose or acceptance criteria to justify a fix.
+
+Request a scope ruling from `agent:pm` only when the proposed change adds a
+new feature, a change to the SPEC's purpose, or another Issue's domain.
+Provide the investigation evidence and proposed boundary; keep the execution
+active while that decision is pending.
+
+Examples, when the repair is necessary to meet the same owner's existing AC:
+
+- Issue #5566: post-delivery measurement identifies the root cause within the original scope: update plan/tasks and continue without PM approval.
+- Issue #5016: slice verification exposes an existing lifecycle defect within the slice's AC: update plan/tasks and continue without PM approval.
+
+Manual or unknown launch routes keep the existing interactive
+Investigation-First discussion and approval contract.
+Permission, safety, and verification gates still apply, as do existing
+lifecycle ownership and recovery requirements.
 
 ## Board (coordination history)
 

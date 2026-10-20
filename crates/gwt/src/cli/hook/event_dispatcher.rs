@@ -50,6 +50,13 @@ pub fn handle_with_input(
         None => output,
     });
     let result = result.map(|output| {
+        if event == "PreToolUse" {
+            append_boundary_advisory(output, event, gate_remediation_context(worktree_root))
+        } else {
+            output
+        }
+    });
+    let result = result.map(|output| {
         let advisory = run_value(event, "external-skill-advisory", || {
             super::external_skill_conflicts::advisory_context(event, input, worktree_root)
         });
@@ -432,6 +439,59 @@ fn same_receipt_path(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
     }
+}
+
+fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
+    use crate::cli::execution_state::{
+        execution_binding_authorizes_current_generation, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    gwt_agent::validate_session_id_path_component(&session_id).ok()?;
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    if session.id != session_id
+        || session.review_dispatch
+        || !same_receipt_path(&session.worktree_path, worktree_root)
+    {
+        return None;
+    }
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(worktree_root),
+    )
+    .ok()?;
+    let record = prefs
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == issue)?;
+    let reason = record.gate_remediation_reason()?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session).ok()??;
+    let kind = match identity.execution_binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => return None,
+    };
+    if !execution_binding_authorizes_current_generation(
+        worktree_root,
+        ExecutionOwnerKey {
+            kind,
+            number: issue,
+        },
+        &session.id,
+        &identity.execution_binding.identity,
+    )
+    .unwrap_or(false)
+    {
+        return None;
+    }
+    let ids = record
+        .acceptance_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.ids.join(", "))
+        .unwrap_or_default();
+    Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -908,6 +968,128 @@ mod tests {
         for event in ["SessionStart", "PreToolUse", "PostToolUse", "Stop"] {
             assert!(enter_event_deadline(event, started).is_none(), "{event}");
         }
+    }
+
+    #[test]
+    fn issue_5248_hook_delivers_gate_reason_and_current_criteria_only_to_its_owner() {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        use crate::issue_monitor::{AutonomousIssueRecord, AutonomousPhase, IssueMonitorPrefs};
+        use crate::issue_monitor_gate::AcceptanceSnapshot;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/issue-5248.git"
+            ])
+            .current_dir(&worktree)
+            .status()
+            .unwrap()
+            .success());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+        let mut session = Session::new(&worktree, "work/issue-5248", AgentId::Codex);
+        session.linked_issue_number = Some(5248);
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 5248,
+        };
+        execution_state::materialize_at_launch(
+            &worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            &worktree,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "issue".into(),
+                owner_number: 5248,
+                identity: execution_state::current_execution_binding(&worktree, owner)
+                    .unwrap()
+                    .unwrap(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut record = AutonomousIssueRecord::new(5248);
+        record.phase = AutonomousPhase::Implementing;
+        record.active_launch_id = Some("tab::agent-1".into());
+        record.reviewed_sha = Some("old-head".into());
+        record.review_passed = Some(true);
+        record.last_failure_message = Some("acceptance criteria changed after launch".into());
+        record.acceptance_snapshot = Some(AcceptanceSnapshot {
+            ids: vec!["AC-1".into(), "AC-R2".into()],
+            visual_surface: false,
+        });
+        let prefs = IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        crate::issue_monitor::save_issue_monitor_prefs(
+            &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree),
+            &prefs,
+        )
+        .unwrap();
+        let output = handle_with_input(
+            "PreToolUse",
+            r#"{"tool_name":"Read","tool_input":{"file_path":"README.md"}}"#,
+            &worktree,
+            Some(&session.id),
+        )
+        .unwrap();
+        let HookOutput::PreToolUseAdditionalContext(context) = output else {
+            panic!("missing remediation context: {output:?}")
+        };
+        assert!(
+            context.contains("acceptance criteria changed after launch"),
+            "{context}"
+        );
+        assert!(context.contains("AC-R2"), "{context}");
+        assert!(context.contains("same window"), "{context}");
+
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        std::fs::copy(
+            sessions.join(format!("{}.toml", session.id)),
+            sessions.join("alias-session.toml"),
+        )
+        .unwrap();
+        {
+            let _alias = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "alias-session");
+            assert!(
+                gate_remediation_context(&worktree).is_none(),
+                "the file name must match the owning Session"
+            );
+        }
+
+        session.linked_issue_number = Some(9999);
+        session.execution_binding = None;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "another owner gets no remediation"
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ env:
   # debug assertions and the unoptimized test behavior stay unchanged.
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   coverage-shard:
@@ -78,8 +79,20 @@ jobs:
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         with:
           components: llvm-tools-preview, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - name: Select instrumented cache
+        id: cache-mode
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
+        shell: bash
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "compiler=$(rustc -vV | sha256sum | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.transport.outputs.sharded }}" = true ] && git cat-file -e HEAD:scripts/ci_coverage_cache.py 2>/dev/null; then
+            echo "rolling=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rolling=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ (steps.transport.outputs.sharded == 'true' || matrix.shard == 1) && steps.cache-mode.outputs.rolling != 'true' }}
         with:
           # llvm-cov builds into its own instrumented target, not target/debug.
           # Develop writes the base-branch cache every PR can restore; reports
@@ -90,6 +103,30 @@ jobs:
           cache-workspace-crates: true
           save-if: ${{ matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         continue-on-error: true
+      # Cache writes are immutable. Keep the environment prefix stable for
+      # restoration, but publish each successful develop revision separately.
+      # Older PR heads keep their supported cache and never run a missing helper.
+      - name: Restore instrumented workspace
+        id: instrumented-cache
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            target/llvm-cov-target
+            target/coverage-cache-source.json
+          key: coverage-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-mode.outputs.compiler }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.config/nextest.toml', '.github/workflows/coverage.yml', 'scripts/ci_coverage_cache.py') }}-${{ steps.cache-mode.outputs.revision }}
+          restore-keys: |
+            coverage-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-mode.outputs.compiler }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.config/nextest.toml', '.github/workflows/coverage.yml', 'scripts/ci_coverage_cache.py') }}-
+        continue-on-error: true
+      - name: Restore verified coverage inputs
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' }}
+        env:
+          COVERAGE_CACHE_RESTORED: ${{ steps.instrumented-cache.outputs.cache-matched-key }}
+        run: python3 scripts/ci_coverage_cache.py restore
       - name: Install cargo-llvm-cov
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -114,7 +151,10 @@ jobs:
           # profiles per instrumented module instead of one copy per PID.
           LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
           NEXTEST_PROFILE: coverage
-        run: node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
+        run: |
+          GWT_COVERAGE_REVISION="$(git rev-parse HEAD)"
+          export GWT_COVERAGE_REVISION
+          node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
         timeout-minutes: 20
       - name: Run pre-shard head coverage
         if: ${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}
@@ -142,6 +182,23 @@ jobs:
           path: target/coverage-export/
           if-no-files-found: error
           retention-days: 1
+      - name: Capture verified coverage inputs
+        id: cache-source
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: python3 scripts/ci_coverage_cache.py capture
+      - name: Save instrumented workspace
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' && steps.cache-source.outputs.cacheable == 'true' && steps.instrumented-cache.outputs.cache-hit != 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            target/llvm-cov-target
+            target/coverage-cache-source.json
+          key: ${{ steps.instrumented-cache.outputs.cache-primary-key }}
+        continue-on-error: true
 
   rust-coverage:
     name: Rust Coverage

@@ -2329,6 +2329,7 @@ format_version: Some(1),
                 driver: None,
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
                     admission: None,
+                    measurement: None,
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,

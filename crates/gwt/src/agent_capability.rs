@@ -32,9 +32,6 @@ pub struct AgentSessionPrincipal {
 #[derive(Clone, PartialEq, Eq)]
 enum AgentExecutionAuthority {
     Inspection,
-    // Prepared issuance is consumed by the continuation coordinator in the
-    // next W-24 slice; this slice establishes its observation-only boundary.
-    #[allow(dead_code)]
     Prepared(Box<gwt_agent::SessionExecutionBinding>),
     Active(Box<gwt_agent::SessionExecutionBinding>),
 }
@@ -302,9 +299,7 @@ impl AgentSessionPrincipal {
         }
     }
 
-    /// Kept as the narrow project-observation check for the forthcoming
-    /// workspace-update route; hook-live only needs the canonical root value.
-    #[allow(dead_code)]
+    /// Whether this principal belongs to the supplied canonical project root.
     pub fn authorizes_project_root(&self, project_root: &Path) -> bool {
         dunce::canonicalize(project_root)
             .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))

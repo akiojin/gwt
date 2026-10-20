@@ -1977,17 +1977,6 @@ enum UserEvent {
         window_id: String,
         generation: u64,
     },
-    /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
-    /// only producer of this variant. The browser UI now handles
-    /// drag/drop natively via the HTML5 API. The variant stays around
-    /// in case a follow-up reintroduces native drag/drop for the tray
-    /// window, but the event_loop arm in `main()` simply drops it.
-    #[allow(dead_code)]
-    NativeFileDrop {
-        paths: Vec<String>,
-        x: i32,
-        y: i32,
-    },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
     },
@@ -2174,6 +2163,7 @@ enum UserEvent {
         waiting: bool,
     },
     IssueMonitorLaunchPrepared(Box<app_runtime::IssueMonitorLaunchPrepared>),
+    IssueMonitorLaunchFactsPrefetched(Box<app_runtime::IssueMonitorLaunchFactsPrefetched>),
     IssueMonitorLaunchRequest {
         project_root: PathBuf,
         issue_number: u64,
@@ -2191,6 +2181,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
+    IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -4741,9 +4732,11 @@ mod tests {
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
+            issue_monitor_launch_queue: Vec::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+            issue_monitor_profile_saves: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -4778,6 +4771,7 @@ mod tests {
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_merge_status_cache: Default::default(),
+            work_merge_scan_queue: Default::default(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -11255,12 +11249,6 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorStartupTimeout { window_id, generation }) => {
                 clients.dispatch(app.handle_issue_monitor_startup_timeout(&window_id, generation));
             }
-            Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
-                // SPEC #2920: the wry WebView drag/drop handler was the
-                // only producer of this variant. The browser UI now
-                // handles drag/drop natively via the HTML5 API, so any
-                // stragglers from older clients are dropped silently.
-            }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 // Issue #3366 — gated on an open Logs window; see
                 // `AppRuntime::log_entry_events`.
@@ -11539,6 +11527,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorLaunchPrepared(prepared)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
             }
+            Event::UserEvent(UserEvent::IssueMonitorLaunchFactsPrefetched(prefetched)) => {
+                clients.dispatch(app.handle_issue_monitor_launch_facts_prefetched(*prefetched));
+            }
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
                 project_root,
                 issue_number,
@@ -11623,6 +11614,11 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorProfilesSaved(completion)) => {
+                let events = app.handle_issue_monitor_profiles_saved(*completion);
+                app.observe_notification_toasts(&events);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));

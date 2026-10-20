@@ -2206,6 +2206,7 @@ pub enum BackendEvent {
     IssueMonitorProfiles {
         project_root: String,
         profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        choices: crate::launch_wizard::IssueMonitorProfileChoices,
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
     },

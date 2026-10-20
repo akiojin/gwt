@@ -170,6 +170,20 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
         .iter()
         .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
         .unwrap();
+    let job_steps = flake["steps"].as_sequence().unwrap();
+    let nextest = job_steps
+        .iter()
+        .position(|step| {
+            step["uses"].as_str() == Some("taiki-e/install-action@v2")
+                && step["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")
+        })
+        .expect("flake detection must install the nextest used by nested verification tests");
+    let detector_index = job_steps.iter().position(|step| step == detector).unwrap();
+    assert!(nextest < detector_index);
+    assert_ne!(
+        job_steps[nextest]["continue-on-error"].as_bool(),
+        Some(true)
+    );
     assert_eq!(
         detector["env"]["GWT_FLAKE_BASE_SHA"],
         "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",

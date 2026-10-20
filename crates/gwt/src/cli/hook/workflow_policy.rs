@@ -19,6 +19,7 @@ use std::{io::Read, path::Path};
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
+use gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_OPERATION;
 
 use crate::discussion_resume::PendingDiscussionGoal;
 use crate::pm_registry::pm_identity_exempt_session_for_worktree;
@@ -610,11 +611,17 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
     if event.tool_name.as_deref() != Some("Bash") {
         return false;
     }
-    event
-        .command()
-        .and_then(json_envelope_operation)
+    let Some(command) = event.command() else {
+        return false;
+    };
+    json_envelope_operation(command)
         .as_deref()
-        .is_some_and(is_identity_gate_exempt_operation)
+        .is_some_and(|operation| {
+            is_identity_gate_exempt_operation(operation)
+                // Naming must not carry a file write past the identity gate.
+                && (operation != PANE_NAME_FIRST_ACTION_OPERATION
+                    || !has_file_output_redirection(command))
+        })
 }
 
 /// Issue #4533: the operations a session may run while the Agent Workspace
@@ -656,9 +663,11 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
 /// now spells out in the refusal itself (AC-1).
 pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "execution.adopt"
+    // Issue #5705: the canonical startup operation must run before identity.
+    operation == PANE_NAME_FIRST_ACTION_OPERATION
+        || matches!(
+            operation,
+            "execution.adopt"
             | "execution.repair"
             | "execution.reopen"
             | "execution.release_prepared"
@@ -677,7 +686,7 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             | "pr.create_from_ci"
             | "execution.blocked"
             | "memory.add"
-    )
+        )
 }
 
 /// Issue #5078 (AC-3): the PM escalation path never waits for the identity.
@@ -2097,6 +2106,23 @@ mod tests {
             evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_rejects_work_attached_to_pane_name() {
+        let name = envelope_command("pane.name", "{}");
+        for command in [
+            format!("{name}\ncargo test -p gwt"),
+            name.replacen("gwtd", "gwtd > source.txt", 1),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "startup exemption must not admit work: {command}"
+            );
+        }
     }
 
     #[test]

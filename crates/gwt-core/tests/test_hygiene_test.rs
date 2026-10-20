@@ -23,6 +23,10 @@
 //!   process integration contracts need a reason; pure tests inject the probe.
 //!   This lexical rule covers that known entrypoint, not aliases or indirect
 //!   calls through arbitrary helpers.
+//! * **(D) unchecked socket paths** — test binds must pass their path through
+//!   `test_support::checked_socket_path`. This detects TMPDIR-dependent fixtures
+//!   on Linux before they exceed the shorter macOS/BSD limit. Use the shared
+//!   `socket_tempdir` root instead of fixing each test with its own `/tmp` path.
 //!
 //! Existing violations are grandfathered in `test_hygiene_baseline.txt`, one
 //! line per `<rule>|<file>|<context>`. The baseline only shrinks: a violation
@@ -188,6 +192,49 @@ fn scan_fixture(text: &str) -> Vec<hygiene::Finding> {
         text,
         SourceKind::WholeFileIsTest,
     )
+}
+
+#[test]
+fn socket_fixtures_reject_ambient_tempdirs_even_when_bind_is_in_a_helper() {
+    let findings = scan_fixture(
+        r#"
+fn fixture() {
+    let root = TempDir::new().unwrap();
+    start_server(root.path());
+}
+fn start_server(root: &Path) {
+    UnixListener::bind(root.join("daemon.sock")).unwrap();
+}
+fn another_fixture() {
+    let root = tempfile::tempdir().unwrap();
+    tokio::net::UnixListener::bind(root.path().join("daemon.sock")).unwrap();
+}
+"#,
+    );
+    assert_eq!(findings.len(), 2, "unexpected findings: {findings:?}");
+    assert!(findings
+        .iter()
+        .all(|finding| finding.rule.id() == "unchecked-socket-bind"));
+}
+
+#[test]
+fn socket_bind_rule_preserves_checked_paths_and_reasoned_path_limit_probes() {
+    assert!(scan_fixture(
+        r#"
+fn fixture() {
+    let root = gwt_core::test_support::socket_tempdir();
+    IpcListener::bind(gwt_core::test_support::checked_socket_path(&root.path().join("daemon.sock")));
+}
+fn long_path_probe() {
+    // test-hygiene: allow-unchecked-socket-bind Verify rejection by the OS at its real limit.
+    UnixListener::bind(&one_too_long);
+}
+"#,
+    )
+    .is_empty());
+    assert!(
+        scan_fixture("fn ordinary_fixture() { let root = TempDir::new().unwrap(); }").is_empty()
+    );
 }
 
 #[test]
@@ -664,6 +711,11 @@ fn no_undeclared_production_probe_deadlines() {
     assert_no_new_violations(Rule::ProductionProbeDeadline);
 }
 
+#[test]
+fn no_unchecked_socket_binds_in_test_code() {
+    assert_no_new_violations(Rule::UncheckedSocketBind);
+}
+
 fn time_dependency_inventory(findings: &[hygiene::TimeDependency]) -> BTreeSet<String> {
     let mut counts = BTreeMap::new();
     for finding in findings {
@@ -917,6 +969,7 @@ mod hygiene {
         UnlockedProcessEnv,
         NativeWatcherDeadline,
         ProductionProbeDeadline,
+        UncheckedSocketBind,
     }
 
     impl Rule {
@@ -926,6 +979,7 @@ mod hygiene {
                 Rule::UnlockedProcessEnv => "unlocked-process-env",
                 Rule::NativeWatcherDeadline => "native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "production-probe-deadline",
+                Rule::UncheckedSocketBind => "unchecked-socket-bind",
             }
         }
 
@@ -935,6 +989,7 @@ mod hygiene {
                 "unlocked-process-env" => Some(Rule::UnlockedProcessEnv),
                 "native-watcher-deadline" => Some(Rule::NativeWatcherDeadline),
                 "production-probe-deadline" => Some(Rule::ProductionProbeDeadline),
+                "unchecked-socket-bind" => Some(Rule::UncheckedSocketBind),
                 _ => None,
             }
         }
@@ -945,6 +1000,7 @@ mod hygiene {
                 Rule::UnlockedProcessEnv => "test-hygiene: allow-unlocked-env",
                 Rule::NativeWatcherDeadline => "test-hygiene: allow-native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "test-hygiene: allow-production-probe-deadline",
+                Rule::UncheckedSocketBind => "test-hygiene: allow-unchecked-socket-bind",
             }
         }
 
@@ -980,6 +1036,12 @@ mod hygiene {
                     "Inject the probe result for pure contracts. If executing the real\n",
                     "wrapper is essential to this test, declare why:\n",
                     "    // test-hygiene: allow-production-probe-deadline <reason>"
+                ),
+                Rule::UncheckedSocketBind => concat!(
+                    "Socket fixtures must use test_support::socket_tempdir() and bind\n",
+                    "through test_support::checked_socket_path(&path), so nested TMPDIR\n",
+                    "cannot silently break macOS/BSD. A test of the OS path boundary\n",
+                    "itself may declare // test-hygiene: allow-unchecked-socket-bind <reason>"
                 ),
             }
         }
@@ -1317,6 +1379,19 @@ mod hygiene {
         let functions = function_ranges(&code, &depths);
         let scannable = scannable_lines(&code, &depths, kind);
 
+        // Inspect complete calls so formatting a bind across lines cannot
+        // bypass the rule. As with the other lexical rules, renamed imports
+        // and arbitrary aliases are outside this scanner's contract.
+        let joined = code.join("\n");
+        let line_offsets: Vec<_> = std::iter::once(0)
+            .chain(joined.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect();
+        let unchecked_binds: std::collections::BTreeSet<_> = socket_bind_regex()
+            .find_iter(&joined)
+            .filter(|bind| !checked_socket_path_regex().is_match(&joined[bind.end()..]))
+            .map(|bind| line_offsets.partition_point(|start| *start <= bind.start()) - 1)
+            .collect();
+
         let mut findings = Vec::new();
         for (index, line) in code.iter().enumerate() {
             if !scannable[index] {
@@ -1328,8 +1403,14 @@ mod hygiene {
                 Rule::UnlockedProcessEnv,
                 Rule::NativeWatcherDeadline,
                 Rule::ProductionProbeDeadline,
+                Rule::UncheckedSocketBind,
             ] {
-                if !line_violates(rule, line) {
+                let violates = if rule == Rule::UncheckedSocketBind {
+                    unchecked_binds.contains(&index)
+                } else {
+                    line_violates(rule, line)
+                };
+                if !violates {
                     continue;
                 }
                 if declared_allowed(rule, &raw, index) {
@@ -1386,6 +1467,7 @@ mod hygiene {
             Rule::UnlockedProcessEnv => env_mutation_regex().is_match(code),
             Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
             Rule::ProductionProbeDeadline => production_probe_regex().is_match(code),
+            Rule::UncheckedSocketBind => false, // Complete calls are checked in scan_source.
         }
     }
 
@@ -1663,6 +1745,22 @@ mod hygiene {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
             Regex::new(r"\bResolvedContainerRuntime\s*::\s*resolve\s*\(").expect("valid regex")
+        })
+    }
+
+    fn socket_bind_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"\b(?:UnixListener|UnixDatagram|IpcListener)\s*::\s*bind\s*\(")
+                .expect("valid regex")
+        })
+    }
+
+    fn checked_socket_path_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"^\s*(?:(?:gwt_core|crate)::test_support::)?checked_socket_path\s*\(")
+                .expect("valid regex")
         })
     }
 

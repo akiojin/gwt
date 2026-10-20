@@ -88,7 +88,7 @@ fn stop_target() -> IssueMonitorStopTarget {
 #[test]
 fn hung_daemon_control_publish_is_bounded_and_outcome_unknown() {
     let _env_lock = env_test_lock();
-    let project = TempDir::new().expect("project tempdir");
+    let project = gwt_core::test_support::socket_tempdir().expect("project tempdir");
     let home = TempDir::new().expect("home tempdir");
     let _home_guard = ScopedEnvVar::set("HOME", home.path());
     let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -96,7 +96,8 @@ fn hung_daemon_control_publish_is_bounded_and_outcome_unknown() {
     let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
         .expect("runtime scope");
     let socket_path = project.path().join("hung.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind hung listener");
+    let listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+        .expect("bind hung listener");
     // Accept connections but never read or write: the client's per-stage
     // deadline is the only thing standing between the PM and a dead loop.
     let accepting = std::thread::spawn(move || {
