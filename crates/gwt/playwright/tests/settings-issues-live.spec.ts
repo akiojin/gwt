@@ -75,10 +75,23 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await expect(control("Reasoning")).toHaveValue("high");
     await expect(control("Docker service")).toHaveValue(service!);
     await expect(control("Windows shell")).toBeDisabled();
-    await save(() => control("Agent").selectOption("gemini"));
+    await info.attach(`candidate-selects-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
+    await save(() => control("Agent").selectOption("openclaw"));
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
-    await expect(candidates.getByLabel("Reasoning gemini", { exact: true })).toBeDisabled();
-    await expect(candidates.getByLabel("Fast mode gemini", { exact: true })).toBeDisabled();
+    await expect(candidates.getByLabel("Reasoning openclaw", { exact: true })).toBeDisabled();
+    await expect(candidates.getByLabel("Fast mode openclaw", { exact: true })).toBeDisabled();
+    await save(() => candidates.getByLabel("Agent openclaw", { exact: true }).selectOption("hermes"));
+    await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
+    const hermesModel = candidates.getByLabel("Model hermes", { exact: true });
+    await expect(hermesModel).toHaveJSProperty("tagName", "INPUT");
+    const suggestions = await hermesModel.getAttribute("list");
+    expect(suggestions).toBeTruthy();
+    expect(await candidates.locator(`[id="${suggestions}"] option`).evaluateAll(options =>
+      options.map(option => (option as HTMLOptionElement).value))).toEqual(["fixture-model", "fixture-alternative"]);
+    await save(async () => { await hermesModel.fill("custom-hermes-model"); await hermesModel.press("Tab"); });
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await open();
+    await expect(candidates.getByLabel("Model hermes", { exact: true })).toHaveValue("custom-hermes-model");
     await expect(page.locator("html")).toHaveAttribute("data-theme", themeFor(info));
     await info.attach(`candidate-choices-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
     expect(errors).toEqual([]);

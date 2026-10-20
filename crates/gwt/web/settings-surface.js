@@ -624,6 +624,9 @@ export function renderAgentsSettingsPanel(panel, options) {
     const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    const modelSuggestions = document.createElement("datalist");
+    modelSuggestions.id = `candidate-models-${crypto.randomUUID()}`;
+    row.appendChild(modelSuggestions);
     row.updateCandidateChoices = changed => {
       const entry = capabilities();
       const agentChanged = changed === "agent_id";
@@ -637,6 +640,14 @@ export function renderAgentsSettingsPanel(panel, options) {
         }
         if (freeText) model.value = value;
         else setChoices(model, entry?.models || [], value);
+        modelSuggestions.replaceChildren();
+        for (const value of freeText ? entry?.model_suggestions || [] : []) {
+          const option = document.createElement("option");
+          option.value = value;
+          modelSuggestions.appendChild(option);
+        }
+        if (modelSuggestions.children.length) model.setAttribute("list", modelSuggestions.id);
+        else model.removeAttribute("list");
         if (agentChanged) model.dataset.profileEdited = "true";
         model.disabled = !entry || (!freeText && !entry.models.length);
         setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);

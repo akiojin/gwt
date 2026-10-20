@@ -74,6 +74,11 @@ impl LaunchWizardState {
                     supports_model_input: !models.is_empty()
                         || state.current_agent_supports_freetext_model(),
                     models,
+                    model_suggestions: if state.current_agent_supports_hermes_options() {
+                        state.hermes_choices.models_for(&state.hermes_provider)
+                    } else {
+                        Vec::new()
+                    },
                     default_model,
                     reasoning_options: state.reasoning_options_view(),
                     default_reasoning: state

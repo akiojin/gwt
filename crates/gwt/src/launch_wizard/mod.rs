@@ -148,6 +148,7 @@ pub struct IssueMonitorProfileChoices {
 pub struct IssueMonitorAgentChoices {
     pub id: String,
     pub models: Vec<IssueMonitorModelChoices>,
+    pub model_suggestions: Vec<String>,
     pub default_model: String,
     pub reasoning_options: Vec<LaunchWizardOptionView>,
     pub default_reasoning: Option<String>,

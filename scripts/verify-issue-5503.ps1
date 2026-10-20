@@ -71,7 +71,13 @@ $isolatedEnv['USERPROFILE'] = $checkHome
 $isolatedEnv['GWT_BROWSER_URL_FILE'] = Join-Path $checkHome 'url'
 $isolatedEnv['GWT_HOOK_BIN'] = $hookBin
 $isolatedEnv['GIT_TERMINAL_PROMPT'] = '0'
-if ($CandidateSettings) { $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1' }
+if ($CandidateSettings) {
+    $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1'
+    $isolatedEnv['HERMES_HOME'] = Join-Path $checkHome 'hermes-fixture'
+    New-Item -ItemType Directory -Path $isolatedEnv['HERMES_HOME'] -Force | Out-Null
+    "model:`n  provider: fixture`n  default: fixture-model`nproviders:`n  fixture:`n    models: [fixture-model, fixture-alternative]" |
+        Set-Content -LiteralPath (Join-Path $isolatedEnv['HERMES_HOME'] 'config.yaml')
+}
 # Provider UI fixtures need no live credentials or transcript data.
 $isolatedEnv['CODEX_HOME'] = Join-Path $checkHome 'codex-fixture'
 $isolatedEnv['CLAUDE_CONFIG_DIR'] = Join-Path $checkHome 'claude-fixture'

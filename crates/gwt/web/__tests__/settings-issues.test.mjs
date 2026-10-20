@@ -17,6 +17,8 @@ const candidateChoices = {
         { value: "", label: "Default", default_reasoning: "auto", reasoning_options: [{ value: "auto", label: "Auto" }] },
         { value: "haiku", label: "Haiku", default_reasoning: null, reasoning_options: [] },
       ] },
+    { id: "hermes", default_model: "", models: [], model_suggestions: ["fixture-model", "other-model"],
+      session_modes: ["Normal"], supports_model_input: true },
     { id: "custom", models: [], session_modes: ["Normal"], supports_model_input: false },
   ], docker_services: ["dev", "worker"], default_docker_service: "dev",
 };
@@ -385,6 +387,15 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("reasoning").disabled, true);
   assert.equal(sent.at(-1).profiles[0].reasoning, null, "unsupported models do not inherit the previous model's effort");
+  selectValue(control("agent_id"), "hermes");
+  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("model").localName, "input", "Hermes retains arbitrary model input");
+  const suggestions = document.getElementById(control("model").getAttribute("list"));
+  assert.ok(suggestions, "Hermes offers the configured default provider's model suggestions");
+  assert.deepEqual([...suggestions.querySelectorAll("option")].map(option => option.value), ["fixture-model", "other-model"]);
+  control("model").value = "custom-hermes-model";
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.at(-1).profiles[0].model, "custom-hermes-model");
   load("renderAgentsSettingsPanel")(panel, {
     profiles: [{ agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
     send: message => sent.push(message),

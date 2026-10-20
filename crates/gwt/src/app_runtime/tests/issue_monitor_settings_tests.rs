@@ -2,8 +2,19 @@ use super::*;
 
 #[test]
 fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewriting_profiles() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    let hermes_home = temp.path().join("hermes");
+    fs::create_dir_all(&hermes_home).expect("isolated Hermes home");
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "model:\n  provider: fixture\n  default: fixture-default\nproviders:\n  fixture:\n    models: [fixture-first, fixture-default, fixture-second]\n  other:\n    models: [other-provider-model]\n",
+    )
+    .expect("Hermes model suggestions");
+    let _hermes_home = ScopedEnvVar::set("HERMES_HOME", &hermes_home);
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
@@ -84,6 +95,15 @@ fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewri
         .unwrap();
     assert_eq!(openclaw["supports_skip_permissions"], false);
     assert_eq!(openclaw["session_modes"], serde_json::json!(["Normal"]));
+    let hermes = agents.iter().find(|agent| agent["id"] == "hermes").unwrap();
+    assert_eq!(hermes["supports_model_input"], true);
+    assert_eq!(hermes["models"], serde_json::json!([]));
+    assert_eq!(
+        hermes["model_suggestions"],
+        serde_json::json!(["fixture-default", "fixture-first", "fixture-second"]),
+        "Hermes suggestions follow its configured default provider without restricting free-text models"
+    );
+    assert_eq!(codex["model_suggestions"], serde_json::json!([]));
     assert_eq!(
         choices["docker_services"],
         serde_json::json!(["app", "worker"])
