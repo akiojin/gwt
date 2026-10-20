@@ -49,8 +49,6 @@ pub enum ClientScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTarget {
     All,
-    // Explicit Hub recipients are part of the routing contract; producers migrate separately.
-    #[allow(dead_code)]
     Hub,
     Project(gwt_core::repo_hash::ProjectKey),
     Client(String),
