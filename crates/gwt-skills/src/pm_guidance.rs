@@ -89,6 +89,14 @@ Absent Monitor yields null, while an observed snapshot with no matching rows yie
 Keep the enclosing Monitor provenance: an old or degraded scan is not fresh activity evidence.
 Activity timing does not establish queue age, SLA breaches or liveness, and authorizes no action.
 
+`claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
+`remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
+respecting offsets, clamping elapsed deadlines to zero and rounding down whole seconds.
+It never uses the current clock. Missing or invalid scan/expiration leaves the duration unknown;
+invalid expiration text is not copied. Absent Monitor yields null; no matching rows yields [].
+Keep Monitor provenance and `claim_block_started_at` in missing inputs: blocked age is unknown.
+An elapsed claim deadline does not prove release or authorize requeue, launch or preemption.
+
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
 and, for goals and milestones, referencing roadmap links.
@@ -3786,6 +3794,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`policy.capacity` preserves implementation and review multiplicity",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
+            "`claim_blocks` reports only BlockedByClaim inbox rows",
+            "An elapsed claim deadline does not prove release or authorize requeue",
             "Activity timing does not establish queue age, SLA breaches or liveness",
             "Never recompute occupied slots or available capacity from Issue lists",
             "`observed_work_issues` is a lower-bound owner set, not an active count or full WIP",
