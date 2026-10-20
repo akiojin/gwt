@@ -1959,6 +1959,9 @@ fn issue_monitor_control_error_preserves_the_authoritative_display() {
 
 #[test]
 fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1989,14 +1992,31 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     runtime.issue_monitor_fallback_commit_timeout =
         super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
 
-    let started = Instant::now();
+    // Projection reads have their own budget before the 250 ms prefs deadline.
+    // The held lock must produce a deadline error without changing the display.
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false },
     );
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
+                    && message.contains("file lock")
+                    && message.contains("operation=issue_monitor_prefs")
+        )),
+        "the fallback must fail on the prefs lock deadline, not another error: {:?}",
+        events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::IssueMonitorToast { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     assert!(
         events
             .iter()

@@ -208,7 +208,6 @@ crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstra
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|release_rx.recv_timeout(Duration::from_secs(5)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|started_rx.recv_timeout(Duration::from_secs(1)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|wait_for_recorded_event(,&events,|events||1
-crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state|assert!(started.elapsed()<Duration::from_secs(1))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposal|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(5),)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops|*started_at=Instant::now()-Duration::from_secs(61)|1

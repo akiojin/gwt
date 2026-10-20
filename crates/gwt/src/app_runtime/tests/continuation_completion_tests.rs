@@ -1518,6 +1518,12 @@ fn managed_hook_health_for_one_hundred_forty_rows_reuses_session_json_within_one
             // Keep health visible without unrelated Git/config audits in fixture setup.
             gwt::cli::hook::health::record_managed_hook_self_healed(&session.worktree_path)
                 .unwrap();
+            // Keep the audit independent of the host's installed plugin inventory.
+            fs::write(
+                session.worktree_path.join(".gwt/external-skill-roots.json"),
+                "[]",
+            )
+            .unwrap();
             let path = gwt_agent::runtime_state_path(&sessions_dir, &session.session_id);
             gwt::cli::hook::runtime_state::write_for_event(&path, "PreToolUse").unwrap();
             session
