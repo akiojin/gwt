@@ -214,6 +214,8 @@ test.describe("Issue Monitor candidate pool", () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
+      // The empty bootstrap frame can precede the persisted window snapshot.
+      await expect(settings).toHaveAttribute("data-id", windowId!);
       await openCandidates();
       const reloadedPool = pool;
       await expect(reloadedPool.getByLabel("Usage threshold (%) candidate", { exact: true })).toHaveCount(0);
@@ -233,6 +235,7 @@ test.describe("Issue Monitor candidate pool", () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
+      await expect(settings).toHaveAttribute("data-id", windowId!);
       await openCandidates();
       await expect(reloadedPool.locator(`fieldset[data-agent-id="${CUSTOM_ID}"]`)).toBeVisible();
       await saveProfiles(() => reloadedPool.getByRole("button", { name: `Remove ${CUSTOM_ID}`, exact: true }).click(), ["claude"]);

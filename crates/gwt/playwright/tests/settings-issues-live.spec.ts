@@ -54,13 +54,14 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
         && payload.request_id === 578701)?.payload).then(handle => handle.jsonValue());
     expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
     const open = async () => {
-      // Restore the saved window before the disclosure can create another one.
+      // Wait for project bootstrap; retained windows are awaited after reload.
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
       await expect(panel(page, "agents")).toBeVisible();
     };
     await open();
+    const windowId = await settings(page).getAttribute("data-id");
     const candidates = panel(page, "agents");
     const control = (name: string) => candidates.getByLabel(`${name} codex`, { exact: true });
     for (const name of ["Agent", "Model", "Reasoning", "Docker service"]) await expect(control(name)).toHaveJSProperty("tagName", "SELECT");
@@ -94,6 +95,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     expect(service).toBeTruthy();
     await select(control("Docker service"), service!);
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(settings(page)).toHaveAttribute("data-id", windowId!);
     await open();
     await expect(control("Model")).toHaveValue("gpt-6-astra");
     await expect(control("Reasoning")).toHaveValue("high");
@@ -116,6 +118,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     expect(suggestions.values).toEqual(["fixture-model", "fixture-alternative"]);
     await save(async () => { await hermesModel.fill("custom-hermes-model"); await hermesModel.press("Tab"); });
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(settings(page)).toHaveAttribute("data-id", windowId!);
     await open();
     await expect(candidates.getByLabel("Model hermes", { exact: true })).toHaveValue("custom-hermes-model");
     await expect(page.locator("html")).toHaveAttribute("data-theme", themeFor(info));

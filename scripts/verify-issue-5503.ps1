@@ -18,11 +18,12 @@ foreach ($relative in @('.gwt/runtime', '.config', '.docker')) {
         New-Item -ItemType Junction -Path (Join-Path $checkHome $relative) -Target $source | Out-Null
     }
 }
-$statusJson = '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' | & $checkoutGwtd
-if ($LASTEXITCODE -ne 0) { throw "gwtd issue.monitor.status failed with exit code $LASTEXITCODE." }
-$status = $statusJson | ConvertFrom-Json
-if (!$status.ok -or !$status.project_store.hash) { throw 'Cannot resolve the canonical project hash.' }
-$repoHash = $status.project_store.hash
+# Resolve canonical project identity locally before starting the isolated runtime.
+$identityJson = '{"schema_version":1,"operation":"issue.monitor.profiles","params":{}}' | & $checkoutGwtd
+if ($LASTEXITCODE -ne 0) { throw "gwtd issue.monitor.profiles failed with exit code $LASTEXITCODE." }
+$identity = $identityJson | ConvertFrom-Json
+if (!$identity.ok -or !$identity.project_store.hash) { throw 'Cannot resolve the canonical project hash.' }
+$repoHash = $identity.project_store.hash
 $statePath = Join-Path $checkHome ".gwt/projects/$repoHash/project-state"
 New-Item -ItemType Directory -Path $statePath -Force | Out-Null
 '{"settings":{"auto_start":false}}' | Set-Content -LiteralPath (Join-Path $statePath 'pm.json')
