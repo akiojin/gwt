@@ -15511,7 +15511,6 @@ exit 0
 
         let hub = BroadcastHub::new();
         let _materializer = hub.acquire_issue_monitor_materializer();
-        let mut statuses = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
         let worker = spawn_issue_monitor_worker_with_config_and_timeout(
             scope,
@@ -15554,20 +15553,24 @@ exit 0
             fs::write(&issue_list, serde_json::to_vec(&issues).unwrap())
                 .expect("refresh candidates");
             fs::write(scan_release.join(scan.to_string()), b"release").expect("release scan");
-            scans.push(started && tokio::select! {
-                biased;
-                committed = recv_issue_monitor_status_matching(&mut statuses, HANG_GUARD, |status| {
-                    status.last_scan_at.is_some() && status.last_error.is_none()
-                        && hub.issue_monitor_status().is_some_and(|published| {
-                            published["inbox"].as_array().is_some_and(|rows| rows.iter().any(|row| {
-                                row["issue_number"] == 44 && row["issue_updated_at"] == revision
-                            }))
-                        })
-                }) => committed.is_some(),
-                // A coalesced retry reaching the next barrier without publishing
-                // this revision proves the captured scan was discarded.
-                _ = wait_for_marker_count(&scan_started, scan + 1) => false,
-            });
+            // The worker publishes before starting the next scan, which stops
+            // at its release barrier. Read that stable projection directly:
+            // a broadcast receiver can yield even with the committed frame
+            // queued, so losing a select to this marker does not prove discard.
+            let next_started = wait_for_marker_count(&scan_started, scan + 1).await;
+            scans.push(
+                started
+                    && next_started
+                    && hub.issue_monitor_status().is_some_and(|published| {
+                        published["last_scan_at"].as_str().is_some()
+                            && published["last_error"].is_null()
+                            && published["inbox"].as_array().is_some_and(|rows| {
+                                rows.iter().any(|row| {
+                                    row["issue_number"] == 44 && row["issue_updated_at"] == revision
+                                })
+                            })
+                    }),
+            );
         }
         if scans.iter().all(|committed| *committed) {
             hub.publish_issue_monitor_control(DaemonFrame::Event {
