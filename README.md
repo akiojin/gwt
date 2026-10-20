@@ -805,6 +805,11 @@ Issues at the Monitor's scan time. They use the supplied timestamps, never the c
 Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable
 Monitor returns null rather than an observed empty list. Keep the scan's source and age in mind:
 these values do not establish queue age, SLA breaches or liveness, or trigger any action.
+Claim-block observations list Issues held by another claim and the whole seconds remaining
+until its expiration at the supplied scan time. An elapsed deadline shows zero; missing or
+invalid timestamps leave the duration unknown. Blocked age remains unknown because the
+snapshot has no start time. These observations retain the scan's provenance and do not
+prove claim release or authorize requeue, launch or preemption.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.

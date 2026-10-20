@@ -204,6 +204,7 @@ pub struct CapacityObservation {
     pub max_active: Option<usize>,
     pub observed_work_issues: Vec<u64>,
     pub launch_activity: Option<Vec<LaunchActivityObservation>>,
+    pub claim_blocks: Option<Vec<ClaimBlockObservation>>,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -214,6 +215,53 @@ pub struct LaunchActivityObservation {
     pub last_activity_at: Option<String>,
     pub inactivity_seconds_at_scan: Option<u64>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClaimBlockObservation {
+    pub issue_number: u64,
+    pub claim_expires_at: Option<String>,
+    pub remaining_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// A deadline is not a release receipt; the snapshot has no block start time.
+fn observe_claim_blocks(status: &IssueMonitorAgentStatus) -> Vec<ClaimBlockObservation> {
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    status
+        .inbox
+        .iter()
+        .filter(|row| row.state == MonitorInboxState::BlockedByClaim)
+        .map(|row| {
+            let expiry = row
+                .claim_expires_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let mut missing_inputs = vec!["claim_block_started_at"];
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            if expiry.is_none() {
+                missing_inputs.push("claim_expires_at");
+            }
+            let remaining_seconds_at_scan = scan.zip(expiry).map(|(scan, expiry)| {
+                expiry
+                    .signed_duration_since(scan)
+                    .to_std()
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+            ClaimBlockObservation {
+                issue_number: row.issue_number,
+                claim_expires_at: expiry.map(|value| value.to_rfc3339()),
+                remaining_seconds_at_scan,
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 /// Timing belongs to the supplied snapshot, never the reader's wall clock.
@@ -326,6 +374,7 @@ fn observe_capacity(
         max_active: monitor.map(|status| status.max_active),
         observed_work_issues,
         launch_activity: monitor.map(observe_launch_activity),
+        claim_blocks: monitor.map(observe_claim_blocks),
         missing_inputs,
     }
 }
@@ -1084,6 +1133,7 @@ mod tests {
                 "occupied_slot_count":17, "max_active":4,
                 "observed_work_issues":[1,3,8,9,10,11],
                 "launch_activity":[],
+                "claim_blocks":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1199,9 +1249,79 @@ mod tests {
     }
 
     #[test]
+    fn claim_blocks_report_deadlines_without_implying_release_or_blocked_age() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":9,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T09:02:00+09:00","blocked_by_owner":"private owner"},
+            {"issue_number":3,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00.900Z"},
+            {"issue_number":9,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00Z"},
+            {"issue_number":4,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:00:59.900Z"},
+            {"issue_number":5,"state":"blocked_by_claim","attempts":0},
+            {"issue_number":6,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"private invalid timestamp","exclusion_reason":"private reason"},
+            {"issue_number":7,"state":"queued","attempts":0,"claim_expires_at":"2026-10-21T00:02:00Z"},
+            {"issue_number":8,"state":"launched","attempts":0,"claim_expires_at":"2026-10-21T00:02:00Z"}
+        ])).unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["claim_blocks"].as_array().unwrap();
+        let facts: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!([
+                    row["issue_number"],
+                    row["remaining_seconds_at_scan"],
+                    row["missing_inputs"]
+                ])
+            })
+            .collect();
+        assert_eq!(
+            json!(facts),
+            json!([
+                [9, 60, ["claim_block_started_at"]],
+                [3, 0, ["claim_block_started_at"]],
+                [9, 0, ["claim_block_started_at"]],
+                [4, 0, ["claim_block_started_at"]],
+                [5, null, ["claim_block_started_at", "claim_expires_at"]],
+                [6, null, ["claim_block_started_at", "claim_expires_at"]]
+            ])
+        );
+        assert_eq!(rows[0]["claim_expires_at"], "2026-10-21T09:02:00+09:00");
+        assert_eq!(rows[5]["claim_expires_at"], Value::Null);
+        assert!(!report.to_string().contains("private"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["claim_blocks"],
+            report["capacity"]["claim_blocks"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid scan".into())] {
+            monitor.last_scan_at = scan;
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            assert_eq!(
+                untimed["capacity"]["claim_blocks"][0]["remaining_seconds_at_scan"],
+                Value::Null
+            );
+            assert_eq!(
+                untimed["capacity"]["claim_blocks"][0]["missing_inputs"],
+                json!(["claim_block_started_at", "monitor_scan_time"])
+            );
+        }
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty["capacity"]["claim_blocks"], json!([]));
+    }
+
+    #[test]
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent["capacity"].get("claim_blocks"), Some(&Value::Null));
         assert_eq!(row(&absent, 1)["observed_inbox_states"], json!([]));
         assert_eq!(absent["monitor"]["source"], Value::Null);
         assert_eq!(absent["monitor"]["active_launches_incomplete"], true);
