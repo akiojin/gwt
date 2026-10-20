@@ -77,7 +77,13 @@ in the same receipt, including decision source revision and policy version/budge
 These records have no direct Issue mapping:
 `direct_issue_mapping` is missing; an empty Issue set does not mean no impact.
 Use the recorded values and reason when explaining a revised decision or policy;
-they do not prove downstream propagation or notification. Recurring changes remain outside this evidence.
+they do not prove downstream propagation or notification.
+Recurring changes retain redacted before/after settings in the same receipt.
+`changes.idempotency_key_digest` hashes the recurring setting key; the receipt's
+top-level key digest identifies the apply request. Neither raw key is copied into audit.
+Recurring records also lack direct Issue mapping. Use the recorded cadence, owner,
+next run and miss policy when explaining a schedule edit.
+Change evidence does not schedule work or prove duplicate prevention or notification.
 
 The policy groups Now/Next/Later and explains missing milestone inputs;
 authored health and confidence are not verified evidence. Effective health
@@ -3729,6 +3735,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`directly_affected_issues`",
             "Goal changes use only roadmap links explicitly naming the goal",
             "Risk, Decision and Policy changes retain redacted before/after values",
+            "Recurring changes retain redacted before/after settings",
+            "`changes.idempotency_key_digest` hashes the recurring setting key",
+            "Change evidence does not schedule work or prove duplicate prevention",
             "`direct_issue_mapping` is missing; an empty Issue set does not mean no impact",
             "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
             "Goal observations do not prove outcome achievement or metric evidence",

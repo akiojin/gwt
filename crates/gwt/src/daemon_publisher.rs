@@ -548,13 +548,29 @@ pub fn publish_issue_monitor_window_snapshot(
     snapshot: &crate::IssueMonitorWindowSnapshot,
     project_tab_ids: &std::collections::BTreeSet<String>,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control(
+    publish_issue_monitor_window_snapshot_with_timeout(
+        project_root,
+        snapshot,
+        project_tab_ids,
+        DEFAULT_TIMEOUT,
+    )
+}
+
+/// Publish the same canvas control with a caller-owned timeout budget.
+pub fn publish_issue_monitor_window_snapshot_with_timeout(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+    project_tab_ids: &std::collections::BTreeSet<String>,
+    timeout: Duration,
+) -> Result<(), IssueMonitorControlPublishError> {
+    publish_issue_monitor_control_with_timeout(
         project_root,
         crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({ "window_snapshot": snapshot, "window_snapshot_project_tabs": project_tab_ids }),
             std::process::id(),
         ),
+        timeout,
     )
 }
 

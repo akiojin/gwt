@@ -126,6 +126,49 @@ test("Other disclosure survives a cache refresh between pointerdown and pointeru
   await expect(row(page, "other-paused")).toBeVisible();
 });
 
+test("Remote branch snapshots replace Other rows and preserve branch launch", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".issue-other-summary").click();
+  const emitBranches = async (id: string, branches: string[]) => {
+    const processed = page.waitForEvent("dialog");
+    await page.evaluate(({ id, branches }) => {
+      const fixture = window as any;
+      fixture.__otherEmit({ kind: "remote_start_work_branches", id, branches });
+      // Observe completion on the same receive FIFO before negative assertions.
+      fixture.__otherEmit({ kind: "workspace_projection_prune_error", message: "Remote snapshot processed" });
+    }, { id, branches });
+    const dialog = await processed;
+    expect(dialog.message()).toBe("Work Projection Prune error: Remote snapshot processed");
+    await dialog.dismiss();
+  };
+  await emitBranches("closed-issue-window", ["origin/feature/ignored"]);
+  await expect(row(page, "remote-start:feature/ignored")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/remote")).toBeVisible();
+
+  await emitBranches("tab-other::issue-1", [
+    "origin/feature/other", "origin/feature/linked",
+    "origin/feature/replacement", "origin/feature/replacement",
+  ]);
+  await expect(row(page, "remote-start:feature/remote")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/other")).toHaveCount(0);
+  await expect(row(page, "remote-start:feature/linked")).toHaveCount(0);
+  await expect(page.locator(".issue-other-summary")).toHaveText("Other (2)");
+  const replacement = row(page, "remote-start:feature/replacement");
+  await expect(replacement).toHaveCount(1);
+  await expect(replacement.locator(".workspace-overview-remote")).toHaveText("Remote");
+  await replacement.click();
+  await expect(replacement).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({ path: info.outputPath("remote-branch-snapshot.png") });
+  await replacement.locator('[data-action="launch-workspace-row"]').click();
+  await expect.poll(() => messages(page, "open_launch_wizard")).toEqual([
+    expect.objectContaining({ branch_name: "feature/replacement" }),
+  ]);
+  await emitBranches("tab-other::issue-1", []);
+  await expect(replacement).toHaveCount(0);
+  await expect(row(page, "other-paused")).toBeVisible();
+  await expect(page.locator(".issue-other-summary")).toHaveText("Other (1)");
+});
+
 test("Other keeps branch launch, conversation resume and backend-approved cleanup reachable", async ({ page }) => {
   await boot(page);
   await page.locator(".issue-other-summary").click();
