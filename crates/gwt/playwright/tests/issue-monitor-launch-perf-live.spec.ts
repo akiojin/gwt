@@ -56,12 +56,13 @@ test('Issue #5596: twelve admitted launches keep completion handlers within budg
         } catch { return false; }
       }));
     }, { timeout: 120_000, message: 'all twelve exact UserPromptSubmit hooks are authenticated and matched by the GUI' }).toEqual(Array(12).fill(true));
+    const windowListCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, { kind: 'list_windows' });
-    await expect.poll(() => page.evaluate(sessions => {
-      const entry = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.payload.kind === 'workspace_state').at(-1);
-      const windows = (entry?.payload.workspace.tabs || []).flatMap((tab: any) => tab.workspace.windows || []);
+    await expect.poll(() => page.evaluate(({ sessions, cursor }) => {
+      const entry = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
+      const windows = entry?.payload.windows || [];
       return sessions.filter(session => windows.some((window: any) => window.session_id === session && ['running', 'idle'].includes(window.status))).length;
-    }, providers.map(provider => provider.session_id)), { timeout: 120_000, message: 'twelve provider sessions are bound to running Work windows' }).toBe(12);
+    }, { sessions: providers.map(provider => provider.session_id), cursor: windowListCursor }), { timeout: 120_000, message: 'twelve provider sessions are bound to running Work windows' }).toBe(12);
     // The summary contains only >50 ms handlers. Wait for a complete owned
     // minute after the final completion, so an absent target row has meaning.
     await expect.poll(async () => {
