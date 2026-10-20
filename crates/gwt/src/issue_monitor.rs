@@ -15090,7 +15090,6 @@ impl IssueMonitorState {
         let now = snapshot.observed_at.as_str();
         for observed in &snapshot.windows {
             if !observed.review_dispatch
-                || !idle_window_is_alive(observed.status)
                 || !issue_monitor_qualified_window_id(&observed.window_id)
                     .is_some_and(|(tab, _)| project_tabs.contains(tab))
             {
@@ -15108,7 +15107,7 @@ impl IssueMonitorState {
             }
             match self.review_windows.get_mut(&issue_number) {
                 Some(window) => {
-                    if window.window_id.is_none() {
+                    if window.window_id.is_none() && idle_window_is_alive(observed.status) {
                         window.window_id = Some(observed.window_id.clone());
                         tracing::info!(
                             issue = issue_number,
@@ -15132,8 +15131,8 @@ impl IssueMonitorState {
                     let Some(record) = self.autonomous_records.get(&issue_number) else {
                         continue;
                     };
-                    // Issue #4117 AC-7: a review window still alive after its
-                    // verdict has nothing left to do. The implementation
+                    // Issue #4117 AC-7: a review pane left after its verdict or
+                    // failure needs cleanup even if it already exited. The implementation
                     // binding is never a review window to close (AC-3).
                     let bound_implementation = self
                         .launched_windows
@@ -15154,6 +15153,9 @@ impl IssueMonitorState {
                                 IssueMonitorIdleKind::ReviewVerdictPublished,
                             );
                         }
+                        continue;
+                    }
+                    if !idle_window_is_alive(observed.status) {
                         continue;
                     }
                     let Some(pr_number) = record.pr_number else {
@@ -46373,23 +46375,35 @@ mod tests {
         assert_eq!(review_close(&mut monitor), 1);
 
         // A failure can reach the daemon before the first canvas snapshot.
-        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
-        monitor.set_max_active_agents(3);
-        monitor
-            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
-            .expect("dispatch admitted");
-        monitor.record_launch_failed_at(41, "agent exited", "2026-09-07T04:00:05Z");
-        monitor.record_window_snapshot(running("2026-09-07T04:00:10Z"));
-        assert_eq!(
-            review_close(&mut monitor),
-            1,
-            "the late failed pane is closed"
-        );
-        assert!(monitor.review_windows().is_empty());
-        assert_eq!(
-            review_attempts_of(&monitor, 41).unwrap().reviewed_sha,
-            "sha-410"
-        );
+        for status in [
+            WindowState::Running,
+            WindowState::Error,
+            WindowState::Stopped,
+        ] {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(3);
+            monitor
+                .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+                .expect("dispatch admitted");
+            monitor.record_launch_failed_at(41, "agent exited", "2026-09-07T04:00:05Z");
+            monitor.record_window_snapshot(idle_snapshot(
+                "2026-09-07T04:00:10Z",
+                vec![
+                    idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                    idle_observation("tab-1::review-41", Some(41), status, true),
+                ],
+            ));
+            assert_eq!(
+                review_close(&mut monitor),
+                1,
+                "the late failed {status:?} pane is closed"
+            );
+            assert!(monitor.review_windows().is_empty());
+            assert_eq!(
+                review_attempts_of(&monitor, 41).unwrap().reviewed_sha,
+                "sha-410"
+            );
+        }
     }
 
     #[test]
@@ -46468,11 +46482,17 @@ mod tests {
                 idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
                 idle_observation("tab-1::review-41", Some(41), WindowState::Running, true),
                 idle_observation("tab-1::duplicate-41", Some(41), WindowState::Running, true),
+                idle_observation("tab-1::failed-41", Some(41), WindowState::Error, true),
             ],
         ));
         let closes = monitor.take_pending_idle_pane_closes();
-        assert_eq!(closes.len(), 1, "a recovered duplicate reviewer is closed");
+        assert_eq!(
+            closes.len(),
+            2,
+            "running and failed duplicate reviewers close"
+        );
         assert_eq!(closes[0].window_id, "tab-1::duplicate-41");
+        assert_eq!(closes[1].window_id, "tab-1::failed-41");
 
         monitor.record_review_verdict(41, false);
         let closes = monitor.take_pending_idle_pane_closes();
