@@ -4111,6 +4111,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         alertsToasts.push(alert);
       }
 
+      const continueWorkOutcomeModel = createUiStateStore(null);
+      continueWorkOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleContinueWorkOutcome(outcome);
+      });
+
       function handleContinueWorkOutcome(event) {
         const exact = continueWorkDispatcher.handleOutcome(event);
         if (!exact) {
@@ -5541,7 +5546,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "continue_work_outcome":
-            handleContinueWorkOutcome(event);
+            continueWorkOutcomeModel.update(() => ({ ...event }));
             break;
           case "workspace_resume_agent_error":
             workspaceResumePicker.handleError(event);
