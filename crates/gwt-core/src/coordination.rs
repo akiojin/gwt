@@ -7287,8 +7287,10 @@ mod tests {
         let split = pending.len() / 2;
         file.write_all(&pending[..split]).unwrap();
         file.flush().unwrap();
+        let now = std::time::Instant::now();
+        let _clock = crate::operation_deadline::ScopedOperationClock::set(now);
         let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + Duration::from_millis(200),
+            now + Duration::from_millis(200),
         );
         let load = || {
             LocalProvider.load_prompt_reminder_for_repo_hash(

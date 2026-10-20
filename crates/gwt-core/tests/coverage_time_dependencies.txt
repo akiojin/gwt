@@ -26,7 +26,6 @@ crates/gwt-config/src/settings.rs|persist_embedded_port_is_serialized_with_globa
 crates/gwt-config/src/settings.rs|persist_embedded_port_is_serialized_with_global_updates|letbefore_release=done_rx.recv_timeout(Duration::from_millis(250))|1
 crates/gwt-core/src/coordination.rs|prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment|let_deadline=crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_millis(1),)|1
 crates/gwt-core/src/coordination.rs|prompt_board_tail_bounds_reads_with_twelve_thousand_entries|assert!(elapsed<Duration::from_millis(200),)|1
-crates/gwt-core/src/coordination.rs|prompt_board_tail_reads_rollover_without_repair_and_retries_partial_append|let_deadline=crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()+Duration::from_millis(200),)|1
 crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter|granted_rx.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|letdeadline=Instant::now()+Duration::from_secs(30)|1
