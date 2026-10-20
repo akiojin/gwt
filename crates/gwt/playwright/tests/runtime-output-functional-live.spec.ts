@@ -8,9 +8,9 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME || "";
 const AGENT = "runtime-output-5379-0";
 
+test.skip(!BASE || !HOME || process.platform !== "win32", "requires issue-5379-browser-check.ps1");
 test.use({ headless: false, viewport: { width: 1280, height: 900 } });
 test("one Agent delivers fixed output and restores its screen", async ({ page }, info) => {
-  test.skip(!BASE || !HOME || process.platform !== "win32", "requires issue-5379-browser-check.ps1");
   test.setTimeout(180_000);
   await withLiveGwtBackendLock(BASE, info, async () => {
     const fixture = JSON.parse(await readFile(join(HOME, "fixture.json"), "utf8"));
