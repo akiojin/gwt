@@ -13,7 +13,7 @@ Agent workspace を materialize するために worktree を使いますが、�
 
 - **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
   `Antigravity CLI` / `OpenCode` / `Copilot` /
-  custom agent を共有 canvas から起動・再開・状態確認できます。
+  custom agent を共有 workspace から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
   `question` を扱えます。
@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
-  surface を mission-control 風 workspace に並べられます。
+- **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
+  必要に応じて Split view と独立した PM 入口を使えます。
 
 ## インストール
 
@@ -270,11 +270,17 @@ server (X11 / Wayland) を要求します。macOS / Windows のブラウザサ�
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。ブラウザの
-タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取ったときに、
-PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。tray 常駐
-プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
-出して終了します。
+Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。既定のトレイ常駐
+モードでは、ブラウザのタブを閉じてもプロジェクトと実行中の agent は継続し、
+プロジェクト URL を開き直すと同じワークスペースに戻れます。プロジェクトを停止するには、そのページのヘッダーか
+Hub の開いているプロジェクト一覧にある **Close Project** を選びます。実行中の agent が
+ある場合は、対象を列挙した確認ダイアログが表示されます。**Cancel** なら実行を継続し、
+**Close Project** ならそのプロジェクトの runtime と agent を停止します。他のプロジェクトは
+継続し、閉じたプロジェクトを表示していたすべてのブラウザタブは Hub に戻ります。
+
+サーバー全体を停止するには、トレイの **Quit**、または `Ctrl-C` / `SIGTERM` を使います。
+gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
+1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
 `gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
 
@@ -371,7 +377,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 1. プロジェクトを開く、GitHub から clone する、または前回のプロジェクトを復元する
 2. `Board`、`Issue`、Knowledge search surface で現在の作業、
    関連 owner、過去の判断を把握する
-3. **Curate** レーンでは、Command Rail または Command Palette の `Intake` を
+3. **Curate** レーンでは、Command Palette の `Intake` を
    選ぶ。branchless で使い捨ての session で、議論・計画し GitHub Issue を
    登録する。設計が必要な作業は同じ Issue に `gwt-spec` design-required label と
    SPEC artifact を付ける。Intake は branch を作らない
@@ -393,9 +399,9 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
-  開かず、Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
-  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  Work Item view を開きます。Issue Monitor が自動起動した Agent は、
+  Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で同じセッションを Agents の個別タブに開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
@@ -408,8 +414,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
-  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
-  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  順序・優先条件を同じ欄で編集できます。
+  起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
+  拒否された入力は保持され、該当欄の近くにエラーを表示します。
+  Settings は Application / Project の左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
@@ -417,6 +425,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
   `update.settings.status` で状態を読み取れます。
   この設定は Issue Monitor の設定から除外されています。
+  `Restart now` では稼働中 agent の件数、pending claim、verification lease、
+  関連 Issue を確認してから適用します。作業中は `Apply after all agents finish`
+  が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
+  代わりに `Restart now` を明示確認すると、稼働中 agent を停止して直ちに再起動します。
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
@@ -427,9 +439,10 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 `Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
 `Back to latest entries` で最新の更新へ戻れます。
 
-作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
-Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
-名前は復元・その場での再起動をまたいで維持され、確定前のバッジは `Naming…` です。
+gwt は作業 Agent の起動時に、出力言語に合う覚えやすい名前をランダムに割り当てます。
+バッジ・ウィンドウタイトル・Fleet・Kanban・Board に表示し、PM も名前で状況を報告します。
+名前はプロジェクトの過去の担当名と重複せず、復元・その場での再起動をまたいで維持します。
+担当開始・引継ぎ・PR 作成・完了は担当名付きで Issue のコメントに残り、PR 本文にも担当名を載せます。
 常駐 PM は独自の固定表示を維持します。
 
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
@@ -456,13 +469,16 @@ Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Activ
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
 設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
-Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
+Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
+**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
+稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
+Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
 
 Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
 本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
-**Windowize** でエージェントを Canvas へ移せます。**Close preview** または Escape で
+**Windowize** でエージェントを Agents の個別タブに開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
@@ -474,12 +490,14 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+**Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
 既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`、共有実測値の `agent_capacity` を返します。
+`max_active_last_change` は最後の明示的な設定変更の `changed_at` と
+`source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
 **Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
@@ -498,6 +516,10 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 `params.number` と `params.reason` を渡して失敗した launch を停止できます。
 保存済みの失敗 window は同じ Issue の所有である場合だけ使用し、永続的な停止状態と
 閉じる対象の pane を返します。
+停止した Issue は理由付きの保留として表示され、既定ではこの端末の起動キューから
+外れます。`params.remove_from_queue` を `false` にすると、保留したままキューへの
+所属を維持します。起動失敗には原因の分類と次の回復操作を表示し、同じ原因の失敗が
+続いた場合は設定済みの試行上限後に自動再試行を止めます。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -606,7 +628,7 @@ Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考�
 指定すると、無料枠を確認した後に OS の確認ダイアログを表示します。
 **Redeem free reset** を選ぶと、そのアカウントの無料リセットを1回消費します。
 既定は Cancel で、autonomous モードでも確認を省略しません。
-JSON の承認フラグや過去の承認は利用できません。canvas 上にある、直接インストールした
+JSON の承認フラグや過去の承認は利用できません。独立した Agent タブで動く、直接インストールした
 Host Codex と既定プロバイダの window に対応し、Docker・package runner・独自 backend は拒否します。
 確認画面には対象窓の起動時に記録した認証ルートと由来（host・profile・caller environment）を
 表示し、ヘルパーも同じルートを使用します。証跡のない古い窓は再起動してください。
@@ -665,18 +687,25 @@ NeedsHuman エスカレーション）はトーストとして表示され、永
 通知スタックに蓄積されるため、離席中のイベントも失われません。
 
 Agent の状態通知は **停止**・**エラー**・**人間の対応待ち**を伝えます。
-Idle を Work 完了とは扱いません。runtime のデスクトップ通知は、ページで連続した
-Running を5分以上観測し、ページが非表示またはフォーカス外の場合に限ります。
-別状態への遷移や再接続で計測をリセットします。Monitor の NeedsHuman は窓のない
+Idle を Work 完了とは扱いません。runtime のデスクトップ通知は、同じ runtime 世代で
+連続した Running をサーバーが5分以上観測した場合に限ります。全ブラウザタブを
+閉じても計測を続け、別状態への遷移や runtime 世代の変更でリセットします。Monitor の NeedsHuman は窓のない
 Issue も既存の通知ストリームで即時に伝え、inbox snapshot から二重に通知しません。
 Session Interrupted は再開候補の過去 snapshot としてしか公開されていないため対象外です。
 
 ネイティブ権限の adapter は macOS の認可設定、Windows の通知設定、Linux の
 認可照会不可を区別します。不明・未設定・拒否・照会失敗では配送を許可せず、権限を
 自動要求しません。Linux の GetCapabilities はサーバー機能であり、ユーザーの許可では
-ありません。この adapter 自体はタブなしのネイティブ配送を追加せず、その配送機構は
-SPEC #3287 の別の実装範囲です。debug binary では判定とブラウザ挙動を検証でき、
-署名済み macOS bundle の権限・配送と Windows/Linux のネイティブ操作は実機での別検証が必要です。
+ありません。同じ Project に表示中かつフォーカス中のタブがあればデスクトップ配送を
+抑止し、それ以外では許可済みタブのうち最後に注視情報を受信した1つへ配送します。
+Project の接続タブが0個の場合、最後に報告されたブラウザの許可と GWT 自身の現在の
+OS 許可があればネイティブ配送できます。未設定・拒否の報告は保持した許可を取り消し、
+Project の明示終了や GWT 再起動では許可を破棄します。クリックは受信タブへフォーカスするか、
+安定した Project URL を開きます。配送失敗時は別経路へ再送せず、未読・title・favicon・
+トレイ更新は継続します。macOS には許可済みの署名済み GWT.app、Windows には MSI が
+登録する AUMID 付きショートカットが必要です（portable ZIP は登録しません）。Linux は
+認可照会ができないためネイティブ配送を抑止します。debug binary では判定とブラウザ挙動を
+検証でき、署名済み macOS／インストール済み Windows の配送・クリック操作は別途実機検証が必要です。
 
 調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
 モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC
@@ -689,6 +718,26 @@ SPEC #3287 の別の実装範囲です。debug binary では判定とブラウ�
 登録・design-required Issue の計画策定・意味的な実行順序の決定・Issue Monitor
 への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
 同じ会話の中で行われます。
+
+計画中の Issue をプロジェクト目標、または明示的な maintenance / compliance
+区分へ紐付けるよう PM に依頼できます。`pm.plan.status` は保存済み計画の revision と、
+未紐付け・不正な紐付け、Now/Next/Later、マイルストーン情報の不足を示す `policy`
+診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
+観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
+証拠が接続されるまでは検証済みとして扱いません。
+マイルストーン診断では、明示的な所属 Issue と、一意かつ空でないマイルストーン ID を
+参照するロードマップ項目の Issue について、Monitor inbox の観測状態と未観測番号も示します。
+これは参照の事実であり、目標との整合を証明するものではありません。保留・失敗・claim 競合を
+状態から確認できますが、観測の欠落や Merged / Released を健康・完了の証拠にはしません。
+目標診断でも、一意かつ空でない目標 ID と完全一致する明示的なリンクについて、
+ロードマップ参照・Issue 番号・inbox の観測状態・未観測 Issue を示します。
+不正なリンクも参照の事実として残し、マイルストーンや区分だけのリンクは所属を広げません。
+空または重複した目標 ID ではリンクを解決しません。観測から目標達成や指標の裏付けを
+証明せず、正本となる情報源が接続されるまで `metric_evidence` は不足として残します。
+目標・マイルストーン・ロードマップの変更では、理由・revision・変更前後の値・直接影響する
+Issue も計画の監査記録に残します。目標変更では、ロードマップ項目からその目標へ明示的に
+紐付く Issue のみが対象です。この記録だけでは、依存先や担当エージェントへの
+通知済みとは判断しません。
 
 PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
 スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
@@ -714,7 +763,7 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
   手動 close が許可され、その Work の稼働 agent がいないことを確認します。
   終了履歴を記録し、branch と worktree は保持します。
 
-PM に GitHub Discussion の作成と Board 接続、`develop` / `main` の必須チェック変更、
+PM に Board Discussion 共有の有効化や単独 Discussion の作成、`develop` / `main` の必須チェック変更、
 全プロジェクト共通の Auto-apply updates 変更を依頼できます。操作対象を明確にした
 指示の記録、または OS ネイティブの承認ダイアログで許可します。**Approve once** で
 今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
@@ -875,14 +924,18 @@ Agent session の隔離と再現性のため、gwt は各プロジェクトを�
 └── .gwt/project.toml       # gwt が管理するプロジェクトメタデータ
 ```
 
-Project Picker の `Clone from GitHub...` (タブ未選択時の全画面ピッカー) と、
-トップツールバーの `Open Project ▾` split-button ドロップダウン (アクティブな
-プロジェクトがある状態でも到達可能) のどちらからでも clone を開始できます。
+Hub またはシステムトレイの `Clone from GitHub…` から clone を開始できます。
 clone modal では GitHub HTTPS / SSH URL を直接入力するか、`gh search repos`
 による repository 検索から候補を選択し、保存先の親フォルダを指定します。新しい
 プロジェクトは `<parent>/<project>/` に作成され、`<project>.git/` bare リポジトリ
 と initial worktree が配置されます。remote に `develop` が存在する場合は
 `develop` worktree を作成し、存在しない場合は remote default branch を使います。
+
+Clone を実行するとブラウザタブを確保し、成功後にそのタブでプロジェクトの URL を
+開きます。Hub はそのまま残ります。ポップアップがブロックされた場合や確保した
+タブを閉じた場合は、Hub の完了リンクから開けます。失敗時は確保したタブを閉じて
+理由を表示します。同じリポジトリが Open または Recent に登録済みなら clone を
+拒否し、**Open existing project** から既存の URL を開けます。
 
 既存の Normal Git リポジトリ（プロジェクト直下に `.git/` がある通常レイアウト）
 は検出され、要望に応じて Nested Bare + Worktree 構成へマイグレーションできます。
@@ -904,17 +957,12 @@ worktree にプロジェクトタブが切り替わります。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
-別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に
-`discussion.create` の `sync_board:true` で Discussion 作成と接続を依頼できます。
-既存の Discussion に接続する場合は `board.config.set` の `github_discussion` に番号を
-指定します。接続だけ失敗した場合も、Discussion を重複作成せずに復旧できます。
-現在の Board provider が Local 以外なら、作成時は `board_provider:"local"`、
-既存への接続時は `provider:"local"` を明示して切替を依頼してください。
-対象プロジェクトの provider 上書きと接続先を同時に保存し、全体設定や他プロジェクトの
-provider 設定は維持します。明示的な切替がなければ、同期付き作成は GitHub 上に
-Discussion を作る前に拒否されます。
-どちらも現在のリポジトリが対象です。手動で接続する場合は Board provider を
-**Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
+別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に scoped な
+`board.config.set` で共有を有効化するよう依頼します。`category:"General"` または
+別のカテゴリー名を指定でき、Discussion 番号や手動での Discussion 作成は不要です。
+現在の Board provider が Local 以外なら `provider:"local"` を明示して切り替えます。
+既存の scoped authority を必要とし、全体設定や他プロジェクトの設定は維持します。
+手動で opt-in する場合は `.gwt/work/board.toml` を設定します。
 
 ```toml
 provider = "local"
@@ -922,24 +970,41 @@ provider = "local"
 [github_discussion]
 owner = "your-org"
 repo = "your-repo"
-number = 123
+category = "General" # 省略時の既定値
 ```
 
-各マシンで同じ既存 Discussion を指定し、GitHub Discussions を有効にして、読み書き権限を
-持つ `gh` 認証を用意してください。Board の読み書き時に、最大1分に1回バックグラウンド同期を
-起動します。明示的な同期と直近の結果の確認は、
-`{"schema_version":1,"operation":"board.sync","params":{}}` を `gwtd` の標準入力へ送ります。
-`status` / `claim` はローカルに留まり、共有種別は設定で変更できません。
-受信した投稿は既存 Board のフィードに表示されます。
-GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` のコメントだけを
-取り込み、それ以外や不明な所属は取り込みません。受信投稿は escalation を開閉できるため、
-所有者・組織メンバー・collaborator をローカルの調整相手として信頼できるリポジトリを指定してください。
+各マシンで同じリポジトリとカテゴリーを指定し、GitHub Discussions を有効にして、
+読み書き権限を持つ `gh` 認証を用意してください。共有対象の Board root ごとに
+Discussion を1つ作り、title は owner Issue 番号と短い要約、本文には Board entry ID と
+owner Issue へのリンクを置きます。共有対象の返信はその Discussion のコメントになります。
+`status` / `claim` は返信もローカルに留まり、共有種別は設定で変更できません。
+永続履歴にも root が見つからない返信や、root が共有対象でない返信はローカルに留まります。
+中間の親が local-only や表示範囲外でも、共有対象の子孫は配送します。
+旧設定の `number` は読み込み互換として残りますが、単一の配送先を指定する用途には
+使わず、新しい投稿は話題ごとの Discussion へ配送します。既存の一括 Discussion は残します。
+作成は投稿元のマシンに限定し、新しい投稿の出自記録、または旧 root の Session 履歴で
+判定します。出自を証明できない旧 root は診断を残してローカルに留まります。opt-in 後の
+新しいローカル root は出自を自動記録します。複数マシンの同時移行での重複作成を避けるためです。
 
-同期は best-effort で、ローカルの現在の表示範囲（最大500件）を送信します。
-長期障害中に表示範囲から外れた未送信投稿は遡って配送しません。レート制限・認証失効・
-ネットワーク障害でもローカル Board は利用でき、`board.sync` で診断を確認できます。
-失敗時は5分後に共有 GitHub budget を尊重して再試行します。停止中の相手は次回同期で保存済み
-コメントを受信します。共有を停止するには `[github_discussion]` を削除してください。
+Board の読み書き時に最大1分に1回バックグラウンド同期を起動します。明示的な同期と
+診断の確認は `{"schema_version":1,"operation":"board.sync","params":{}}` を
+`gwtd` の標準入力へ送ります。受信した投稿は既存 Board のフィードに表示されます。
+GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` の root / コメント
+だけを取り込み、それ以外や不明な所属は取り込みません。通常のコメントは安定した
+remote ID を持つ Board 返信になります。encoded 投稿は escalation を開閉できるため、
+所有者・組織メンバー・collaborator を調整相手として信頼できるリポジトリを指定してください。
+公開リポジトリでは共有する Board 本文も公開されます。
+
+同期は bounded best-effort です。追跡は最大50話題で、超過した話題はローカルに留め、
+`board.sync` に上限を表示します。各 tick で repository を1ページ、話題を最大5つずつ
+順に読み、作成・投稿は合計最大5件に制限します。repository の発見が完了するまで
+作成せず、作成応答を失ったときも entry ID を照合してから再試行します。GraphQL の
+実際の cost は既存 GitHub budget に記録し、予算不足なら同期を延期します。
+送信候補はローカルの現在の表示範囲（最大500件）です。長期障害中に範囲外へ出た
+未送信投稿は遡って配送しません。レート制限・認証失効・ネットワーク障害でも
+ローカル Board は利用でき、診断を残して5分後に共有 budget を尊重して再試行します。
+停止中の相手は後の同期で保存済み投稿を受信します。共有を停止するには
+`[github_discussion]` を削除してください。
 
 ## Board プロバイダ (Local / Slack / Teams)
 
@@ -1148,19 +1213,19 @@ project 固有の規約を明示的に渡すには、
 `gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
 指定を外した内容は次回の再生成で除去されます。
 
-## キャンバス操作
+## サーフェス操作
 
-- 画面上の zoom ボタンでキャンバスを拡大・縮小
-- 背景ドラッグでキャンバスを移動
-- `Tile` で表示中のウィンドウをグリッド整列
-- `Stack` でタイトルバーを残したまま重ねて表示
-- `Align` でウィンドウサイズを変えずにグリッド整列
+- レールから **Issues**、**Agents**、**Board**、**Settings** を選ぶと、コンテンツ領域全体に表示します。
+- **PM** は独立したレール入口から開き、単一ペインで表示します。
+- プロジェクトバーの **Split view** で左右のペインを表示し、それぞれのサーフェスを選びます。
+- **Close split** でアクティブなサーフェスを単一ペインに戻します。
+- **Agents** では同じライブターミナルを維持して、**All agents** と個別タブを切り替えます。
 
 ## Agent の巡回
 
 `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
 状態順（running/starting → waiting/idle → その他）に選択します。
-Issue 内に表示された Agent も含み、PM と Shell はスキップします。
+Issue 内に表示された Agent と Shell のターミナルも含み、PM はスキップします。
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
@@ -1178,7 +1243,7 @@ Operator Design System 採用後、gwt は editorial-industrial 系タイポグ�
 counter、密度の高い作業サーフェスを長時間でも読み取りやすくします。
 一方で display typography は見出しと chrome label に限定して Operator らしさを
 保ちます。Project Bar / Command Rail / Status Strip / Command Palette /
-Hotkey Overlay / Drawer モーダル / フローティングウィンドウ の全クロームが
+Hotkey Overlay / Drawer モーダル / サーフェスパネル の全クロームが
 共通トークンを参照し、 2 つの旗艦テーマで提供されます:
 
 - **Dark Operator** (Mission Control / carbon + neon) — 既定、 長時間作業向け
@@ -1205,20 +1270,15 @@ Contrast) では system colors にフォールバックします。
 | --- | --- |
 | `⌘K` / `⌘P` | Command Palette を開く (全サーフェス アクションの fuzzy 検索) |
 | `⌘B` | Board サーフェスを focus |
-| `⌘G` | Git (Branches) サーフェスを focus |
+| `⌘G` | Issues サーフェスを focus |
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
 
-画面左端の Command Rail は常時表示です。上段に Intake (Curate レーン) と
-Open Workspace (Execute レーン)、
-中段にウィンドウ操作 (Tile / Stack / Align / ウィンドウ一覧 / Add)、
-下段に Command Palette が並びます。Board と Logs はレール項目ではなく、
-Add Window のプリセットメニュー・Command Palette・`⌘B` / `⌘L` のホットキー
-から開けます。レール項目にホバーするとラベルと実際のショートカットが
-表示されます。ウィンドウを閉じる操作
-(タイトルバーの × / タブの ×) は常に確認ダイアログを経由するため、誤クリック
-で実行中のエージェントが失われることはありません。
+レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Agents**、
+**Board**、**Settings** が並びます。選択したサーフェスは固定ペインに表示し、
+**Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
+コンテンツ領域の下に表示します。その他の操作は Command Palette またはホットキーから使えます。
 
 ### アクセシビリティ
 

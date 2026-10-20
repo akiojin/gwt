@@ -6,6 +6,7 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 test.describe("Branch Cleanup E2E", () => {
   test.use({
@@ -544,7 +545,7 @@ test.describe("Issue #4433 branch cleanup reconnect", () => {
 
   test("a reconnect mid-cleanup re-syncs instead of showing a false failure", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -552,18 +553,41 @@ test.describe("Issue #4433 branch cleanup reconnect", () => {
     });
     page.on("pageerror", (error) => pageErrors.push(String(error)));
 
-    await installEmbeddedRoutes(page);
+    const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    if (configuredUrl) {
+      // Exercise real checkout startup first; cleanup itself uses a deterministic
+      // backend so this verification cannot delete a repository branch.
+      await gotoLiveGwt(page, configuredUrl, { enableTestBridge: true });
+      const asset = await page.request.get(new URL("/branches-cleanup-surface.js", configuredUrl).toString());
+      expect(asset.ok()).toBe(true);
+      expect(await asset.text()).toContain("const cleanupModel = createUiStateStore");
+    } else {
+      await installEmbeddedRoutes(page);
+    }
     await installWorkspaceCleanupBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(configuredUrl ? new URL(new URL(APP_URL).pathname, configuredUrl).toString() : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await page.locator(".issue-other-summary").click();
 
     await expect(page.locator(".workspace-overview-root")).toBeVisible({
       timeout: 10_000,
     });
 
-    await page.locator("[data-action='cleanup-merged-workspaces']").click();
+    const cleanupTrigger = page.locator("[data-action='cleanup-merged-workspaces']");
+    await cleanupTrigger.click();
     const modal = page.locator("#branch-cleanup-modal");
     await expect(modal).toHaveClass(/open/);
+    await modal.getByRole("button", { name: "Cancel" }).click();
+    await expect(cleanupTrigger).toBeFocused();
+    await cleanupTrigger.click();
+    await expect(modal).toHaveClass(/open/);
+    const force = modal.getByLabel("Force remove remaining worktree files");
+    await force.focus();
+    await force.check();
+    await expect(force).toBeFocused();
+    await expect(force).toBeChecked();
     await modal.getByRole("button", { name: "Run cleanup" }).click();
 
     // AC-1: the run is tagged so the backend can address it by operation.
@@ -575,6 +599,7 @@ test.describe("Issue #4433 branch cleanup reconnect", () => {
     );
     expect(typeof runCall.operation_id).toBe("string");
     expect(runCall.operation_id.length).toBeGreaterThan(0);
+    expect(runCall.force_filesystem_delete).toBe(true);
 
     await page.evaluate((operationId) => {
       (window as any).__cleanupFixture.emit({
@@ -615,6 +640,8 @@ test.describe("Issue #4433 branch cleanup reconnect", () => {
     await expect(modal).toContainText("Cleanup result");
     await expect(modal).toContainText("success 1");
     await expect(modal).toContainText("Deleted local branch and worktree");
+
+    await page.screenshot({ path: testInfo.outputPath("cleanup-shared-result.png") });
 
     // AC-3: closing the result releases the backend snapshot.
     await modal.getByRole("button", { name: "Close" }).click();

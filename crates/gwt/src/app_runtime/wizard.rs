@@ -239,6 +239,7 @@ fn issue_monitor_non_head_selection_toast(
         context.project_key.clone(),
         BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "info".to_string(),
             message: format!("Issue #{issue_number} launches with {selected_agent_id}: {reasons}"),
             issue_number: Some(issue_number),
@@ -2428,6 +2429,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Project tab not found".to_string(),
                     issue_number: Some(issue_number),
@@ -2446,6 +2448,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Issue Monitor launch requires a Git project".to_string(),
                     issue_number: Some(issue_number),
@@ -2458,6 +2461,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Complete the project migration before launching monitored Issue work"
                         .to_string(),
@@ -2476,6 +2480,7 @@ impl AppRuntime {
                         client_id,
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "error".to_string(),
                             message: error,
                             issue_number: Some(issue_number),
@@ -2520,6 +2525,7 @@ impl AppRuntime {
                         client_id,
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "info".to_string(),
                             message: "Issue Monitor launch prepared".to_string(),
                             issue_number: Some(issue_number),
@@ -2532,6 +2538,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: error,
                     issue_number: Some(issue_number),
@@ -2634,6 +2641,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Project tab not found".to_string(),
                     issue_number: None,
@@ -2646,6 +2654,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Issue Monitor settings require a Git project".to_string(),
                     issue_number: None,
@@ -2658,6 +2667,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message:
                         "Complete the project migration before configuring Issue Monitor settings"
@@ -2718,6 +2728,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "info".to_string(),
                     message: "Issue Monitor settings opened".to_string(),
                     issue_number: None,
@@ -3073,9 +3084,9 @@ impl AppRuntime {
                     started_at,
                 }) => {
                     let window_exists = self.tracked_window_exists(&window_id);
-                    // Issue #3851: the TTL bounds pre-PTY materialization only.
-                    // Once a runtime exists, SessionStart may legitimately wait
-                    // for terminal input; runtime status owns exit recovery.
+                    // A live preparation or its queued completion still owns
+                    // this window. The TTL only recovers abandoned placeholders.
+                    // Once a runtime exists, runtime status owns exit recovery.
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
                             !matches!(
@@ -3084,7 +3095,8 @@ impl AppRuntime {
                             )
                         });
                     if window_exists
-                        && (live_runtime
+                        && (self.has_pending_agent_launch_worker(&window_id)
+                            || live_runtime
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         return Vec::new();
@@ -3267,6 +3279,7 @@ impl AppRuntime {
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "info".to_string(),
                             message: "Issue Monitor settings are already open".to_string(),
                             issue_number: Some(issue_number),
@@ -3346,6 +3359,7 @@ impl AppRuntime {
                     recovery_events.push(OutboundEvent::project(context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "error".to_string(),
                             message: format!(
                                 "Issue Monitor could not continue the exact answered session;{disposition}: {error}"
@@ -3469,6 +3483,7 @@ impl AppRuntime {
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "warn".to_string(),
                 message: format!(
                     "Issue Monitor did not open a second pane for #{issue_number}: window {live_window_id} is already working it"
@@ -3495,15 +3510,34 @@ impl AppRuntime {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
         })?;
         let bound_window_id = delivery.materializer_window_id.as_deref()?;
-        let window_id = tab
+        let window = tab
             .workspace
             .persisted()
             .windows
             .iter()
-            .map(|window| combined_window_id(&tab_id, &window.id))
-            .find(|window_id| window_id == bound_window_id)?;
+            .find(|window| combined_window_id(&tab_id, &window.id) == bound_window_id)?;
+        // Window IDs can be reused after close. The old reservation alone
+        // cannot authorize adopting or closing its current occupant.
+        let owners = [
+            window.linked_issue_number,
+            self.issue_monitor_pending_feedback_for_window(bound_window_id, &tab.project_root)
+                .and_then(|feedback| feedback.issue_monitor_issue_number),
+            window.session_id.as_deref().and_then(|session_id| {
+                self.launch_wizard_cache
+                    .session_by_id(session_id)
+                    .and_then(|session| session.linked_issue_number)
+            }),
+        ];
+        if !owners.contains(&Some(issue_number))
+            || owners
+                .into_iter()
+                .flatten()
+                .any(|owner| owner != issue_number)
+        {
+            return None;
+        }
         Some((
-            window_id,
+            bound_window_id.to_string(),
             delivery.materialized_window_id.as_deref() == Some(bound_window_id),
             delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
         ))
@@ -3567,6 +3601,7 @@ impl AppRuntime {
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "warn".to_string(),
                     message: format!(
                         "Independent review for #{} could not start (launch settings unavailable)",
@@ -4083,6 +4118,7 @@ impl AppRuntime {
         if let Some(holder_window_id) = resume_holder_window_id {
             events.push(OutboundEvent::project(context.project_key.clone(), BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "warn".to_string(),
                 message: format!(
                     "Issue Monitor started a fresh session because native conversation is already held by window {holder_window_id}"
@@ -4100,6 +4136,7 @@ impl AppRuntime {
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "info".to_string(),
                 message,
                 issue_number: Some(issue_number),
@@ -4333,6 +4370,22 @@ impl AppRuntime {
             }
             return Ok((None, None));
         }
+        // Issue #5696: terminal Work cannot rebound in the same Session,
+        // including a Completed owner that has been reopened. The Resume
+        // coordinator would degrade to observation-only, so route Monitor
+        // back through the fresh-launch readiness transaction instead.
+        if session.linked_issue_number == Some(issue_number)
+            && gwt::continuation_requires_new_session(project_root, &session)
+                .map_err(|error| format!("failed to inspect Monitor resume Work: {error}"))?
+        {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff requires a fresh Session because its Work is terminal"
+                        .to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
         if !session.worktree_path.as_path().exists() {
             config.working_dir = None;
         }
@@ -4444,6 +4497,7 @@ impl AppRuntime {
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "info".to_string(),
                 message: "Issue Monitor resumed existing session".to_string(),
                 issue_number: Some(issue_number),
@@ -5995,6 +6049,7 @@ impl AppRuntime {
                 &client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "info".to_string(),
                     message: "Issue Monitor settings saved".to_string(),
                     issue_number,

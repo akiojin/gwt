@@ -889,6 +889,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.startup"
             | "perf.violations"
             | "pm.capabilities"
+            | "pm.plan.status"
             | "pm.status"
             | "pm.report.list"
             | "search"
@@ -2248,6 +2249,30 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
+        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": envelope_command(operation, "{}")
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            assert_eq!(is_read_only_json_envelope_operation(operation), admitted);
+            assert_eq!(identity_gate_admits_operation(operation), admitted);
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output")
+                    == HookOutput::Silent,
+                admitted,
+                "{operation}"
+            );
+        }
     }
 
     /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in

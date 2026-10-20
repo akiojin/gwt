@@ -794,6 +794,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         &failed,
         None,
         Some(owner.number),
+        Some(owner),
         &context,
         Some(&HashSet::from([failed.session_id.clone()])),
     )

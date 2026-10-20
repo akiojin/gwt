@@ -255,7 +255,7 @@ fn hosted_windows_startup_selects_only_the_native_command_contract() {
         .into_iter()
         .find(|(name, _)| name == "Check Windows startup tray readiness contract")
         .expect("Windows startup contract step");
-    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture"));
+    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run-runtime gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture"));
     assert_eq!(timeout_minutes(&step), Some(1));
     assert!(!step.contains("if:"));
     assert!(
@@ -283,7 +283,7 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
         .into_iter()
         .find(|(name, _)| name == "Check startup update Git-spawn budget")
         .expect("Windows must run the existing 1500-session Git budget test");
-    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
+    assert!(step.contains("run: node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
     assert!(!step.contains("continue-on-error:"));
     assert!(!step.contains("if:"));
 }
@@ -421,9 +421,7 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     }
     let required = job_body(&workflow, "  test-rust-required:");
     assert!(required.contains("name: Test (Rust)\n"));
-    assert!(required.contains(
-        "needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]"
-    ));
+    assert!(required.contains("needs: [test, test-linux-infrastructure, source-sync]"));
     assert!(required.contains("if: ${{ !cancelled() }}"));
     assert!(required.contains("RUST_RESULT: ${{ needs.test.result }}"));
     assert!(required.contains("INFRA_RESULT: ${{ needs.test-linux-infrastructure.result }}"));
@@ -432,16 +430,18 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
 }
 
 #[test]
-fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
-    let workflow = read(TEST_WORKFLOW);
+fn paired_windows_timings_preserve_evidence_outside_the_pr_path() {
+    let pr_workflow = read(TEST_WORKFLOW);
+    assert!(!pr_workflow.contains("test-windows-verify-timings"));
+    assert!(!pr_workflow.contains("verify_timings"));
+    let workflow = read(NIGHTLY_WORKFLOW);
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("workflow_dispatch:"));
+    assert!(!workflow.contains("pull_request:"));
     let job = job_body(&workflow, "  test-windows-verify-timings:");
-    assert!(job.contains("runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"));
-    assert!(job.contains("needs: [changes, source-sync]"));
-    assert!(
-        job.contains("if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}")
-    );
-    // Unknown/failed classification must measure, not silently skip.
-    assert!(job.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
+    assert!(job.contains("runs-on: windows-latest"));
+    assert!(job.contains("ref: develop"));
+    assert!(job.contains("fetch-depth: 0"));
     assert!(job.contains("cargo-nextest@0.9.146"));
     let (_, measure) = named_steps(job)
         .into_iter()
@@ -449,45 +449,28 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
     assert!(!measure.contains("continue-on-error"));
-    assert!(measure.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
+    assert!(!measure.contains("if:"));
     let (_, upload) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Upload both measurements even on failure")
         .expect("preserve raw evidence when a measurement fails");
-    assert!(
-        upload.contains("if: ${{ always() && needs.changes.outputs.verify_timings != 'false' }}")
-    );
+    assert!(upload.contains("if: always()"));
     assert!(upload.contains("path: target/verify-timings/"));
     assert!(upload.contains("if-no-files-found: error"));
-    let required = job_body(&workflow, "  test-rust-required:");
-    assert!(required.contains("TIMINGS_RESULT: ${{ needs.test-windows-verify-timings.result }}"));
-    assert!(required.contains("if: ${{ !cancelled() }}"));
-    assert!(required.contains("case \"$TIMINGS_RESULT\" in success|skipped) ;; *) exit 1 ;; esac"));
+    let report = job_body(&workflow, "  report-nightly-failure:");
+    assert!(report
+        .lines()
+        .any(|line| line.contains("needs:") && line.contains("test-windows-verify-timings")));
+    assert!(report.contains("if: failure()"));
 }
 
 #[test]
-fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
+fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     use serde_yaml::Value;
 
     let workflow = read(TEST_WORKFLOW);
-    let job = job_body(&workflow, "  test-windows-rust:");
     let warm = job_body(&workflow, "  test-windows-warm:");
-    assert_eq!(
-        workflow
-            .matches("ci-windows-tests.mjs build default")
-            .count(),
-        1
-    );
-    assert_eq!(job.matches("ci-windows-tests.mjs build default").count(), 1);
-    assert!(
-        job.find("ci-windows-tests.mjs build default").unwrap()
-            < job.find("ci-windows-tests.mjs run ").unwrap()
-    );
     assert!(!workflow.contains("test-windows-regression-build:"));
-    assert!(
-        !job.contains("cargo test"),
-        "regression filters must execute built binaries without recompiling"
-    );
     assert_eq!(
         workflow.matches("ci-windows-tests.mjs build warm").count(),
         1
@@ -499,17 +482,120 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
             < warm.find("ci-windows-tests.mjs run-warm").unwrap()
     );
     assert!(warm.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1"));
-    assert!(job.contains("ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact"));
 
     let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
-    let regressions = &doc["jobs"]["test-windows-rust"];
-    assert_eq!(regressions["needs"].as_str(), Some("source-sync"));
-    assert!(
-        regressions["strategy"].is_null(),
-        "one regression runner shares its build"
-    );
-    let steps = regressions["steps"].as_sequence().unwrap();
-    let driver = steps
+    let invocation =
+        regex::Regex::new(r"node scripts/ci-windows-tests\.mjs (run(?:-lib|-runtime)?) ([^\r\n]+)")
+            .expect("default regression invocation");
+    let mut actual_filters = Vec::new();
+    for (name, group, command, lib) in [
+        ("test-windows-rust", "default-runtime", "run-runtime", false),
+        ("test-windows-rust-lib", "default-lib", "run-lib", true),
+    ] {
+        let job = &doc["jobs"][name];
+        assert_eq!(
+            job["needs"].as_str(),
+            Some("source-sync"),
+            "{name} must start independently"
+        );
+        assert!(job["strategy"].is_null(), "{name} builds each harness once");
+        assert!(job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        let steps = job["steps"].as_sequence().expect("regression steps");
+        assert_eq!(
+            steps[0]["with"]["ref"].as_str(),
+            Some("${{ github.event.pull_request.head.sha || github.sha }}"),
+            "T453 native evidence must use the exact PR head"
+        );
+        let build_command = format!("node scripts/ci-windows-tests.mjs build {group}");
+        assert_eq!(workflow.matches(&build_command).count(), 1);
+        let build = steps
+            .iter()
+            .position(|step| step["run"].as_str() == Some(build_command.as_str()))
+            .expect("each regression group needs its own build");
+        assert_eq!(
+            steps[build]["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str(),
+            Some("0")
+        );
+        assert!(steps[build]["if"].is_null());
+        // Issue #1921 T453: exact acceptance precedes each slice's broader
+        // regressions and cannot pass with a renamed or ignored test.
+        let exact = &steps[build + 1];
+        assert!(exact["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Run T453 exact Windows"));
+        assert_eq!(exact["shell"].as_str(), Some("bash"));
+        assert!(exact["if"].is_null());
+        assert!(exact["continue-on-error"].is_null());
+        let exact_run = exact["run"].as_str().unwrap();
+        assert!(exact_run.contains("\"$@\" | tee \"$RUNNER_TEMP/t453-exact.log\""));
+        assert!(exact_run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'"));
+        assert_eq!(
+            exact_run
+                .matches("exact node scripts/ci-windows-tests.mjs")
+                .count(),
+            7
+        );
+        assert_eq!(
+            exact_run
+                .matches(" -- --exact --test-threads=1 --nocapture")
+                .count(),
+            7
+        );
+        for (index, step) in steps.iter().enumerate() {
+            if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
+                assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+            }
+            let Some(run) = step["run"].as_str() else {
+                continue;
+            };
+            assert!(
+                !run.contains("cargo test"),
+                "filters execute prebuilt binaries"
+            );
+            for capture in invocation.captures_iter(run) {
+                assert!(build < index, "{name} must build before running filters");
+                assert!(
+                    step["if"].is_null(),
+                    "all regression filters run unconditionally"
+                );
+                assert_eq!(&capture[1], command);
+                let filter = &capture[2];
+                assert_eq!(filter.split_whitespace().nth(1) == Some("lib"), lib);
+                actual_filters.push(filter.to_owned());
+            }
+        }
+    }
+
+    let required = &doc["jobs"]["test-windows-required"];
+    let needs = required["needs"]
+        .as_sequence()
+        .expect("protected Windows dependencies");
+    let gate = required["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["env"]["WINDOWS_RESULT"].as_str().is_some())
+        .expect("protected Windows result gate");
+    let gate_run = gate["run"].as_str().unwrap();
+    for name in ["test-windows-rust", "test-windows-rust-lib"] {
+        assert!(needs.iter().any(|need| need.as_str() == Some(name)));
+        let result = format!("${{{{ needs.{name}.result }}}}");
+        let key = gate["env"]
+            .as_mapping()
+            .unwrap()
+            .iter()
+            .find_map(|(key, value)| {
+                (value.as_str() == Some(result.as_str())).then(|| key.as_str().unwrap())
+            })
+            .expect("both regression results must reach the protected gate");
+        assert!(gate_run.contains(&format!("test \"${key}\" = success")));
+    }
+
+    let runtime = &doc["jobs"]["test-windows-rust"];
+    let driver = runtime["steps"]
+        .as_sequence()
+        .unwrap()
         .iter()
         .find(|step| {
             step["run"]
@@ -523,20 +609,11 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
     assert!(driver_run.contains("Start-Job"));
     assert!(driver_run.contains("$attempt -le 2"));
     assert!(driver_run.contains("verification_driver_cli_test:: -- --test-threads=1"));
-    assert!(driver_run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
-    assert!(driver_run.contains("cli::verification_record::driver:: -- --test-threads=1"));
     assert_eq!(
-        driver_run
-            .matches("cli::verification_record::driver::")
-            .count(),
+        driver_run.matches("verification_driver_cli_test::").count(),
         1
     );
-    assert!(
-        driver_run
-            .find("cli::verification_record::driver::")
-            .unwrap()
-            < driver_run.find("Start-Job").unwrap()
-    );
+    assert!(!driver_run.contains("cli::verification_record::driver::"));
     assert!(
         driver_run.contains("throw"),
         "native command failures must fail their worker"
@@ -550,17 +627,79 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
         driver_run.contains("exit 1"),
         "any failed worker must fail the required job"
     );
-    for step in steps {
-        let Some(run) = step["run"].as_str() else {
-            continue;
-        };
-        if run.contains("ci-windows-tests.mjs run ") {
-            assert!(
-                step["if"].is_null(),
-                "all regression contracts must run unconditionally"
-            );
-        }
-    }
+
+    // Issue #5565 split the original 49 default filters across both hosts.
+    // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
+    let mut expected_filters = vec![
+        "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
+        "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
+        "gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1",
+        "gwt bin gwt dispatch_watchdog::tests:: -- --test-threads=1",
+        "gwt-core test process_priority_roundtrip -- --nocapture",
+        "gwt-core test windows_process_resolver",
+        "gwt-core test process_adapter_parity",
+        "gwt-core test windows_claude_user_agent",
+        "gwt-agent lib gwt_agent real_bun_global_placeholder_fixture",
+        "gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary",
+        "gwt bin gwt real_bun_global_placeholder_fixture",
+        "gwt bin gwt command_prompt_agent_wrapper",
+        "gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1",
+        "gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1",
+        "gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1",
+        "gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1",
+        "gwt-terminal test pty_start_gate_test -- --test-threads=1",
+        "gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1",
+        "gwt bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1",
+        "gwt bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1",
+        "gwt bin gwt app_runtime_local_driver_ -- --test-threads=1",
+        "gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1",
+        "gwt lib gwt local_fallback_lease -- --test-threads=1",
+        "gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
+        "gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+        "gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
+        "gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        "gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
+        "gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
+        "gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
+        "gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+        "gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1",
+        "gwt test runtime_tests agent_process_resolution_contract_test::",
+        "gwt lib gwt cli::daemon::transport -- --test-threads=1",
+        "gwt lib gwt cli::daemon::client -- --test-threads=1",
+        "gwt lib gwt cli::daemon::tests -- --test-threads=1",
+        "gwt lib gwt daemon_subscriber -- --test-threads=1",
+        "gwt lib gwt daemon_supervisor -- --test-threads=1",
+        "gwt lib gwt process::tests -- --test-threads=1",
+        "gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1",
+        "gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1",
+        "gwt lib gwt cli::verification_lease:: -- --test-threads=1",
+        "gwt lib gwt cli::verification_record::driver:: -- --test-threads=1",
+        "gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1",
+        "gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture",
+        "gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1",
+        "gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1",
+        "gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1",
+        "gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1",
+        "gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_health_returns_managed_health_json -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::hook_doctor_repair_does_not_persist_path_local_build_binary -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::new_for_hooks_keeps_detached_cache_root -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::owner_runtime_override_requires_complete_explicit_loopback_environment -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt app_runtime::tests::continuation_authority_tests::continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt tests::powershell_agent_wrapper_quotes_spaced_path_and_single_quotes -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin -- --exact --test-threads=1 --nocapture",
+        "gwt test hook_contracts hook_health_test::managed_hook_health_understands_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
+        "gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
+    ];
+    assert_eq!(expected_filters.len(), 64);
+    expected_filters.sort_unstable();
+    actual_filters.sort_unstable();
+    assert_eq!(actual_filters, expected_filters);
 }
 
 /// Issue #4134 AC-1: the three-pass determinism loop is the single most
@@ -633,6 +772,8 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
 /// providers, and attributes a failure to its provider.
 #[test]
 fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
+    use serde_yaml::Value;
+
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, AGENT_LAUNCH_JOB);
     assert!(
@@ -664,4 +805,40 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
         "the loop must keep the matrix's fail-fast: false semantics and run \
          every provider before failing"
     );
+    let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
+    let agent_job = &doc["jobs"]["test-windows-agent-launch-e2e"];
+    assert!(agent_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    let steps = agent_job["steps"].as_sequence().unwrap();
+    let cargo_steps: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .collect();
+    assert_eq!(cargo_steps.len(), 3);
+    assert!(cargo_steps
+        .iter()
+        .all(|step| step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str() == Some("0")));
+    assert!(steps.iter().all(|step| {
+        step["uses"].as_str() != Some("Swatinem/rust-cache@v2")
+            || step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null()
+    }));
+    let providers = cargo_steps
+        .iter()
+        .find_map(|step| {
+            let run = step["run"].as_str()?;
+            run.contains("--ignored").then_some(run)
+        })
+        .unwrap();
+    assert!(providers.contains("providers=(codex claude)"));
+    assert!(providers.contains("pids=()"));
+    assert!(providers.contains("2>&1 &"));
+    assert!(providers.contains("pids+=(\"$!\")"));
+    assert!(providers.contains("for index in \"${!pids[@]}\"; do"));
+    assert!(providers.contains("provider=\"${providers[$index]}\""));
+    assert!(providers.contains("if wait \"${pids[$index]}\"; then"));
+    assert!(providers.contains("cat \"$RUNNER_TEMP/windows-agent-${provider}.log\""));
+    assert!(providers.contains("exit \"$status\""));
 }

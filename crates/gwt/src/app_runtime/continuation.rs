@@ -315,13 +315,13 @@ fn prepare_fresh_execution_launch_session_start(
                 sessions_dir,
                 &pending.session_identity,
                 |activate| {
-                    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
+                    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_supersession_commit(
                         &pending.project_root,
                         &pending.worktree_path,
                         &pending.operation_id,
                         |projection, work_items, _| {
                             let now = chrono::Utc::now();
-                            let event = apply_workspace_launch_for_current_work(
+                            let events = apply_workspace_launch_for_current_work(
                                 &pending.project_root,
                                 projection,
                                 work_items,
@@ -344,8 +344,9 @@ fn prepare_fresh_execution_launch_session_start(
                                     live_session_ids,
                                     now,
                                 },
+                                true,
                             )?;
-                            Ok(((), vec![event]))
+                            Ok(((), events))
                         },
                         || {
                             if !window_is_current()

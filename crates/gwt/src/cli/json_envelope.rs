@@ -492,10 +492,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.close" => {
             reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
             let close_kind = required_string(params, "close_kind")?;
-            if !matches!(close_kind.as_str(), "done" | "discarded") {
+            if !matches!(close_kind.as_str(), "done" | "discarded" | "superseded") {
                 return Err(CliParseError::InvalidValue {
                     flag: "close_kind",
-                    reason: "expected done or discarded",
+                    reason: "expected done, discarded, or superseded",
                 });
             }
             CliCommand::Workspace(WorkspaceCommand::Close {
@@ -738,6 +738,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // FR-031: an unexplained stop is not auditable.
             reason: required_string(params, "reason")?,
+            remove_from_queue: optional_bool(params, "remove_from_queue")?.unwrap_or(true),
             // Which identity components are required is a property of the live
             // launch, not of the request shape, so the state layer decides.
             claim_id: optional_string(params, "claim_id")?,
@@ -979,6 +980,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
         }),
         "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            if lookup(params, "usage_threshold_percent").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "usage_threshold_percent is retired because usage percentages no longer control launch selection; omit this parameter"
+                        .to_string(),
+                ));
+            }
             let Some(profiles) = lookup(params, "profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
@@ -993,19 +1000,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "profiles must be an array of launch profiles with agent_id: {error}"
                 ))
             })?;
-            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
-                .map(|value| {
-                    u8::try_from(value).map_err(|_| {
-                        CliParseError::InvalidJson(
-                            "usage_threshold_percent must be between 1 and 100".to_string(),
-                        )
-                    })
-                })
-                .transpose()?;
             CliCommand::Issue(IssueCommand::MonitorProfilesSet {
                 project_root: optional_path(params, "project_root")?,
                 profiles,
-                usage_threshold_percent,
+                usage_threshold_percent: None,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -1566,7 +1564,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
-                candidate: required_string(params, "candidate")?,
+                candidate: optional_string(params, "candidate")?.unwrap_or_default(),
             })
         }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
@@ -1602,6 +1600,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.plan.status" => {
+            reject_unknown_params(params, &[], "pm.plan.status")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        }
+        "pm.plan.apply" => {
+            reject_unknown_params(
+                params,
+                &["action", "expected_revision", "reason", "idempotency_key"],
+                "pm.plan.apply",
+            )?;
+            let request: crate::pm_planning::PlanningApplyRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply {
+                request: Box::new(request),
+            })
+        }
         "pm.peer.send" => {
             reject_unknown_params(
                 params,
@@ -2729,10 +2747,44 @@ mod tests {
         WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
-    use crate::cli::TestEnv;
+    use crate::cli::{dispatch_json_input, TestEnv};
     use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
+
+    #[test]
+    fn provided_json_input_keeps_envelope_validation_and_response_without_rereading_stdin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = "stdin was already read".to_string();
+
+        for input in [
+            "{",
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
+        ] {
+            assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
+            assert!(env.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stderr.clear();
+        }
+
+        env.seed_run_log(273, "run log from provided JSON");
+        assert_eq!(
+            dispatch_json_input(
+                &mut env,
+                "gwtd",
+                r#"{"schema_version":1,"operation":"actions.logs","params":{"run_id":273}}"#,
+            ),
+            0
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["operation"], "actions.logs");
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["output"], "run log from provided JSON\n");
+        assert_eq!(env.run_log_call_log, vec![273]);
+        assert_eq!(env.stdin, "stdin was already read");
+    }
 
     #[test]
     fn provider_reset_operations_never_accept_caller_supplied_approval() {
@@ -4534,6 +4586,11 @@ mod tests {
             CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
                 if work_id == "work-1" && close_kind == "done"
         ));
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"superseded"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "superseded"
+        ));
         for params in [
             json!({"close_kind":"done"}),
             json!({"work_id":"work-1"}),
@@ -4711,7 +4768,6 @@ mod tests {
                     {"agent_id": "codex"},
                     {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
                 ],
-                "usage_threshold_percent": 70,
             }),
         );
         let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
@@ -4723,7 +4779,7 @@ mod tests {
             panic!("expected MonitorProfilesSet, got {parsed:?}");
         };
         assert_eq!(project_root, None);
-        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(usage_threshold_percent, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].profile.agent_id, "codex");
         assert_eq!(profiles[0].profile.model, None);
@@ -4760,13 +4816,13 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
-        assert!(matches!(
-            err(
+        for threshold in [json!(70), json!(null), json!("lots")] {
+            let error = err(
                 "issue.monitor.profiles.set",
-                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
-            ),
-            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
-        ));
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": threshold}),
+            );
+            assert!(error.to_string().contains("retired"), "{error}");
+        }
     }
 
     #[test]
@@ -5126,6 +5182,7 @@ mod tests {
                 project_root: None,
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -5138,6 +5195,7 @@ mod tests {
                     "project_root": "/tmp/project",
                     "number": 7,
                     "reason": "switch provider",
+                    "remove_from_queue": false,
                     "claim_id": "claim-1",
                     "delivery_id": "launch:effect-1",
                 })
@@ -5146,6 +5204,7 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
                 reason: "switch provider".to_string(),
+                remove_from_queue: false,
                 claim_id: Some("claim-1".to_string()),
                 delivery_id: Some("launch:effect-1".to_string()),
                 window_id: None,
@@ -6675,6 +6734,112 @@ mod tests {
     }
 
     #[test]
+    fn pm_plan_status_accepts_only_empty_params() {
+        assert!(matches!(
+            ok("pm.plan.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        ));
+        for params in [
+            json!({"project_root": "/tmp/foreign"}),
+            json!({"path": "/tmp/planning.json"}),
+            json!({"actor": "another-pm"}),
+            json!({"unexpected": true}),
+        ] {
+            assert!(matches!(
+                err("pm.plan.status", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let report = crate::cli::pm::capabilities_report();
+        for operation in ["pm.plan.status", "pm.plan.apply"] {
+            assert!(report
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_parses_each_typed_action() {
+        for kind in [
+            "goal",
+            "milestone",
+            "risk",
+            "decision",
+            "policy",
+            "recurring",
+            "link",
+        ] {
+            let params = json!({
+                "action": {"kind": kind, "value": {"id": kind}},
+                "expected_revision": 0,
+                "reason": "Record the approved plan",
+                "idempotency_key": format!("planning-{kind}")
+            });
+            let CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply { request }) =
+                ok("pm.plan.apply", params)
+            else {
+                panic!("expected a typed planning apply command for {kind}");
+            };
+            assert_eq!(request.expected_revision, 0);
+            assert_eq!(request.idempotency_key, format!("planning-{kind}"));
+            let action = serde_json::to_value(request.action).unwrap();
+            assert_eq!(action["kind"], kind);
+            assert_eq!(action["value"]["id"], kind);
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_rejects_invalid_and_scope_overrides() {
+        let valid = json!({
+            "action": {"kind": "goal", "value": {"id": "goal-1"}},
+            "expected_revision": 0,
+            "reason": "Record the approved plan",
+            "idempotency_key": "planning-1"
+        });
+        for field in ["action", "expected_revision", "reason", "idempotency_key"] {
+            let mut params = valid.clone();
+            params.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for (field, value) in [
+            ("project_root", json!("/tmp/foreign")),
+            ("path", json!("/tmp/planning.json")),
+            ("actor", json!("another-pm")),
+            ("session_id", json!("another-pm")),
+            ("unexpected", json!(true)),
+            ("expected_revision", json!(-1)),
+            ("expected_revision", json!(1.5)),
+            ("expected_revision", json!("0")),
+            ("reason", json!(" ")),
+            ("idempotency_key", json!("")),
+            (
+                "action",
+                json!({"kind": "delete", "value": {"id": "goal-1"}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1", "unknown": true}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1"}, "unknown": true}),
+            ),
+            ("action", json!({"kind": "goal", "value": {"id": " "}})),
+        ] {
+            let mut params = valid.clone();
+            params[field] = value;
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn pm_pause_and_resume_are_mutating_json_operations() {
         for operation in ["pm.pause", "pm.resume"] {
             assert!(matches!(ok(operation, json!({})), CliCommand::Pm(_)));
@@ -8080,14 +8245,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_parses_only_an_ai_candidate() {
+    fn pane_name_gets_assigned_identity_with_optional_legacy_candidate() {
         let command = ok("pane.name", json!({"candidate": "Aster"}));
         assert!(matches!(command,
             CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
         ));
-        assert!(matches!(
-            err("pane.name", json!({})),
-            CliParseError::MissingFlag("candidate")
+        assert!(matches!(ok("pane.name", json!({})),
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate.is_empty()
         ));
         for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
             let mut params = json!({"candidate": "Aster"});

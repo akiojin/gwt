@@ -1165,6 +1165,7 @@ pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent
         knowledge_wire_metadata: None,
         terminal_stream_seq: None,
         error_origin: None,
+        knowledge_load_timing: None,
     }]);
 }
 

@@ -156,7 +156,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -191,7 +191,7 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - name: Build gwt bundle binaries
-        run: rustup run stable cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
+        run: cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
       - name: Prepare macOS signing keychain
         if: runner.os == 'macOS'
         shell: bash
@@ -287,7 +287,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
@@ -298,7 +298,7 @@ jobs:
         run: |
           dotnet tool install --global wix --version 6.0.2
       - name: Build gwt bundle binaries
-        run: rustup run stable cargo build --release -p gwt --target x86_64-pc-windows-msvc --bin gwt --bin gwtd
+        run: cargo build --release -p gwt --target x86_64-pc-windows-msvc --bin gwt --bin gwtd
       - name: Build MSI
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -342,7 +342,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -350,7 +350,7 @@ jobs:
           key: gwt-dmg-${{ matrix.expected_arch }}
         continue-on-error: true
       - name: Build gwt bundle binaries
-        run: rustup run stable cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
+        run: cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
       - name: Prepare arch-specific binaries
         run: |
           mkdir -p dist

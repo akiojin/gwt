@@ -1,6 +1,6 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
-export function compactText(value, fallback = "") {
+function compactText(value, fallback = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text || fallback;
 }
@@ -162,7 +162,6 @@ export function createIssueOtherSurface({
   openWorkspaceCleanup,
   send,
   windowMap,
-  openWorkspaceResumePicker,
   getResumeBounds,
   focusBoardEntry,
   launchPending,
@@ -839,7 +838,8 @@ export function createIssueOtherSurface({
         createNode(
           "div",
           "workspace-overview-agent-name",
-          agent.agent_name || "Naming…",
+          agent.agent_name || agent.title_summary || agent.current_focus || agent.branch
+            || agent.display_name || agent.agent_id || "Agent",
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
@@ -1228,6 +1228,10 @@ export function createIssueOtherSurface({
 
       let renderedSessionCount = 0;
       for (const agent of displayedAgents) {
+        if (agent.agent_name) {
+          group.appendChild(createNode("div", "workspace-detail-work-heading",
+            `${agent.agent_name} (${agent.display_name || agent.agent_id || "Agent"})`));
+        }
         const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
         if (sessions.length === 0) continue;
         // Multiple Session rows per agent read as noise — render only that
@@ -1278,6 +1282,9 @@ export function createIssueOtherSurface({
   }
 
   function displayedWorkAgentIdentity(agent, index) {
+    if (agent?.agent_name) {
+      return agent.session_id ? `session:${agent.session_id}` : `name:${agent.agent_name}`;
+    }
     const raw = String(agent?.agent_id || agent?.display_name || "").trim();
     if (!raw) return `session:${agent?.session_id || index}`;
 
@@ -1651,18 +1658,6 @@ export function createIssueOtherSurface({
       list.appendChild(item);
   }
 
-  function resumeWorkspace(workspace) {
-    const workspaceId = workspace?.id ?? null;
-    let operationId = "";
-    if (typeof openWorkspaceResumePicker === "function") {
-      operationId = String(openWorkspaceResumePicker(workspaceId) || "");
-    }
-    send({
-      kind: "list_resumable_agents",
-      operation_id: operationId,
-      workspace_id: workspaceId ?? undefined,
-    });
-  }
 
   function renderWorkspaceDetail(container, workspace, windowId) {
     container.innerHTML = "";

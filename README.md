@@ -15,7 +15,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
   `Grok Build`, `Antigravity CLI`, `OpenCode`, `Copilot`,
-  and custom agents from a shared canvas.
+  and custom agents from a shared workspace.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -30,8 +30,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Logs, Profile, Index, and
-  Settings surfaces in one mission-control style workspace.
+- **Operator workspace** — switch between Issues, Agents, Board, and Settings
+  from the rail, with an optional Split view and a separate PM entry.
 
 ## Install
 
@@ -283,11 +283,19 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
-browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
-the server to drain PTYs and exit gracefully. The tray-resident process is one
-per OS-login user; a second `gwt` invocation prints the existing URL and exits
-instead of starting a second server.
+Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
+tray mode, closing a browser tab leaves the project and its running agents active;
+reopen its project URL to return to the same workspace. To stop a project, choose
+**Close Project**
+in its page header or beside it in the Hub's open-project list. If agents are
+running, a confirmation dialog lists them: **Cancel** keeps them running, while
+**Close Project** stops that project's runtime and agents. Other projects keep
+running, and every browser tab showing the closed project returns to the Hub.
+
+To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
+`SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
+is one per OS-login user; a second `gwt` invocation prints the existing URL and
+exits instead of starting a second server.
 
 gwtd operations run through stdin JSON envelopes without opening a GUI window:
 
@@ -390,7 +398,7 @@ the daemon.
    project.
 2. Use `Board`, `Issue`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
+3. In the **Curate** lane, choose `Intake` from the Command
    Palette to shape new work: a branchless, throwaway session that discusses,
    plans, and registers a GitHub Issue. Work that needs design gets the
    `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
@@ -416,9 +424,9 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view. Issue Monitor launches do not open a window on
-  the canvas: the agent is mirrored read-only in the Issue window's right pane,
-  and `Windowize` promotes it to a normal window when you want to type into it.
+  open this same Work Item view. Issue Monitor agents are mirrored read-only in
+  the Issue window's right pane,
+  and `Windowize` opens the same session in an individual Agents tab for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -433,6 +441,8 @@ Common windows include:
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
   the same Issues section to edit launch profiles and candidate order/preferences.
+  Candidate edits save automatically when committed; text fields save when focus
+  leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
   `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
@@ -441,6 +451,11 @@ Common windows include:
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
   It is no longer an Issue Monitor setting.
+  `Restart now` opens a confirmation showing active agent counts, pending
+  claims, verification leases, and affected Issues. When work is active,
+  `Apply after all agents finish` is the default choice; it holds new launches
+  and waits for the existing work to finish. Confirming `Restart now` instead
+  stops active agents and restarts gwt immediately.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
@@ -451,11 +466,12 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Each worker Agent chooses a short memorable name when it starts. Its badge,
-window title, Fleet, and Kanban cards use that name; duplicate choices receive
-a numeric suffix. The name stays the same through restore and in-place restart.
-Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
-fixed identity.
+gwt assigns each worker Agent a random memorable name in the output language
+when it starts. Its badge, window title, Fleet, Kanban, and Board show that
+name, and the PM uses it when reporting work. Names are unique across the
+project's history and survive restore and in-place restart. Issue comments
+record assignments, handovers, PR creation, and completion; PR bodies also
+include the responsible name. The resident PM keeps its own fixed identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -483,14 +499,17 @@ expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Autonomous and Start / Stop return to the summary when collapsed.
 Auto-apply updates is in **System**. Select **Manual** to edit
-Max active; **Auto** displays the calculated value without editing. Auto-refill is
+Max active, then select **Apply** to save the final number. **Auto** disables editing
+and shows the effective limit, with **Measuring capacity…** while measurement is pending.
+Lowering the limit below the active count keeps existing agents running; new launches
+wait until the active count falls below the limit. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
-agent's read-only output. **Windowize** moves the agent to Canvas. **Close preview**
-or Escape restores the full board. At narrow widths the preview overlays the
+agent's read-only output. **Windowize** opens the agent in an individual Agents
+tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
 
@@ -503,13 +522,15 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
 follow the recommendation again. Existing saved limits remain Manual. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_last_change` records the last explicit setting change with `changed_at`
+and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
 **Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
@@ -527,6 +548,11 @@ Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
 `params.number`, and `params.reason`, even after its live claim/window identity
 was lost. The saved failed window is used only while it still belongs to that
 Issue; stopping records a persistent hold and returns any pane to close.
+The hold appears with its reason and removes the Issue from this host's launch
+queue by default. Set `params.remove_from_queue` to `false` to keep queue
+membership while holding the Issue. Launch failures show their category and
+the next recovery operation; repeated unchanged failures stop automatic retries
+after the configured attempt limit.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -654,7 +680,7 @@ is never enabled by gwt.
 confirmation dialog. Choose **Redeem free reset** to consume one free reset
 for that account; Cancel is the default. Confirmation is mandatory even in
 autonomous mode. JSON approval flags and past approvals cannot replace it.
-Only canvas windows using a directly installed Host Codex and its default
+Only standalone agent tabs using a directly installed Host Codex and its default
 provider are supported; Docker, package-runner launches and custom backends
 are refused. The dialog identifies the authentication root recorded when the
 target window launched and its source (host, profile or caller environment).
@@ -718,8 +744,9 @@ scrollable notification stack so nothing is lost while you are away.
 
 Agent state notices say **stopped**, **error**, or **needs human**; an idle agent
 is not evidence of completed work. Runtime desktop notices require five minutes
-of continuously observed Running and an unfocused/hidden page. A different state
-or reconnection resets that duration. Monitor NeedsHuman uses its existing notice
+of continuously observed Running in the same runtime incarnation. The server
+tracks this duration even while every browser tab is closed; a different runtime
+state or incarnation resets it. Monitor NeedsHuman uses its existing notice
 stream immediately, including issues without an agent window; it does not create
 another notice from inbox snapshots. Session Interrupted is outside this notice
 stream because the resume picker exposes historical snapshots only.
@@ -728,10 +755,19 @@ Native permission adapters distinguish macOS authorization settings, Windows
 notification settings, and Linux's unavailable authorization query. Unknown,
 default, denied, or failed queries do not authorize delivery, and permissions are
 never requested automatically. Linux GetCapabilities describes server features,
-not user consent. These adapters do not yet add zero-tab native delivery: that
-transport remains a separate part of SPEC #3287. Debug-binary tests cover policy
-and browser behavior; signed-bundle macOS permission/delivery and Windows/Linux
-native interaction require separate host verification.
+not user consent. A visible, focused Project tab suppresses desktop delivery.
+Otherwise the server chooses one granted Project tab using its latest received
+attention report. When no Project tab is connected, the last reported browser
+grant can permit native delivery, subject to GWT's own current OS permission.
+Default/denied reports revoke that cached grant; closing the Project or restarting
+GWT clears it. Clicks focus the receiving tab or open the stable Project URL.
+Delivery failure does not retry through another channel; unread/title/favicon/tray
+updates continue independently. macOS requires a granted signed GWT.app; Windows
+requires the installed AUMID shortcut supplied by the MSI (portable ZIPs do not
+register it). Linux native delivery is suppressed because authorization cannot
+be queried. Debug-binary tests cover policy and browser behavior; actual signed
+macOS/installed Windows notification delivery and click interaction require
+separate host verification.
 
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC
@@ -745,6 +781,29 @@ PM decomposes it into Issues, registers them, plans the design-required ones,
 decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
+
+Ask the PM to link planned Issues to a project goal or an explicit maintenance
+or compliance category. `pm.plan.status` shows the saved planning revision and a
+`policy` assessment with unlinked or invalid work, Now/Next/Later items, and
+missing milestone information. Monitor observations include their source and
+scan time; unavailable or incomplete observations do not prove full coverage.
+Reported milestone health and confidence remain unverified until supporting
+evidence is connected.
+Milestone diagnostics also show the observed Monitor inbox states and unobserved
+Issues from explicit milestone membership and roadmap references to a unique,
+nonempty milestone ID. These are reference facts, not proof of goal alignment.
+Use the states to inspect holds, failures or claim contention; missing observations
+and Merged/Released states do not prove milestone health or completion.
+Goal diagnostics list roadmap references, Issue numbers, observed inbox states and
+unobserved Issues for links explicitly naming a unique, nonempty exact goal ID.
+Invalid links remain reference facts; milestone-only or category-only links do
+not expand membership, and empty or duplicate goal IDs resolve no links.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` remains missing until a supporting source is connected.
+Goal, milestone and roadmap changes also retain their reason, revision, changed
+values and directly affected Issues in the planning audit receipts. Goal changes
+include only Issues explicitly linked to that goal through roadmap items. These records do
+not confirm that dependent work or its agents have been notified.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
@@ -773,7 +832,7 @@ unchanged.
   checks apply: manual close must be allowed and that Work must have no active
   agents. Closing records terminal history and retains its branch and worktree.
 
-You can ask the PM to create and bind a GitHub Discussion, adjust required checks
+You can ask the PM to enable Board Discussion sharing, create a standalone Discussion, adjust required checks
 on `develop` or `main`, or change global Auto-apply updates. These actions use a
 recorded instruction scoped to the requested action or an OS-native approval
 dialog. Choose **Approve once** or remember approval for that repository and
@@ -940,14 +999,18 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you choose `Clone from GitHub...` from
-either the Project Picker (shown when no tab is open) or the top toolbar's
-`Open Project ▾` split-button dropdown (always reachable from an active
-project). The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
+`gwt` auto-creates this layout when you choose `Clone from GitHub…` from
+the Hub or system tray. The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
 repositories through `gh search repos`, then asks for a destination parent
 folder. The new project is created at `<parent>/<project>/`, with a bare
 `<project>.git/` repository and an initial worktree on `develop` when it
 exists, otherwise on the remote default branch.
+
+Clone reserves a browser tab when you submit and opens the project's URL there
+after success, keeping the Hub available. If popups are blocked or you close
+that tab, use the completion link in the Hub. Failure closes the reserved tab
+and shows the reason. If the repository is already registered in Open or
+Recent, cloning is refused and **Open existing project** opens its existing URL.
 
 Existing Normal Git repositories (`.git/` directly under the project
 directory) are recognised so a migration to the Nested Bare + Worktree layout
@@ -967,17 +1030,13 @@ worktree without restarting the app.
 
 ## Share local Board milestones through GitHub Discussions
 
-To share `decision`, `blocked`, and `handoff` posts across machines, ask the PM to
-create a Discussion with `discussion.create` and `sync_board:true`. To connect
-an existing Discussion, use `board.config.set` with its `github_discussion`
-number; this also recovers a failed binding without creating a duplicate.
-If the effective Board provider is not Local, explicitly request
-`board_provider:"local"` on creation or `provider:"local"` on binding. The
-project's provider override and binding are saved together; global and other
-projects' provider settings are preserved. Without this explicit switch,
-synchronized creation is refused before creating a remote Discussion.
-Both operations use the current repository. Alternatively, keep the **Local**
-Board provider and add a binding to `.gwt/work/board.toml`:
+To share `decision`, `blocked`, and `handoff` posts across machines, enable
+Discussion sharing for the repository through the PM's scoped `board.config.set`
+operation, with `category:"General"` (or another category name). No Discussion
+number or manually created Discussion is needed. If the effective Board provider
+is not Local, include `provider:"local"` to switch this project explicitly.
+The operation preserves global and other projects' settings and requires the
+existing scoped authority. Alternatively, opt in with `.gwt/work/board.toml`:
 
 ```toml
 provider = "local"
@@ -985,26 +1044,47 @@ provider = "local"
 [github_discussion]
 owner = "your-org"
 repo = "your-repo"
-number = 123
+category = "General" # optional; this is the default
 ```
 
-Use the same existing Discussion on each machine, with GitHub Discussions enabled
-and `gh` authenticated for read/write access. Board reads and posts schedule
-background synchronization at most once a minute. To synchronize explicitly and
-inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
-to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
-changed through configuration. Imported posts appear in the existing Board feed.
-Only comments whose GitHub author association is `OWNER`, `MEMBER`, or
-`COLLABORATOR` are imported; other or unknown associations are ignored. Choose a
-repository whose owner, organization members, and collaborators you trust with
-local coordination, since imported posts can open and resolve escalations.
+Use the same repository and category on each machine, enable GitHub Discussions,
+and authenticate `gh` with read/write access. Each shared Board root becomes
+one Discussion, titled with its owner Issue number and a short summary. Its body
+contains the Board entry ID and owner Issue links. Shared replies become comments
+on that Discussion. `status` and `claim` stay local, including replies; the shared
+kinds cannot be changed through configuration. A reply whose root is missing from durable history or
+not shareable stays local. Intermediate local-only or archived parents do not
+prevent shared descendants from being delivered. Legacy `number` settings remain readable but no longer
+select a single destination; new posts use topic Discussions. Existing aggregate
+Discussions are left intact. Creation is restricted to the source machine,
+using locally recorded post origin or the legacy root's machine-local Session
+history. Legacy roots whose origin cannot be proven stay local with a diagnostic;
+new local roots posted after opt-in record their source automatically. This
+avoids duplicate topic creation when multiple machines upgrade together.
 
-Synchronization is best effort: it sends the current local window of up to 500
-posts, so older unsent posts that leave that window during a long outage are not
-backfilled. Rate limits, expired authentication, and network errors leave the
-local Board usable and are reported by `board.sync`; failures retry after five
-minutes, subject to the shared GitHub budget. An offline peer receives saved
-comments when it next synchronizes. Remove `[github_discussion]` to disable sharing.
+Board reads and posts schedule background synchronization at most once a minute.
+To synchronize explicitly and inspect diagnostics, send
+`{"schema_version":1,"operation":"board.sync","params":{}}` to `gwtd` on stdin.
+Imported posts appear in the existing Board feed. Only Discussion roots and
+comments whose GitHub author association is `OWNER`, `MEMBER`, or `COLLABORATOR`
+are imported; other or unknown associations are ignored. Plain trusted comments
+become Board replies with stable remote IDs. Choose a repository whose owner,
+organization members, and collaborators you trust with local coordination,
+since encoded imported posts can open and resolve escalations. In a public
+repository, shared Board content is public.
+
+Synchronization is bounded best effort. It tracks up to 50 topic Discussions;
+additional topics remain local and `board.sync` reports the limit. Each tick
+reads one repository page and up to five topics in rotation, and creates/posts
+at most five times. Repository discovery must finish before any creation, so a
+lost creation response is reconciled by Board entry ID before retrying. The
+existing GitHub budget records server-reported GraphQL cost and can defer work.
+Outbound candidates come from the current local window of up to 500 posts;
+older unsent posts that leave that window during a long outage are not backfilled.
+Rate limits, expired authentication, and network errors leave the local Board
+usable and are reported by `board.sync`; failures retry after five minutes,
+subject to the shared budget. An offline peer receives saved posts on a later
+synchronization. Remove `[github_discussion]` to disable sharing.
 
 ## Board providers (Local / Slack / Teams)
 
@@ -1230,20 +1310,20 @@ Selected text is copied into the existing generated `gwt-pm` skill during
 managed asset refresh; no project symlink is added to the runtime. Removing
 an entry removes its copied policy on the next refresh.
 
-## Canvas Operations
+## Surface Navigation
 
-- Zoom the canvas with the on-screen zoom buttons
-- Pan the canvas by dragging the background
-- Use `Tile` to arrange windows on a grid
-- Use `Stack` to cascade windows with overlap
-- Use `Align` to arrange windows on a grid without changing their size
+- Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
+- Open **PM** from its separate rail entry; PM uses a single pane.
+- Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
+- Use **Close split** to keep the active surface in one pane.
+- In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
 
 ## Agent Navigation
 
 Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
 Agent tabs by activity: running/starting first, waiting/idle next, then the
-remaining Agents. Agents shown inside Issues are included; PM and Shell
-windows are skipped. Cycling keeps the split view and focuses the selected
+remaining Agents. Agents shown inside Issues and Shell terminals are included;
+PM is skipped. Cycling keeps the split view and focuses the selected
 terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
 
@@ -1260,7 +1340,7 @@ counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
 labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
-Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
+Command Palette, Hotkey Overlay, Drawer modals, surface panels — shares a
 single token system that ships in two flagship themes:
 
 - **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
@@ -1289,18 +1369,15 @@ falls back to system colors so accessibility is preserved.
 | --- | --- |
 | `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
 | `⌘B` | Focus the Board surface |
-| `⌘G` | Focus the Git (Branches) surface |
+| `⌘G` | Focus the Issues surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Intake (Curate lane) and
-Open Workspace (Execute lane) at the top, window operations (Tile / Stack /
-Align / window list / Add) in the middle, and the Command Palette at the bottom. Board and Logs are not rail
-items; reach them via the Add Window preset menu, the command palette, or the
-`⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
-window (titlebar × or tab ×) always asks for confirmation so a stray click
-can never kill a running agent.
+The rail keeps **PM** separate from the four labeled surfaces: **Issues**,
+**Agents**, **Board**, and **Settings**. The selected surface fills a fixed pane;
+**Split view** adds an optional second pane. The status strip remains below the
+content area. Reach other actions through the Command Palette or their hotkeys.
 
 ### Accessibility
 

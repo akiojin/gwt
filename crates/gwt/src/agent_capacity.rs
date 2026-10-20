@@ -64,6 +64,115 @@ impl AgentCapacity {
     }
 }
 
+/// Worker-prepared capacity overlay. The GUI applies only these three fields;
+/// prefs, repository identity, snapshot reads and reduction reporting stay here.
+#[derive(Clone, Debug)]
+pub struct CapacityUpdate {
+    pub capacity: AgentCapacity,
+    pub limits: Option<(usize, Option<usize>)>,
+    fresh: bool,
+}
+
+impl CapacityUpdate {
+    pub fn from_status(status: &crate::IssueMonitorStatusView) -> Self {
+        Self {
+            capacity: status.agent_capacity.clone(),
+            limits: Some((status.max_active_agents, status.max_active_agents_override)),
+            fresh: status.agent_capacity.is_fresh(),
+        }
+    }
+
+    pub fn read(project_root: &Path, previous: Option<&Self>) -> Self {
+        Self::read_with(project_root, previous, |root| {
+            project_capacity(root, &BTreeSet::new(), 0)
+        })
+    }
+
+    pub fn read_with(
+        project_root: &Path,
+        previous: Option<&Self>,
+        read_capacity: impl FnOnce(&Path) -> AgentCapacity,
+    ) -> Self {
+        let capacity = read_capacity(project_root);
+        let fresh = capacity.is_fresh();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor = match crate::load_issue_monitor_prefs(&prefs_path) {
+            Ok(prefs) => Some(crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs,
+            )),
+            Err(error) => {
+                tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
+                previous.and_then(|value| value.limits).map(|(_, manual)| {
+                    let mut monitor =
+                        crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+                    monitor.set_max_active_agents_override(manual);
+                    monitor
+                })
+            }
+        };
+        let limits = monitor.map(|mut monitor| {
+            if monitor.max_active_agents_override().is_none() {
+                if let Some((limit, _)) = previous.and_then(|value| value.limits) {
+                    monitor.config.max_active = limit;
+                }
+            }
+            monitor.set_agent_capacity_for_project(project_root, capacity.clone());
+            (
+                monitor.effective_max_active_agents(),
+                monitor.max_active_agents_override(),
+            )
+        });
+        Self {
+            capacity,
+            limits,
+            fresh,
+        }
+    }
+
+    /// Sensor renewal alone is not a display change. Compare freshness as
+    /// observed at sampling time, so a renewed sample never creates a false
+    /// expiry transition when the previous timestamp eventually ages out.
+    pub fn changed_from(&self, previous: Option<&Self>) -> bool {
+        let Some(previous) = previous else {
+            return true;
+        };
+        let mut before = previous.capacity.clone();
+        before.observed_at = self.capacity.observed_at;
+        before.expires_at = self.capacity.expires_at;
+        self.fresh != previous.fresh || self.limits != previous.limits || self.capacity != before
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_notifications_ignore_renewal_and_publish_expiry_or_mode_changes() {
+        let previous = CapacityUpdate {
+            capacity: AgentCapacity {
+                measurement_complete: true,
+                observed_at: Some(100),
+                expires_at: Some(130),
+                ..Default::default()
+            },
+            limits: Some((3, None)),
+            fresh: true,
+        };
+        let mut renewed = previous.clone();
+        renewed.capacity.observed_at = Some(110);
+        renewed.capacity.expires_at = Some(140);
+        assert!(!renewed.changed_from(Some(&previous)));
+        renewed.fresh = false;
+        assert!(renewed.changed_from(Some(&previous)));
+        renewed.fresh = true;
+        renewed.limits = Some((3, Some(3)));
+        assert!(renewed.changed_from(Some(&previous)));
+        assert!(renewed.changed_from(None));
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct MachineCapacitySnapshot {
@@ -747,13 +856,29 @@ impl RuntimeProbe {
             &gwt_core::paths::gwt_sessions_dir(),
             &mut self.system,
         );
-        let gui = self
+        let gui_pids = self
             .system
             .processes()
             .values()
             .filter(|process| {
                 is_gui_process(process.exe().unwrap_or_else(|| Path::new(process.name())))
             })
+            .map(sysinfo::Process::pid)
+            .collect::<Vec<_>>();
+        #[cfg(windows)]
+        {
+            // Session liveness needs fresh identities for every process; CPU
+            // counters are consumed only for GUI roots. On Windows, sampling
+            // every unrelated process repeats GetSystemTimes for each one.
+            self.system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&gui_pids),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+            );
+        }
+        let gui = gui_pids
+            .iter()
+            .filter_map(|pid| self.system.process(*pid))
             .collect::<Vec<_>>();
         let current_gui = gui
             .iter()
@@ -1089,6 +1214,24 @@ mod tests {
             }
         }
         None
+    }
+
+    fn refresh_target_measurement(
+        root: &Path,
+        mut refresh: impl FnMut() -> io::Result<()>,
+    ) -> MachineCapacitySnapshot {
+        let pending = format!(
+            "target_measurement_in_progress: {}; wait for the scan or use Manual",
+            root.join("target").display()
+        );
+        for _ in 0..100 {
+            refresh().unwrap();
+            let snapshot = read_snapshot(&snapshot_path()).unwrap();
+            if !snapshot.diagnostics.contains(&pending) {
+                return snapshot;
+            }
+        }
+        panic!("target measurement remained in progress after 100 refreshes: {pending}");
     }
 
     #[test]
@@ -1579,8 +1722,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/artifact"), [0_u8; 8]).unwrap();
         let root = normalized(&root);
-        refresh_machine_capacity(&root).unwrap();
-        let snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let snapshot = refresh_target_measurement(&root, || refresh_machine_capacity(&root));
         assert_eq!(snapshot.targets[&root.join("target")].bytes, 8);
         assert_eq!(snapshot.per_agent_ram_bytes, RAM_FLOOR_BYTES);
         assert!(snapshot.inventory.sessions.is_empty());
@@ -1612,6 +1754,28 @@ mod tests {
         for name in ["gwtd", "gwt-helper", "codex", "cargo"] {
             assert!(!is_gui_process(Path::new(name)));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn machine_sampling_does_not_initialize_non_gui_cpu_counters() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut probe = RuntimeProbe::default();
+        probe.sample_machine(&MachineCapacitySnapshot::default(), epoch_seconds());
+        let current = probe
+            .system
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .expect("fresh census includes the test process");
+        assert!(!is_gui_process(current.exe().unwrap()));
+        assert_eq!(
+            current.accumulated_cpu_time(),
+            0,
+            "capacity consumes GUI CPU only; other processes need identity, not CPU sampling"
+        );
     }
 
     #[test]
@@ -1818,15 +1982,13 @@ mod tests {
         let root = normalized(&root);
         let target = root.join("target");
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&root).unwrap();
-        let mut snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let mut snapshot = refresh_target_measurement(&root, || probe.refresh(&root));
         snapshot.targets.get_mut(&target).unwrap().observed_at =
             epoch_seconds() - TARGET_TTL_SECS / 2 - 1;
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
-        probe.refresh(&root).unwrap();
-        let failed = read_snapshot(&snapshot_path()).unwrap();
+        let failed = refresh_target_measurement(&root, || probe.refresh(&root));
         assert!(
             !failed.targets.contains_key(&target),
             "I/O failure invalidates a required measured target"
@@ -1835,10 +1997,7 @@ mod tests {
         assert_eq!(view.recommended_worker_limit, 0);
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
-        probe.refresh(&root).unwrap();
-        assert_eq!(
-            read_snapshot(&snapshot_path()).unwrap().targets[&target].bytes,
-            7
-        );
+        let recovered = refresh_target_measurement(&root, || probe.refresh(&root));
+        assert_eq!(recovered.targets[&target].bytes, 7);
     }
 }

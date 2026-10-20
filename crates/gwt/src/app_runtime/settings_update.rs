@@ -31,6 +31,27 @@ use super::{
     UserEvent,
 };
 
+fn restart_impact_lease_ids(
+    slots: &[gwt_core::index_coordinator::HeavySlotStatus],
+    belongs_to_app: impl Fn(u32) -> bool,
+) -> Vec<String> {
+    slots
+        .iter()
+        .map(|slot| &slot.status)
+        .filter(|status| {
+            status.held
+                && !status.expired
+                && status
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| belongs_to_app(owner.pid))
+        })
+        .filter_map(|status| status.lease_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn autostart_status_event_from_result(
     result: Result<
         gwt::cli::tray::autostart::AutostartStatus,
@@ -951,6 +972,173 @@ impl AppRuntime {
         }
     }
 
+    /// Observe on a worker: checking ECRs/leases must not block the GUI loop.
+    pub(super) fn get_update_restart_impact_events(
+        &self,
+        client_id: &str,
+        request_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let (panes, worktrees) = self.capture_update_quiescence_inputs();
+        let mut issue_numbers = std::collections::BTreeSet::new();
+        let mut unresolved_sessions = Vec::new();
+        for pane in panes.iter().filter(|pane| {
+            !pane.resident_pm
+                && matches!(
+                    pane.state,
+                    gwt::persistence::WindowState::Running
+                        | gwt::persistence::WindowState::Starting
+                )
+        }) {
+            let issue = self
+                .active_agent_sessions
+                .get(&pane.window_id)
+                .and_then(|active| self.launch_wizard_cache.session_by_id(&active.session_id))
+                .and_then(|session| session.linked_issue_number)
+                .or_else(|| {
+                    let address = self.window_lookup.get(&pane.window_id)?;
+                    self.tab(&address.tab_id)?
+                        .workspace
+                        .window(&address.raw_id)?
+                        .linked_issue_number
+                });
+            if issue.is_none() {
+                if let Some(active) = self.active_agent_sessions.get(&pane.window_id) {
+                    unresolved_sessions.push(
+                        self.sessions_dir
+                            .join(format!("{}.toml", active.session_id)),
+                    );
+                }
+            }
+            issue_numbers.extend(issue);
+        }
+        let contexts = self.project_contexts();
+        let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
+        let request_id = request_id.to_string();
+        self.blocking_tasks.spawn(move || {
+            let result = (|| -> Result<BackendEvent, String> {
+                let mut blocking = Vec::new();
+                let pool =
+                    gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                        .and_then(|coordinator| coordinator.heavy_pool_status())
+                        .map_err(|error| format!("Cannot inspect verification leases: {error}"))?;
+                let lease_ids = restart_impact_lease_ids(&pool.slots, |pid| {
+                    gwt::process::is_descendant_of(pid, std::process::id())
+                });
+                for path in unresolved_sessions {
+                    if let Ok(session) = gwt_agent::Session::load(&path) {
+                        issue_numbers.extend(session.linked_issue_number);
+                    }
+                }
+                // Host activity still matters when no project is open.
+                let mut monitors = Vec::new();
+                for context in contexts {
+                    let prefs = gwt::load_issue_monitor_prefs(
+                        &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    monitors.push(gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        prefs,
+                    ));
+                }
+                if monitors.is_empty() {
+                    monitors.push(gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        Default::default(),
+                    ));
+                }
+                for monitor in monitors {
+                    let mut snapshot = Self::read_update_quiescence_snapshot(
+                        panes.clone(),
+                        worktrees.clone(),
+                        &monitor,
+                    );
+                    // Preview counts every affected pool slot; automatic drain
+                    // observations retain their existing decision contract.
+                    snapshot.held_verification_leases = lease_ids.clone();
+                    issue_numbers.extend(snapshot.pending_acquire_claims.iter().copied());
+                    for worktree in &snapshot.active_executions {
+                        if let Ok(Some(record)) =
+                            gwt::cli::execution_state::load(Path::new(worktree))
+                        {
+                            issue_numbers.insert(record.owner_number);
+                        }
+                    }
+                    for blocker in gwt::update_drain::update_quiescence(&snapshot)
+                        .err()
+                        .unwrap_or_default()
+                    {
+                        if !blocking.contains(&blocker) {
+                            blocking.push(blocker);
+                        }
+                    }
+                }
+                Ok(BackendEvent::UpdateRestartImpact {
+                    request_id: request_id.clone(),
+                    blocking,
+                    issue_numbers: issue_numbers.into_iter().collect(),
+                    error: None,
+                })
+            })();
+            let event = result.unwrap_or_else(|reason| BackendEvent::UpdateRestartImpact {
+                request_id,
+                blocking: Vec::new(),
+                issue_numbers: Vec::new(),
+                error: Some(reason),
+            });
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
+    }
+
+    pub(super) fn apply_update_when_idle_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        let result = (|| -> Result<(), String> {
+            let manifest = gwt_core::update::load_pending_update_manifest()
+                .ok_or_else(|| "No prepared update is available to schedule.".to_string())?;
+            // A failed wait request must also keep startup apply deferred.
+            gwt_core::update::defer_pending_update(&manifest.version)?;
+            let contexts = self.project_contexts();
+            if contexts.is_empty() {
+                return Err("Open a project before scheduling the update.".into());
+            }
+            // Validate every project before starting any drain.
+            let projects = contexts
+                .into_iter()
+                .map(|context| {
+                    let prefs = gwt::load_issue_monitor_prefs(
+                        &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok((context, prefs))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (context, prefs) in projects {
+                let (project_events, saved) =
+                    self.begin_update_drain_for_project(&context, &manifest.version, prefs, false);
+                events.extend(project_events);
+                if !saved {
+                    return Err(format!(
+                        "Could not start the update drain for {}; automatic apply remains deferred.",
+                        context.project_root.display()
+                    ));
+                }
+            }
+            gwt_core::update::resume_pending_update(&manifest.version)?;
+            Ok(())
+        })();
+        if let Err(reason) = result {
+            events.push(OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Apply after agents finish", &reason),
+            ));
+        }
+        Self::deduplicate_update_host_events(events)
+    }
+
     /// SPEC-2785 US-1 / FR-C / FR-E: user clicked the server URL cell in the
     /// status strip. The renderer-supplied `url` is treated as untrusted and
     /// is only forwarded to [`open_url_with_os_default`] when it matches the
@@ -1010,6 +1198,44 @@ impl AppRuntime {
             }
         }
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod restart_impact_tests {
+    use super::*;
+
+    #[test]
+    fn issue_5646_restart_preview_collects_all_local_verification_slots() {
+        use gwt_core::index_coordinator::{HeavyLeaseStatus, HeavySlotStatus, OwnerIdentity};
+        let slot = |pid, lease_id: &str| HeavySlotStatus {
+            slot: None,
+            status: HeavyLeaseStatus {
+                held: true,
+                lease_id: Some(lease_id.into()),
+                owner: Some(OwnerIdentity {
+                    pid,
+                    start_id: "test".into(),
+                }),
+                ..Default::default()
+            },
+        };
+        let mut slots = vec![
+            slot(99, "other-app"),
+            slot(1, "local-one"),
+            slot(2, "local-two"),
+            slot(2, "local-two"),
+        ];
+        let mut expired = slot(1, "expired");
+        expired.status.expired = true;
+        slots.push(expired);
+        let mut released = slot(1, "released");
+        released.status.held = false;
+        slots.push(released);
+        assert_eq!(
+            restart_impact_lease_ids(&slots, |pid| pid <= 2),
+            ["local-one", "local-two"]
+        );
     }
 }
 

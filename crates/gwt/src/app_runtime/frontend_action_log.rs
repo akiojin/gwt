@@ -512,6 +512,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
         }
+        FrontendEvent::GetUpdateRestartImpact { .. } => {
+            FrontendUserActionLog::new("get_update_restart_impact", "update")
+        }
+        FrontendEvent::ApplyUpdateWhenIdle => {
+            FrontendUserActionLog::new("apply_update_when_idle", "update")
+        }
         FrontendEvent::CancelUpdateAutoApply => {
             FrontendUserActionLog::new("cancel_update_auto_apply", "update")
         }
@@ -764,6 +770,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
         | FrontendEvent::ProjectAggregateAck { .. }
+        | FrontendEvent::ProjectClientAttention { .. }
         | FrontendEvent::StartupFirstFrame { .. }
         | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }

@@ -193,6 +193,7 @@ export function createAgentKanbanSurface({
   createTerminalRuntime,
   send,
   onLaunchAgent,
+  onUndockAgent,
   visibleBounds,
   windowDisplayTitle,
   windowRoleBadgeLabel,
@@ -308,7 +309,8 @@ export function createAgentKanbanSurface({
     title.className = "agent-kanban-card-title";
     title.textContent = windowData.is_pm
       ? windowDisplayTitle?.(windowData) || "Project Manager"
-      : String(windowData.agent_name || "").trim() || "Naming…";
+      : String(windowData.agent_name || "").trim() || windowDisplayTitle?.(windowData)
+        || windowData.title || windowData.branch || windowData.agent_id || "Agent";
     const meta = document.createElement("div");
     meta.className = "agent-kanban-card-meta";
     const provider = windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
@@ -342,6 +344,7 @@ export function createAgentKanbanSurface({
       event.preventDefault();
       event.stopPropagation();
       send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
+      onUndockAgent?.(windowData.id);
     });
     actions.append(collapse, undock);
     header.append(titleWrap, actions);

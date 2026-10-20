@@ -569,6 +569,7 @@ pub fn transact_workspace_state_with_preflight<T>(
             &work_items_path,
             &events_path,
             repo_path,
+            false,
             update,
         )?;
         persist_workspace_state_transaction_locked(&current_path, &transaction)?;
@@ -617,6 +618,7 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         project_state_root,
         work_event_root,
         false,
+        false,
         preflight,
         update,
     )
@@ -638,6 +640,30 @@ pub fn transact_workspace_close_state_for_work_event_root<T>(
         project_state_root,
         work_event_root,
         true,
+        false,
+        |_, _, _| Ok(()),
+        update,
+    )
+}
+
+/// The registered PM may explicitly retire an exact invalid successor after
+/// validating owner/container and current member liveness under this lock.
+/// Only reserved supersession audits receive cross-Work authority; ordinary
+/// event and Session-assignment checks remain unchanged.
+pub fn transact_workspace_successor_supersession_for_work_event_root<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        false,
+        true,
         |_, _, _| Ok(()),
         update,
     )
@@ -647,6 +673,7 @@ fn transact_workspace_state_for_work_event_root_with_event_log<T>(
     project_state_root: &Path,
     work_event_root: &Path,
     machine_local_close_events: bool,
+    allow_successor_supersession: bool,
     preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
     update: impl FnOnce(
         &mut WorkspaceProjection,
@@ -685,6 +712,7 @@ fn transact_workspace_state_for_work_event_root_with_event_log<T>(
                 &work_items_path,
                 &events_path,
                 project_state_root,
+                allow_successor_supersession,
                 update,
             )?;
             persist_workspace_state_transaction_locked(&current_path, &transaction)?;
@@ -1801,6 +1829,51 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
     ) -> Result<(T, Vec<WorkEvent>)>,
     commit: impl FnOnce() -> Result<()>,
 ) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_commit_policy(
+        project_state_root,
+        work_event_root,
+        external_operation_id,
+        false,
+        update,
+        commit,
+    )
+}
+
+/// Authenticated fresh ECR activation may additionally publish exact
+/// successor supersession audits in the same externally committed batch.
+pub fn transact_workspace_state_for_work_event_root_with_supersession_commit<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    external_operation_id: &str,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_commit_policy(
+        project_state_root,
+        work_event_root,
+        external_operation_id,
+        true,
+        update,
+        commit,
+    )
+}
+
+fn transact_workspace_state_for_work_event_root_with_commit_policy<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    external_operation_id: &str,
+    allow_successor_supersession: bool,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<T> {
     validate_external_workspace_operation_id(external_operation_id)?;
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
@@ -1850,6 +1923,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
                 &work_items_path,
                 &events_path,
                 project_state_root,
+                allow_successor_supersession,
                 update,
             )?;
             transaction.external_commit = Some(ExternalWorkspaceCommit {
@@ -1878,7 +1952,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
 
 const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 4;
 const MIN_WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 1;
-const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
+pub(super) const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
     ".gwt-pending-workspace-state-transactions";
 const WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR: &str = ".gwt-workspace-state-transaction-receipts";
 const EXTERNAL_WORKSPACE_COMMIT_RECEIPT_VERSION: u32 = 1;
@@ -2180,6 +2254,7 @@ pub fn transact_workspace_state_at<T>(
             work_items_path,
             events_path,
             project_root,
+            false,
             update,
         )?;
         persist_workspace_state_transaction_locked(current_path, &transaction)?;
@@ -2238,6 +2313,7 @@ pub fn transact_workspace_state_at_with_commit<T>(
             work_items_path,
             events_path,
             project_root,
+            false,
             update,
         )?;
         transaction.external_commit = Some(ExternalWorkspaceCommit {
@@ -2506,6 +2582,7 @@ fn build_workspace_state_transaction_locked<T>(
     work_items_path: &Path,
     events_path: &Path,
     project_root: &Path,
+    allow_successor_supersession: bool,
     update: impl FnOnce(
         &mut WorkspaceProjection,
         &WorkItemsProjection,
@@ -2546,6 +2623,7 @@ fn build_workspace_state_transaction_locked<T>(
         &projection,
         &board_refs_before,
         &events,
+        allow_successor_supersession,
     )?;
 
     let mut next_work_items = work_items;
@@ -2591,8 +2669,17 @@ fn validate_workspace_state_transaction_mutations(
     projection_after: &WorkspaceProjection,
     board_refs_before: &HashSet<String>,
     events: &[WorkEvent],
+    allow_successor_supersession: bool,
 ) -> Result<()> {
     for event in events {
+        if event.is_owner_successor() && !allow_successor_supersession {
+            return Err(GwtError::Other(
+                "owner successor Start requires authenticated fresh activation".to_string(),
+            ));
+        }
+        if allow_successor_supersession && event.is_successor_supersession() {
+            continue;
+        }
         if event.work_item_id == projection_before.id {
             continue;
         }
@@ -2851,6 +2938,15 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         // identity outside this transaction. Reject an unsafe managed store
         // before that reservation or any recovery marker can be published.
         validate_workspace_work_event_store_path(events_dir)?;
+    }
+    if tracked_event_policy == TrackedWorkEventPolicy::Persist
+        && update.status_category == Some(WorkspaceStatusCategory::Done)
+    {
+        // The external obligation must not be reserved for an unsafe home
+        // close stream that this transaction will also have to publish.
+        validate_workspace_local_close_path(
+            &work_items_path.with_file_name("work-events-closed.jsonl"),
+        )?;
     }
 
     // This strict entry point never synthesizes or migrates authority state.
@@ -4737,9 +4833,11 @@ fn with_workspace_transaction_recovery_observed_profiled<T>(
                                 )));
                             }
                             return Err(GwtError::Other(format!(
-                            "workspace state transaction external commit is unresolved for operation {}",
-                            external_commit.operation_id
-                        )));
+                                "workspace state transaction {} external commit is unresolved for operation {} (owner {}); use JSON operation execution.release_prepared with the owning issue/spec, this exact operation_id, and a non-empty reason to reconcile its durable launch decision; do not delete the transaction markers",
+                                transaction.transaction_id.as_deref().unwrap_or("legacy"),
+                                external_commit.operation_id,
+                                transaction.events.first().and_then(|event| event.owner.as_deref()).unwrap_or("unknown")
+                            )));
                         }
                         if external_commit.reconciliation_work_items_path.is_some() {
                             return Err(GwtError::Other(format!(
@@ -4806,7 +4904,7 @@ fn find_pending_workspace_state_transaction(
         if !workspace_state_transactions_match_except_external_publication_state(
             existing,
             &transaction,
-        )? {
+        ) {
             return Err(malformed_workspace_state_transaction_error(
                 marker_path,
                 "transaction marker copies disagree",
@@ -4912,23 +5010,29 @@ fn malformed_workspace_state_transaction_error(marker_path: &Path, message: &str
 fn workspace_state_transactions_match_except_external_publication_state(
     left: &PendingWorkspaceStateTransaction,
     right: &PendingWorkspaceStateTransaction,
-) -> Result<bool> {
-    let mut left = serde_json::to_value(left)
-        .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
-    let mut right = serde_json::to_value(right)
-        .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
-    for value in [&mut left, &mut right] {
-        if let Some(phase) = value.pointer_mut("/external_commit/phase") {
-            *phase = serde_json::Value::String("prepared".to_string());
-        }
-        if let Some(external) = value
-            .pointer_mut("/external_commit")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            external.remove("reconciliation_work_items_path");
-        }
-    }
-    Ok(left == right)
+) -> bool {
+    // Compare every durable payload field without allocating JSON trees for
+    // the full Work history. Only publication phase/reconciliation may differ.
+    left.version == right.version
+        && left.transaction_id == right.transaction_id
+        && left.current_path == right.current_path
+        && left.work_items_path == right.work_items_path
+        && left.current_precondition == right.current_precondition
+        && left.work_items_precondition == right.work_items_precondition
+        && left.projection == right.projection
+        && left.work_items == right.work_items
+        && left.events_path == right.events_path
+        && left.events == right.events
+        && left.journal_path == right.journal_path
+        && left.journal_entries == right.journal_entries
+        && left
+            .external_commit
+            .as_ref()
+            .map(|external| &external.operation_id)
+            == right
+                .external_commit
+                .as_ref()
+                .map(|external| &external.operation_id)
 }
 
 fn quarantine_invalid_pending_workspace_state_transactions(
@@ -4995,6 +5099,9 @@ fn write_workspace_state_transaction_markers(
     if let Some(path) = transaction.journal_path.as_deref() {
         ensure_supported_workspace_layout(path)?;
     }
+    if let Some(path) = workspace_transaction_local_close_path(transaction) {
+        validate_workspace_local_close_path(&path)?;
+    }
 
     validate_pending_workspace_state_transaction(
         transaction,
@@ -5039,6 +5146,75 @@ fn remove_workspace_state_transaction_markers(marker_paths: &[PathBuf]) -> Resul
     }
     for parent in parent_directories {
         sync_directory(&parent)?;
+    }
+    Ok(())
+}
+
+/// Exact launch identity proven by the external operation's durable owner ledger.
+pub struct ExternalWorkspaceCommitAuthority<'a> {
+    pub owner: &'a str,
+    pub session_id: &'a str,
+    pub worktree_path: &'a Path,
+    pub work_id: Option<&'a str>,
+}
+
+/// Recover a canonical launch publication only when its staged Work event
+/// matches the identity proven by the caller's durable owner ledger.
+/// Validation runs under the same state locks as resolution, before any
+/// receipt or marker is changed. Receipt-only retries are read-only.
+pub fn resolve_workspace_state_external_commit_for_authority(
+    repo_path: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    authority: &ExternalWorkspaceCommitAuthority<'_>,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(operation_id)?;
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &current_path,
+        &work_items_path,
+        operation_id,
+    )?
+    else {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    };
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        &current_path,
+        &work_items_path,
+        operation_id,
+        decision,
+        &[],
+        None,
+        Some(authority),
+        |_| Ok(()),
+    )
+}
+
+fn validate_external_workspace_commit_authority(
+    transaction: &PendingWorkspaceStateTransaction,
+    authority: &ExternalWorkspaceCommitAuthority<'_>,
+) -> Result<()> {
+    let matches = if let [event] = transaction.events.as_slice() {
+        matches!(event.kind, WorkEventKind::Start | WorkEventKind::Resume)
+            && event.owner.as_deref() == Some(authority.owner)
+            && event.agent_session_id.as_deref() == Some(authority.session_id)
+            && authority.work_id.is_none_or(|id| event.work_item_id == id)
+            && session_bound_paths_match(
+                event
+                    .execution_container
+                    .as_ref()
+                    .and_then(|container| container.worktree_path.as_deref()),
+                Some(authority.worktree_path),
+            )?
+    } else {
+        false
+    };
+    if !matches {
+        return Err(GwtError::Other(
+            "external workspace transaction does not match the proven owner launch authority"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -5157,6 +5333,29 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
     decision: ExternalWorkspaceCommitDecision,
     additional_lock_targets: &[PathBuf],
     reconciliation_work_items_path: Option<&Path>,
+    on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        current_path,
+        work_items_path,
+        operation_id,
+        decision,
+        additional_lock_targets,
+        reconciliation_work_items_path,
+        None,
+        on_committed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    additional_lock_targets: &[PathBuf],
+    reconciliation_work_items_path: Option<&Path>,
+    authority: Option<&ExternalWorkspaceCommitAuthority<'_>>,
     mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     ensure_supported_workspace_layout(current_path)?;
@@ -5257,6 +5456,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
                 return Err(GwtError::ExternalWorkspacePathPairMismatch {
                     operation_id: operation_id.to_string(),
                 });
+            }
+            if let Some(authority) = authority {
+                validate_external_workspace_commit_authority(&transaction, authority)?;
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction
@@ -5369,6 +5571,10 @@ fn apply_workspace_state_transaction_locked(
     if let Some(path) = transaction.journal_path.as_deref() {
         ensure_supported_workspace_layout(path)?;
     }
+    let local_close_path = workspace_transaction_local_close_path(transaction);
+    if let Some(path) = local_close_path.as_deref() {
+        validate_workspace_local_close_path(path)?;
+    }
 
     if transaction
         .external_commit
@@ -5431,6 +5637,30 @@ fn apply_workspace_state_transaction_locked(
             append_workspace_work_events_to_path(events_path, &transaction.events)?;
         }
     }
+    if let Some(path) = local_close_path.as_deref() {
+        // A tracked close is audit evidence; complete shared-source rebuilds
+        // deliberately ignore it. Publish the same accepted event in the home
+        // close stream before clearing this marker, including during recovery.
+        let existing = read_machine_local_workspace_work_events_from_path(path)?;
+        let mut missing = Vec::new();
+        for event in transaction
+            .events
+            .iter()
+            .filter(|event| event.kind == WorkEventKind::Done)
+        {
+            match existing.iter().find(|stored| stored.id == event.id) {
+                Some(stored) if stored != event => {
+                    return Err(GwtError::Other(format!(
+                        "machine-local close event identity conflicts with transaction: {}",
+                        event.id
+                    )));
+                }
+                Some(_) => {}
+                None => missing.push(event.clone()),
+            }
+        }
+        append_workspace_work_events_to_path(path, &missing)?;
+    }
     let may_write_current = !recovering
         || workspace_state_snapshot_matches_precondition(
             current_path,
@@ -5463,6 +5693,70 @@ fn apply_workspace_state_transaction_locked(
 
 fn is_workspace_work_event_store_dir(path: &Path) -> bool {
     path.ends_with(Path::new(".gwt").join("work").join("events"))
+}
+
+fn workspace_transaction_local_close_path(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Option<PathBuf> {
+    transaction
+        .events_path
+        .as_deref()
+        .filter(|path| is_workspace_work_event_store_dir(path))?;
+    transaction
+        .events
+        .iter()
+        .any(|event| event.kind == WorkEventKind::Done)
+        .then(|| {
+            transaction
+                .work_items_path
+                .with_file_name("work-events-closed.jsonl")
+        })
+}
+
+fn validate_workspace_local_close_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        // HOME itself may be reached through a symlink. Check only the managed
+        // project-state / project-hash / projects tail, or the injected parent
+        // used by compatibility callers.
+        let depth = if parent
+            .file_name()
+            .is_some_and(|name| name == "project-state")
+        {
+            3
+        } else {
+            1
+        };
+        for directory in parent.ancestors().take(depth) {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "workspace local close parent is not a real directory: {}",
+                            directory.display()
+                        ),
+                    )
+                    .into())
+                }
+            }
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "workspace local close stream is not a regular file: {}",
+                path.display()
+            ),
+        )
+        .into()),
+    }
 }
 
 fn workspace_state_transaction_version_for_events_path(events_path: Option<&Path>) -> u32 {
@@ -5990,7 +6284,7 @@ fn current_canonical_work_item<'a>(
     };
     let validate_launch_owner = |item: &WorkItem| -> Result<()> {
         if let (Some(expected), Some(actual)) = (launch_owner, item.owner.as_deref()) {
-            if !owners_match(expected, actual) {
+            if !item.is_terminal() && !owners_match(expected, actual) {
                 return Err(GwtError::Other(format!(
                     "Work {} owner mismatch: expected {expected}, actual {actual}",
                     item.id
@@ -6000,7 +6294,7 @@ fn current_canonical_work_item<'a>(
         Ok(())
     };
     validate_launch_owner(current)?;
-    let mut owner_anchor = launch_owner.or(current.owner.as_deref());
+    let mut owner_anchor = current.owner.as_deref().or(launch_owner);
     let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
@@ -6017,45 +6311,77 @@ fn current_canonical_work_item<'a>(
             break;
         };
         validate_launch_owner(successor)?;
+        let container_matches = |container: &WorkspaceExecutionContainerRef| {
+            canonical_work_id(
+                project_root,
+                container.branch.as_deref(),
+                container.worktree_path.as_deref(),
+            )
+            .as_deref()
+                == Some(canonical_id)
+        };
+        // A durable detachment receipt may remove even the container added by
+        // supersession. The exact authenticated audit still proves terminal
+        // lineage; reading it must not restore the detached mutable refs.
+        let supersession_container = successor.events.iter().find_map(|event| {
+            (successor.is_terminal()
+                && event.is_successor_supersession()
+                && event.work_item_id == successor.id
+                && event.related_work_item_id.as_deref() == Some(current.id.as_str()))
+            .then_some(event.execution_container.as_ref())
+            .flatten()
+            .filter(|container| container_matches(container))
+        });
+        let detached_supersession_container =
+            supersession_container.filter(|_| successor.execution_containers.is_empty());
         // Historical terminal rows may lack owner metadata. Keep the last
         // known owner across that gap, and only publish a later Work once its
         // owner agrees. An ownerless tail must not gain adoption authority.
-        let owner_matches = match (owner_anchor, successor.owner.as_deref()) {
-            (Some(anchor), Some(owner)) => {
-                anchor == owner
-                    || can_upgrade_work_owner(Some(anchor), Some(owner))
-                    || can_upgrade_work_owner(Some(owner), Some(anchor))
-            }
-            (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
-            (None, None) => true,
-            (None, Some(owner)) => successor.execution_containers.iter().any(|container| {
-                container
-                    .branch
-                    .as_deref()
-                    .and_then(work_owner_for_branch)
-                    .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
-            }),
-        };
+        let owner_successor = successor.events.iter().any(|event| {
+            event.is_owner_successor()
+                && event.related_work_item_id.as_deref() == Some(current.id.as_str())
+                && event.owner == successor.owner
+                && event
+                    .execution_container
+                    .as_ref()
+                    .is_some_and(container_matches)
+        });
+        let owner_matches = owner_successor
+            // The registered PM may retire foreign historical occupancy.
+            // Only the exact terminal audit can bridge that owner boundary;
+            // the next lifetime still needs its own owner provenance.
+            || supersession_container.is_some()
+            || match (owner_anchor, successor.owner.as_deref()) {
+                (Some(anchor), Some(owner)) => {
+                    anchor == owner
+                        || can_upgrade_work_owner(Some(anchor), Some(owner))
+                        || can_upgrade_work_owner(Some(owner), Some(anchor))
+                }
+                (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
+                (None, None) => true,
+                (None, Some(owner)) => successor
+                    .execution_containers
+                    .iter()
+                    .chain(detached_supersession_container)
+                    .any(|container| {
+                        container
+                            .branch
+                            .as_deref()
+                            .and_then(work_owner_for_branch)
+                            .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
+                    }),
+            };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {
-                event.kind == WorkEventKind::Start
+                event.is_successor_lineage_anchor()
+                    && (event.kind == WorkEventKind::Start || successor.is_terminal())
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
             || !owner_matches
-            || successor.execution_containers.is_empty()
-            || !successor.execution_containers.iter().all(|container| {
-                // Branch-backed Work identity spans hosts. Old paths may be
-                // foreign or absent; the Start link and canonical identity
-                // establish lineage, not a historical host's checkout path.
-                canonical_work_id(
-                    project_root,
-                    container.branch.as_deref(),
-                    container.worktree_path.as_deref(),
-                )
-                .as_deref()
-                    == Some(canonical_id)
-            })
+            || (successor.execution_containers.is_empty()
+                && detached_supersession_container.is_none())
+            || !successor.execution_containers.iter().all(container_matches)
         {
             break;
         }
@@ -6307,11 +6633,11 @@ impl ResumeOwnerBleedRepairReport {
     }
 }
 
-/// #3065: minimum number of distinct Work items sharing one identical resume
-/// payload before it is treated as a bleed signature. Two branches may
-/// legitimately resume the same SPEC with the same wording; three or more
-/// identical (title, owner, next_action) stamps across different Work items
-/// only arise from the shared-projection replay bug.
+/// #3065: minimum number of distinct branches sharing one identical resume
+/// payload before it is treated as a bleed signature. Successive Work
+/// lifetimes of one branch legitimately retain the same resume payload.
+/// Work items without a branch remain distinct because their shared authority
+/// cannot be proven.
 const RESUME_OWNER_BLEED_MIN_ITEMS: usize = 3;
 
 fn resume_bleed_key(event: &WorkEvent) -> Option<(String, String, String)> {
@@ -6346,7 +6672,8 @@ fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
 
 /// #3065: detection-based, idempotent repair for the resume owner bleed.
 /// Detection: an identical (title, owner, next_action) resume payload stamped
-/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct Work items. Sanitization,
+/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct branches (or branchless Work
+/// items). Sanitization,
 /// in two strengths:
 ///
 /// - events carrying a contaminated (title, owner) identity pair — the same
@@ -6405,9 +6732,20 @@ fn repair_resume_owner_bleed_paths_locked(
 
     let mut stamped: HashMap<(String, String, String), HashSet<String>> = HashMap::new();
     for item in &works.work_items {
+        // Issue #5288: a reopened owner can have many Done successors on the
+        // same branch. Counting their IDs erased the whole chain's owners and
+        // made ordinary canonical lookup fall back to the terminal root.
+        let identity = item
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.branch.as_deref())
+            .map(str::trim)
+            .find(|branch| !branch.is_empty())
+            .map(|branch| format!("branch:{}", canonical_work_branch_identity(branch)))
+            .unwrap_or_else(|| format!("work:{}", item.id));
         for event in &item.events {
             if let Some(key) = resume_bleed_key(event) {
-                stamped.entry(key).or_default().insert(item.id.clone());
+                stamped.entry(key).or_default().insert(identity.clone());
             }
         }
     }

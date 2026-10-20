@@ -359,6 +359,7 @@ pub(super) fn run<E: CliEnv>(
                     session.id.clone(),
                     session.display_name.clone(),
                 )
+                .with_agent_name(session.agent_name.clone())
                 .with_worktree_form(
                     crate::worktree_form::board_origin_worktree_form(
                         env.repo_path(),
@@ -1144,13 +1145,14 @@ fn format_author(entry: &BoardEntry) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let author = entry.author_display_name();
     match (branch, session) {
         (Some(branch), Some(session)) => {
-            format!("{} @ {} / {}", entry.author, branch, session)
+            format!("{} @ {} / {}", author, branch, session)
         }
-        (Some(branch), None) => format!("{} @ {}", entry.author, branch),
-        (None, Some(session)) => format!("{} / {}", entry.author, session),
-        (None, None) => entry.author.clone(),
+        (Some(branch), None) => format!("{} @ {}", author, branch),
+        (None, Some(session)) => format!("{} / {}", author, session),
+        (None, None) => author,
     }
 }
 
@@ -2779,7 +2781,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-        let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        let mut session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        session.agent_name = Some("ミオ".into());
         session.save(&sessions_dir).unwrap();
         let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
@@ -2820,6 +2823,7 @@ mod tests {
         );
         assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
     }
 
     #[test]
@@ -3514,6 +3518,22 @@ mod tests {
             out.contains("Claude @ feature/foo / sess-a3f2"),
             "expected origin metadata suffix, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn board_author_format_prefers_the_captured_agent_name() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_agent_name("ミオ");
+        assert_eq!(format_author(&entry), "ミオ (Codex)");
     }
 
     #[test]

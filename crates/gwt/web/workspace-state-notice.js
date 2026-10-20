@@ -1,7 +1,10 @@
+import { createUiStateStore } from "./ui-state-store.js";
+
 // Persistent project-state load diagnostics, cleared only after a successful retry.
 export function createWorkspaceStateNotice({ document, send }) {
+  const model = createUiStateStore(null);
   let banner = null;
-  function receive(notice) {
+  function render(notice) {
     banner?.remove();
     banner = null;
     if (!notice) return;
@@ -17,6 +20,10 @@ export function createWorkspaceStateNotice({ document, send }) {
     retry.addEventListener("click", () => send({ kind: "retry_workspace_state_load" }));
     banner.appendChild(retry);
     document.getElementById("app").appendChild(banner);
+  }
+  model.subscribe(notice => notice, render);
+  function receive(notice) {
+    model.update(() => notice);
   }
   return { receive };
 }

@@ -14,6 +14,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
+import { createUiStateStore } from "../ui-state-store.js";
+import { notificationForTransition } from "../agent-completion-notifications.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -74,7 +76,11 @@ function recordCalls(snippet) {
 // --- T-015: issue_monitor_toast fan-out (FR-011 / FR-012, Sc 2) ---
 
 test("issue_monitor_toast records into the notification center with the Issue Monitor title and issue suffix", () => {
-  const block = caseBlock(appSource, "issue_monitor_toast");
+  const receiver = caseBlock(appSource, "issue_monitor_toast");
+  assert.match(receiver, /issueMonitorNotificationModel\.update\(\(\) => \(\{ \.\.\.event \}\)\)/);
+  assert.doesNotMatch(receiver, /notificationCenter\.record/);
+  const block = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(block, "Monitor notifications must be recorded by a model subscriber");
   const calls = recordCalls(block);
   assert.equal(calls.length, 1, "exactly one history record per event");
   const call = calls[0];
@@ -89,23 +95,40 @@ test("issue_monitor_toast records into the notification center with the Issue Mo
   // FR-011: the history record must not be gated by any display path.
   const recordAt = block.indexOf("notificationCenter.record(");
   const firstIf = block.indexOf("if (");
-  assert.ok(firstIf < 0 || recordAt < firstIf, "record() runs before any display gating");
+  assert.match(block, /if \(!event\) return;/, "initial null state creates no history entry");
+  assert.ok(firstIf < recordAt, "only the initial null state gates recording");
+});
+
+test("Monitor model snapshots are immutable and repeated events each reach history once", () => {
+  const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(initialization, "Monitor notification model must exist");
+  const records = [];
+  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", `
+    ${initialization}
+    return { model: issueMonitorNotificationModel, receive(event) {
+      ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
+    }};
+  `)(createUiStateStore, notificationForTransition, { record: notice => records.push(notice) });
+  assert.equal(records.length, 0);
+  const event = { kind: "issue_monitor_toast", level: "error", message: "retry", issue_number: 5016 };
+  receive(event);
+  const first = model.read();
+  event.message = "changed by caller";
+  assert.equal(first.message, "retry");
+  assert.ok(Object.isFrozen(first));
+  receive(first);
+  assert.equal(records.length, 2, "identical notifications must not be coalesced");
+  assert.deepEqual(records.map(record => record.message), ["retry", "retry"]);
 });
 
 // --- T-017: completion / attention / board-mention seams (FR-011, Sc 3, Sc 7) ---
 
-test("agent completion keeps its alerts lifetime + gating and additionally records history", () => {
-  const body = functionBody(appSource, "showAgentCompletionToast");
-  assert.match(body, /alertsToasts\.push\(/, "transient toast still renders");
-  assert.match(body, /id:\s*"agent-completion"/, "alerts singleton id preserved");
-  assert.match(body, /timeoutMs:\s*12_000/, "completion lifetime preserved (12s)");
-  assert.match(body, /dismissible:\s*false/);
-  const calls = recordCalls(body);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], /kind:\s*"agent-completion"/);
-  assert.match(body, /onActivate/, "jump-to (project tab) carried by the shared notice");
-  // Away-gating stays in the controller: app.js's renderer never checks it.
-  assert.doesNotMatch(body, /isAttentionAway|visibilityState|hasFocus/);
+test("desktop intents have no duplicate in-app history or toast fan-out", () => {
+  const block = caseBlock(appSource, "project_notification");
+  assert.match(block, /projectNotificationModel\.update\(\(\) => event\.notification\)/);
+  assert.match(appSource, /projectNotificationModel\.subscribe\([\s\S]*?agentCompletionNotifier\.handleIntent\(notice\)/);
+  assert.match(block, /event\.notification\?\.project_key === routeProjectKey/);
+  assert.doesNotMatch(block, /notificationCenter\.record|alertsToasts\.push|showAgentCompletionToast/);
 });
 
 test("attention keeps error=sticky / done=8s / needs_input=14s and per-window dedup, and records history", () => {
@@ -144,8 +167,7 @@ test("history records are additive: every record() passes a kind and the control
   // The controllers never learn about the center.
   assert.doesNotMatch(completionSource, /notificationCenter|notification-center/);
   assert.doesNotMatch(boardLogsSource, /notificationCenter|notification-center/);
-  // The desktop-notification fan-out still goes through the same publish seam.
-  assert.match(completionSource, /showToast\(notice\);\s*\n\s*if \(getDesktopNotificationPermission\(\) === "granted"\)/);
+  assert.doesNotMatch(completionSource, /runningStartedAt|minRunningMs/);
 });
 
 // --- T-019: non-regression note (FR-011) ---
@@ -170,24 +192,10 @@ test("app.js reports Issue-surface errors to the center and renders nothing in t
 
 // --- 選別（どの窓が通知を生むか）: user ruling 2026-09-04 ---
 
-test("completion notices are gated to agent panes, like attention (a Settings window must not say 'Agent stopped')", () => {
-  // createAgentCompletionNotifier has no preset gate of its own (FR-016 keeps
-  // the controller untouched), so the gate lives at the app.js call site —
-  // exactly where the attention toaster is already gated. Without it every
-  // window preset (Settings / Board / Logs / Issue) can publish an
-  // "Agent stopped" notice titled with that window's own title, and v2 makes
-  // it worse by persisting it into the history instead of a passing toast.
-  const call = appSource.match(
-    /if \(windowData && presetSupportsWaitingStatus\(windowData\.preset\)\) \{[\s\S]*?\n {12}\}/,
-  )?.[0];
-  assert.ok(call, "the preset-gated block must exist");
-  assert.match(call, /agentCompletionNotifier\.handleRuntimeState\(/, "completion runs inside the preset gate");
-  assert.match(call, /agentAttentionToaster\.handleRuntimeState\(/, "attention stays inside the same gate");
-  // and nothing calls the completion notifier outside that gate
-  const ungated = appSource.split("presetSupportsWaitingStatus")[0];
-  assert.doesNotMatch(
-    ungated,
-    /agentCompletionNotifier\.handleRuntimeState\(/,
-    "no ungated completion call may remain",
-  );
+test("runtime frames retain the agent-only in-app toaster, without OS authority", () => {
+  const body = functionBody(appSource, "applyStatus");
+  assert.match(body, /presetSupportsWaitingStatus\(windowData\.preset\)/);
+  assert.match(body, /agentAttentionToaster\.handleRuntimeState\(/);
+  assert.doesNotMatch(body, /agentCompletionNotifier/);
+  assert.doesNotMatch(appSource, /agentCompletionNotifier\.(reset|forgetWindow|handleRuntimeState)\(/);
 });

@@ -62,6 +62,12 @@ pub enum KnowledgeWireMetadata {
     NonSemanticError,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct KnowledgeLoadTiming {
+    pub queued_at: Instant,
+    pub dispatch_enqueued_at: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub struct OutboundEvent {
     pub target: DispatchTarget,
@@ -78,6 +84,8 @@ pub struct OutboundEvent {
     pub terminal_stream_seq: Option<u64>,
     /// Error provenance only; never serialized or inferred from dispatch targets.
     pub error_origin: Option<crate::error_report::ErrorOrigin>,
+    /// First cache response timing across the GUI dispatch queue; never serialized.
+    pub knowledge_load_timing: Option<KnowledgeLoadTiming>,
 }
 
 impl OutboundEvent {
@@ -88,6 +96,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -133,6 +142,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -145,6 +155,7 @@ impl OutboundEvent {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -152,6 +163,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: Some(crate::error_report::ErrorOrigin::Host),
+            knowledge_load_timing: None,
         }
     }
 
@@ -169,6 +181,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -187,6 +200,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -211,6 +225,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -1004,6 +1019,31 @@ impl ClientHub {
             .map(|registration| registration.scope.clone())
     }
 
+    /// Only browser views bound to this Project participate in notification delivery.
+    pub fn project_browser_client_ids(&self, key: &gwt_core::repo_hash::ProjectKey) -> Vec<String> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, client)| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn has_project_browser_clients(&self, key: &gwt_core::repo_hash::ProjectKey) -> bool {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+    }
+
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, false, ClientScope::Hub)
     }
@@ -1141,11 +1181,32 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
+            let target = outbound.target.clone();
+            let client_id = match &target {
+                DispatchTarget::Client(id) => Some(id.as_str()),
+                _ => None,
+            };
+            let knowledge_load = match &outbound.event {
+                BackendEvent::KnowledgeEntries { id, request_id, .. } => Some((
+                    id.clone(),
+                    *request_id,
+                    Instant::now(),
+                    outbound.knowledge_load_timing,
+                )),
+                _ => None,
+            };
+            if let Some((window_id, request_id, started, Some(timing))) = &knowledge_load {
+                let elapsed_ms = started.duration_since(timing.queued_at).as_secs_f64() * 1000.0;
+                tracing::info!(target: "gwt::knowledge_load", stage = "dispatch_wait", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.duration_since(timing.dispatch_enqueued_at).as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = (elapsed_ms >= 60_000.0).then_some("dispatch_wait"),
+                    "Issue cache response dispatch queue wait");
+            }
             crate::error_report::queue_backend_event_with_origin(
                 &outbound.event,
                 outbound.error_origin.as_ref(),
             );
-            let target = outbound.target.clone();
             let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
                 if target_selects(&target, client_id, *receives_broadcasts, scope)
@@ -1153,6 +1214,15 @@ impl ClientHub {
                 {
                     dead_clients.push(client_id.clone());
                 }
+            }
+            if let Some((window_id, request_id, started, timing)) = knowledge_load {
+                let elapsed_ms =
+                    timing.map(|timing| timing.queued_at.elapsed().as_secs_f64() * 1000.0);
+                tracing::info!(target: "gwt::knowledge_load", stage = "send", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = elapsed_ms.filter(|elapsed| *elapsed >= 60_000.0).map(|_| "send"),
+                    boundary = "serialize_and_socket_queue", "Issue cache response queued");
             }
         }
 
@@ -2897,7 +2967,8 @@ mod tests {
         }
         assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
             BackendEvent::CloneProjectError {
-                message: "project error".into()
+                message: "project error".into(),
+                existing_project_key: None,
             }
         ))
         .is_err());
@@ -2920,6 +2991,23 @@ mod tests {
         assert_eq!(clients.browser_session_state(), (2, false));
         assert!(clients.has_clients());
     }
+
+    #[test]
+    fn project_browser_membership_excludes_hub_panes_and_disconnected_clients() {
+        let clients = ClientHub::default();
+        let key = project_a();
+        clients.register_pane("agent".into());
+        clients.register_scoped("hub".into(), ClientScope::Hub);
+        clients.register_scoped("a".into(), ClientScope::Project(key.clone()));
+        clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        assert_eq!(clients.project_browser_client_ids(&key), ["a"]);
+        assert!(clients.has_project_browser_clients(&key));
+        clients.unregister("a");
+        assert!(!clients.has_project_browser_clients(&key));
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }
@@ -2930,7 +3018,66 @@ mod tests {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
+    }
+
+    #[test]
+    fn knowledge_load_transport_records_dispatch_wait_and_send_deadlines() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
+        let event = BackendEvent::KnowledgeEntries {
+            id: "tab-1::issue-1".into(),
+            knowledge_kind: KnowledgeKind::Issue,
+            request_id: Some(5543),
+            revision: "cached".into(),
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: false,
+            cache_revision: None,
+        };
+        let now = Instant::now();
+        let mut outbound = OutboundEvent::reply("client", event.clone());
+        outbound.knowledge_load_timing = Some(KnowledgeLoadTiming {
+            queued_at: now - Duration::from_secs(61),
+            dispatch_enqueued_at: now - Duration::from_secs(60),
+        });
+        assert_eq!(
+            prepare_outbound_event(&outbound).payload.as_ref(),
+            serde_json::to_string(&event).unwrap(),
+            "request timing is internal and must not change the wire payload"
+        );
+        ClientHub::default().dispatch(vec![outbound]);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["target"] == "gwt::knowledge_load")
+            .collect();
+        for stage in ["dispatch_wait", "send"] {
+            let fields = &records
+                .iter()
+                .find(|record| record["fields"]["stage"] == stage)
+                .unwrap_or_else(|| panic!("missing {stage} timing"))["fields"];
+            assert_eq!(fields["window_id"], "tab-1::issue-1");
+            assert_eq!(fields["request_id"], "Some(5543)");
+            assert_eq!(fields["client_id"], "client");
+            assert_eq!(fields["status"], "completed");
+            assert_eq!(fields["deadline_exceeded_stage"], stage);
+            assert!(fields["elapsed_ms"].as_f64().unwrap() >= 61_000.0);
+            assert!(fields["duration_ms"].as_f64().unwrap() >= 0.0);
+        }
+        let wait = records
+            .iter()
+            .find(|record| record["fields"]["stage"] == "dispatch_wait")
+            .unwrap();
+        assert!(wait["fields"]["duration_ms"].as_f64().unwrap() >= 60_000.0);
     }
 
     #[tokio::test]
@@ -4079,6 +4226,7 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let event = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "project launch error".into(),
             issue_number: Some(4735),
@@ -4144,6 +4292,7 @@ mod tests {
             )),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         };
         let prepared = prepare_outbound_event(&outbound);
         let value: serde_json::Value =
@@ -5054,6 +5203,7 @@ mod tests {
                     knowledge_wire_metadata: None,
                     terminal_stream_seq: None,
                     error_origin: None,
+                    knowledge_load_timing: None,
                 },
             };
             hub.dispatch(vec![outbound]);

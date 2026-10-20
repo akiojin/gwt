@@ -164,6 +164,22 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
         index_of_step_running(&steps, FLAKE_SCRIPT).is_some(),
         "`{FLAKE_JOB}` must run {FLAKE_SCRIPT}"
     );
+    let detector = flake["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
+        .unwrap();
+    assert_eq!(
+        detector["env"]["GWT_FLAKE_BASE_SHA"],
+        "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
+        "develop pushes must use changed-file selection too"
+    );
+    assert_eq!(
+        detector["env"]["GWT_FLAKE_HEAD_SHA"],
+        "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}",
+        "a merge checkout must select the owner's changes rather than newer base changes"
+    );
 
     let condition = flake
         .get("if")
@@ -250,8 +266,20 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
     );
     assert!(
         script.contains("GWT_FLAKE_BUDGET_SECS:-600"),
-        "Issue #5171 AC-1: compile-excluded test budget defaults to 600 seconds"
+        "standalone detector budget defaults to 600 seconds"
     );
+    let flake = job(&test_workflow(), FLAKE_JOB);
+    let detector = flake["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
+        .unwrap();
+    assert_eq!(detector["env"]["GWT_FLAKE_BUDGET_SECS"], "220");
+    for key in ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"] {
+        assert_eq!(detector["env"][key], "0");
+        assert!(flake["env"][key].is_null(), "keep the shared cache key");
+    }
 }
 
 /// A gate that cannot be reproduced outside CI gets disabled instead of fixed.
@@ -514,6 +542,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
             CORE_STABILITY_JOB,
             "test-windows-index-stability",
             "test-windows-rust",
+            "test-windows-rust-lib",
             "test-windows-warm",
             "source-sync"
         ]
@@ -620,6 +649,7 @@ fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
         }))
         .expect("resolve Python for the real selector")
         .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+        .env("GWT_FLAKE_HEAD_SHA", "HEAD")
         .current_dir(repo.path())
         .output()
         .expect("run the real Python selector")

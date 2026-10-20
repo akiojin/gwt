@@ -85,6 +85,11 @@ pub use pr::types::{
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
 
+/// Dispatch already-read stdin through the standard JSON envelope path.
+pub fn dispatch_json_input<E: CliEnv>(env: &mut E, prog: &str, input: &str) -> i32 {
+    json_envelope::dispatch_input(env, prog, input, None)
+}
+
 /// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
 /// verb maps to one family-typed inner enum, so the parent enum stays compact
 /// variants and dispatch becomes a nested match.

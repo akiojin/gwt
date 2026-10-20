@@ -95,7 +95,15 @@ pub const PROJECT_BOARD_FILE: &str = "board.toml";
 pub struct GitHubDiscussionConfig {
     pub owner: String,
     pub repo: String,
+    /// Legacy aggregate binding; new delivery is keyed by Board root ID.
+    #[serde(default)]
     pub number: u64,
+    #[serde(default = "default_discussion_category")]
+    pub category: String,
+}
+
+fn default_discussion_category() -> String {
+    "General".into()
 }
 
 /// Per-project Board provider override (SPEC-2963 FR-025..FR-032).
@@ -208,6 +216,25 @@ impl Default for BoardConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topic_sharing_needs_no_precreated_discussion_and_roundtrips_category() {
+        let raw = "[github_discussion]\nowner = 'example'\nrepo = 'project'\n";
+        let config: ProjectBoardConfig = toml::from_str(raw).unwrap();
+        let binding = config.github_discussion.as_ref().unwrap();
+        assert_eq!(binding.number, 0);
+        // The serialized default is part of the user-visible configuration contract.
+        let value: toml::Value = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            value["github_discussion"]["category"].as_str(),
+            Some("General")
+        );
+        let custom: ProjectBoardConfig =
+            toml::from_str(&format!("{raw}category = 'Announcements'\n")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        custom.save_to_work_dir(dir.path()).unwrap();
+        assert_eq!(ProjectBoardConfig::load_from_work_dir(dir.path()), custom);
+    }
 
     #[test]
     fn default_provider_is_local() {

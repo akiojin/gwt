@@ -218,6 +218,46 @@ fn automatic_update_setting_is_saved_without_starting_maintenance() {
 }
 
 #[test]
+fn automatic_agent_and_app_updates_are_saved_independently() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    runtime.profile_config_path = None;
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let path = runtime.profile_config_path().unwrap();
+    let defaults = Settings::default();
+    assert!(!defaults.agent.auto_update);
+    defaults.save(&path).unwrap();
+
+    // Opposite values expose accidental coupling in either save direction.
+    for (agent_enabled, app_enabled) in [(true, false), (false, true)] {
+        Settings::persist_auto_apply_updates(&path, |_| Ok(app_enabled)).unwrap();
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+        assert_eq!(saved.agent.auto_update, !agent_enabled);
+
+        runtime.handle_frontend_event(
+            "settings".into(),
+            FrontendEvent::SetAgentAutoUpdate {
+                enabled: agent_enabled,
+            },
+        );
+        let saved = Settings::load_from_path(&path).unwrap();
+        assert_eq!(saved.agent.auto_update, agent_enabled);
+        assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+
+        // Change the app setting to match, then differ, without a no-op save.
+        for app_enabled in [agent_enabled, app_enabled] {
+            Settings::persist_auto_apply_updates(&path, |_| Ok(app_enabled)).unwrap();
+            let saved = Settings::load_from_path(&path).unwrap();
+            assert_eq!(saved.auto_apply_updates, Some(app_enabled));
+            assert_eq!(saved.agent.auto_update, agent_enabled);
+        }
+    }
+}
+
+#[test]
 fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());

@@ -1,0 +1,202 @@
+{
+  "issue": 5561,
+  "theme": "light",
+  "passed": false,
+  "gui_pid": 38112,
+  "checkout_sha": "695e8fbf827a63af7e9400b2267cc654f1fd29b9",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe",
+  "checkout_branch": "work/issue-5561",
+  "source_worktree_count": 516,
+  "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-runtime-memory-efdb0fff-8a73-4a62-88eb-773b7fbcb312",
+  "started_at": "2026-10-16T15:01:02.583Z",
+  "ended_at": "2026-10-16T15:11:32.067Z",
+  "observation_started_at": null,
+  "requested_duration_seconds": 60,
+  "budget_bytes": 1500000000,
+  "pane_ids": [
+    "memory-workload-0::agent-1",
+    "memory-workload-1::agent-1",
+    "memory-workload-2::agent-1",
+    "memory-workload-3::agent-1",
+    "memory-workload-4::agent-1",
+    "memory-workload-5::agent-1",
+    "memory-workload-6::agent-1",
+    "memory-workload-7::agent-1",
+    "memory-workload-8::agent-1",
+    "memory-workload-9::agent-1",
+    "memory-workload-10::agent-1",
+    "memory-workload-11::agent-1"
+  ],
+  "workload": "12 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
+  "limitations": "12 deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail",
+  "initial_producers": [
+    {
+      "pid": 16796,
+      "started_at": 1792163049016.1882,
+      "session": "a8e14375-ffe1-41b6-9414-3f78713fef4a",
+      "tick": 359,
+      "observed_at": "2026-10-16T15:11:23.585Z"
+    },
+    {
+      "pid": 27684,
+      "started_at": 1792163385639.6045,
+      "session": "f637f606-f86b-4125-92f1-dfb872c3e4cf",
+      "tick": 80,
+      "observed_at": "2026-10-16T15:11:23.591Z"
+    },
+    {
+      "pid": 29436,
+      "started_at": 1792162953070.1514,
+      "session": "644ad57e-9092-4a0c-b307-e6fcfb647a98",
+      "tick": 440,
+      "observed_at": "2026-10-16T15:11:23.585Z"
+    },
+    {
+      "pid": 38216,
+      "started_at": 1792162986006.493,
+      "session": "2dbc8871-33a0-4d05-8ee2-fb1f3a21853b",
+      "tick": 411,
+      "observed_at": "2026-10-16T15:11:23.587Z"
+    },
+    {
+      "pid": 42100,
+      "started_at": 1792162929041.0369,
+      "session": "639bf001-f67a-48bf-8a0f-e83520e2fbc7",
+      "tick": 460,
+      "observed_at": "2026-10-16T15:11:23.587Z"
+    },
+    {
+      "pid": 43260,
+      "started_at": 1792163013491.121,
+      "session": "de1155c0-8582-45ec-9a34-7ac086b60541",
+      "tick": 386,
+      "observed_at": "2026-10-16T15:11:23.588Z"
+    },
+    {
+      "pid": 46732,
+      "started_at": 1792163087000.6306,
+      "session": "8e1b579d-06a3-4716-9fa8-56615a9661ba",
+      "tick": 328,
+      "observed_at": "2026-10-16T15:11:23.586Z"
+    },
+    {
+      "pid": 48652,
+      "started_at": 1792163151104.486,
+      "session": "c5af3de2-ee31-458e-a085-337dc7b28b5a",
+      "tick": 274,
+      "observed_at": "2026-10-16T15:11:23.587Z"
+    },
+    {
+      "pid": 53296,
+      "started_at": 1792162884165.0364,
+      "session": "7515844a-ef4e-4df7-b661-a896faae406a",
+      "tick": 498,
+      "observed_at": "2026-10-16T15:11:23.590Z"
+    },
+    {
+      "pid": 57368,
+      "started_at": 1792162905848.8594,
+      "session": "1dfcd30d-1941-4c3e-b40f-559763cb9728",
+      "tick": 479,
+      "observed_at": "2026-10-16T15:11:23.591Z"
+    },
+    {
+      "pid": 64104,
+      "started_at": 1792163277542.9585,
+      "session": "0538c1cf-13dc-45f1-a9db-ea01cd4a2ac2",
+      "tick": 171,
+      "observed_at": "2026-10-16T15:11:23.589Z"
+    }
+  ],
+  "final_producers": [],
+  "rss_samples": [
+    {
+      "timestamp": "2026-10-16T15:01:28.0518090Z",
+      "rss_bytes": 187469824,
+      "private_bytes": 390639616,
+      "cpu_seconds": 2824.359375,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:01:52.5112041Z",
+      "rss_bytes": 187678720,
+      "private_bytes": 389976064,
+      "cpu_seconds": 2835.828125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:02:14.6018417Z",
+      "rss_bytes": 190537728,
+      "private_bytes": 392126464,
+      "cpu_seconds": 2844.8125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:02:42.9604958Z",
+      "rss_bytes": 196153344,
+      "private_bytes": 395816960,
+      "cpu_seconds": 2855.359375,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:03:10.8635947Z",
+      "rss_bytes": 198496256,
+      "private_bytes": 394948608,
+      "cpu_seconds": 2867.25,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:03:38.2997711Z",
+      "rss_bytes": 203038720,
+      "private_bytes": 396967936,
+      "cpu_seconds": 2880.203125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:04:16.1896696Z",
+      "rss_bytes": 205766656,
+      "private_bytes": 395419648,
+      "cpu_seconds": 2897.1875,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:04:56.4729403Z",
+      "rss_bytes": 209719296,
+      "private_bytes": 396746752,
+      "cpu_seconds": 2913.40625,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:06:10.1758844Z",
+      "rss_bytes": 222351360,
+      "private_bytes": 408584192,
+      "cpu_seconds": 2932.203125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:08:31.9545212Z",
+      "rss_bytes": 248262656,
+      "private_bytes": 433152000,
+      "cpu_seconds": 2965.859375,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:09:55.7548686Z",
+      "rss_bytes": 265547776,
+      "private_bytes": 445693952,
+      "cpu_seconds": 2992.578125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T15:11:22.0083337Z",
+      "rss_bytes": 276402176,
+      "private_bytes": 456642560,
+      "cpu_seconds": 3017.015625,
+      "elapsed_ms": 0
+    }
+  ],
+  "browser_errors": []
+}

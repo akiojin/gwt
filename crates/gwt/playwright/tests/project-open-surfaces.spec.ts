@@ -63,8 +63,32 @@ test.describe("Project open entry surfaces", () => {
     await expect.poll(() => sentMessageKinds(page)).toContain("open_project_dialog");
   });
 
-  test("active Project Ctrl+O exposes pending, cancellation and manual path fallback", async ({ page }) => {
-    await bootProjectOpenFixture(page, [fixtureTab("git")]);
+  test("active Project Ctrl+O exposes pending, cancellation and manual path fallback", async ({ page }, testInfo) => {
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (liveBase) {
+      await page.addInitScript(() => {
+        const recordedSends: string[] = [];
+        (window as any).__gwtProjectOpenFixture = {
+          recordedSends,
+          reply: (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail })),
+        };
+        const originalSend = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+          if (typeof data === "string" && ["open_project_dialog", "reopen_recent_project"].includes(JSON.parse(data).kind)) {
+            recordedSends.push(data);
+            return;
+          }
+          return originalSend.call(this, data);
+        };
+      });
+      await gotoLiveGwt(page, liveBase, { enableTestBridge: true, suppressProjectSurfaces: true });
+    } else {
+      await bootProjectOpenFixture(page, [fixtureTab("git")]);
+    }
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const trigger = page.locator("#window-list-button");
+    await trigger.focus();
     await page.keyboard.press('Control+o');
     const modal = page.locator('#open-project-path-modal');
     await expect(modal).toBeVisible();
@@ -74,7 +98,22 @@ test.describe("Project open entry surfaces", () => {
     await expect(modal.locator('.modal-shell > .modal-footer')).toBeVisible();
     await expect(modal.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
     await expect(modal.getByRole('status')).toContainText('Choose a folder');
+    const draft = modal.locator('[data-open-project-path]');
+    await draft.fill('/draft/project');
+    await draft.evaluate(element => {
+      (window as any).__pickerDraft = element;
+      (element as HTMLInputElement).setSelectionRange(2, 5);
+    });
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_started', purpose: 'open', request_id: 1 }));
+    await page.evaluate(() => {
+      const fixture = (window as any).__gwtProjectOpenFixture;
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'clone_parent', request_id: 1 });
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 99 });
+    });
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'true');
+    expect(await draft.evaluate(element => element === (window as any).__pickerDraft)).toBe(true);
+    expect(await draft.evaluate(element => [(element as HTMLInputElement).selectionStart, (element as HTMLInputElement).selectionEnd])).toEqual([2, 5]);
+    await expect(draft).toBeFocused();
     await modal.getByRole('button', { name: 'Choosing folder…' }).click();
     expect((await sentMessageKinds(page)).filter((kind) => kind === 'open_project_dialog')).toHaveLength(1);
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 1 }));
@@ -86,6 +125,20 @@ test.describe("Project open entry surfaces", () => {
       (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_error', purpose: 'open', request_id: 2, message: 'Picker timed out' });
     });
     await expect(modal.getByRole('status')).toHaveText('Picker timed out');
+    await modal.getByRole('button', { name: 'Choose Folder…' }).click();
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_busy', purpose: 'open', message: 'Finish the existing dialog first' }));
+    await expect(modal.getByRole('status')).toHaveText('Finish the existing dialog first');
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'false');
+    await modal.getByRole('button', { name: 'Choose Folder…' }).click();
+    await page.evaluate(() => {
+      const fixture = (window as any).__gwtProjectOpenFixture;
+      fixture.reply({ kind: 'picker_started', purpose: 'open', request_id: 3 });
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 2 });
+    });
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'true');
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 3 }));
+    await expect(modal.getByRole('status')).toBeHidden();
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'false');
     await modal.locator('[data-open-project-path]').fill('E:\\repos\\manual');
     await modal.locator('[data-open-project-submit]').click();
     await expect.poll(() => sentMessageKinds(page)).toContain('reopen_recent_project');
@@ -98,9 +151,19 @@ test.describe("Project open entry surfaces", () => {
       fixture.reply({ kind: 'project_open_error', message: 'Unrelated failure' });
     });
     await expect(modal.getByRole('status')).toHaveText('Opening project…');
+    const input = modal.locator('[data-open-project-path]');
+    await input.focus();
+    await input.evaluate(element => {
+      (window as any).__openProjectInput = element;
+      (element as HTMLInputElement).setSelectionRange(3, 7);
+    });
     await page.evaluate((request_id) => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_open_error', request_id, message: 'Folder does not exist' }), firstRequestId);
     await expect(modal.getByRole('status')).toHaveText('Folder does not exist');
     await expect(modal.locator('[data-open-project-path]')).toHaveValue('E:\\repos\\manual');
+    expect(await input.evaluate(element => element === (window as any).__openProjectInput)).toBe(true);
+    expect(await input.evaluate(element => [(element as HTMLInputElement).selectionStart, (element as HTMLInputElement).selectionEnd])).toEqual([3, 7]);
+    await expect(input).toBeFocused();
+    await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`open-project-error-${theme}.png`) });
     await modal.locator('[data-open-project-path]').fill('E:\\repos\\valid');
     await modal.locator('[data-open-project-submit]').click();
     const secondRequestId = await page.evaluate(() => (window as any).__gwtProjectOpenFixture.recordedSends.map(JSON.parse).filter((message: any) => message.kind === 'reopen_recent_project').at(-1).request_id);
@@ -109,6 +172,7 @@ test.describe("Project open entry surfaces", () => {
     await expect(modal).toBeVisible();
     await page.evaluate((request_id) => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_opened', request_id, project_key: '0123456789abcdef', title: 'Valid Project' }), secondRequestId);
     await expect(modal).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 
   test("Clone from GitHub click opens the clone modal from the picker", async ({

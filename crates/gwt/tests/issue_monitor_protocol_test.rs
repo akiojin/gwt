@@ -256,6 +256,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status: Box::new(IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -278,6 +279,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
             update_drain_release: None,
             autonomous_issues: Vec::new(),
@@ -298,7 +300,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         value["status"]["launch_profile_candidates"],
         serde_json::json!([])
     );
-    assert_eq!(value["status"]["usage_threshold_percent"], 80);
+    assert!(value["status"].get("usage_threshold_percent").is_none());
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
@@ -362,6 +364,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
         .expect("serialize inbox");
     let toast = serde_json::to_value(BackendEvent::IssueMonitorToast {
         notification_transition: None,
+        notification_transition_id: None,
         level: "info".to_string(),
         message: "Issue queued".to_string(),
         issue_number: Some(42),

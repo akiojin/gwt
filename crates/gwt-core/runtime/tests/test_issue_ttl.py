@@ -369,6 +369,64 @@ class IssueTtlTests(unittest.TestCase):
                     self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
                 create.assert_not_called()
 
+    def test_publication_os_error_preserves_active_generation_and_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "First", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            pointer_before = runner.active_pointer_path(db).read_bytes()
+            meta_before = (db / runner.META_FILENAME).read_bytes()
+            replace = os.replace
+            error = PermissionError("[WinError 5] staging handle is still open")
+
+            def fail_staging(source, destination):
+                if Path(source) == runner._staging_dir_for(db):
+                    raise error
+                return replace(source, destination)
+
+            with mock.patch.object(runner.os, "replace", side_effect=fail_staging):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertEqual(result["error_code"], "PUBLISH_FAILED", result)
+            self.assertIn(str(error), result["error"])
+            self.assertIn(str(error), runner._read_issue_repair(db)["error"])
+            self.assertEqual(runner.active_pointer_path(db).read_bytes(), pointer_before)
+            self.assertEqual((db / runner.META_FILENAME).read_bytes(), meta_before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows native publication contract")
+    def test_native_incremental_refresh_publishes_1622_issues_after_ttl(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+            "HOME": tmp, "GWT_INDEX_COORDINATOR_ROOT": str(Path(tmp) / "coordinator")
+        }):
+            issues = [{"number": number, "title": f"Issue {number}", "body": "body",
+                       "state": "open", "labels": []} for number in range(1, 1623)]
+            fake = runner._FakeEmbeddingModel()
+            model = mock.Mock()
+            # Keep native Chroma/SQLx/HNSW, with the production E5 vector size.
+            model.encode.side_effect = lambda texts: [vector * 24 for vector in fake.encode(texts)]
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=Path(tmp) / "index")
+            with mock.patch.object(runner, "_load_cached_issue_documents", return_value=issues), mock.patch.object(
+                runner, "_get_embedding_model", return_value=model
+            ), mock.patch.object(runner, "emit_progress"):
+                baseline = runner.action_index_issues_v2(**args)
+                self.assertTrue(baseline["ok"], baseline)
+                db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+                pointer_before = runner.active_pointer_path(db).read_bytes()
+                meta = runner._read_issue_meta(db)
+                meta["last_full_refresh"] = "2000-01-01T00:00:00Z"
+                runner._write_issue_meta(db, meta)
+                issues[0]["body"] = "updated body"
+                issues[-1] = dict(issues[-1], number=1623)
+                result = runner.action_index_issues_v2(**args, mode="incremental", respect_ttl=True)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["mode"], "incremental")
+                self.assertEqual(result["indexed"], 1622)
+                self.assertEqual(result["newly_embedded"], 2)
+                self.assertNotEqual(runner.active_pointer_path(db).read_bytes(), pointer_before)
+                self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
+
     def test_building_serves_previous_generation(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             root = Path(tmp)

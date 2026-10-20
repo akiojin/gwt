@@ -198,3 +198,117 @@ fn project_aggregate_reopen_discards_unread_and_fences_old_ack() {
     );
     assert!(events.is_empty());
 }
+
+#[test]
+fn project_notification_routes_one_client_and_updates_unread() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let other = runtime.project_context("b").unwrap();
+    let clients = crate::ClientHub::default();
+    for (id, key) in [
+        ("first", &context.project_key),
+        ("latest", &context.project_key),
+        ("foreign", &other.project_key),
+    ] {
+        clients.register_scoped(id.into(), ClientScope::Project(key.clone()));
+        let attention = serde_json::from_value(serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": false,
+            "notification_permission": "granted"
+        }))
+        .unwrap();
+        runtime.handle_frontend_event_in_scope(
+            id.into(),
+            attention,
+            &ClientScope::Project(key.clone()),
+        );
+    }
+    runtime.refresh_project_aggregates();
+    let started = Instant::now() - Duration::from_secs(300);
+    runtime.observe_notification_transition_at("a::agent", WindowProcessStatus::Running, started);
+    runtime.stop_window_events("a::agent");
+    let (events, native) = runtime.collect_project_notifications(&clients);
+    assert!(native.is_empty());
+    let recipients: Vec<_> = events
+        .iter()
+        .filter_map(|event| match (&event.target, &event.event) {
+            (DispatchTarget::Client(id), BackendEvent::ProjectNotification { .. }) => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recipients, ["latest"]);
+    assert!(aggregate_payload(&events, &context.project_key).unread);
+    assert!(runtime.collect_project_notifications(&clients).0.is_empty());
+}
+
+#[test]
+fn project_notification_monitor_replay_is_suppressed_and_close_revokes_native() {
+    use std::sync::atomic::Ordering;
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let context = runtime.project_context("a").unwrap();
+    let clients = crate::ClientHub::default();
+    // Establish the baseline that frontend_ready sends before attention reports.
+    runtime.refresh_project_aggregates();
+    let attention = serde_json::from_value(serde_json::json!({
+        "kind": "project_client_attention", "visible": false, "focused": false,
+        "notification_permission": "granted"
+    }))
+    .unwrap();
+    runtime.handle_frontend_event_in_scope(
+        "gone".into(),
+        attention,
+        &ClientScope::Project(context.project_key.clone()),
+    );
+    let event = OutboundEvent::project(
+        context.project_key.clone(),
+        BackendEvent::IssueMonitorToast {
+            notification_transition: Some(
+                gwt::issue_monitor::MonitorNotificationTransition::NeedsHuman,
+            ),
+            notification_transition_id: Some("source-transition".into()),
+            level: "error".into(),
+            message: "private/path/error".into(),
+            issue_number: Some(3287),
+        },
+    );
+    runtime.observe_notification_toasts(std::slice::from_ref(&event));
+    let (events, native) = runtime.collect_project_notifications(&clients);
+    assert!(aggregate_payload(&events, &context.project_key).unread);
+    assert_eq!(native.len(), 1);
+    assert!(!native[0].intent.body.contains("private/path"));
+    runtime.observe_notification_toasts(&[event]);
+    assert!(runtime.collect_project_notifications(&clients).1.is_empty());
+    runtime.project_tab_incarnations.remove("a");
+    runtime.collect_project_notifications(&clients);
+    assert!(!native[0].validity.load(Ordering::Acquire));
+}
+
+#[test]
+fn project_notification_silent_process_install_does_not_infer_agent_running() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let id = "a::agent";
+    runtime.install_process_window(
+        id,
+        super::next_window_runtime_incarnation(),
+        long_running_test_pane(id),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(runtime.window_status(id), Some(WindowProcessStatus::Starting));
+    runtime.observe_notification_transition_at(
+        id,
+        WindowProcessStatus::Stopped,
+        Instant::now() + Duration::from_secs(300),
+    );
+    let intents = runtime.notification_coordinator.drain_intents();
+    runtime.stop_window_runtime(id);
+    assert!(intents.is_empty(), "PTY liveness is not Agent Running");
+}

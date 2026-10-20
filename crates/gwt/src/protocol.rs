@@ -388,6 +388,11 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectClientAttention {
+        visible: bool,
+        focused: bool,
+        notification_permission: crate::project_notifications::NotificationPermission,
+    },
     RetryWorkspaceStateLoad,
     ProjectAggregateAck {
         revision: u64,
@@ -541,8 +546,9 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
-    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    /// Fetch the gwt-assigned identity; the principal supplies all scope.
     PaneName {
+        #[serde(default)]
         candidate: String,
         request_id: String,
     },
@@ -940,6 +946,8 @@ pub enum FrontendEvent {
     GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+        /// Legacy clients may still send this retired setting; ignore it.
+        #[serde(skip)]
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     },
@@ -1028,6 +1036,12 @@ pub enum FrontendEvent {
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
     /// the prepared binary via the helper subprocess and exits the parent.
     ApplyUpdateRestartNow,
+    /// Read current host activity before confirming an explicit restart.
+    GetUpdateRestartImpact {
+        request_id: String,
+    },
+    /// Explicitly schedule the staged update through the existing drain.
+    ApplyUpdateWhenIdle,
     /// Issue #3906 AC-7 / #4076 AC-2: the user cancelled the automatic apply
     /// during its grace. The `update_drain` hold is released, the staged
     /// update stays on disk for the manual button, and the tick never
@@ -1990,6 +2004,9 @@ pub enum BackendEvent {
     ProjectAgentAggregate {
         aggregate: ProjectAgentAggregate,
     },
+    ProjectNotification {
+        notification: crate::project_notifications::NotificationIntent,
+    },
     HubState {
         hub: HubStateView,
     },
@@ -2208,6 +2225,8 @@ pub enum BackendEvent {
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         notification_transition: Option<MonitorNotificationTransition>,
         level: String,
@@ -2431,10 +2450,13 @@ pub enum BackendEvent {
         message: String,
     },
     CloneProjectDone {
+        project_key: String,
         workspace_home: String,
     },
     CloneProjectError {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_project_key: Option<String>,
     },
     LaunchWizardOpenError {
         title: String,
@@ -2653,6 +2675,13 @@ pub enum BackendEvent {
     UpdateSettings {
         project_root: Option<String>,
         status: crate::update_settings::Status,
+    },
+    UpdateRestartImpact {
+        request_id: String,
+        blocking: Vec<crate::update_drain::UpdateBlocker>,
+        issue_numbers: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
@@ -2888,6 +2917,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
         "project_agent_aggregate",
         BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_notification",
+        BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
@@ -3416,6 +3450,7 @@ impl BackendEvent {
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
+            BackendEvent::ProjectNotification { .. } => "project_notification",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
@@ -3525,6 +3560,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::UpdateSettings { .. } => "update_settings",
+            BackendEvent::UpdateRestartImpact { .. } => "update_restart_impact",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
@@ -3584,6 +3620,18 @@ pub enum KnowledgePhaseUpdateResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_client_attention_accepts_only_known_permissions() {
+        let wire = serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": true,
+            "notification_permission": "granted"
+        });
+        assert!(serde_json::from_value::<super::FrontendEvent>(wire.clone()).is_ok());
+        let mut invalid = wire;
+        invalid["notification_permission"] = serde_json::json!("allow");
+        assert!(serde_json::from_value::<super::FrontendEvent>(invalid).is_err());
+    }
+
     use gwt_core::{
         coordination::{
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
@@ -5063,6 +5111,7 @@ mod tests {
 
         let error = BackendEvent::CloneProjectError {
             message: "target already exists".to_string(),
+            existing_project_key: None,
         };
         let value = serde_json::to_value(error).expect("serialize clone error");
         assert_eq!(

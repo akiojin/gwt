@@ -58,13 +58,21 @@ impl WorkEventsIntakeReport {
 #[derive(Debug, Clone)]
 pub struct SharedWorkEventsSource {
     content: Arc<str>,
-    source_execution_container: Option<WorkspaceExecutionContainerRef>,
+    source_execution_container: Option<Arc<WorkspaceExecutionContainerRef>>,
 }
 
 impl SharedWorkEventsSource {
     pub fn new(
         content: impl Into<Arc<str>>,
         source_execution_container: Option<WorkspaceExecutionContainerRef>,
+    ) -> Self {
+        Self::with_shared_container(content, source_execution_container.map(Arc::new))
+    }
+
+    /// Keep one diagnostic context allocation for all sources in a group.
+    pub fn with_shared_container(
+        content: impl Into<Arc<str>>,
+        source_execution_container: Option<Arc<WorkspaceExecutionContainerRef>>,
     ) -> Self {
         Self {
             content: content.into(),
@@ -73,11 +81,11 @@ impl SharedWorkEventsSource {
     }
 }
 
-fn is_close_kind(kind: WorkEventKind) -> bool {
+fn is_close_kind(event: &WorkEvent) -> bool {
     matches!(
-        kind,
+        event.kind,
         WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
-    )
+    ) && !event.is_successor_supersession()
 }
 
 /// The first durable terminal close instant. Metadata and heartbeat events may
@@ -210,7 +218,7 @@ fn prepare_ingested_work_events(
         .collect::<HashMap<_, _>>();
     if !compacted_through.is_empty() {
         incoming.retain(|(event, _)| {
-            let already_folded = !is_close_kind(event.kind)
+            let already_folded = !is_close_kind(event)
                 && !seen_event_ids.contains(&event.id)
                 && compacted_through
                     .get(&event.work_item_id)
@@ -673,7 +681,7 @@ where
                         }
                         Some(match decode(line.as_bytes()) {
                             Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
-                                if event.execution_container.is_none() && !is_close_kind(event.kind) {
+                                if event.execution_container.is_none() && !is_close_kind(&event) {
                                     tracing::warn!(
                                         event_id = %event.id,
                                         work_item_id = %event.work_item_id,
@@ -704,7 +712,7 @@ where
                     continue;
                 }
             };
-            if is_close_kind(event.kind) {
+            if is_close_kind(&event) {
                 report.skipped_close_kind += 1;
                 continue;
             }
@@ -1282,6 +1290,15 @@ impl WorkEventsIntakeStore {
         self.loaded.get(group).and_then(Option::as_ref)
     }
 
+    /// Release a successful read after comparison. Unsaved changes (including
+    /// legacy migration) and failed reads remain authoritative for this pass.
+    pub fn evict_clean_group_sources(&mut self, group: &str) -> bool {
+        if self.dirty_groups.contains(group) || !matches!(self.loaded.get(group), Some(Some(_))) {
+            return false;
+        }
+        self.loaded.remove(group).is_some()
+    }
+
     fn read_group(&self, group: &str) -> Option<BTreeMap<String, String>> {
         let body = std::fs::read(self.group_path(group)).ok()?;
         let file = serde_json::from_slice::<IntakeGroupFile>(&body).ok()?;
@@ -1564,6 +1581,25 @@ mod tests {
             pr_url: None,
             pr_state: None,
         }
+    }
+
+    #[test]
+    fn shared_source_keeps_group_container_allocation_and_owned_constructor_compatibility() {
+        let container = Arc::new(source_container("work/shared"));
+        let content: Arc<str> = Arc::from("shared content");
+        let shared = SharedWorkEventsSource::with_shared_container(
+            Arc::clone(&content),
+            Some(Arc::clone(&container)),
+        );
+        let owned = SharedWorkEventsSource::new(content, Some(container.as_ref().clone()));
+        assert!(Arc::ptr_eq(
+            shared.source_execution_container.as_ref().unwrap(),
+            &container
+        ));
+        assert_eq!(
+            shared.source_execution_container,
+            owned.source_execution_container
+        );
     }
 
     #[test]
@@ -3100,6 +3136,38 @@ mod tests {
         state.record("source-list:v1", "fp-list");
         state.record_projection_version("v-test");
         state
+    }
+
+    #[test]
+    fn intake_store_evicts_only_clean_successful_groups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let expected = grouped_state();
+        std::fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        let group = "ref:refs/remotes/origin/b0";
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(
+            !store.evict_clean_group_sources(group),
+            "migration is not saved yet"
+        );
+        assert!(store.loaded.contains_key(group));
+        store.save().unwrap();
+        assert!(store.evict_clean_group_sources(group));
+        assert!(!store.loaded.contains_key(group));
+        assert_eq!(store.group_sources(group).unwrap().len(), 4);
+        assert_eq!(store.to_state().unwrap(), expected);
+
+        assert!(store.evict_clean_group_sources(group));
+        let group_path = store.group_path(group);
+        let original = std::fs::read(&group_path).unwrap();
+        std::fs::write(&group_path, b"{ invalid").unwrap();
+        assert!(store.group_sources(group).is_none());
+        assert!(!store.evict_clean_group_sources(group));
+        std::fs::write(&group_path, original).unwrap();
+        assert!(
+            store.group_sources(group).is_none(),
+            "a failed read stays fail-closed for this pass"
+        );
     }
 
     /// Issue #4397 AC-1: a trigger that changed one group rewrites that group

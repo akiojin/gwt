@@ -29,6 +29,7 @@
 import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
+  boardEntryAuthorLabel,
   boardEntryMentionsSelf,
   boardEntryOriginActionLabel,
   boardEntryOriginLabel,
@@ -51,6 +52,7 @@ export function createBoardLogsSurface({
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
@@ -512,6 +514,27 @@ export function createBoardLogsSurface({
         });
       }
 
+      function resyncBoardLogs(windowIds) {
+        for (const windowId of windowIds) {
+          const board = boardStateMap.get(windowId);
+          if (board) {
+            // A lost history reply cannot be merged safely with a later window.
+            // Keep the draft until the recovered snapshot confirms the post.
+            if (board.pendingSubmit) board.pendingSubmit.recovering = true;
+            board.loading = false;
+            board.loadingOlder = false;
+            board.pendingLatestReload = false;
+            requestBoard(windowId, true);
+          }
+          const logs = logStateMap.get(windowId);
+          if (logs) {
+            logs.loading = false;
+            logs.pendingScope = null;
+            requestLogs(windowId);
+          }
+        }
+      }
+
       function requestOlderBoardEntries(windowId) {
         const state = ensureBoardState(windowId);
         if (state.loading || state.loadingOlder || !state.hasMoreBefore) {
@@ -606,6 +629,7 @@ export function createBoardLogsSurface({
           origin_session_id: originSessionId,
           bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {
@@ -1231,7 +1255,7 @@ export function createBoardLogsSurface({
           }
           meta.appendChild(
             document.createTextNode(
-              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              `${boardEntryAuthorLabel(entry)} · ${boardTimestampLabel(
                 entry.updated_at || entry.created_at,
               )}`,
             ),
@@ -1254,7 +1278,7 @@ export function createBoardLogsSurface({
               "button",
               "board-reply-quote",
               parent
-                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                ? `Reply to ${boardEntryAuthorLabel(parent)}: ${boardEntryPreview(parent)}`
                 : "Reply to earlier Board entry",
             );
             quote.type = "button";
@@ -1450,7 +1474,7 @@ export function createBoardLogsSurface({
               "span",
               "board-reply-banner-text",
               parent
-                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                ? `Replying to ${boardEntryAuthorLabel(parent)} - ${boardEntryPreview(parent)}`
                 : "Replying to earlier Board entry",
             ),
           );
@@ -1780,6 +1804,7 @@ export function createBoardLogsSurface({
                   && String(entry.author_kind || "").toLowerCase() === "user"
                   && String(entry.body || "").trim() === pendingSubmit.body;
               });
+            const unconfirmedSubmit = pendingSubmit?.recovering && !completedSubmit;
             // Preserve the requested cursor until its page arrives. Evicting it
             // for a live push would leave a hole between history and this window.
             if (state.loadingOlder && addedEntry) state.hasNewerEntries = true;
@@ -1812,6 +1837,9 @@ export function createBoardLogsSurface({
               state.pendingSubmit = null;
               state.submitting = false;
               state.pendingSelfPostScroll = true;
+            } else if (unconfirmedSubmit) {
+              state.pendingSubmit = null;
+              state.submitting = false;
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
@@ -1824,7 +1852,9 @@ export function createBoardLogsSurface({
               showBoardMentionNotification(addressedEntry, event.id);
             }
             state.loading = false;
-            state.error = "";
+            state.error = unconfirmedSubmit
+              ? "Post result could not be confirmed. Check Board history before retrying; your draft is preserved."
+              : "";
             if (completedSubmit && state.hasNewerEntries) {
               state.pendingLatestReload = true;
             }
@@ -1897,6 +1927,7 @@ export function createBoardLogsSurface({
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,

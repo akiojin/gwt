@@ -244,6 +244,7 @@ test.describe("Issue #5322 Settings", () => {
         const maxMode = issues.getByLabel("Max active mode", { exact: true });
         await selectCapacityMode(page, "manual");
         await editNumber(issues.getByLabel("Max active", { exact: true }), "6");
+        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(6);
         await expect(maxMode).toHaveValue("manual");
         await selectCapacityMode(page, "auto");
@@ -252,6 +253,7 @@ test.describe("Issue #5322 Settings", () => {
         await selectCapacityMode(page, "manual");
         await expect(issues.getByLabel("Max active", { exact: true })).toBeEnabled();
         await editNumber(issues.getByLabel("Max active", { exact: true }), "4");
+        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(4);
         await issues.getByLabel("Auto-refill", { exact: true }).check();
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill).toBe(true);
@@ -269,6 +271,20 @@ test.describe("Issue #5322 Settings", () => {
         await openSettings(pageB, "agents");
         const agents = panel(page, "agents");
         const agentsB = panel(pageB, "agents");
+        const saveCandidate = async (action: () => Promise<unknown>) => {
+          const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+          await action();
+          await page.waitForFunction(({ before, root }) => ((window as any).__gwtPlaywrightMessages ?? [])
+            .some(({ sequence, payload }: any) => sequence > before
+              && payload.kind === "issue_monitor_profiles" && payload.project_root === root
+              && Number.isInteger(payload.request_id)), { before, root: a.root });
+          await expect(agents).toHaveAttribute("data-saving", "false");
+        };
+        const editCandidate = async (name: string, value: string) => saveCandidate(async () => {
+          await agents.getByLabel(name, { exact: true }).fill(value);
+          await agents.getByLabel(name, { exact: true }).press("Tab");
+        });
+        await expect(agents.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);
         await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
         await page.waitForFunction(root => ((window as any).__gwtPlaywrightMessages ?? []).some(({ payload }: any) =>
           payload.kind === "issue_monitor_profiles" && payload.project_root === root
@@ -276,21 +292,20 @@ test.describe("Issue #5322 Settings", () => {
         await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-astra");
         await expect(agents.getByLabel("Reasoning codex", { exact: true })).toHaveValue("high");
         await expect(agents.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:fix");
-        await agents.getByLabel("Model codex", { exact: true }).fill("gpt-6-sol");
-        await agents.getByLabel("Reasoning codex", { exact: true }).fill("medium");
+        await editCandidate("Model codex", "gpt-6-sol");
+        await editCandidate("Reasoning codex", "medium");
         await agents.getByLabel("Prefer for codex", { exact: true }).fill("bug");
-        await agents.getByRole("button", { name: "Save profiles", exact: true }).click();
+        await agents.getByLabel("Prefer for codex", { exact: true }).press("Tab");
         await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some(({ payload }: any) =>
           payload.kind === "issue_monitor_toast" && payload.level === "error" && /prefer_for/.test(payload.message)));
         await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
         await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-sol");
         await expect(agents.getByLabel("Prefer for codex", { exact: true })).toHaveValue("bug");
-        expect((await readPreferences(a)).launch_profiles[0].model).toBe("gpt-6-astra");
-        await agents.getByLabel("Prefer for codex", { exact: true }).fill("type:fix, kind:spec");
-        await agents.getByLabel("Session mode codex", { exact: true }).selectOption("Continue");
-        await agents.getByLabel("Runtime codex", { exact: true }).selectOption("Docker");
-        await agents.getByLabel("Docker service codex", { exact: true }).fill("fixture-service");
-        await agents.getByRole("button", { name: "Save profiles", exact: true }).click();
+        expect((await readPreferences(a)).launch_profiles[0]).toMatchObject({ model: "gpt-6-sol", prefer_for: ["type:fix"] });
+        await editCandidate("Prefer for codex", "type:fix, kind:spec");
+        await saveCandidate(() => agents.getByLabel("Session mode codex", { exact: true }).selectOption("Continue"));
+        await saveCandidate(() => agents.getByLabel("Runtime codex", { exact: true }).selectOption("Docker"));
+        await editCandidate("Docker service codex", "fixture-service");
         await expect.poll(async () => (await readPreferences(a)).launch_profiles[0]).toMatchObject({
           agent_id: "codex", model: "gpt-6-sol", reasoning: "medium", prefer_for: ["type:fix", "kind:spec"],
           version: "1.2.3", runtime_target: "Docker", docker_service: "fixture-service", docker_lifecycle_intent: "Connect", session_mode: "Continue",
@@ -305,9 +320,8 @@ test.describe("Issue #5322 Settings", () => {
         await agents.getByLabel("Add candidate candidate", { exact: true }).selectOption("claude");
         await agents.getByRole("button", { name: "Add candidate", exact: true }).click();
         await expect(agents.locator("fieldset[data-agent-id]")).toHaveCount(2);
-        await agents.getByLabel("Model claude", { exact: true }).fill("sonnet");
-        await agents.getByLabel("Reasoning claude", { exact: true }).fill("medium");
-        await agents.getByRole("button", { name: "Save profiles", exact: true }).click();
+        await editCandidate("Model claude", "sonnet");
+        await editCandidate("Reasoning claude", "medium");
         await expect.poll(async () => (await readPreferences(a)).launch_profiles[1].model).toBe("sonnet");
         await agents.getByRole("button", { name: "Move down codex", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).launch_profiles.map((profile: any) => profile.agent_id)).toEqual(["claude", "codex"]);

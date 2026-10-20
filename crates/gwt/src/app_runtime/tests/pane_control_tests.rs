@@ -1436,7 +1436,7 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
         .clone();
 
     assert!(!runtime
-        .close_window_after_issue_monitor_finalize_events(&window_id)
+        .issue_monitor_idle_pane_close_events(&window_id, Some(4117), "review_verdict_published")
         .is_empty());
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -2046,9 +2046,7 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
     locked_rx.recv().expect("pane mutex acquired");
 
     let mut events = None;
-    let mut elapsed = Duration::MAX;
     let logs = capture_tracing_events(|| {
-        let started = Instant::now();
         events = Some(runtime.handle_agent_frontend_event(
             "pane-client".to_string(),
             principal,
@@ -2058,7 +2056,8 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
                 responder: None,
             },
         ));
-        elapsed = started.elapsed();
+        // The holder cannot release until close returns: returning while this
+        // channel is unreleased proves that close did not acquire the mutex.
         release_tx.send(()).expect("release pane mutex");
         let queued = {
             let mut finalizers = finalizers
@@ -2074,32 +2073,14 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
     let events = events.expect("pane close events");
     holder.join().expect("pane mutex holder");
 
-    let proof_deadline = Instant::now() + Duration::from_secs(5);
-    let terminal_proof = loop {
-        let child_exited = pty
-            .try_wait()
-            .expect("probe exact holder child exit")
-            .is_some();
-        let proof = gwt_agent::SessionRuntimeState::load(&runtime_path).ok();
-        if child_exited
-            && proof
-                .as_ref()
-                .is_some_and(|proof| proof.status == gwt_agent::AgentStatus::Stopped)
-        {
-            break proof.expect("terminal runtime proof");
-        }
-        assert!(
-            Instant::now() < proof_deadline,
-            "exact holder child exit and terminal proof were not observed before the deadline"
-        );
-        // test-hygiene: allow-short-duration bounded OS child-exit and durable stop-proof polling; ordering comes from observed state, not this interval
-        thread::sleep(Duration::from_millis(10));
-    };
-
+    // Running the queued finalizer acknowledges both reap and durable proof.
     assert!(
-        elapsed < Duration::from_millis(300),
-        "pane.close waited {elapsed:?} for the pane mutex"
+        pty.try_wait().expect("exact holder child exit").is_some(),
+        "completed finalizer must reap its exact child"
     );
+    let terminal_proof = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("completed finalizer must persist terminal proof");
+    assert_eq!(terminal_proof.status, gwt_agent::AgentStatus::Stopped);
     assert!(matches!(
         events.first(),
         Some(OutboundEvent {
@@ -3959,39 +3940,59 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     let mut foreign_tab = sample_project_tab_with_window_at(
         "foreign",
         "agent",
-        foreign,
+        foreign.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
     foreign_tab
         .workspace
         .set_session_id("agent", Some("same-session".into()));
-    foreign_tab
-        .workspace
-        .set_agent_name("agent", Some("FALCON".into()));
     let (mut runtime, _) =
         sample_runtime_with_events(temp.path(), vec![foreign_tab, own_tab], Some("own"));
+    // Simultaneous launches are serialized through this handler. Both Agents
+    // proposed "Orven" on 2026-10-16; the old runtime assigned Orven / Orven-2.
+    runtime.handle_agent_frontend_event(
+        "foreign-caller".into(),
+        AgentSessionPrincipal::for_test(&foreign, "same-session").unwrap(),
+        AgentFrontendRequest::Name {
+            candidate: "Orven".into(),
+            request_id: "foreign-name".into(),
+        },
+    );
+    let first_assigned = runtime
+        .tab("foreign")
+        .unwrap()
+        .workspace
+        .window("agent")
+        .unwrap()
+        .agent_name
+        .clone()
+        .unwrap();
     let principal = AgentSessionPrincipal::for_test(&own, "same-session").unwrap();
     let events = runtime.handle_agent_frontend_event(
         "caller".into(),
         principal.clone(),
         AgentFrontendRequest::Name {
-            candidate: " falcon ".into(),
+            candidate: "Orven".into(),
             request_id: "name-request".into(),
         },
     );
-    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PaneNameResult { request_id, ok: true, agent_name: Some(name), error: None } if request_id == "name-request" && name == "Falcon-2") && matches!(&event.target, DispatchTarget::Client(id) if id == "caller")));
-    assert_eq!(
-        runtime
-            .tab("own")
-            .unwrap()
-            .workspace
-            .window("agent")
-            .unwrap()
-            .agent_name
-            .as_deref(),
-        Some("Falcon-2")
+    let assigned = runtime
+        .tab("own")
+        .unwrap()
+        .workspace
+        .window("agent")
+        .unwrap()
+        .agent_name
+        .clone()
+        .unwrap();
+    assert_ne!(
+        assigned.chars().next().unwrap().to_ascii_lowercase(),
+        first_assigned.chars().next().unwrap().to_ascii_lowercase()
     );
+    assert!(!first_assigned.starts_with("Orven"));
+    assert!(!assigned.starts_with("Orven"));
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PaneNameResult { request_id, ok: true, agent_name: Some(name), error: None } if request_id == "name-request" && name == &assigned) && matches!(&event.target, DispatchTarget::Client(id) if id == "caller")));
     assert_eq!(
         runtime
             .tab("foreign")
@@ -4001,7 +4002,7 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
             .unwrap()
             .agent_name
             .as_deref(),
-        Some("FALCON")
+        Some(first_assigned.as_str())
     );
     assert_eq!(
         events
@@ -4019,13 +4020,13 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
         },
     );
     assert!(
-        matches!(&retry[0].event, BackendEvent::PaneNameResult { ok: true, agent_name: Some(name), .. } if name == "Falcon-2")
+        matches!(&retry[0].event, BackendEvent::PaneNameResult { ok: true, agent_name: Some(name), .. } if name == &assigned)
     );
     assert_eq!(retry.len(), 1);
 }
 
 #[test]
-fn agent_name_refuses_pm_missing_and_invalid_without_mutation() {
+fn agent_name_refuses_pm_and_missing_without_mutation() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
@@ -4040,7 +4041,8 @@ fn agent_name_refuses_pm_missing_and_invalid_without_mutation() {
     tab.workspace
         .set_session_id("agent", Some("session".into()));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    for (session, candidate) in [("session", "Issue3824"), ("missing", "Falcon")] {
+    {
+        let (session, candidate) = ("missing", "Falcon");
         let principal = AgentSessionPrincipal::for_test(&root, session).unwrap();
         let events = runtime.handle_agent_frontend_event(
             "caller".into(),
@@ -4180,5 +4182,89 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
             .prepared_dispatch
             .is_none(),
         "naming supersedes an in-flight unnamed snapshot"
+    );
+}
+
+#[test]
+fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "claude",
+        root.clone(),
+        WindowPreset::Claude,
+        WindowProcessStatus::Running,
+    );
+    let second = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace
+        .set_agent_name(&second.id, Some("Falcon".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    let events = runtime.assign_missing_agent_names();
+    let workspace = &runtime.tab("tab").unwrap().workspace;
+    let assigned = workspace
+        .window("claude")
+        .unwrap()
+        .agent_name
+        .as_deref()
+        .expect("runtime assignment");
+    assert_ne!(assigned.chars().next().unwrap(), 'F');
+    assert_eq!(
+        workspace.window(&second.id).unwrap().agent_name.as_deref(),
+        Some("Falcon")
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(runtime.assign_missing_agent_names().is_empty());
+}
+
+#[test]
+fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Waiting,
+    );
+    let mut session = gwt_agent::Session::new(&root, "work/test", gwt_agent::AgentId::Codex);
+    session.id = "legacy-named-session".into();
+    tab.workspace
+        .set_session_id("agent", Some(session.id.clone()));
+    tab.workspace.set_agent_name("agent", Some("Falcon".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    session.save(&runtime.sessions_dir).unwrap();
+    let reserved = runtime.agent_name_reservations(None).1.contains("Falcon");
+    assert!(
+        runtime
+            .allocate_agent_name(&root, Some("Flora".into()))
+            .is_err(),
+        "restoring another project must not duplicate a retained Agent initial"
+    );
+    runtime
+        .tab_mut("tab")
+        .unwrap()
+        .workspace
+        .set_status("agent", WindowProcessStatus::Stopped);
+    let retained = runtime.agent_name_reservations(None).1.contains("Falcon");
+    assert!(
+        runtime.assign_missing_agent_names().is_empty(),
+        "session backfill needs no UI repaint"
+    );
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(
+        (reserved, retained, saved.agent_name.as_deref()),
+        (true, true, Some("Falcon"))
     );
 }

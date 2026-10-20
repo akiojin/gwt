@@ -57,12 +57,14 @@ fn global_broadcast_host_update_notice_is_an_ownerless_exception() {
     assert!(matches!(notice.target, DispatchTarget::All));
     assert!(matches!(notice.event, BackendEvent::IssueMonitorToast {
         notification_transition: None,
+        notification_transition_id: None,
         issue_number: None, ref level, ref message,
     } if level == "info" && message == "Host update ready"));
     assert!(
         std::panic::catch_unwind(
             || OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 issue_number: None,
                 level: "info".into(),
                 message: "Unscoped producer".into(),

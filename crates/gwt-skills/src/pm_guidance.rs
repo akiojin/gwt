@@ -51,6 +51,50 @@ session. Do not change the provider's working directory to that checkout or
 import its configuration. Only the explicitly opted-in project policy copied
 into this generated skill supplements the PM contract.
 
+## Goal and roadmap diagnostics
+
+Use `pm.plan.status` to read the saved planning revision and its additive
+`policy` diagnostics before explaining planned work. Use `pm.plan.apply`
+for bounded planning upserts with expected revision, reason and idempotency
+key. Link each queued/active Issue to one complete goal or an explicit
+maintenance/compliance category. Never justify priority from an orphan or invalid trace.
+Resolve missing goals, conflicting links and missing milestone metadata
+through the existing protected planning operation, then read back the result.
+
+Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
+changed fields before/after and `directly_affected_issues` from old/new membership
+and, for goals and milestones, referencing roadmap links.
+Goal changes use only roadmap links explicitly naming the goal, including invalid
+links as reference facts, without expanding milestone membership or proving alignment.
+Read these receipts in
+`pm.plan.status` alongside their reason and revisions when explaining a date,
+goal, scope or reported-health change. An identical upsert has no direct impact;
+an exact retry returns the original receipt. Older receipts lack this evidence.
+This record does not prove dependency propagation or owner notification:
+`missing_inputs` names the absent dependency graph and active-owner handoff.
+
+The policy groups Now/Next/Later and explains missing milestone inputs;
+authored health and confidence are not verified evidence. Effective health
+and confidence remain unknown until exit/metric evidence is connected.
+Each milestone's `observed_issue_states` and `unobserved_issues` cover its
+explicit Issues plus roadmap Issues referencing its unique, nonempty ID.
+These are reference facts, including invalid goal links, not proof of alignment.
+Read the exact inbox states to explain a hold, failure or claim contention;
+an empty list does not prove health. Merged or Released does not prove milestone completion.
+Absent inbox rows stay unobserved even when other Monitor lists mention the Issue.
+Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references
+to its unique, nonempty exact ID, including invalid links as reference facts.
+Milestone-only or category-only references do not expand Goal membership;
+empty or duplicate Goal IDs resolve no links and name the missing identity input.
+The Goal's `observed_issue_states` and `unobserved_issues` use the same inbox boundary.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` stays missing until a canonical source is connected.
+Monitor source, last scan time and incomplete coverage are separate from the
+planning revision: no observation, an old scan or a cache projection cannot
+prove full fleet alignment. This read-only assessment never launches work
+or changes priority; deadline/scope impact propagation and FR-045 delivery remain separate.
+Do not claim a change handoff was delivered or acknowledged from diagnostics.
+
 ## Direct messages to peer PMs
 
 Use `pm.peer.send {project, kind, text, reply_to?}` to contact another
@@ -239,7 +283,8 @@ Approved existing operations:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
   above. An unchanged cycle produces no message.
-- Name work by Issue number and title, never by pane or window ID. Omit
+- Name running work by the assigned agent name and its work; keep the Issue
+  number and title as supporting context, never a pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
 - Post every user-facing digest, decision, and blocker to the Reports
@@ -299,6 +344,8 @@ Approved existing operations:
 - Maintain the current-status card separately from Reports with
   `pm.status.set`. Send `items`, each with `kind`: `working` or `waiting`,
   a short `text` in the user's language, and an RFC 3339 `started_at`.
+  Lead active-work text with the assigned agent name from the named active
+  row in `issue.monitor.status`, then describe what that agent is doing.
   Include a concrete `next_trigger` and `user_action` as the action the
   user must take, or JSON null when no user action is needed.
   `stale_after_minutes` defaults to 15; pass it only when a different
@@ -475,6 +522,10 @@ body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
+- Active inbox rows include `agent_name`; `active_launch_details` supplies the
+  same assigned name, provider, and Session alongside the window identity.
+  Use this current assignment directly rather than joining `pane.list` or
+  retaining a predecessor's name after ownership changes.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the completed stops in `released`, the inbox rows
@@ -538,8 +589,9 @@ body cannot hold `plan` / `tasks` sections.
   on its first rate-limit refusal, including the last candidate, and the
   refused Issue relaunches on the next candidate at once. No usage reading or
   threshold moves launches ahead of a refusal — an account shown at 100% can
-  still be serving — and `usage_threshold_percent` is accepted and stored
-  but no longer affects selection. `effective_launch_profile` says a switch is
+  still be serving. The retired `usage_threshold_percent` parameter is rejected
+  by JSON operations; legacy frontend inputs and saved values are ignored and
+  never persisted. `effective_launch_profile` says a switch is
   in force and why: `refused_provider`, `refused_at`, the `refusal` wording,
   and the candidate launches use instead. Holds never admit timed probes or
   use usage readings to infer recovery. When all candidates are held and at
@@ -797,11 +849,11 @@ same profile to try again.
 ### Closing an inactive Work
 
 Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
-`work_id` is required; `close_kind` is `done` or `discarded`. This uses
+`work_id` is required; for normal closes, `close_kind` is `done` or `discarded`. This uses
 normal registered-PM authority, without a scoped approval. Only the live
 registered PM may call it through the authenticated Host route.
 
-The Host requires that the exact child Work's `manual_close_allowed` is `true`
+For normal closes, the Host requires that the exact child Work's `manual_close_allowed` is `true`
 and there are zero active agents for that Work, then rechecks the current
 runtime before recording the close. Unavailable, refreshing, stale, unknown,
 or foreign target state refuses the close. Follow a retryable reply's refresh
@@ -810,6 +862,18 @@ successful close or bypass it by editing Work state or closing its pane.
 
 A successful close records terminal Work history and retains its branch and worktree.
 Git and build-cache cleanup remain separate operations with their own gates.
+
+For an invalid deterministic successor occupying a fresh launch's slot, use
+`workspace.close {work_id: "<occupied-work-id>", close_kind: "superseded"}`.
+This explicit repair also handles an already terminal invalid successor; it
+does not use the normal `manual_close_allowed` cache gate. The live registered
+PM is still required. The Host proves the exact terminal predecessor, canonical
+owner branch and local checkout, and rechecks every member's runtime. Foreign
+ownership or lineage, a live writer, or unprovable runtime state refuses repair.
+Success appends a supersession audit and preserves the original events and completion time,
+branch and worktree. It never reopens the occupied Work or attaches a new Session
+to it. After a successful supersession, call `issue.monitor.requeue` with the
+owning Issue number; the next fresh launch creates a new successor Work.
 
 ### Fallback cleanup of windows the runtime failed to close
 
@@ -1217,8 +1281,8 @@ quota:
 - Every answer carries `source` (`github` / `cache` / `stale-cache`),
   `cache_age_secs`, `throttled`, and `github_calls`. When the budget is
   below its reserve, `pr.list` serves the last snapshot with
-  `source: stale-cache` and the reason in `throttled`: act on those rows
-  as usual, say "PR inventory throttled: <reason>" in the digest, and do
+  `source: stale-cache` and the reason in `throttled`: hold those rows
+  without taking their suggested actions, say "PR inventory throttled: <reason>" in the digest, and do
   not retry the read this cycle. With no snapshot to serve it fails as
   unobservable (see below).
 - Do not pass `refresh:true` on the periodic inventory. Reserve it for
@@ -1275,7 +1339,8 @@ quota:
   - `CI-RED`: relaunch the owner to fix CI
   - `SUPERSEDED`: propose close in the digest
   - `IN-PROGRESS`: leave it unless `stale` is true
-  - `UNDETERMINED`: GitHub has not computed mergeability yet; hold and
+  - `UNDETERMINED`: GitHub has not computed mergeability yet, or
+    `lifecycle_source: stale-cache` means the snapshot could not be refreshed; hold and
     re-read next cycle. `lifecycle_source` is `held` when `pr.list` kept
     the previous class because the PR's real data did not change, so a
     class never flips on a non-final GitHub answer.
@@ -1289,6 +1354,8 @@ quota:
   (default 3, overridable with `params.escalate_after_cycles`), and
   `escalation_due`. Dwell and staleness are measured from the PR's real
   `updated_at`, never from the class of the moment.
+  `stale` is also true for an unverified inventory snapshot; that hold
+  does not advance `unchanged_cycles` or trigger `escalation_due`.
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
   `owner_issue_source` says whether the owner was declared by the PR
@@ -1378,9 +1445,13 @@ PR | owner Issue | dwell | conflicting files | behind | recommendation
 and `behind` is `conflict.behind_by`. Use `?` for a fact the row did not
 measure; never leave a column out and never guess one.
 - When `default_action_executable` is false the Issue Monitor cannot
-  perform the default action and `blocker` says why: `owner_unknown`
+  perform the default action and `blocker` says why: `stale_pr_inventory`,
+  `owner_unknown`
   (no closing Issue and no launch ref naming one) or
-  `owner_issue_closed`. A head sitting on the owner's own launch ref is
+  `owner_issue_closed`. For `stale_pr_inventory`, wait for the budget to
+  recover and obtain a fresh `pr.list` before any action; do not apply
+  the CI/conflict fallback below to unverified rows.
+  A head sitting on the owner's own launch ref is
   no longer a blocker — since #4074 a relaunch inherits that branch and
   its commits instead of being refused, so relaunch the owner.
   Do not retry the default action. The row's `fallback` fixes the
@@ -1466,8 +1537,12 @@ measure; never leave a column out and never guess one.
 branch with commits `origin/develop` does not have and no open PR
 carrying them. Each row names the `branch`, its `owner_issue`, how many
 commits it is `ahead`, and its `last_commit_at`. It is read from local
-refs, so it costs no GitHub budget and stays truthful even when the PR
-rows came from cache. `unlanded_branch_count` is the row count.
+refs, so it costs no GitHub budget. `unlanded_branch_count` is the row count.
+With `source: stale-cache`, the open PR set is unverified: stocktake arrays
+and counts are `null` (unknown, not zero), and rows have stale provenance
+with non-executable actions. Do not relaunch an owner from a stale snapshot;
+retry `pr.list` with `refresh:true` after the budget recovers. A snapshot
+inside the normal TTL still supports the stocktake.
 
 - Read it every cycle. A row is committed work with nothing carrying it
   to `develop` — #3551 sat unlanded for ten days because no open PR
@@ -1700,8 +1775,14 @@ and urgency.
 
 ## Reporting cadence
 
+- Report running work with the assigned agent name as the subject:
+  "<name> is handling <work>". Keep the Issue number as supporting context.
+  Use this form in conversation, `pm.report.post` bodies, `pm.status.set`
+  items, and escalations. On a handover, report "<old name> to <new name>"
+  and use the new name for subsequent updates. For an unnamed legacy window
+  or the PM, retain the existing window-title and Issue fallback.
 - Default each user-facing report to 3-6 lines. Lead with the outcome,
-  identify affected agents by window title, and move supporting detail to
+  identify affected agents by assigned agent name and work, and move supporting detail to
   the owning Issue or Board entry. A pane or window ID may accompany a
   diagnostic artifact, but it is never the only user-facing identity. If
   the window title is unavailable, identify the owning Issue and say
@@ -2379,6 +2460,29 @@ mod tests {
     }
 
     #[test]
+    fn contract_reports_running_work_by_assigned_agent_name() {
+        let reporting = section("## Reporting cadence");
+        for phrase in [
+            "assigned agent name",
+            "<name> is handling <work>",
+            "Issue number as supporting context",
+            "<old name> to <new name>",
+        ] {
+            assert!(
+                reporting.contains(phrase),
+                "missing named reporting rule: {phrase}"
+            );
+        }
+        let current = section("## Current PM status");
+        assert!(current.contains("assigned agent name"));
+        let references = reference_sections()
+            .find(|(name, _)| *name == "escalation-and-reporting.md")
+            .unwrap()
+            .1;
+        assert!(references.contains("assigned agent name"));
+    }
+
+    #[test]
     fn contract_posts_user_reports_to_the_reports_surface() {
         let reporting = section("## Reporting to the user");
         assert!(reporting.contains(
@@ -2707,6 +2811,11 @@ mod tests {
             "`unlanded_branch_count`",
             "`last_commit_at`",
             "costs no GitHub budget",
+            "`source: stale-cache`",
+            "unknown, not zero",
+            "Do not relaunch an owner from a stale snapshot",
+            "hold those rows without taking their suggested actions",
+            "`stale_pr_inventory`",
             "relaunch the owner Issue so the work reaches a PR, or rule the branch archived",
             "A row that survives a cycle unaddressed is an escalation",
             "## Terminal executions never justify a successor Issue",
@@ -2724,6 +2833,7 @@ mod tests {
         ] {
             assert!(body.contains(phrase), "PM contract is missing: {phrase}");
         }
+        assert!(!body.contains("act on those rows as usual"));
     }
 
     /// Issue #3776 / SPEC-3431 FR-145〜148 and Issue #3825: a slow gwtd
@@ -3602,6 +3712,19 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`pm.plan.status`",
+            "`pm.plan.apply`",
+            "authored health and confidence are not verified evidence",
+            "`observed_issue_states` and `unobserved_issues`",
+            "Merged or Released does not prove milestone completion",
+            "Never justify priority from an orphan or invalid trace",
+            "deadline/scope impact propagation and FR-045 delivery remain separate",
+            "`change_impact`",
+            "`directly_affected_issues`",
+            "Goal changes use only roadmap links explicitly naming the goal",
+            "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
+            "Goal observations do not prove outcome achievement or metric evidence",
+            "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",
             "`released` array from `issue.monitor.status`",
@@ -3615,6 +3738,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Update the existing owner's FR/AC",
             "`owner_check`",
             "one to three lines",
+            "invalid deterministic successor",
+            "`workspace.close {work_id: \"<occupied-work-id>\", close_kind: \"superseded\"}`",
+            "preserves the original events and completion time",
+            "After a successful supersession, call `issue.monitor.requeue`",
         ] {
             assert!(
                 intake.contains(phrase),

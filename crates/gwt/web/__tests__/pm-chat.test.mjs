@@ -250,7 +250,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
 
 test('Reports rejects file-drop input while Execution log keeps the attachment bridge', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
-  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -289,7 +289,7 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
 // Exercise the real token/XHR path: the uploader override bypasses both.
 async function clipboardFixture(windowId, run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
-  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -358,4 +358,49 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
     assert.equal(sent[0].message, alerts[0]);
     assert.match(sent[0].operation_id, /^attachment-/);
   });
+});
+
+
+test('Agents tiles own browser and native file drops and their progress', async () => {
+  let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
+    source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
+  }
+  const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><section hidden><div class="workspace-window" data-id="agent"></div></section><article class="agent-tile" data-agent-id="agent"><header>Agent</header><div class="terminal-root"></div></article></body></html>');
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = window;
+  globalThis.document = document;
+  const sent = [], alerts = [];
+  window.alert = message => alerts.push(message);
+  window.__gwtAttachmentUploader = async () => ({ upload_id: 'tile-upload' });
+  try {
+    const cached = document.querySelector('.workspace-window');
+    const tile = document.querySelector('.agent-tile');
+    const terminalRoot = tile.querySelector('.terminal-root');
+    document.elementFromPoint = () => terminalRoot;
+    const bridge = createTerminalAttachments({ send: message => sent.push(message),
+      terminalMap: new Map([['agent', { terminalContainer: terminalRoot, terminal: { focus() {} } }]]),
+      windowMap: new Map([['agent', cached]]), workspaceWindowById: () => ({ preset: 'agent' }),
+      isAgentWindowPreset: preset => preset === 'agent', workspaceWindowElement: () => cached });
+    bridge.installBrowserFileDropBridge();
+    bridge.installNativeFileDropBridge();
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    drop.dataTransfer = { types: ['Files'], files: [{ name: 'input.txt', size: 4 }] };
+    tile.querySelector('header').dispatchEvent(drop);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(sent.map(message => message.kind), ['attach_files']);
+    assert.equal(sent[0].id, 'agent');
+    assert.equal(tile.querySelector('.attachment-progress').hidden, false);
+    assert.equal(cached.querySelector('.attachment-progress'), null);
+    window.dispatchEvent(new window.CustomEvent('gwt:native-file-drop', {
+      detail: { paths: ['C:/input.txt'], x: 10, y: 20 },
+    }));
+    assert.equal(sent[1].id, 'agent');
+    assert.equal(sent[1].files[0].source, 'native_path');
+    assert.deepEqual(alerts, []);
+  } finally {
+    globalThis.window = previous.window;
+    globalThis.document = previous.document;
+  }
 });

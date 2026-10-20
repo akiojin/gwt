@@ -2169,11 +2169,43 @@ fn repo_scope_source_paths(scope: RefreshScope, root: &Path, repo_hash: &RepoHas
     }
 }
 
+fn refresh_source_metadata(path: &Path) -> io::Result<std::fs::Metadata> {
+    #[cfg(test)]
+    REFRESH_SOURCE_READS.with(|reads| {
+        *reads
+            .borrow_mut()
+            .path_metadata_probes
+            .entry(path.to_path_buf())
+            .or_default() += 1;
+    });
+    std::fs::symlink_metadata(path)
+}
+
+#[cfg(windows)]
+fn refresh_source_entry_metadata(entry: &std::fs::DirEntry) -> Option<std::fs::Metadata> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = entry.metadata().ok()?;
+    // Reparse points retain the original symlink_metadata behavior.
+    (metadata.file_attributes() & 0x400 == 0).then_some(metadata)
+}
+
 /// Metadata-only source snapshot. Nanosecond mtimes detect same-size edits;
 /// missing paths remain in the identity so creation/removal is observable.
 fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
-    fn collect(path: &Path, files: &mut Vec<(PathBuf, u64, u128)>) -> io::Result<()> {
-        let metadata = match std::fs::symlink_metadata(path) {
+    #[cfg(test)]
+    REFRESH_SOURCE_READS.with(|reads| {
+        *reads
+            .borrow_mut()
+            .fingerprints
+            .entry(paths.to_vec())
+            .or_default() += 1;
+    });
+    fn collect(
+        path: &Path,
+        metadata: io::Result<std::fs::Metadata>,
+        files: &mut Vec<(PathBuf, u64, u128)>,
+    ) -> io::Result<()> {
+        let metadata = match metadata {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 files.push((path.to_path_buf(), 0, 0));
@@ -2183,7 +2215,15 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
         };
         if metadata.is_dir() {
             for entry in std::fs::read_dir(path)? {
-                collect(&entry?.path(), files)?;
+                let entry = entry?;
+                let path = entry.path();
+                #[cfg(windows)]
+                let metadata = refresh_source_entry_metadata(&entry)
+                    .map(Ok)
+                    .unwrap_or_else(|| refresh_source_metadata(&path));
+                #[cfg(not(windows))]
+                let metadata = refresh_source_metadata(&path);
+                collect(&path, metadata, files)?;
             }
         } else if metadata.is_file() {
             files.push((
@@ -2199,9 +2239,49 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
         Ok(())
     }
     use sha2::{Digest, Sha256};
+    // Windows directory enumeration supplies metadata without per-file syscalls.
+    // Keep it only for this snapshot and only for names requested by the caller.
+    #[cfg(windows)]
+    let metadata_by_path = {
+        let mut parents: HashMap<&Path, HashMap<&std::ffi::OsStr, &Path>> = HashMap::new();
+        for path in paths {
+            if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+                parents.entry(parent).or_default().insert(name, path);
+            }
+        }
+        let mut metadata = HashMap::new();
+        for (parent, mut names) in parents {
+            // A singleton does not justify scanning unrelated directory entries.
+            if names.len() < 2 {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(parent) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if let Some(path) = names.remove(entry.file_name().as_os_str()) {
+                    if let Some(value) = refresh_source_entry_metadata(&entry) {
+                        metadata.insert(path, value);
+                    }
+                    if names.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        metadata
+    };
     let mut files = Vec::new();
     for path in paths {
-        collect(path, &mut files)
+        #[cfg(windows)]
+        let metadata = metadata_by_path
+            .get(path.as_path())
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| refresh_source_metadata(path));
+        #[cfg(not(windows))]
+        let metadata = refresh_source_metadata(path);
+        collect(path, metadata, &mut files)
             .map_err(|error| format!("index source snapshot {}: {error}", path.display()))?;
     }
     files.sort();
@@ -2215,15 +2295,94 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("source:{:x}", digest.finalize()))
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct RefreshSourceReads {
+    broker_inspections: usize,
+    fingerprints: HashMap<Vec<PathBuf>, usize>,
+    path_metadata_probes: HashMap<PathBuf, usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REFRESH_SOURCE_READS: std::cell::RefCell<RefreshSourceReads> = Default::default();
+}
+
+/// Read the broker and each distinct repo source set once within a poll. A new
+/// instance on every poll keeps discovery and the broker quiet window unchanged.
+struct SourceRefreshPoll<'a> {
+    broker: &'a RefreshBroker,
+    previous: gwt_core::index::broker::RefreshBrokerSnapshot,
+    repo_fingerprints: HashMap<Vec<PathBuf>, String>,
+}
+
+impl<'a> SourceRefreshPoll<'a> {
+    fn new(broker: &'a RefreshBroker) -> Result<Self, String> {
+        #[cfg(test)]
+        REFRESH_SOURCE_READS.with(|reads| reads.borrow_mut().broker_inspections += 1);
+        Ok(Self {
+            broker,
+            previous: broker.inspect().map_err(|error| error.to_string())?,
+            repo_fingerprints: HashMap::new(),
+        })
+    }
+
+    fn submit_repo_sources(&mut self, root: &Path, repo_hash: &RepoHash) -> Result<(), String> {
+        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        for scope in REFRESH_REPO_SCOPES {
+            let snapshot = self.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+            self.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)?;
+        }
+        Ok(())
+    }
+
+    fn repo_snapshot(&mut self, paths: Vec<PathBuf>) -> Result<String, String> {
+        match self.repo_fingerprints.get(&paths) {
+            Some(snapshot) => Ok(snapshot.clone()),
+            None => {
+                let snapshot = refresh_source_snapshot(&paths)?;
+                self.repo_fingerprints.insert(paths, snapshot.clone());
+                Ok(snapshot)
+            }
+        }
+    }
+
+    fn submit(&self, target: RefreshTarget, snapshot: String) -> Result<(), String> {
+        if self
+            .previous
+            .target(&target)
+            .is_some_and(|old| old.desired_snapshot() == snapshot)
+        {
+            return Ok(());
+        }
+        let desired_epoch = unix_millis_now().max(
+            self.previous
+                .target(&target)
+                .map_or(0, |old| old.desired_epoch().saturating_add(1)),
+        );
+        // The poll view is observational. submit rereads the current record
+        // under its target lock and never replaces a newer producer's epoch.
+        self.broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target,
+                desired_epoch,
+                desired_snapshot: snapshot,
+                priority: JobPriority::Background,
+                reason: RefreshReason::DirtyEvent,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
 fn submit_repo_source_refreshes(
     broker: &RefreshBroker,
     root: &Path,
     repo_hash: &RepoHash,
 ) -> Result<(), String> {
-    for scope in REFRESH_REPO_SCOPES {
-        submit_repo_scope_refresh(broker, root, repo_hash, scope)?;
-    }
-    Ok(())
+    SourceRefreshPoll::new(broker)?.submit_repo_sources(root, repo_hash)
 }
 
 fn submit_repo_scope_refresh(
@@ -2233,32 +2392,9 @@ fn submit_repo_scope_refresh(
     scope: RefreshScope,
 ) -> Result<(), String> {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let previous = broker.inspect().map_err(|error| error.to_string())?;
-    let target = RefreshTarget::base(repo_hash.as_str(), [scope]);
-    let snapshot = refresh_source_snapshot(&repo_scope_source_paths(scope, &root, repo_hash))?;
-    if previous
-        .target(&target)
-        .is_some_and(|old| old.desired_snapshot() == snapshot)
-    {
-        return Ok(());
-    }
-    let desired_epoch = unix_millis_now().max(
-        previous
-            .target(&target)
-            .map_or(0, |old| old.desired_epoch().saturating_add(1)),
-    );
-    broker
-        .submit(RefreshIntent {
-            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
-            target,
-            desired_epoch,
-            desired_snapshot: snapshot,
-            priority: JobPriority::Background,
-            reason: RefreshReason::DirtyEvent,
-            resource_class: RefreshResourceClass::Embedding,
-        })
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    let mut poll = SourceRefreshPoll::new(broker)?;
+    let snapshot = poll.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+    poll.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)
 }
 
 /// Queue the saved Reports sources immediately; the GUI broker drain does model work.
@@ -2280,9 +2416,13 @@ pub fn poll_registered_project_index_sources(broker: &RefreshBroker) -> Result<(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    if projects.is_empty() {
+        return Ok(());
+    }
+    let mut poll = SourceRefreshPoll::new(broker)?;
     for project in projects.values() {
         if let Some(repo_hash) = detect_repo_hash(&project.project_root) {
-            submit_repo_source_refreshes(broker, &project.project_root, &repo_hash)?;
+            poll.submit_repo_sources(&project.project_root, &repo_hash)?;
         }
         for root in &project.worktree_roots {
             if let Some(repo_hash) = detect_repo_hash(root) {
@@ -2309,38 +2449,19 @@ pub fn poll_registered_project_index_sources(broker: &RefreshBroker) -> Result<(
                     .split('\0')
                     .filter(|name| !name.is_empty())
                     .map(|name| root.join(name))
-                    .filter(|path| !policy.is_builtin_denied_path(root, path))
                     .collect();
+                let files = policy.filter_builtin_denied_paths(root, files);
                 let snapshot = refresh_source_snapshot(&files)?;
                 let worktree_hash =
                     compute_worktree_hash(root).map_err(|error| error.to_string())?;
-                let target = RefreshTarget::overlay(
-                    repo_hash.as_str(),
-                    worktree_hash.as_str(),
-                    REFRESH_FILE_SCOPES,
-                );
-                let previous = broker.inspect().map_err(|error| error.to_string())?;
-                if previous
-                    .target(&target)
-                    .is_none_or(|old| old.desired_snapshot() != snapshot)
-                {
-                    let desired_epoch = unix_millis_now().max(
-                        previous
-                            .target(&target)
-                            .map_or(0, |old| old.desired_epoch().saturating_add(1)),
-                    );
-                    broker
-                        .submit(RefreshIntent {
-                            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
-                            target,
-                            desired_epoch,
-                            desired_snapshot: snapshot,
-                            priority: JobPriority::Background,
-                            reason: RefreshReason::DirtyEvent,
-                            resource_class: RefreshResourceClass::Embedding,
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
+                poll.submit(
+                    RefreshTarget::overlay(
+                        repo_hash.as_str(),
+                        worktree_hash.as_str(),
+                        REFRESH_FILE_SCOPES,
+                    ),
+                    snapshot,
+                )?;
             }
         }
     }
@@ -4440,13 +4561,32 @@ detached
                 ],
             );
             std::fs::write(root.join("lib.rs"), "fn initial() {}\n").unwrap();
+            std::fs::write(root.join("mod.rs"), "fn sibling() {}\n").unwrap();
             let root = dunce::canonicalize(root).unwrap();
             let repo_hash = detect_repo_hash(&root).unwrap();
             register_refresh_project(repo_hash.as_str(), &root, &temp.path().join("index"));
             roots.push(root);
         }
-        poll_registered_project_index_sources(&broker).unwrap();
         let repo_hash = detect_repo_hash(&roots[0]).unwrap();
+        let issue_sources = repo_scope_source_paths(RefreshScope::Issues, &roots[0], &repo_hash);
+        REFRESH_SOURCE_READS.with(|reads| *reads.borrow_mut() = RefreshSourceReads::default());
+        poll_registered_project_index_sources(&broker).unwrap();
+        REFRESH_SOURCE_READS.with(|reads| {
+            let reads = reads.borrow();
+            assert_eq!(
+                (reads.broker_inspections, reads.fingerprints[&issue_sources]),
+                (1, 1),
+                "one source poll shares its broker read across repo/worktree scopes and fingerprints Issues/Specs sources once"
+            );
+            #[cfg(windows)]
+            for root in &roots {
+                assert_eq!(
+                    reads.path_metadata_probes.get(&root.join("lib.rs")).copied().unwrap_or(0),
+                    0,
+                    "a regular file's parent enumeration already supplies its metadata"
+                );
+            }
+        });
         let targets: Vec<_> = roots
             .iter()
             .map(|root| {
@@ -4460,6 +4600,14 @@ detached
         let before = broker.inspect().unwrap();
         std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
         poll_registered_project_index_sources(&broker).unwrap();
+        REFRESH_SOURCE_READS.with(|reads| {
+            let reads = reads.borrow();
+            assert_eq!(
+                (reads.broker_inspections, reads.fingerprints[&issue_sources]),
+                (2, 2),
+                "the next source poll must read fresh broker and source state"
+            );
+        });
         let after = broker.inspect().unwrap();
         let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
         assert_eq!(

@@ -292,7 +292,7 @@ fn verification_adjudication_note(
 /// Snapshot the body submitted by a mutation, or the existing body for Ready.
 /// File-backed mutations dispatch this same value after checking it.
 fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<Option<String>> {
-    match cmd {
+    let body = match cmd {
         PrCommand::CreateBody { body, .. } => Ok(Some(body.clone())),
         PrCommand::Create { file, .. } => env.read_file(file).map(Some),
         PrCommand::EditBody { body, .. } => Ok(body.clone()),
@@ -303,7 +303,17 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
         other => Err(std::io::Error::other(format!(
             "not a PR mutation: {other:?} carries no PR body"
         ))),
+    }?;
+    if let Some(body) = body.as_deref() {
+        if let PrCommand::Edit { number, .. } | PrCommand::EditBody { number, .. } = cmd {
+            let previous = env.fetch_pr_quarantine_context(*number)?;
+            return Ok(Some(crate::session_launch::preserve_named_pr_author(
+                body,
+                &previous.body,
+            )));
+        }
     }
+    Ok(body)
 }
 
 /// #4326: use the launch route and measured verification for Ready handoffs.
@@ -756,7 +766,10 @@ pub(super) fn run<E: CliEnv>(
                     )
                 }),
                 || {
-                    let mut checked_body = body.to_string();
+                    let author_session = mutation_binding.as_ref().and_then(|binding| {
+                        gwt_agent::Session::load(&gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", binding.session_id))).ok()
+                    });
+                    let mut checked_body = crate::session_launch::with_named_pr_author(body, author_session.as_ref());
                     let mut checked_head = head.clone();
                     if !draft {
                         let worktree = mutation_worktree.as_deref().expect("mutation worktree");
@@ -802,6 +815,17 @@ pub(super) fn run<E: CliEnv>(
                         head.as_deref(),
                         false,
                     )?;
+                    if let Some(session) = author_session.as_ref() {
+                        if let Err(error) = crate::session_launch::record_named_issue_activity(
+                            env.client(), session,
+                            crate::session_launch::NamedIssueActivity::PrCreated { number: pr.number },
+                        ) {
+                            crate::cli::operation_warnings::push(
+                                "named_issue_history_recording_skipped",
+                                format!("PR #{} was created, but its named Issue history could not be recorded: {error}", pr.number),
+                            );
+                        }
+                    }
                     Ok(Some(pr))
                 },
             )
@@ -1750,6 +1774,9 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
     let unlanded: Vec<serde_json::Value> = unlanded.into_iter().map(render_branch).collect();
     let bookkeeping_only: Vec<serde_json::Value> =
         bookkeeping_only.into_iter().map(render_branch).collect();
+    // A stale open-PR set cannot establish branch absence. Null means this
+    // stocktake was not observed; an empty array means it was observed empty.
+    let stocktake_observed = read.source != "stale-cache";
     // Issue #3891: provenance and cost of the read travel with the rows so a
     // cached or throttled inventory is never mistaken for a live one.
     let payload = serde_json::json!({
@@ -1762,10 +1789,10 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         "hydrated": read.hydrated,
         "skipped_unchanged": read.skipped_unchanged,
         "pull_requests": rows,
-        "unlanded_branch_count": unlanded.len(),
-        "unlanded_branches": unlanded,
-        "bookkeeping_only_branch_count": bookkeeping_only.len(),
-        "bookkeeping_only_branches": bookkeeping_only,
+        "unlanded_branch_count": stocktake_observed.then_some(unlanded.len()),
+        "unlanded_branches": stocktake_observed.then_some(unlanded),
+        "bookkeeping_only_branch_count": stocktake_observed.then_some(bookkeeping_only.len()),
+        "bookkeeping_only_branches": stocktake_observed.then_some(bookkeeping_only),
     });
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {
@@ -2309,6 +2336,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
         persist_pr_generation_session(&fixture.repo, session_id, identity);
         enable_autonomous_pr_session(&fixture.repo, session_id);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         let (failed, _) = crate::cli::verification_record::run_verification(
             &fixture.repo,
@@ -2327,6 +2359,17 @@ mod tests {
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
+        env.client.fail_create_comment_after(0);
+        crate::cli::operation_warnings::take();
         let request = ci_request_for(&fixture.repo);
         seed_ci_delivery(&mut env, &request);
         crate::cli::action_obligation::mark_from_prompt(
@@ -2408,6 +2451,15 @@ mod tests {
             Some(request.head.as_str())
         );
         assert!(out.contains("CI delivery audit"), "{out}");
+        assert!(out.contains("https://example.com/pr/7"), "{out}");
+        assert!(
+            out.contains("warning:") && out.contains("injected create_comment failure"),
+            "{out}"
+        );
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "named_issue_history_recording_skipped");
+        assert!(warnings[0].message.contains("PR #7"));
         assert!(crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty());
         assert_eq!(
             protected
@@ -2546,6 +2598,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, producer);
         persist_pr_generation_session(&fixture.repo, producer, identity);
         enable_autonomous_pr_session(&fixture.repo, producer);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{producer}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         crate::cli::execution_state::settle(
             &fixture.repo,
             producer,
@@ -2601,6 +2658,15 @@ mod tests {
             .unwrap();
         let mut env = crate::cli::TestEnv::new(pm_path.clone());
         seed_ci_delivery(&mut env, &request);
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
         let mut out = String::new();
         assert_eq!(
             run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
@@ -2612,6 +2678,14 @@ mod tests {
             Some("work/issue-42")
         );
         assert!(!env.pr_create_call_log[0].draft);
+        assert!(env.pr_create_call_log[0]
+            .body
+            .contains("Agent: ミオ (Codex)"));
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応し、PR #7 を作成")));
         assert_eq!(
             protected
                 .iter()
@@ -2915,6 +2989,10 @@ mod tests {
         crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
         let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
         persist_pr_generation_session(worktree.path(), "session-current", identity.clone());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named = gwt_agent::Session::load(&sessions.join("session-current.toml")).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         seed_pr_generation_work(worktree.path(), "session-current");
         let _session = gwt_core::test_support::ScopedEnvVar::set(
             gwt_agent::GWT_SESSION_ID_ENV,
@@ -2924,6 +3002,23 @@ mod tests {
         env.seed_pr(7, seeded_pr());
         seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
+        env.client.fail_create_comment_after(0);
+        crate::cli::operation_warnings::take();
+        crate::cli::action_obligation::mark_from_prompt(
+            worktree.path(),
+            "session-current",
+            "PRを作成してください",
+        )
+        .unwrap();
 
         let mut out = String::new();
         assert_eq!(
@@ -2942,6 +3037,23 @@ mod tests {
             .expect("create draft as exact current Session"),
             0,
             "{out}",
+        );
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert!(
+            out.contains("created pull request") && out.contains("https://example.com/pr/7"),
+            "{out}"
+        );
+        assert!(
+            out.contains("warning:") && out.contains("injected create_comment failure"),
+            "{out}"
+        );
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "named_issue_history_recording_skipped");
+        assert!(warnings[0].message.contains("PR #7"));
+        assert!(
+            crate::cli::action_obligation::open_kinds(worktree.path(), "session-current")
+                .is_empty()
         );
         out.clear();
         assert_eq!(
@@ -3440,6 +3552,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
         persist_pr_generation_session(&fixture.repo, session_id, identity);
         enable_autonomous_pr_session(&fixture.repo, session_id);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         let git = |args: &[&str]| {
             let output = gwt_core::process::hidden_command("git")
@@ -3492,6 +3609,15 @@ mod tests {
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
         let mut out = String::new();
         for command in [
             crate::cli::verification_record::VerifyCommand::Plan {
@@ -3537,6 +3663,17 @@ mod tests {
             &fixture.repo,
             verified.verified_head.as_deref().unwrap(),
         );
+        assert!(env
+            .pr_create_call_log
+            .last()
+            .unwrap()
+            .body
+            .contains("Agent: ミオ (Codex)"));
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応し、PR #7 を作成")));
         let items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
             .unwrap()
             .unwrap();
@@ -3663,6 +3800,11 @@ mod tests {
         let completed = crate::cli::execution_state::load(&fixture.repo)
             .unwrap()
             .unwrap();
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応を完了")));
         let bookkeeping =
             crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
                 .unwrap()
@@ -4562,6 +4704,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pr_list_stale_stocktake_is_unknown_rather_than_empty() {
+        let mut read = gwt_git::PrInventoryRead {
+            items: vec![seeded_inventory_item()],
+            source: "stale-cache",
+            fetched_at: None,
+            cache_age_secs: Some(3600),
+            throttled: Some("budget_reserve".to_string()),
+            github_calls: 0,
+            hydrated: 0,
+            skipped_unchanged: 0,
+            unlanded_branches: Vec::new(),
+        };
+        for (source, expected) in [
+            ("stale-cache", serde_json::Value::Null),
+            ("github", serde_json::json!([])),
+        ] {
+            read.source = source;
+            let mut out = String::new();
+            render_pr_inventory(&mut out, &read);
+            let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(payload["unlanded_branches"], expected);
+            assert_eq!(payload["bookkeeping_only_branches"], expected);
+            let count = if expected.is_null() {
+                expected
+            } else {
+                serde_json::json!(0)
+            };
+            assert_eq!(payload["unlanded_branch_count"], count);
+            assert_eq!(payload["bookkeeping_only_branch_count"], count);
+        }
+    }
+
     /// SPEC #3835 AC-2 / AC-3 / AC-4 / AC-6: the facts the PM used to collect
     /// by hand reach the row it already reads.
     #[test]
@@ -4910,6 +5085,33 @@ mod tests {
                 ..gwt_git::PrInventoryOptions::default()
             })
         );
+    }
+
+    #[test]
+    fn pr_edit_body_retains_the_original_named_producer() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut producer =
+            gwt_agent::Session::new(repo.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        producer.agent_name = Some("Maya".into());
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        seed_readable_pr_body(&mut env);
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
+            crate::session_launch::with_named_pr_author("Original description", Some(&producer));
+        let body = pr_mutation_body(
+            &mut env,
+            &PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: None,
+                body: Some("Rewritten description".into()),
+                add_labels: vec![],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(body.starts_with("Rewritten description"));
+        assert!(body.contains("Agent: Maya (Codex)"), "{body}");
+        assert!(body.contains("\"phase\":\"pr_author\""), "{body}");
     }
 
     #[test]

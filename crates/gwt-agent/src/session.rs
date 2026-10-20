@@ -350,6 +350,9 @@ pub struct Session {
     pub repo_hash: Option<String>,
     pub branch: String,
     pub agent_id: AgentId,
+    /// Stable, gwt-assigned window name, distinct from the provider identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub agent_session_id: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
@@ -543,6 +546,7 @@ impl Session {
             repo_hash,
             branch: branch.into(),
             agent_id,
+            agent_name: None,
             agent_session_id: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
@@ -2982,6 +2986,21 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn assigned_agent_name_survives_session_persistence_and_legacy_absence() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let mut value = serde_json::to_value(&session).unwrap();
+        value["agent_name"] = serde_json::json!("ハヤテ");
+        let named: Session = serde_json::from_value(value).unwrap();
+        let persisted = toml::to_string(&named).unwrap();
+        let restored: Session = toml::from_str(&persisted).unwrap();
+        let mut value = serde_json::to_value(restored).unwrap();
+        assert_eq!(value["agent_name"], "ハヤテ");
+        value.as_object_mut().unwrap().remove("agent_name");
+        let legacy: Session = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
     }
 
     #[test]

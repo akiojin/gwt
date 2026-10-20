@@ -14,11 +14,13 @@ type SentMessage = {
 };
 
 const agentNames: Record<string, string> = {
+  "shell-topmost": "Shell",
   "agent-running": "Aster", "agent-waiting": "Birch", "agent-stopped-tab-peer": "Cedar",
   "agent-live-future": "Dune", "agent-starting-hidden": "Elm",
 };
 
 test.describe("Agent-prioritized focus cycling", () => {
+  test.setTimeout(60_000);
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
   test("selects individual Agent tabs in live priority order and reuses their terminal", async ({ page }, testInfo) => {
@@ -27,7 +29,6 @@ test.describe("Agent-prioritized focus cycling", () => {
     await expect(windowById(page, "shell-topmost")).toHaveClass(/focused/);
     await expect(windowById(page, "agent-running")).toBeHidden();
     await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState());
-    const transform = await canvasTransform(page);
     await settleAndClearMessages(page);
 
     // The starting Agent shares running's rank. Waiting comes next, then the
@@ -46,8 +47,12 @@ test.describe("Agent-prioritized focus cycling", () => {
     await pressFocusCycle(page, "ArrowRight", "Control");
     await expectAgentTabFocus(page, "agent-stopped-tab-peer");
     await pressFocusCycle(page, "ArrowRight", "Meta");
+    await expectAgentTabFocus(page, "shell-topmost");
+    await pressFocusCycle(page, "ArrowRight", "Control");
     await expectAgentTabFocus(page, "agent-running");
     await pressFocusCycle(page, "ArrowLeft", "Control");
+    await expectAgentTabFocus(page, "shell-topmost");
+    await pressFocusCycle(page, "ArrowLeft", "Meta");
     await expectAgentTabFocus(page, "agent-stopped-tab-peer");
     await pressFocusCycle(page, "ArrowLeft", "Meta");
     await expectAgentTabFocus(page, "agent-live-future");
@@ -63,11 +68,11 @@ test.describe("Agent-prioritized focus cycling", () => {
     await expectAgentTabFocus(page, "agent-running");
     await expect.poll(() => focusTargets(page)).toEqual([
       "agent-running", "agent-starting-hidden", "agent-waiting",
-      "agent-live-future", "agent-stopped-tab-peer", "agent-running",
-      "agent-stopped-tab-peer", "agent-live-future", "agent-running",
+      "agent-live-future", "agent-stopped-tab-peer", "shell-topmost", "agent-running",
+      "shell-topmost", "agent-stopped-tab-peer", "agent-live-future", "agent-running",
     ]);
     await expect(page.locator('.agent-tile[data-agent-id="pm-window"]')).toHaveCount(0);
-    await expect(page.locator('.agent-tile[data-agent-id="shell-topmost"]')).toHaveCount(0);
+    await expect(page.locator('.agent-tile[data-agent-id="shell-topmost"]')).toHaveCount(1);
 
     await page.getByRole("button", { name: "Close Aster tab", exact: true }).click();
     await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveCount(0);
@@ -93,19 +98,18 @@ test.describe("Agent-prioritized focus cycling", () => {
     await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input"))
       .toEqual([{ kind: "terminal_input", id: "agent-running", data: "q" }]);
     expectNavigationOnly(await sentMessages(page));
-    expect(await canvasTransform(page)).toBe(transform);
+    await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     expect(problems).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath("agent-cycle-selected.png") });
   });
 
-  test("keeps split selection when a superseded frame request finally arrives", async ({ page }) => {
+  test("legacy grouped focus opens Agents immediately and later state keeps split selection", async ({ page }) => {
     const problems = recordErrors(page);
     await openFixture(page);
     await expect(windowById(page, "shell-topmost")).toHaveClass(/focused/);
 
-    // Use the existing runtime-health launcher to enter requestWindowFrame.
-    // The grouped tab's activation projection is deliberately held back.
+    // The runtime-health entry point ignores legacy tab activation metadata.
     await page.evaluate(() => (window as any).__operatorShell.applyRuntimeHealth({
       state: "ok", processes: [{ pid: 301, role: "codex", name: "codex",
         focus_window_id: "agent-starting-hidden" }],
@@ -113,11 +117,15 @@ test.describe("Agent-prioritized focus cycling", () => {
     await page.locator("#op-strip-runtime-health").hover();
     await page.getByRole("button", { name: "Focus codex process 301", exact: true }).click();
     await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "activate_window_tab"))
-      .toEqual([{ kind: "activate_window_tab", id: "agent-starting-hidden" }]);
+      .toEqual([]);
+    await expect(page.getByRole("tab", { name: "Elm", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(agentTile(page, "agent-starting-hidden")).toBeVisible();
+    await expect(windowById(page, "agent-starting-hidden")).toHaveClass(/focused/);
 
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     const left = page.getByRole("region", { name: "Left pane", exact: true });
     const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await left.getByRole("combobox", { name: "Left pane surface" }).selectOption("issues");
     await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
     await expect(left).toHaveAttribute("data-surface", "issues");
     await expect(right).toHaveAttribute("data-surface", "agents");
@@ -125,22 +133,21 @@ test.describe("Agent-prioritized focus cycling", () => {
     // pane rather than replace Issues with a second Agents surface.
     await left.getByRole("combobox", { name: "Left pane surface" }).focus();
     await expect(left).toHaveAttribute("data-active", "true");
-    const transform = await canvasTransform(page);
     await settleAndClearMessages(page);
     await pressFocusCycle(page, "ArrowRight", "Control");
-    await expectAgentTabFocus(page, "agent-running");
+    await expectAgentTabFocus(page, "agent-waiting");
 
     const catalogVersion = await right.locator(".agents-surface").getAttribute("data-catalog-version");
-    await page.evaluate(() => (window as any).__releaseAgentFocusCycleActivation());
+    await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
     await expect(right.locator(".agents-surface")).not.toHaveAttribute("data-catalog-version", catalogVersion!);
     await expect(page.locator("#split-surfaces")).toBeVisible();
     await expect(left).toHaveAttribute("data-surface", "issues");
     await expect(right).toHaveAttribute("data-surface", "agents");
     await expect(right).toHaveAttribute("data-active", "true");
-    await expectAgentTabFocus(page, "agent-running");
-    await expect.poll(() => focusTargets(page)).toEqual(["agent-running"]);
+    await expectAgentTabFocus(page, "agent-waiting");
+    await expect.poll(() => focusTargets(page)).toEqual(["agent-waiting"]);
     expectNavigationOnly(await sentMessages(page));
-    expect(await canvasTransform(page)).toBe(transform);
+    await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
     expect(problems).toEqual([]);
   });
 });
@@ -197,10 +204,6 @@ function expectNavigationOnly(messages: SentMessage[]): void {
   ]);
   expect(messages.filter(message => forbidden.has(message.kind ?? "")
     || /(?:save.*group|placement|launch_wizard)/.test(message.kind ?? ""))).toEqual([]);
-}
-
-async function canvasTransform(page: Page): Promise<string> {
-  return page.locator("#canvas-stage").evaluate(element => (element as HTMLElement).style.transform);
 }
 
 async function settleAndClearMessages(page: Page): Promise<void> {

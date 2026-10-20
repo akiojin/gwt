@@ -291,7 +291,7 @@ pub(super) fn save_workspace_launch_projection(
                     &preserved_sessions
                 }
             };
-            let work_event = apply_workspace_launch_for_current_work(
+            let work_events = apply_workspace_launch_for_current_work(
                 project_root,
                 projection,
                 work_items,
@@ -306,8 +306,9 @@ pub(super) fn save_workspace_launch_projection(
                     live_session_ids,
                     now,
                 },
+                false,
             )?;
-            Ok(((), vec![work_event]))
+            Ok(((), work_events))
         },
     )
     .map_err(|error| error.to_string())
@@ -321,7 +322,8 @@ pub(super) fn apply_workspace_launch_for_current_work(
     work_items: &gwt_core::workspace_projection::WorkItemsProjection,
     session: &ActiveAgentSession,
     mut transition: WorkspaceLaunchTransition<'_>,
-) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
+    allow_successor_supersession: bool,
+) -> gwt_core::error::Result<Vec<gwt_core::workspace_projection::WorkEvent>> {
     use gwt_core::workspace_projection::{
         can_upgrade_work_owner, canonical_work_id, current_work_id_for_launch, successor_work_id,
         workspace_group_key_for_item, WorkEventKind, WorkspaceStatusCategory,
@@ -332,99 +334,372 @@ pub(super) fn apply_workspace_launch_for_current_work(
         Some(&session.worktree_path),
     );
     let owner = transition.owner();
-    transition.work_id = current_work_id_for_launch(
-        work_items,
-        project_root,
-        Some(&session.branch_name),
-        Some(&session.worktree_path),
-        transition.canonical_owner.and(owner.as_deref()),
-    )?;
+    let mut resolved = std::borrow::Cow::Borrowed(work_items);
+    let mut events = Vec::new();
     let mut predecessor_id = None;
-    if let Some(current) = work_items
-        .work_items
-        .iter()
-        .find(|item| Some(&item.id) == transition.work_id.as_ref())
-        .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
-    {
-        let owner_matches = current.owner == owner
-            || (current.owner.is_none() && transition.canonical_owner.is_some())
-            || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
-        // The authenticated launch proves this Session's local path. Work's
-        // branch identity spans hosts, including history with no saved path.
-        let container_matches = current.execution_containers.iter().all(|container| {
-            canonical_work_id(
-                project_root,
-                container.branch.as_deref(),
-                container.worktree_path.as_deref(),
-            ) == canonical_id
-        });
-        if !owner_matches || !container_matches {
-            return Err(gwt_core::error::GwtError::Other(format!(
-                "cannot launch successor of Work {}: owner or execution container mismatch",
-                current.id
-            )));
-        }
-        if work_items.work_items.iter().any(|item| {
-            item.is_terminal()
-                && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
-                && item
-                    .agents
-                    .iter()
-                    .any(|agent| agent.session_id == session.session_id)
-        }) {
-            return Err(gwt_core::error::GwtError::Other(format!(
-                "Session {} belongs to a terminal Work; start a new Session for the successor",
-                session.session_id
-            )));
-        }
-        if current.is_terminal() {
-            let successor_id = successor_work_id(&current.id);
-            if let Some(occupied) = work_items
-                .work_items
-                .iter()
-                .find(|item| item.id == successor_id)
-            {
-                // Earlier refused launches could leave an Idle orphan at
-                // this deterministic ID. Complete its missing lineage under
-                // fresh execution authority, preserving historical events.
-                // Inline histories are compacted, so absence of Start in the
-                // retained tail cannot prove that a lifetime never started.
-                let recoverable_orphan = !occupied.is_terminal()
-                    && occupied.status_category == WorkspaceStatusCategory::Idle
-                    && occupied.related_work_item_ids.is_empty()
-                    && (occupied.owner == owner
-                        || can_upgrade_work_owner(occupied.owner.as_deref(), owner.as_deref()))
-                    && !occupied.execution_containers.is_empty()
-                    && occupied.execution_containers.iter().all(|container| {
-                        canonical_work_id(
-                            project_root,
-                            container.branch.as_deref(),
-                            container.worktree_path.as_deref(),
-                        ) == canonical_id
-                    })
-                    && occupied
-                        .events
-                        .iter()
-                        .all(|event| event.related_work_item_id.is_none())
-                    && occupied
+    let mut owner_successor = false;
+    loop {
+        transition.work_id = current_work_id_for_launch(
+            &resolved,
+            project_root,
+            Some(&session.branch_name),
+            Some(&session.worktree_path),
+            transition.canonical_owner.and(owner.as_deref()),
+        )?;
+        if let Some(current) = resolved
+            .work_items
+            .iter()
+            .find(|item| Some(&item.id) == transition.work_id.as_ref())
+            .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
+        {
+            let owner_matches = current.owner == owner
+                || (current.owner.is_none() && transition.canonical_owner.is_some())
+                || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
+            let fresh_owner_lifetime = !owner_matches
+                && current.is_terminal()
+                && allow_successor_supersession
+                && transition.canonical_owner.is_some()
+                && session
+                    .branch_name
+                    .strip_prefix("work/issue-")
+                    .and_then(|number| number.parse::<u64>().ok())
+                    == transition.canonical_owner.map(|owner| owner.number);
+            // The authenticated launch proves this Session's local path. Work's
+            // branch identity spans hosts, including history with no saved path.
+            let container_matches = current.execution_containers.iter().all(|container| {
+                canonical_work_id(
+                    project_root,
+                    container.branch.as_deref(),
+                    container.worktree_path.as_deref(),
+                ) == canonical_id
+            });
+            if (!owner_matches && !fresh_owner_lifetime) || !container_matches {
+                return Err(gwt_core::error::GwtError::Other(format!(
+                    "cannot launch successor of Work {}: owner or execution container mismatch",
+                    current.id
+                )));
+            }
+            if resolved.work_items.iter().any(|item| {
+                item.is_terminal()
+                    && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
+                    && item
                         .agents
                         .iter()
-                        .all(|agent| !transition.live_session_ids.contains(&agent.session_id));
-                if !recoverable_orphan {
-                    return Err(gwt_core::error::GwtError::Other(format!(
-                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage", current.id)));
-                }
+                        .any(|agent| agent.session_id == session.session_id)
+            }) {
+                return Err(gwt_core::error::GwtError::Other(format!(
+                    "Session {} belongs to a terminal Work; start a new Session for the successor",
+                    session.session_id
+                )));
             }
-            predecessor_id = Some(current.id.clone());
-            transition.work_id = Some(successor_id);
+            if current.is_terminal() {
+                let successor_id = successor_work_id(&current.id);
+                let occupied_rows = resolved
+                    .work_items
+                    .iter()
+                    .filter(|item| item.id == successor_id)
+                    .collect::<Vec<_>>();
+                if occupied_rows.len() > 1 {
+                    return Err(gwt_core::error::GwtError::Other(format!(
+                    "successor {successor_id} is duplicated; use workspace.close with close_kind superseded for exact-target diagnosis before issue.monitor.requeue"
+                )));
+                }
+                if let Some(occupied) = occupied_rows.first() {
+                    // Earlier refused launches could leave an Idle orphan at
+                    // this deterministic ID. Complete its missing lineage under
+                    // fresh execution authority, preserving historical events.
+                    // Inline histories are compacted, so absence of Start in the
+                    // retained tail cannot prove that a lifetime never started.
+                    let recoverable_orphan = !occupied.is_terminal()
+                        && occupied.status_category == WorkspaceStatusCategory::Idle
+                        && occupied.related_work_item_ids.is_empty()
+                        && (occupied.owner == owner
+                            || can_upgrade_work_owner(occupied.owner.as_deref(), owner.as_deref()))
+                        && !occupied.execution_containers.is_empty()
+                        && occupied.execution_containers.iter().all(|container| {
+                            canonical_work_id(
+                                project_root,
+                                container.branch.as_deref(),
+                                container.worktree_path.as_deref(),
+                            ) == canonical_id
+                        })
+                        && occupied
+                            .events
+                            .iter()
+                            .all(|event| event.related_work_item_id.is_none())
+                        && occupied
+                            .agents
+                            .iter()
+                            .all(|agent| !transition.live_session_ids.contains(&agent.session_id));
+                    if !recoverable_orphan || allow_successor_supersession {
+                        if allow_successor_supersession && transition.canonical_owner.is_some() {
+                            let audit = invalid_successor_supersession_event(
+                                project_root,
+                                current,
+                                occupied,
+                                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                                    branch: Some(session.branch_name.clone()),
+                                    worktree_path: Some(session.worktree_path.clone()),
+                                    pr_number: None,
+                                    pr_url: None,
+                                    pr_state: None,
+                                },
+                                SuccessorSupersessionAuthority::ExecutionOwner(
+                                    owner.as_deref().expect("authenticated launch owner"),
+                                ),
+                                transition.live_session_ids,
+                                transition.now,
+                            )?;
+                            transition.now = audit.updated_at;
+                            if resolved.to_mut().apply_event(audit.clone())
+                                != gwt_core::workspace_projection::WorkEventApplyOutcome::Applied
+                            {
+                                return Err(gwt_core::error::GwtError::Other(
+                                "invalid successor supersession audit could not advance state; use workspace.close with close_kind superseded for exact-target diagnosis".to_string()
+                            ));
+                            }
+                            events.push(audit);
+                            continue;
+                        }
+                        return Err(gwt_core::error::GwtError::Other(format!(
+                        "cannot launch successor of Work {}: successor {successor_id} has invalid lineage; the registered PM can use workspace.close with work_id {successor_id}, close_kind superseded, then issue.monitor.requeue", current.id)));
+                    }
+                }
+                predecessor_id = Some(current.id.clone());
+                owner_successor = fresh_owner_lifetime;
+                transition.work_id = Some(successor_id);
+            }
         }
+        break;
     }
     let mut event = apply_workspace_launch_transition(projection, session, transition);
     if let Some(predecessor_id) = predecessor_id {
         event.kind = WorkEventKind::Start;
         event.related_work_item_id = Some(predecessor_id);
+        if owner_successor {
+            event.id = format!("owner-successor-{}", event.work_item_id);
+        }
     }
+    events.push(event);
+    Ok(events)
+}
+
+/// Authority to retire invalid occupancy without changing historical owners.
+#[derive(Clone, Copy)]
+pub(super) enum SuccessorSupersessionAuthority<'a> {
+    ExecutionOwner(&'a str),
+    RegisteredPm,
+}
+
+/// Build the same bounded repair for authenticated fresh activation and an
+/// explicit registered-PM close. Never attach the new Session to old history.
+pub(super) fn invalid_successor_supersession_event(
+    project_root: &Path,
+    predecessor: &gwt_core::workspace_projection::WorkItem,
+    occupied: &gwt_core::workspace_projection::WorkItem,
+    container: gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+    authority: SuccessorSupersessionAuthority<'_>,
+    live_session_ids: &std::collections::HashSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
+    use gwt_core::workspace_projection::{
+        can_upgrade_work_owner, canonical_work_id, successor_work_id, WorkEvent, WorkEventKind,
+    };
+    let recovery = format!(
+        "the registered PM can use workspace.close with work_id {}, close_kind superseded, then issue.monitor.requeue",
+        occupied.id
+    );
+    let refuse = |reason: &str| {
+        gwt_core::error::GwtError::Other(format!(
+            "cannot supersede invalid successor {}: {reason}; {recovery}",
+            occupied.id
+        ))
+    };
+    if !predecessor.is_terminal() || successor_work_id(&predecessor.id) != occupied.id {
+        return Err(refuse("exact terminal predecessor is required"));
+    }
+    if occupied
+        .agents
+        .iter()
+        .any(|agent| live_session_ids.contains(&agent.session_id))
+    {
+        return Err(refuse(
+            "a member Session is live; use pane.close on its window first",
+        ));
+    }
+    let owner_matches = |actual: Option<&str>| match authority {
+        SuccessorSupersessionAuthority::RegisteredPm => true,
+        SuccessorSupersessionAuthority::ExecutionOwner(owner) => actual.is_none_or(|actual| {
+            actual == owner
+                || can_upgrade_work_owner(Some(actual), Some(owner))
+                || can_upgrade_work_owner(Some(owner), Some(actual))
+        }),
+    };
+    if !owner_matches(predecessor.owner.as_deref())
+        || !owner_matches(occupied.owner.as_deref())
+        || occupied
+            .events
+            .iter()
+            .any(|event| !owner_matches(event.owner.as_deref()))
+    {
+        return Err(refuse(
+            "known owner conflict; repair requires registered PM authority",
+        ));
+    }
+    let canonical_id = canonical_work_id(
+        project_root,
+        container.branch.as_deref(),
+        container.worktree_path.as_deref(),
+    );
+    if canonical_id.is_none() {
+        return Err(refuse("canonical execution container is required"));
+    }
+    let container_matches =
+        |candidate: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef| {
+            canonical_work_id(
+                project_root,
+                candidate.branch.as_deref(),
+                candidate.worktree_path.as_deref(),
+            ) == canonical_id
+        };
+    if occupied.execution_containers.iter().any(|candidate| !container_matches(candidate))
+        || occupied.events.iter().filter_map(|event| event.execution_container.as_ref()).any(|candidate| !container_matches(candidate))
+        || occupied.duplicate_event_containers.values().flatten().any(|provenance| {
+            // Duplicate provenance is serialized either as a complete event
+            // or a legacy container; both retain independent branch evidence.
+            match provenance {
+                gwt_core::workspace_projection::DuplicateWorkEventProvenance::Event(event) =>
+                    event.execution_container.as_ref().is_some_and(|candidate| !container_matches(candidate))
+                    || !owner_matches(event.owner.as_deref())
+                    || event.related_work_item_id.as_deref().is_some_and(|parent| parent != predecessor.id),
+                gwt_core::workspace_projection::DuplicateWorkEventProvenance::LegacyContainer(candidate) => !container_matches(candidate),
+            }
+        })
+    {
+        return Err(refuse("foreign execution container evidence"));
+    }
+    if occupied
+        .related_work_item_ids
+        .iter()
+        .any(|parent| parent != &predecessor.id)
+        || occupied
+            .events
+            .iter()
+            .filter_map(|event| event.related_work_item_id.as_deref())
+            .any(|parent| parent != predecessor.id)
+    {
+        return Err(refuse("unrelated Work lineage"));
+    }
+    validate_superseded_member_runtimes(&gwt_core::paths::gwt_sessions_dir(), occupied)?;
+    let latest = occupied
+        .events
+        .iter()
+        .map(|event| event.updated_at)
+        .chain([occupied.updated_at])
+        .chain(occupied.completed_at)
+        .chain(occupied.discarded_at)
+        .chain(occupied.events_compacted_through())
+        .max()
+        .expect("occupied Work timestamp");
+    let after_history = latest
+        .checked_add_signed(chrono::Duration::nanoseconds(1))
+        .ok_or_else(|| refuse("history timestamp has no safe successor instant"))?;
+    let mut event = WorkEvent::new(WorkEventKind::Discard, &occupied.id, now.max(after_history));
+    event.id = format!("superseded-{}", occupied.id);
+    event.summary =
+        Some("Superseded invalid successor occupancy by authenticated recovery".to_string());
+    event.related_work_item_id = Some(predecessor.id.clone());
+    event.execution_container = Some(container);
     Ok(event)
+}
+
+/// Recheck every recorded member while the caller holds the execution owner
+/// lease. Runtime proof is published before a child is released, including
+/// children not yet visible in this Host's GUI registry.
+pub(super) fn validate_superseded_member_runtimes(
+    sessions_dir: &Path,
+    occupied: &gwt_core::workspace_projection::WorkItem,
+) -> gwt_core::error::Result<()> {
+    use gwt::cli::execution_state::{
+        classify_exact_session_runtime, ExactSessionRuntimeDisposition,
+    };
+    let members = occupied
+        .agents
+        .iter()
+        .map(|agent| agent.session_id.as_str())
+        .chain(
+            occupied
+                .events
+                .iter()
+                .filter_map(|event| event.agent_session_id.as_deref()),
+        )
+        .chain(occupied.duplicate_event_containers.values().flatten().filter_map(|provenance| {
+            match provenance {
+                gwt_core::workspace_projection::DuplicateWorkEventProvenance::Event(event) => event.agent_session_id.as_deref(),
+                gwt_core::workspace_projection::DuplicateWorkEventProvenance::LegacyContainer(_) => None,
+            }
+        }))
+        .collect::<std::collections::BTreeSet<_>>();
+    for session_id in members {
+        let refuse = || {
+            gwt_core::GwtError::Other(format!(
+            "invalid successor member {session_id} has live or unprovable runtime; the registered PM can use pane.close, then workspace.close with close_kind superseded and issue.monitor.requeue"
+        ))
+        };
+        if gwt_agent::validate_session_id_path_component(session_id).is_err() {
+            return Err(refuse());
+        }
+        let identity =
+            match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml")))
+            {
+                gwt_agent::SessionPathState::Present(session) => {
+                    if session.id != session_id {
+                        return Err(refuse());
+                    }
+                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                        .map_err(|_| refuse())?;
+                    if identity.is_none() {
+                        // A stale legacy sidecar is not evidence of a live
+                        // writer. Reuse the exact runtime census, including
+                        // its uncertainty checks; Stopped alone grants nothing.
+                        let observed =
+                            gwt::session_inventory::observe_session(&session, sessions_dir);
+                        if !observed.sessions.is_empty() || !observed.uncertainties.is_empty() {
+                            return Err(refuse());
+                        }
+                        continue;
+                    }
+                    identity
+                }
+                gwt_agent::SessionPathState::Missing => None,
+                gwt_agent::SessionPathState::Error(error) => return Err(error.into()),
+            };
+        if let Some(identity) = identity {
+            match classify_exact_session_runtime(sessions_dir, &identity)? {
+                ExactSessionRuntimeDisposition::Live | ExactSessionRuntimeDisposition::Unknown => {
+                    return Err(refuse())
+                }
+                _ => continue,
+            }
+        }
+        // Legacy/missing Sessions have no exact identity to classify. Only
+        // total sidecar absence proves that no Host is running one.
+        let namespaces = match std::fs::read_dir(sessions_dir.join("runtime")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for namespace in namespaces {
+            if namespace?
+                .path()
+                .join(format!("{session_id}.json"))
+                .try_exists()?
+            {
+                return Err(refuse());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn apply_workspace_launch_transition(

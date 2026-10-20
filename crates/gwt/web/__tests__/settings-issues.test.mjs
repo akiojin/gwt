@@ -90,6 +90,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
     control.dispatchEvent(new Event("change"));
   };
   change("Max active", "6");
+  panel.querySelector('[aria-label="Apply Max active"]').click();
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(mode.value, "manual");
   mode.querySelector('[value="auto"]').selected = true;
@@ -143,9 +144,93 @@ test("Auto capacity is read-only until Manual is selected", () => {
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(max.disabled, true);
   assert.equal(mode.value, "auto");
+  assert.equal(max.value, "4");
+  max.value = "9";
+  max.dispatchEvent(new Event("input"));
+  max.dispatchEvent(new Event("change"));
+  panel.querySelector('[aria-label="Apply Max active"]').click();
+  assert.deepEqual(sent, [], "Auto never sends a numeric override");
+  max.value = "4";
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("Max active stepper edits commit once on Apply and survive status redraw", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { project_root: "/A" },
+    status: { max_active_agents: 6, max_active_agents_override: 6, active_count: 4 },
+    send: message => sent.push(message) };
+  render(panel, options);
+  const max = panel.querySelector('[aria-label="Max active"]');
+  for (const value of ["5", "4", "3"]) {
+    max.value = value;
+    max.dispatchEvent(new Event("input"));
+    max.dispatchEvent(new Event("change"));
+  }
+  assert.deepEqual(sent, [], "intermediate values are draft edits only");
+  render(panel, options);
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "3");
+  const apply = panel.querySelector('[aria-label="Apply Max active"]');
+  apply.click();
+  apply.click();
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 3 }]);
+  render(panel, { ...options, status: { ...options.status, max_active_agents: 3, max_active_agents_override: 3 } });
+  assert.match(panel.textContent, /Existing agents continue.*new launches wait/i);
+});
+
+test("authoritative Auto status disables a focused Manual draft before deferred redraw", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 6, max_active_agents_override: 6 }, send: message => sent.push(message) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  const apply = panel.querySelector('[aria-label="Apply Max active"]');
+  max.value = "3";
+  max.dispatchEvent(new Event("input"));
+  assert.equal(apply.disabled, false);
+  // The edit guard keeps these nodes; only the status callback runs while focused.
+  panel.updateMaxActiveStatus({ max_active_agents: 7, max_active_agents_override: null });
+  assert.equal(max.disabled, true);
+  assert.equal(mode.value, "auto");
+  assert.equal(apply.disabled, true);
+  assert.equal(max.value, "7");
+  assert.equal(panel.dataset.maxActiveDraft, undefined);
+  max.dispatchEvent(new Event("change"));
+  apply.click();
+  assert.deepEqual(sent, [], "an old Manual draft cannot overwrite remote Auto");
+  panel.updateMaxActiveStatus({ max_active_agents: 5, max_active_agents_override: 5 });
+  assert.equal(max.disabled, false);
+  assert.equal(mode.value, "manual");
+  assert.equal(max.value, "5", "returning to Manual does not resurrect the old draft");
+  assert.equal(apply.disabled, true);
+});
+
+test("Auto shows measuring state beside its effective limit until capacity is ready", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { project_root: "/A" }, status: {
+    max_active_agents: 4, max_active_agents_override: null,
+    agent_capacity: { measurement_complete: false },
+  }, send: () => {} };
+  render(panel, options);
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "4");
+  assert.match(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
+  mode.querySelector('[value="auto"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  panel.updateMaxActiveStatus({ ...options.status, max_active_agents: 7,
+    agent_capacity: { measurement_complete: true } });
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "7", "focused Auto status stays live");
+  render(panel, { ...options, status: { ...options.status, agent_capacity: { measurement_complete: true } } });
+  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
 });
 
 test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
@@ -212,7 +297,7 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
     { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
   const render = load("renderAgentsSettingsPanel");
-  render(a, { project: { project_root: "/A", name: "A" }, profiles, send: m => sent.push(m) });
+  render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
   render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
@@ -220,16 +305,110 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   model.value = "new model";
   model.dispatchEvent(new Event("input", { bubbles: true }));
   assert.equal(a.dataset.dirty, "true", "incoming status must not destroy unsaved profile edits");
-  a.querySelector('[data-action="save-profiles"]').click();
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(Boolean(a.querySelector('[data-action="save-profiles"]')), false);
   assert.equal(sent[0].profiles[0].model, "new model");
   assert.equal(sent[0].profiles[0].docker_service, "dev");
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
+  assert.equal(Object.hasOwn(sent[0], "usage_threshold_percent"), false);
+  assert.equal(a.querySelector('[data-profile-field="threshold"]'), null);
+  assert.match(a.textContent, /next candidate when a provider rejects a launch due to a rate limit/);
   assert.equal(b.querySelector('[aria-label="Model codex"]').value, "B model");
   a.querySelector('[aria-label="Move down codex"]').click();
   assert.deepEqual(sent.at(-1).profiles.map(p => p.agent_id), ["claude", "codex"]);
   assert.match(a.textContent, /Candidates/);
   assert.ok(a.querySelector('[aria-label="Prefer for codex"]'));
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
+});
+
+test("candidate fields save exactly once on change, never on incomplete input", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: "gpt-6" }],
+    send: message => sent.push(message),
+  });
+  for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
+    if (input.type === "checkbox") input.checked = !input.checked;
+    else if (input.localName === "select") input.options[1].selected = true;
+    else input.value = "new-value";
+    const before = sent.length;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(sent.length, before, "typing does not persist partial values");
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.equal(sent.length, before + 1, input.dataset.profileField);
+    assert.equal(sent.at(-1).kind, "issue_monitor_profiles_set");
+    input.dispatchEvent(new Event("blur"));
+    assert.equal(sent.length, before + 1, "blur does not duplicate change");
+  }
+  assert.equal(sent.length, 10);
+  assert.equal(Boolean(panel.querySelector('[data-action="save-profiles"]')), false);
+});
+
+test("a correlated save reconciles untouched fields and preserves newer input", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }],
+    send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
+  });
+  const model = panel.querySelector('[data-profile-field="model"]');
+  const reasoning = panel.querySelector('[data-profile-field="reasoning"]');
+  model.value = "saved";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  reasoning.value = "unfinished";
+  reasoning.dispatchEvent(new Event("input", { bubbles: true }));
+  const reconcile = load("reconcileCandidateSave");
+  reconcile(panel, { request_id: 6, profiles: [{ agent_id: "codex", model: "stale" }] });
+  assert.equal(model.value, "saved", "stale ACK is ignored");
+  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  assert.equal(model.value, "normalized");
+  assert.equal(reasoning.value, "unfinished");
+  assert.equal(panel.dataset.dirty, "true");
+  assert.equal(panel.dataset.saving, "false");
+  reasoning.value = "high";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  assert.equal(panel.dataset.dirty, "false");
+  assert.match(panel.querySelector('[role="status"]').textContent, /Saved candidates/);
+});
+
+test("a rejected autosave identifies the edited field and retains its value", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }],
+    send: () => { panel.dataset.pendingRequest = "1"; },
+  });
+  const input = panel.querySelector('[data-profile-field="prefer_for"]');
+  input.value = "invalid";
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
+  assert.equal(input.value, "invalid");
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.match(input.closest("label").nextElementSibling.textContent, /prefer_for entry "invalid"/);
+  const model = panel.querySelector('[aria-label="Model claude"]');
+  model.value = "valid-model";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(model.hasAttribute("aria-invalid"), false);
+});
+
+test("structural saves wait for their correlated response before allowing row edits", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "claude", model: "sonnet" }, { agent_id: "codex", model: "gpt" }],
+    send: message => { sent.push(message); panel.dataset.pendingRequest = "1"; },
+  });
+  panel.querySelector('[aria-label="Move up codex"]').click();
+  const model = panel.querySelector('[aria-label="Model claude"]');
+  assert.equal(model.disabled, true);
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.length, 1);
+  assert.equal(load("reconcileCandidateSave")(panel, { request_id: 1, profiles: sent[0].profiles }), true,
+    "structural ACK requests an authoritative redraw");
 });
 
 test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {
