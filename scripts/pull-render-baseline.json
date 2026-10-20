@@ -3,7 +3,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/continue_work_outcome\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/project_not_found\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_board_entry\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_state\"]",
