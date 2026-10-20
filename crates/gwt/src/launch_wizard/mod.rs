@@ -134,6 +134,37 @@ pub struct LaunchWizardOptionView {
     pub color: Option<gwt_agent::AgentColor>,
 }
 
+/// Read-only input assistance for the saved Issue Monitor candidate pool.
+/// These choices do not normalize or replace any saved profile fields.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorProfileChoices {
+    pub agents: Vec<IssueMonitorAgentChoices>,
+    pub docker_services: Vec<String>,
+    pub default_docker_service: Option<String>,
+    pub windows_shell_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorAgentChoices {
+    pub id: String,
+    pub models: Vec<IssueMonitorModelChoices>,
+    pub default_model: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
+    pub supports_model_input: bool,
+    pub supports_fast_mode: bool,
+    pub supports_skip_permissions: bool,
+    pub session_modes: Vec<gwt_agent::SessionMode>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorModelChoices {
+    pub value: String,
+    pub label: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchTargetKind {

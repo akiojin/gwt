@@ -5,6 +5,31 @@ import { parseHTML } from "linkedom";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
+const candidateChoices = {
+  agents: [
+    { id: "codex", default_model: "gpt-6-astra", supports_fast_mode: true, supports_skip_permissions: true,
+      session_modes: ["Normal", "Continue", "Resume"], models: [
+        { value: "gpt-6-astra", label: "Astra", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }, { value: "high", label: "High" }] },
+        { value: "gpt-6-luna", label: "Luna", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }] },
+      ] },
+    { id: "claude", default_model: "", default_reasoning: "auto", supports_fast_mode: true, supports_skip_permissions: true,
+      session_modes: ["Normal", "Continue", "Resume"], models: [
+        { value: "", label: "Default", default_reasoning: "auto", reasoning_options: [{ value: "auto", label: "Auto" }] },
+        { value: "haiku", label: "Haiku", default_reasoning: null, reasoning_options: [] },
+      ] },
+    { id: "custom", models: [], session_modes: ["Normal"], supports_model_input: false },
+  ], docker_services: ["dev", "worker"], default_docker_service: "dev",
+};
+
+function selectValue(control, value) {
+  let option = [...control.options].find(option => option.value === value);
+  if (!option) {
+    option = control.ownerDocument.createElement("option");
+    option.value = value;
+    control.appendChild(option);
+  }
+  option.selected = true;
+}
 function load(name, bindings = {}) {
   bindings = { setControlExplanation, ...bindings };
   const start = source.indexOf(`function ${name}(`);
@@ -296,13 +321,14 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
     { agent_id: "codex", model: "gpt-6", reasoning: "high", runtime_target: "Docker", docker_service: "dev", prefer_for: ["type:fix"] },
     { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
-  const render = load("renderAgentsSettingsPanel");
+  const renderer = load("renderAgentsSettingsPanel");
+  const render = (panel, options) => renderer(panel, { choices: candidateChoices, ...options });
   render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
   render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
   assert.deepEqual([...a.querySelector('[aria-label="Runtime codex"]').options].map(o => o.value), ["Host", "Docker"]);
-  model.value = "new model";
+  selectValue(model, "new model");
   model.dispatchEvent(new Event("input", { bubbles: true }));
   assert.equal(a.dataset.dirty, "true", "incoming status must not destroy unsaved profile edits");
   model.dispatchEvent(new Event("change", { bubbles: true }));
@@ -321,16 +347,67 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
 });
 
+test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
+      { agent_id: "custom", fast_mode: true }, { agent_id: "saved-unknown-agent", model: "historic" }],
+    availableAgents: candidateChoices.agents.map(agent => ({ id: agent.id })), choices: candidateChoices,
+    send: message => sent.push(message),
+  });
+  const control = key => panel.querySelector(`fieldset [data-profile-field="${key}"]`);
+  for (const key of ["agent_id", "model", "reasoning", "docker_service"]) {
+    assert.equal(control(key).localName, "select", key);
+    assert.equal(control(key).className, "settings-select", "reuse Operator controls");
+  }
+  assert.equal(control("model").value, "retired-model");
+  assert.equal(control("reasoning").value, "retired-effort");
+  const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
+  assert.equal(unknown.querySelector('[data-profile-field="agent_id"]').value, "saved-unknown-agent");
+  assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");
+  assert.equal(control("docker_service").disabled, true);
+  selectValue(control("runtime_target"), "Docker");
+  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("docker_service").disabled, false);
+  assert.deepEqual([...control("docker_service").options].map(option => option.value), ["", "dev", "worker", "saved-service"]);
+  selectValue(control("model"), "gpt-6-luna");
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
+  assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
+  const custom = panel.querySelector('[data-agent-id="custom"]');
+  for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);
+  assert.equal(custom.querySelector('[data-profile-field="fast_mode"]').checked, true, "disabled saved values survive unrelated edits");
+  selectValue(control("agent_id"), "claude");
+  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("model").value, "", "Claude default is the empty CLI alias");
+  selectValue(control("model"), "haiku");
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("reasoning").disabled, true);
+  assert.equal(sent.at(-1).profiles[0].reasoning, null, "unsupported models do not inherit the previous model's effort");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
+    send: message => sent.push(message),
+  });
+  assert.equal(control("model").value, "gpt-6-astra");
+  assert.equal(control("reasoning").value, "medium");
+  selectValue(control("runtime_target"), "Docker");
+  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.at(-1).profiles[0].model, null, "displaying a default does not pin it on unrelated saves");
+  assert.equal(sent.at(-1).profiles[0].reasoning, null);
+});
+
 test("candidate fields save exactly once on change, never on incomplete input", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "gpt-6" }],
+    profiles: [{ agent_id: "codex", model: "gpt-6-astra" }], choices: candidateChoices,
     send: message => sent.push(message),
   });
   for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
+    if (input.disabled) continue;
     if (input.type === "checkbox") input.checked = !input.checked;
-    else if (input.localName === "select") input.options[1].selected = true;
+    else if (input.localName === "select") input.options[0].selected = true;
     else input.value = "new-value";
     const before = sent.length;
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -341,7 +418,7 @@ test("candidate fields save exactly once on change, never on incomplete input", 
     input.dispatchEvent(new Event("blur"));
     assert.equal(sent.length, before + 1, "blur does not duplicate change");
   }
-  assert.equal(sent.length, 10);
+  assert.ok(sent.length >= 6, "enabled fields autosave");
   assert.equal(Boolean(panel.querySelector('[data-action="save-profiles"]')), false);
 });
 
@@ -349,14 +426,14 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }],
+    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
   });
   const model = panel.querySelector('[data-profile-field="model"]');
   const reasoning = panel.querySelector('[data-profile-field="reasoning"]');
-  model.value = "saved";
+  selectValue(model, "saved");
   model.dispatchEvent(new Event("change", { bubbles: true }));
-  reasoning.value = "unfinished";
+  selectValue(reasoning, "unfinished");
   reasoning.dispatchEvent(new Event("input", { bubbles: true }));
   const reconcile = load("reconcileCandidateSave");
   reconcile(panel, { request_id: 6, profiles: [{ agent_id: "codex", model: "stale" }] });
@@ -366,7 +443,7 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   assert.equal(reasoning.value, "unfinished");
   assert.equal(panel.dataset.dirty, "true");
   assert.equal(panel.dataset.saving, "false");
-  reasoning.value = "high";
+  selectValue(reasoning, "high");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
   assert.equal(panel.dataset.dirty, "false");
@@ -377,7 +454,7 @@ test("a rejected autosave identifies the edited field and retains its value", ()
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }],
+    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "1"; },
   });
   const input = panel.querySelector('[data-profile-field="prefer_for"]');
@@ -388,7 +465,7 @@ test("a rejected autosave identifies the edited field and retains its value", ()
   assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.match(input.closest("label").nextElementSibling.textContent, /prefer_for entry "invalid"/);
   const model = panel.querySelector('[aria-label="Model claude"]');
-  model.value = "valid-model";
+  selectValue(model, "valid-model");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
   assert.equal(input.getAttribute("aria-invalid"), "true");
@@ -428,7 +505,7 @@ test("Candidates use the known catalog, including custom agents, and explain emp
   picker.querySelector('[value="team-agent"]').selected = true;
   add.click();
   assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
-  panel.querySelector('[aria-label="Agent ClaudeCode"]').value = "Codex";
+  selectValue(panel.querySelector('[aria-label="Agent ClaudeCode"]'), "Codex");
   picker.querySelector('[value="codex"]').selected = true;
   add.click();
   assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);

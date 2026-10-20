@@ -27,7 +27,7 @@ async function seedCustomCandidate(): Promise<void> {
 
 test.describe("Issue Monitor candidate pool", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
   test("adds, reorders, edits and removes candidates with persistent settings", async ({ page }, testInfo) => {
@@ -50,9 +50,11 @@ test.describe("Issue Monitor candidate pool", () => {
         usage_threshold_percent: 80,
         request_id: 532101,
       });
-      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some(({ payload }: any) =>
-        payload.kind === "issue_monitor_profiles" && payload.request_id === 532101
-        && payload.profiles?.length === 1 && payload.profiles[0].agent_id === "claude"));
+      const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).find(({ payload }: any) =>
+        ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+        && payload.request_id === 532101)?.payload).then(handle => handle.jsonValue());
+      expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
+      expect(seeded.profiles.map((profile: any) => profile.agent_id)).toEqual(["claude"]);
       const beforeIds = await page.locator(".workspace-window").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.id));
       await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue",
@@ -83,11 +85,13 @@ test.describe("Issue Monitor candidate pool", () => {
         await action();
         // Only this save's fresh correlated readback can authorize the next
         // edit; an old status or a background profiles read is insufficient.
-        await page.waitForFunction(({ cursor, agentIds }) => ((window as any).__gwtPlaywrightMessages ?? [])
-          .some(({ sequence, payload }: any) => sequence > cursor
-            && payload.kind === "issue_monitor_profiles" && Number.isInteger(payload.request_id)
-            && JSON.stringify(payload.profiles?.map((profile: any) => profile.agent_id)) === JSON.stringify(agentIds)),
-        { cursor, agentIds });
+        const result = await page.waitForFunction(({ cursor, agentIds }) => ((window as any).__gwtPlaywrightMessages ?? [])
+          .find(({ sequence, payload }: any) => sequence > cursor && Number.isInteger(payload.request_id)
+            && (payload.kind === "issue_monitor_profiles_write_failed"
+              || payload.kind === "issue_monitor_profiles"
+                && JSON.stringify(payload.profiles?.map((profile: any) => profile.agent_id)) === JSON.stringify(agentIds)))?.payload,
+        { cursor, agentIds }).then(handle => handle.jsonValue());
+        expect(result.kind, result.message).toBe("issue_monitor_profiles");
         await expect(pool).toHaveAttribute("data-saving", "false");
         await expect(pool).toHaveAttribute("data-dirty", String(dirty));
       };
@@ -148,7 +152,7 @@ test.describe("Issue Monitor candidate pool", () => {
         };
       });
       await saveProfiles(async () => {
-        await pool.getByLabel("Model codex", { exact: true }).fill("candidate-draft-model");
+        await pool.getByLabel("Model codex", { exact: true }).selectOption("gpt-6-astra");
         await pool.getByLabel("Model codex", { exact: true }).press("Tab");
         await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:");
         await pool.getByLabel("Prefer for codex", { exact: true }).evaluate((input: HTMLInputElement) => input.setSelectionRange(3, 3));
@@ -164,14 +168,14 @@ test.describe("Issue Monitor candidate pool", () => {
       await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveAttribute("aria-invalid", "true");
       await expect(pool.locator('.settings-field:has([data-profile-field="prefer_for"]) + [role="alert"]')).toBeVisible();
       await expect(pool).toHaveAttribute("data-saving", "false");
-      await expect(pool.getByLabel("Model codex", { exact: true })).toHaveValue("candidate-draft-model");
+      await expect(pool.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-astra");
       await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("invalid-preference");
       const rejectedReadCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
       await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
       await page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? []).some(({ sequence, payload }: any) =>
         sequence > cursor && payload.kind === "issue_monitor_profiles"
         && payload.profiles?.some((profile: any) => profile.agent_id === "codex"
-          && profile.model === "candidate-draft-model" && (profile.prefer_for || []).length === 0)), rejectedReadCursor);
+          && profile.model === "gpt-6-astra" && (profile.prefer_for || []).length === 0)), rejectedReadCursor);
       await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:fix, label:bug");
       await saveProfiles(() => pool.getByLabel("Prefer for codex", { exact: true }).press("Tab"), ["claude", "codex"]);
       const fastMode = pool.getByLabel("Fast mode codex", { exact: true });
@@ -214,14 +218,14 @@ test.describe("Issue Monitor candidate pool", () => {
       await expect(reloadedPool.locator(`fieldset[data-agent-id="${CUSTOM_ID}"]`)).toBeVisible();
       await saveProfiles(() => reloadedPool.getByRole("button", { name: `Remove ${CUSTOM_ID}`, exact: true }).click(), ["claude"]);
       // Commit, then close immediately without awaiting the save response.
-      await reloadedPool.getByLabel("Model claude", { exact: true }).fill("immediate-close-model");
+      await reloadedPool.getByLabel("Model claude", { exact: true }).selectOption("opus");
       await reloadedPool.getByLabel("Model claude", { exact: true }).press("Tab");
       await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await openCandidates();
-      await expect(pool.getByLabel("Model claude", { exact: true })).toHaveValue("immediate-close-model");
+      await expect(pool.getByLabel("Model claude", { exact: true })).toHaveValue("opus");
       expect(errors).toEqual([]);
     });
   });

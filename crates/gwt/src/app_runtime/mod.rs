@@ -8575,11 +8575,14 @@ impl AppRuntime {
             Err(error) => return report_failure(self, error),
         };
         if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+            let profiles = prefs.launch_profile_pool();
+            let choices = self.issue_monitor_profile_choices(&context.project_root, &profiles);
             events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorProfiles {
                     project_root: context.project_root.display().to_string(),
-                    profiles: prefs.launch_profile_pool(),
+                    profiles,
+                    choices,
                     request_id,
                 },
             ));
@@ -12653,14 +12656,20 @@ impl AppRuntime {
             FrontendEvent::GetIssueMonitorProfiles => {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
                 match gwt::load_issue_monitor_prefs(&prefs_path) {
-                    Ok(prefs) => vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::IssueMonitorProfiles {
-                            project_root: context.project_root.display().to_string(),
-                            profiles: prefs.launch_profile_pool(),
-                            request_id: None,
-                        },
-                    )],
+                    Ok(prefs) => {
+                        let profiles = prefs.launch_profile_pool();
+                        let choices =
+                            self.issue_monitor_profile_choices(&context.project_root, &profiles);
+                        vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::IssueMonitorProfiles {
+                                project_root: context.project_root.display().to_string(),
+                                profiles,
+                                choices,
+                                request_id: None,
+                            },
+                        )]
+                    }
                     Err(error) => self.issue_monitor_control_error_events(
                         Some(&context.project_root),
                         Some(&client_id),

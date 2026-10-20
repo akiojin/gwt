@@ -1,4 +1,7 @@
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs)
+param(
+    [switch]$CandidateSettings,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
+)
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $checkoutGwt = Join-Path $repoRoot 'target/debug/gwt.exe'
@@ -68,6 +71,7 @@ $isolatedEnv['USERPROFILE'] = $checkHome
 $isolatedEnv['GWT_BROWSER_URL_FILE'] = Join-Path $checkHome 'url'
 $isolatedEnv['GWT_HOOK_BIN'] = $hookBin
 $isolatedEnv['GIT_TERMINAL_PROMPT'] = '0'
+if ($CandidateSettings) { $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1' }
 # Provider UI fixtures need no live credentials or transcript data.
 $isolatedEnv['CODEX_HOME'] = Join-Path $checkHome 'codex-fixture'
 $isolatedEnv['CLAUDE_CONFIG_DIR'] = Join-Path $checkHome 'claude-fixture'
@@ -115,7 +119,9 @@ try {
     @{project=$repoRoot;repo_hash=$repoHash;pid=$ownedGui.Id;url=$checkUrl} | ConvertTo-Json |
         Set-Content -LiteralPath (Join-Path $checkHome 'issue-5503-isolated.json')
     $version = (Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/playwright-version.txt') -Raw).Trim()
-    $deps = Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version"
+    $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else {
+        Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version"
+    }
     $playwright = Join-Path $deps 'node_modules/@playwright/test/cli.js'
     if (!(Test-Path -LiteralPath $playwright)) {
         New-Item -ItemType Directory -Path $deps -Force | Out-Null
@@ -151,9 +157,10 @@ Module._resolveFilename = function(request, parent, ...rest) {
     # Keep evidence outside verify.run's disposable TEMP, as run-visual-tests.sh does.
     $artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5503-' + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+    $specs = if ($CandidateSettings) { @('settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts', '--grep', 'Issue #5787|Issue Monitor candidate pool') } else { @('provider-usage.spec.ts') }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output $artifacts `
-        'provider-usage.spec.ts' @PlaywrightArgs
+        @specs @PlaywrightArgs
     if ($LASTEXITCODE) { throw 'Issue #5503 headed verification failed.' }
 } finally {
     foreach ($name in $savedVars.Keys) { [Environment]::SetEnvironmentVariable($name, $savedVars[$name], 'Process') }

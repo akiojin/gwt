@@ -434,9 +434,21 @@ function reconcileCandidateSave(panel, event) {
       // Even a successful normalization must not move a live text cursor.
       if (input === focused) continue;
       const key = input.dataset.profileField;
+      if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited && profile[key] == null) continue;
       if (input.type === "checkbox") input.checked = profile[key] === true;
-      else input.value = key === "prefer_for" ? (profile[key] || []).join(", ")
-        : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+      else {
+        const saved = key === "prefer_for" ? (profile[key] || []).join(", ")
+          : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+        if (input.localName === "select") {
+          if (![...input.options].some(option => option.value === saved)) {
+            const option = panel.ownerDocument.createElement("option");
+            option.value = saved;
+            option.textContent = saved || "Auto";
+            input.appendChild(option);
+          }
+          [...input.options].find(option => option.value === saved).selected = true;
+        } else input.value = saved;
+      }
     }
   }
   if (!dirty) for (const invalid of panel.querySelectorAll('[aria-invalid="true"]')) invalid.removeAttribute("aria-invalid");
@@ -462,7 +474,7 @@ function positionIssuesLaunchControls(body) {
 }
 
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, send, availableAgents = null } = options;
+  const { project, profiles, send, availableAgents = null, choices = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -490,7 +502,33 @@ export function renderAgentsSettingsPanel(panel, options) {
     feedback.setAttribute("role", error ? "alert" : "status");
     if (error) panel.dataset.dirty = "true";
   };
+  // Match resolve_agent_id aliases and the backend's provider comparison.
+  const providerAliases = new Map([
+    ["claudecode", "claude"], ["claude-code", "claude"], ["claude code", "claude"],
+    ["grok build", "grok"], ["grok-build", "grok"],
+    ["antigravity", "agy"], ["antigravity cli", "agy"], ["antigravity-cli", "agy"],
+    ["open-code", "opencode"], ["open-claw", "openclaw"],
+    ["hermes agent", "hermes"], ["hermes-agent", "hermes"],
+    ["copilot", "gh"], ["github copilot", "gh"], ["github-copilot", "gh"],
+  ]);
+  const provider = agentId => {
+    const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
+    return providerAliases.get(id) || id;
+  };
   const rows = [];
+  const setChoices = (input, options, value) => {
+    input.replaceChildren();
+    const entries = options.map(option => typeof option === "string" ? { value: option, label: option || "Auto" } : option);
+    const saved = String(value ?? "");
+    if (!entries.some(option => option.value === saved)) entries.push({ value: saved, label: saved || "Auto" });
+    for (const entry of entries) {
+      const option = document.createElement("option");
+      option.value = entry.value;
+      option.textContent = entry.label;
+      option.selected = entry.value === saved;
+      input.appendChild(option);
+    }
+  };
   const field = (parent, name, key, value, type = "text", choices = null) => {
     const label = document.createElement("label");
     label.className = "settings-field";
@@ -498,15 +536,8 @@ export function renderAgentsSettingsPanel(panel, options) {
     span.textContent = name;
     label.appendChild(span);
     const input = document.createElement(choices ? "select" : "input");
-    if (choices) {
-      for (const choice of new Set([...choices, value ?? ""])) {
-        const option = document.createElement("option");
-        option.value = choice;
-        option.textContent = choice || "Auto";
-        option.selected = choice === String(value ?? "");
-        input.appendChild(option);
-      }
-    } else input.type = type;
+    if (choices) setChoices(input, choices, value);
+    else input.type = type;
     input.className = choices ? "settings-select" : type === "checkbox" ? "settings-checkbox" : "settings-input";
     input.dataset.profileField = key;
     input.setAttribute("aria-label", `${name} ${parent.dataset.agentId || "candidate"}`);
@@ -515,7 +546,11 @@ export function renderAgentsSettingsPanel(panel, options) {
     label.appendChild(input);
     parent.appendChild(label);
     if (key !== "new") input.addEventListener("change", () => {
-      if (!input.disabled) submit(draft(), input);
+      if (!input.disabled) {
+        input.dataset.profileEdited = "true";
+        parent.updateCandidateChoices?.(key);
+        submit(draft(), input);
+      }
     });
     return input;
   };
@@ -523,6 +558,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     const next = { ...profile };
     for (const input of row.querySelectorAll("[data-profile-field]")) {
       const key = input.dataset.profileField;
+      if (input.dataset.inheritedDefault !== undefined && !input.dataset.profileEdited) continue;
       next[key] = input.type === "checkbox" ? input.checked
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
@@ -570,16 +606,60 @@ export function renderAgentsSettingsPanel(panel, options) {
     row.appendChild(legend);
     panel.appendChild(row);
     rows.push({ row, profile });
-    for (const [name, key, fallback] of [
-      ["Agent", "agent_id", ""], ["Model", "model", ""], ["Reasoning", "reasoning", ""],
-      ["Docker service", "docker_service", ""],
-      ["Prefer for", "prefer_for", ""],
-    ]) field(row, name, key, key === "prefer_for" ? (profile[key] || []).join(", ") : profile[key] ?? fallback);
-    field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", ["Normal", "Continue", "Resume"]);
-    field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
-    field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
-    field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
-    field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    const agent = field(row, "Agent", "agent_id", profile.agent_id, "text",
+      (availableAgents || []).map(agent => ({ value: agent.id, label: agent.name || agent.id })));
+    const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(agent.value));
+    const initial = capabilities();
+    let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
+    const initialModel = initial?.models.find(option => option.value === model.value);
+    const initialReasoning = initialModel ? initialModel.default_reasoning : initial?.default_reasoning;
+    const reasoning = field(row, "Reasoning", "reasoning", profile.reasoning ?? initialReasoning ?? "", "text", []);
+    const docker = field(row, "Docker service", "docker_service", profile.docker_service ?? "", "text", [
+      { value: "", label: choices?.default_docker_service ? `Auto (${choices.default_docker_service})` : "Auto" },
+      ...(choices?.docker_services || []),
+    ]);
+    field(row, "Prefer for", "prefer_for", (profile.prefer_for || []).join(", "));
+    const mode = field(row, "Session mode", "session_mode", profile.session_mode || "Normal", "text", []);
+    const runtime = field(row, "Runtime", "runtime_target", profile.runtime_target || "Host", "text", ["Host", "Docker"]);
+    const shell = field(row, "Windows shell", "windows_shell", profile.windows_shell || "", "text", ["", "command_prompt", "windows_power_shell", "power_shell_7"]);
+    const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
+    const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
+    row.updateCandidateChoices = changed => {
+      const entry = capabilities();
+      const agentChanged = changed === "agent_id";
+      if (!changed || agentChanged) {
+        const value = agentChanged ? entry?.default_model ?? "" : model.value;
+        const freeText = Boolean(entry?.supports_model_input && !entry.models.length);
+        if (freeText !== (model.localName === "input")) {
+          const previous = model.closest("label");
+          model = field(row, "Model", "model", value, "text", freeText ? null : []);
+          previous.replaceWith(model.closest("label"));
+        }
+        if (freeText) model.value = value;
+        else setChoices(model, entry?.models || [], value);
+        if (agentChanged) model.dataset.profileEdited = "true";
+        model.disabled = !entry || (!freeText && !entry.models.length);
+        setChoices(mode, entry?.session_modes || ["Normal"], agentChanged ? "Normal" : mode.value);
+        mode.disabled = !entry || entry.session_modes.length <= 1;
+        if (agentChanged) fast.checked = false;
+        if (agentChanged && !entry?.supports_skip_permissions) skip.checked = false;
+      }
+      const selectedModel = entry?.models.find(option => option.value === model.value);
+      const levels = selectedModel?.reasoning_options || entry?.reasoning_options || [];
+      const defaultReasoning = selectedModel ? selectedModel.default_reasoning : entry?.default_reasoning;
+      const level = agentChanged || changed === "model"
+        ? defaultReasoning ?? "" : reasoning.value;
+      if (agentChanged || changed === "model") reasoning.dataset.profileEdited = "true";
+      setChoices(reasoning, levels, level);
+      reasoning.disabled = levels.length === 0;
+      skip.disabled = !entry?.supports_skip_permissions;
+      fast.disabled = !entry?.supports_fast_mode;
+      docker.disabled = runtime.value !== "Docker";
+      shell.disabled = runtime.value === "Docker" || !choices?.windows_shell_supported;
+    };
+    row.updateCandidateChoices();
+    if (profile.model == null) model.dataset.inheritedDefault = model.value;
+    if (profile.reasoning == null) reasoning.dataset.inheritedDefault = reasoning.value;
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
       const move = button(row, `Move ${direction} ${profile.agent_id}`, direction, () => {
         const next = draft();
@@ -594,19 +674,6 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  // Match resolve_agent_id aliases and the backend's provider comparison.
-  const providerAliases = new Map([
-    ["claudecode", "claude"], ["claude-code", "claude"], ["claude code", "claude"],
-    ["grok build", "grok"], ["grok-build", "grok"],
-    ["antigravity", "agy"], ["antigravity cli", "agy"], ["antigravity-cli", "agy"],
-    ["open-code", "opencode"], ["open-claw", "openclaw"],
-    ["hermes agent", "hermes"], ["hermes-agent", "hermes"],
-    ["copilot", "gh"], ["github copilot", "gh"], ["github-copilot", "gh"],
-  ]);
-  const provider = agentId => {
-    const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
-    return providerAliases.get(id) || id;
-  };
   const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
   const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
   candidate.options[0].textContent = "Select an agent…";
@@ -957,7 +1024,7 @@ export function createSettingsSurface({
           if (section === "issues") panel?.updateMaxActiveStatus?.(current.status);
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
-            project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
+            project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
             availableAgents: supportedAgentsModel.read().agents === null || customAgentsModel.read().catalog.loading ? null : [
               ...supportedAgentsModel.read().agents,
               ...customAgentsModel.read().catalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
@@ -977,7 +1044,7 @@ export function createSettingsSurface({
         const root = event.project_root;
         if (!root) return;
         issueSettingsModel.update(state => ({ ...state, [root]: {
-          ...state[root], profiles: event.profiles, profilesRequestId: event.request_id,
+          ...state[root], profiles: event.profiles, choices: event.choices, profilesRequestId: event.request_id,
         } }));
       }
       function applyIssueMonitorProfilesError(event) {

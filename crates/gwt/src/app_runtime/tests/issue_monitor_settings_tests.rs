@@ -1,6 +1,102 @@
 use super::*;
 
 #[test]
+fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewriting_profiles() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    fs::write(
+        repo.join("compose.yaml"),
+        "services:\n  app:\n    image: alpine\n  worker:\n    image: alpine\n",
+    )
+    .expect("compose services");
+    let mut profile = pool_profile("codex");
+    profile.model = Some("saved-unknown-model".into());
+    profile.reasoning = Some("high".into());
+    let (mut runtime, _, opened) =
+        open_agent_settings_sets(temp.path(), &repo, vec![profile.clone()]);
+    let wizard = agent_settings_view(&opened);
+    let wizard_models = wizard
+        .model_options
+        .iter()
+        .map(|option| option.value.as_str())
+        .collect::<Vec<_>>();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let before = fs::read(&prefs_path).expect("saved profiles");
+    let events =
+        runtime.handle_frontend_event("client-1".into(), FrontendEvent::GetIssueMonitorProfiles);
+    let snapshot = events
+        .iter()
+        .find_map(|event| match &event.event {
+            event @ BackendEvent::IssueMonitorProfiles { .. } => {
+                Some(serde_json::to_value(event).unwrap())
+            }
+            _ => None,
+        })
+        .expect("profiles snapshot");
+    assert_eq!(
+        snapshot["profiles"][0],
+        serde_json::to_value(&profile).unwrap()
+    );
+    let choices = &snapshot["choices"];
+    let agents = choices["agents"].as_array().expect("agent choice catalog");
+    let codex = agents.iter().find(|agent| agent["id"] == "codex").unwrap();
+    assert_eq!(
+        codex["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["value"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        wizard_models,
+        "Candidates and Wizard share the same model rows"
+    );
+    assert_eq!(codex["default_model"], wizard_models[0]);
+    assert_eq!(codex["models"][0]["default_reasoning"], "low");
+    assert_eq!(codex["supports_fast_mode"], true);
+    assert_eq!(
+        codex["session_modes"],
+        serde_json::json!(["Normal", "Continue", "Resume"])
+    );
+    let claude = agents.iter().find(|agent| agent["id"] == "claude").unwrap();
+    assert_eq!(claude["default_model"], "");
+    assert_eq!(claude["models"][0]["default_reasoning"], "auto");
+    let grok = agents.iter().find(|agent| agent["id"] == "grok").unwrap();
+    assert_eq!(grok["supports_model_input"], true);
+    assert_eq!(grok["supports_fast_mode"], false);
+    assert_eq!(
+        grok["session_modes"],
+        serde_json::json!(["Normal", "Continue"])
+    );
+    let opencode = agents
+        .iter()
+        .find(|agent| agent["id"] == "opencode")
+        .unwrap();
+    assert_eq!(
+        opencode["supports_skip_permissions"], true,
+        "the provider supports an environment overlay without a CLI flag"
+    );
+    let openclaw = agents
+        .iter()
+        .find(|agent| agent["id"] == "openclaw")
+        .unwrap();
+    assert_eq!(openclaw["supports_skip_permissions"], false);
+    assert_eq!(openclaw["session_modes"], serde_json::json!(["Normal"]));
+    assert_eq!(
+        choices["docker_services"],
+        serde_json::json!(["app", "worker"])
+    );
+    assert_eq!(choices["default_docker_service"], "app");
+    assert_eq!(
+        fs::read(&prefs_path).unwrap(),
+        before,
+        "reading choices cannot normalize saved values"
+    );
+}
+
+#[test]
 fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -289,8 +385,11 @@ fn app_runtime_issue_monitor_profiles_get_returns_the_saved_pool_for_the_request
             events[0].target,
             gwt::project_transport::DispatchTarget::Client(format!("client-{tab_id}"))
         );
+        let mut snapshot = serde_json::to_value(&events[0].event).expect("serialize profiles");
+        assert!(snapshot["choices"]["agents"].is_array());
+        snapshot.as_object_mut().unwrap().remove("choices");
         assert_eq!(
-            serde_json::to_value(&events[0].event).expect("serialize profiles"),
+            snapshot,
             serde_json::json!({
                 "kind": "issue_monitor_profiles",
                 "project_root": root.display().to_string(),
