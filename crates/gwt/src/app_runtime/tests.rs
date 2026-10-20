@@ -363,6 +363,7 @@ fn sample_issue_snapshot(
 }
 
 fn init_repo(repo_path: &Path) {
+    // Monitor fixtures need GitHub identity, but must never reach the network.
     let remote = format!(
         "https://github.com/example/repo-{:x}.git",
         remote_suffix(repo_path)
@@ -370,6 +371,10 @@ fn init_repo(repo_path: &Path) {
     for args in [
         ["init", "-q"].as_slice(),
         ["remote", "add", "origin", remote.as_str()].as_slice(),
+        ["config", "--local", "protocol.allow", "never"].as_slice(),
+        ["config", "--local", "protocol.https.allow", "never"].as_slice(),
+        // A few fixtures replace origin with a real local bare repository.
+        ["config", "--local", "protocol.file.allow", "always"].as_slice(),
     ] {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
@@ -390,6 +395,53 @@ fn init_repo_with_initial_commit(repo_path: &Path) {
     run_git(repo_path, &["config", "user.name", "Test User"]);
     run_git(repo_path, &["config", "user.email", "test@example.com"]);
     run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
+#[test]
+fn init_repo_fixture_preserves_github_identity_without_network_transport() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    assert_eq!(
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&repo).unwrap(),
+        (
+            "example".to_string(),
+            format!("repo-{:x}", remote_suffix(&repo))
+        )
+    );
+    // Inspect the policy before attempting transport, so a broken fixture
+    // fails without accidentally contacting GitHub.
+    let policy = gwt_core::process::hidden_command("git")
+        .args(["config", "--local", "--get", "protocol.https.allow"])
+        .current_dir(&repo)
+        .output()
+        .expect("read fixture transport policy");
+    assert_eq!(String::from_utf8_lossy(&policy.stdout).trim(), "never");
+    let output = gwt_core::process::hidden_command("git")
+        .args(["fetch", "origin", "--prune"])
+        .env_remove("GIT_ALLOW_PROTOCOL")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(&repo)
+        .output()
+        .expect("fetch fixture origin");
+    assert!(
+        !output.status.success(),
+        "fixture fetch must fail before networking: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("transport 'https' not allowed"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn init_repo_without_origin(repo_path: &Path) {

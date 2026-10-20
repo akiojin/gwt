@@ -473,8 +473,6 @@ crates/gwt/src/cli/verification_record.rs|verification_output_holder_fixture|ass
 crates/gwt/src/cli/verification_record.rs|verification_output_holder_fixture|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(30)|1
 crates/gwt/src/cli/verification_record.rs|verification_output_holder_fixture|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(60)|1
 crates/gwt/src/cli/verification_record.rs|verification_output_holder_fixture|while!directory.join().exists()&&std::time::Instant::now()<deadline|1
-crates/gwt/src/cli/verification_record.rs|verification_records_exit_while_grandchild_holds_output|assert!(std::time::Instant::now()<deadline,)|1
-crates/gwt/src/cli/verification_record.rs|verification_records_exit_while_grandchild_holds_output|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(30)|1
 crates/gwt/src/cli/verification_record.rs|verification_records_exit_while_grandchild_holds_output|letresult=receiver.recv_timeout(std::time::Duration::from_secs(45))|1
 crates/gwt/src/cli/verification_record.rs|verification_timeout_fixture|assert!(std::time::Instant::now()<safety,)|1
 crates/gwt/src/cli/verification_record.rs|verification_timeout_fixture|letsafety=std::time::Instant::now()+std::time::Duration::from_secs(30)|2
