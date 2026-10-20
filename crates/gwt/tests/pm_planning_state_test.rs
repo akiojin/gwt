@@ -502,14 +502,21 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
         let state = load_planning_state(&path).unwrap();
         assert_eq!(state.revision, receipt.resulting_revision);
         assert_eq!(state.audit_receipts.last(), Some(&receipt));
-        if matches!(kind, "risk" | "decision" | "policy") {
+        if matches!(kind, "risk" | "decision" | "policy" | "recurring") {
             let impact = receipt
                 .change_impact
                 .as_ref()
-                .expect("governance upserts need change evidence");
+                .expect("planning upserts need change evidence");
             assert!(impact.record_created);
             assert_eq!(impact.changes["id"].before, json!(null));
             assert_eq!(impact.changes["id"].after, json!(kind));
+            if kind == "recurring" {
+                assert_eq!(impact.changes["idempotency_key_digest"].before, json!(null));
+                assert_eq!(
+                    impact.changes["idempotency_key_digest"].after,
+                    json!(gwt_core::pm_authorization::digest(b""))
+                );
+            }
         }
     }
     let mut request = plan_request("goal", 7, "replace-goal");
@@ -548,6 +555,19 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
             json!({"version":2, "token_budget":1000}),
             json!({"version":{"before":0,"after":2},
                 "token_budget":{"before":null,"after":1000}}),
+        ),
+        (
+            "recurring",
+            json!({"cadence":"weekly", "owner":"maintainer",
+                "next_run":"2026-11-01", "miss_policy":"defer",
+                "idempotency_key":"schedule-v2"}),
+            json!({"cadence":{"before":"","after":"weekly"},
+                "owner":{"before":"","after":"maintainer"},
+                "next_run":{"before":null,"after":"2026-11-01"},
+                "miss_policy":{"before":"","after":"defer"},
+                "idempotency_key_digest":{
+                    "before":gwt_core::pm_authorization::digest(b""),
+                    "after":gwt_core::pm_authorization::digest(b"schedule-v2")}}),
         ),
     ]
     .into_iter()
@@ -588,6 +608,29 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
+    let mut request = plan_request("recurring", 16, "rotate-schedule-key");
+    request.action = gwt::pm_planning::PlanningAction::Recurring(gwt::pm_planning::RecurringItem {
+        idempotency_key: "schedule-v3".into(),
+        ..load_planning_state(&path).unwrap().recurring_items[0].clone()
+    });
+    let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+    let value = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        value["change_impact"]["changes"],
+        json!({"idempotency_key_digest":{
+        "before":gwt_core::pm_authorization::digest(b"schedule-v2"),
+        "after":gwt_core::pm_authorization::digest(b"schedule-v3")}})
+    );
+    let serialized = value.to_string();
+    for raw_key in ["schedule-v2", "schedule-v3", "rotate-schedule-key"] {
+        assert!(!serialized.contains(raw_key));
+    }
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        apply_planning_action(&path, "pm-a", &request).unwrap(),
+        receipt
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
@@ -647,12 +690,9 @@ fn planning_change_receipts_keep_direct_impact_and_exact_history_on_replay() {
         moved["change_impact"]["changes"]["horizon"],
         json!({"before":"now","after":"next"})
     );
-    let other =
+    let recurring =
         apply_planning_action(&path, "pm-a", &plan_request("recurring", 2, "recurring")).unwrap();
-    assert!(serde_json::to_value(other)
-        .unwrap()
-        .get("change_impact")
-        .is_none());
+    assert!(recurring.change_impact.unwrap().record_created);
     let before = fs::read(&path).unwrap();
     assert_eq!(
         apply_planning_action(&path, "pm-a", &request).unwrap(),
@@ -812,6 +852,12 @@ fn planning_change_history_redacts_legacy_values_and_accepts_old_receipts() {
             "policy",
             "policies",
             "cost_budget",
+            json!("Bearer example0123456789"),
+        ),
+        (
+            "recurring",
+            "recurring_items",
+            "owner",
             json!("Bearer example0123456789"),
         ),
     ] {

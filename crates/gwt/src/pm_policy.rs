@@ -97,7 +97,17 @@ pub(crate) fn assess_planning_change(
             None,
             None,
         ),
-        _ => return Ok(None),
+        PlanningAction::Recurring(value) => (
+            state
+                .recurring_items
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+            None,
+        ),
     };
     let mut changes = std::collections::BTreeMap::new();
     if let Value::Object(fields) = &after {
@@ -108,9 +118,23 @@ pub(crate) fn assess_planning_change(
                     before: old.cloned().unwrap_or(Value::Null),
                     after: new.clone(),
                 };
+                // The recurring setting key is distinct from the request key;
+                // retain its change without duplicating either raw key in audit.
+                let field_name = if matches!(action, PlanningAction::Recurring(_))
+                    && name == "idempotency_key"
+                {
+                    for value in [&mut field.before, &mut field.after] {
+                        if let Value::String(key) = value {
+                            *key = gwt_core::pm_authorization::digest(key.as_bytes());
+                        }
+                    }
+                    "idempotency_key_digest"
+                } else {
+                    name.as_str()
+                };
                 redact(&mut field.before);
                 redact(&mut field.after);
-                changes.insert(name.clone(), field);
+                changes.insert(field_name.to_owned(), field);
             }
         }
     }
@@ -132,7 +156,10 @@ pub(crate) fn assess_planning_change(
     let mut missing_inputs = vec!["dependency_graph".into(), "active_owner_handoff".into()];
     if matches!(
         action,
-        PlanningAction::Risk(_) | PlanningAction::Decision(_) | PlanningAction::Policy(_)
+        PlanningAction::Risk(_)
+            | PlanningAction::Decision(_)
+            | PlanningAction::Policy(_)
+            | PlanningAction::Recurring(_)
     ) {
         missing_inputs.push("direct_issue_mapping".into());
     }

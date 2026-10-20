@@ -807,7 +807,9 @@ not confirm that dependent work or its agents have been notified.
 Risk, decision and policy edits also retain their redacted changed values in these
 receipts. They have no direct Issue mapping, which is explicitly marked as missing;
 an empty affected-Issue set does not mean the change has no impact. Recurring edits
-remain outside this change evidence.
+also retain changed schedule settings, with the setting's idempotency key stored
+as a digest rather than copied into the audit. They likewise lack direct Issue
+mapping. These records do not schedule work or prove duplicate prevention or notification.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
