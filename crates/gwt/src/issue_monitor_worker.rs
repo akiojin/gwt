@@ -2948,6 +2948,10 @@ mod tests {
         reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
         assert_eq!(monitor.launched_window_issue("tab-1::agent-0"), Some(5783));
         assert_eq!(
+            monitor.prefs().launch_bindings.get("tab-1::agent-0"),
+            Some(&5783)
+        );
+        assert_eq!(
             monitor.prefs().launch_bindings.get("foreign-tab::agent-0"),
             Some(&500)
         );
