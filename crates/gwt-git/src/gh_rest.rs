@@ -88,7 +88,19 @@ fn list_cache_file_name(key: &str) -> String {
     format!("{:016x}.json", hasher.finish())
 }
 
-fn list_cache_lock(cache_dir: &Path) -> Option<std::fs::File> {
+struct ListCacheLock {
+    file: std::fs::File,
+}
+
+impl Drop for ListCacheLock {
+    fn drop(&mut self) {
+        // A fork/dup can retain the open file description after our File closes.
+        // Release the lock when this critical section ends, before closing it.
+        let _ = self.file.unlock();
+    }
+}
+
+fn list_cache_lock(cache_dir: &Path) -> Option<ListCacheLock> {
     std::fs::create_dir_all(cache_dir).ok()?;
     // Do not create diagnostic sidecars that could replace unknown files.
     let file = std::fs::File::options()
@@ -99,7 +111,7 @@ fn list_cache_lock(cache_dir: &Path) -> Option<std::fs::File> {
         .open(cache_dir.join(".cache.lock"))
         .ok()?;
     file.try_lock().ok()?;
-    Some(file)
+    Some(ListCacheLock { file })
 }
 
 /// Called only under the same lock as publication. Unrecognized files and
@@ -527,6 +539,23 @@ mod tests {
             failure.unwrap_err(),
             "live failure",
             "expiry must not hide a failed refresh"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn list_cache_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let cache = tempfile::tempdir().unwrap();
+        let lock = list_cache_lock(cache.path()).unwrap();
+        // dup models a parallel fork retaining the same open file description.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(list_cache_lock(cache.path()).is_none());
+        drop(lock);
+        let reacquired = list_cache_lock(cache.path());
+        drop(inherited);
+        assert!(
+            reacquired.is_some(),
+            "a completed cache operation must unlock"
         );
     }
 
