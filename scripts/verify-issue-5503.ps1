@@ -232,7 +232,11 @@ Module._resolveFilename = function(request, parent, ...rest) {
     }
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
-    $specs = if ($CandidateSettings) { @('settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts', '--grep', 'Issue #5787|Issue Monitor candidate pool') } else { @('provider-usage.spec.ts') }
+    $specs = if ($CandidateSettings) { @(
+        'settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts',
+        'issue-monitor-candidate-pool.spec.ts', '--grep',
+        'Issue #5787|Issue Monitor candidate pool|candidate selection rejects unknown'
+    ) } else { @('provider-usage.spec.ts') }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output $artifacts `
         @specs @PlaywrightArgs
