@@ -164,14 +164,6 @@ class NonAsciiStorePathTests(unittest.TestCase):
     # flushes the index to disk instead of replaying it from the SQLite log.
     VECTORS = 1100
 
-    def test_ascii_store_path_uses_the_same_windows_alias(self):
-        store = Path("C:/ASCII/cache/long-generation")
-        alias = "C:/ASCII/cache/LONG-G~1"
-        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
-            runner, "_windows_short_path", return_value=alias
-        ):
-            self.assertEqual(runner._chroma_store_path(store), alias)
-
     def test_hnsw_store_reopens_in_fresh_process_under_non_ascii_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             # resolve() restores the long name of a short-form %TEMP%, which is

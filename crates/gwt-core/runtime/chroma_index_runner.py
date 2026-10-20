@@ -2012,11 +2012,10 @@ def _chroma_store_path(db_path: Path) -> str:
     but every later process reads the collection as unloadable, so the index
     looks empty and is rebuilt forever. Use the ASCII 8.3 alias instead, and
     refuse loudly when the volume has none rather than build an unreadable
-    store. Normalize ASCII spellings too, so a short profile path and its
-    resolved long spelling identify the same Chroma System.
+    store.
     """
     text = str(db_path)
-    if os.name != "nt":
+    if os.name != "nt" or text.isascii():
         return text
     short = _windows_short_path(text)
     if not short.isascii():
