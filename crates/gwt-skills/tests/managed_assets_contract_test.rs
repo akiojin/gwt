@@ -1181,6 +1181,56 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 }
 
 #[test]
+fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        let board = fs::read_to_string(skills.join("gwt-coordination/references/board.md"))
+            .expect("materialized authority guidance");
+        let authority = markdown_block(
+            &board,
+            "## Autonomous investigation authority",
+            Some("## Board (coordination history)"),
+        );
+        for required in [
+            "`execution.status`",
+            "`launch_route: autonomous`",
+            "Investigation-First",
+            "do not wait for `進めて`",
+            "owner Issue's purpose and acceptance criteria",
+            "Update the plan/tasks before resuming implementation",
+            "new feature, a change to the SPEC's purpose, or another Issue's domain",
+            "`agent:pm`",
+            "Manual or unknown launch routes keep the existing interactive",
+            "Permission, safety, and verification gates still apply",
+            "Issue #5566: post-delivery measurement identifies the root cause",
+            "Issue #5016: slice verification exposes an existing lifecycle defect",
+        ] {
+            assert!(
+                authority.contains(required),
+                "{provider}: missing {required}"
+            );
+        }
+        assert_eq!(
+            authority
+                .matches("update plan/tasks and continue without PM approval")
+                .count(),
+            2,
+            "both reported in-scope regressions must continue autonomously"
+        );
+        let ownership = fs::read_to_string(skills.join("gwt-execute/references/ownership.md"))
+            .expect("materialized execution ownership");
+        assert!(ownership.contains("../../gwt-coordination/references/board.md"));
+        assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
+        assert!(ownership.contains("first apply the launch-route authority below"));
+    }
+}
+
+#[test]
 fn generated_coordination_reads_gwt_assigned_name_before_work() {
     let dir = tempfile::tempdir().expect("tempdir");
     generate_coordination_guidance(dir.path()).expect("generate guidance");
