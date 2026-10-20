@@ -52,11 +52,26 @@ pub fn detect_provider_limit_notice<Tz: TimeZone>(
     detect_provider_limit_screen_match(screen, now).map(|matched| matched.notice)
 }
 
+/// Resolve the caller's clock only after recognizing a native quota notice.
+pub fn detect_provider_limit_notice_with_clock<Tz: TimeZone>(
+    screen: &str,
+    now: impl FnOnce() -> DateTime<Tz>,
+) -> Option<ProviderLimitNotice> {
+    detect_provider_limit_screen_match_with_clock(screen, now).map(|matched| matched.notice)
+}
+
 /// Preserve the whole rendered screen when calling this: leading indentation
 /// and Markdown fences distinguish tool/code quotations from native responses.
 pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
     screen: &str,
     now: &DateTime<Tz>,
+) -> Option<ProviderLimitScreenMatch> {
+    detect_provider_limit_screen_match_with_clock(screen, || now.clone())
+}
+
+fn detect_provider_limit_screen_match_with_clock<Tz: TimeZone>(
+    screen: &str,
+    now: impl FnOnce() -> DateTime<Tz>,
 ) -> Option<ProviderLimitScreenMatch> {
     let lines: Vec<&str> = screen.lines().collect();
     let start = lines
@@ -123,7 +138,7 @@ pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
         return Some(ProviderLimitScreenMatch {
             notice: ProviderLimitNotice {
                 provider: Some(provider),
-                resets_at: parse_reset(&text, &haystack, now),
+                resets_at: parse_reset(&text, &haystack, &now()),
             },
             region,
             pattern,
@@ -406,6 +421,35 @@ mod tests {
 
     fn jst(text: &str) -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339(text).expect("fixture instant")
+    }
+
+    #[test]
+    fn a_clock_is_resolved_only_for_a_native_notice() {
+        let calls = std::cell::Cell::new(0);
+        let clock = || {
+            calls.set(calls.get() + 1);
+            jst("2026-08-16T11:26:00+09:00")
+        };
+        assert_eq!(
+            detect_provider_limit_notice_with_clock("ordinary output", clock),
+            None
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "ordinary output must not resolve the local clock"
+        );
+
+        let notice = detect_provider_limit_notice_with_clock(
+            "Claude usage limit reached. Your limit will reset at 3pm.",
+            clock,
+        )
+        .expect("native notice");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            notice.resets_at,
+            Some(jst("2026-08-16T06:00:00+00:00").with_timezone(&Utc))
+        );
     }
 
     #[test]

@@ -1996,6 +1996,7 @@ enum UserEvent {
         data: Vec<u8>,
         /// Pane stream position after this chunk was parsed (Issue #4095).
         seq: u64,
+        screen: Option<String>,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
     /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
@@ -11265,8 +11266,9 @@ fn main() -> std::io::Result<()> {
                 incarnation,
                 data,
                 seq,
+                screen,
             }) => {
-                let events = app.handle_runtime_output_event(id, incarnation, data, seq);
+                let events = app.handle_runtime_output_event(id, incarnation, data, seq, screen);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
