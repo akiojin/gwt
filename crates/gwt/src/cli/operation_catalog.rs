@@ -880,7 +880,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// The existing wording opens the message unchanged so log greps still match;
 /// the candidates follow it. When nothing is close, the namespace's actual
 /// operations are listed rather than nothing — an invented name like
-/// `pr.merge` was never a typo of anything, and the caller still has to learn
+/// `pr.nonexistent_operation` is no typo, and the caller still has to learn
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and
