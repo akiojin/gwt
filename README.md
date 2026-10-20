@@ -800,6 +800,9 @@ Invalid links remain reference facts; milestone-only or category-only links do
 not expand membership, and empty or duplicate goal IDs resolve no links.
 Goal observations do not prove outcome achievement or metric evidence;
 `metric_evidence` remains missing until a supporting source is connected.
+Each Goal's `missing_inputs` also names blank or whitespace-only outcome, metric,
+target, horizon, owner and status, including Goals without roadmap links.
+Ask the PM to fill those fields; complete metadata does not prove outcome achievement.
 Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
