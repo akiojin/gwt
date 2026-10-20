@@ -6,9 +6,9 @@ import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL || '';
 const HOME = process.env.GWT5596_HOME || '';
+test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
 test.use({ headless: false });
 test('Issue #5596: twelve admitted launches keep completion handlers within budget', async ({ page }, info) => {
-  test.skip(!BASE || !HOME, 'requires scripts/verify-issue-5596.ps1');
   test.setTimeout(600_000);
   const fixture = JSON.parse(await readFile(join(HOME, 'fixture.json'), 'utf8'));
   const theme = info.project.name.includes('light') ? 'light' : 'dark';
