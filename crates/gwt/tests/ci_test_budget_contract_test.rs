@@ -501,6 +501,11 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         assert!(job["strategy"].is_null(), "{name} builds each harness once");
         assert!(job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
         let steps = job["steps"].as_sequence().expect("regression steps");
+        assert_eq!(
+            steps[0]["with"]["ref"].as_str(),
+            Some("${{ github.event.pull_request.head.sha || github.sha }}"),
+            "T453 native evidence must use the exact PR head"
+        );
         let build_command = format!("node scripts/ci-windows-tests.mjs build {group}");
         assert_eq!(workflow.matches(&build_command).count(), 1);
         let build = steps
@@ -512,6 +517,31 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             Some("0")
         );
         assert!(steps[build]["if"].is_null());
+        // Issue #1921 T453: exact acceptance precedes each slice's broader
+        // regressions and cannot pass with a renamed or ignored test.
+        let exact = &steps[build + 1];
+        assert!(exact["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Run T453 exact Windows"));
+        assert_eq!(exact["shell"].as_str(), Some("bash"));
+        assert!(exact["if"].is_null());
+        assert!(exact["continue-on-error"].is_null());
+        let exact_run = exact["run"].as_str().unwrap();
+        assert!(exact_run.contains("\"$@\" | tee \"$RUNNER_TEMP/t453-exact.log\""));
+        assert!(exact_run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'"));
+        assert_eq!(
+            exact_run
+                .matches("exact node scripts/ci-windows-tests.mjs")
+                .count(),
+            7
+        );
+        assert_eq!(
+            exact_run
+                .matches(" -- --exact --test-threads=1 --nocapture")
+                .count(),
+            7
+        );
         for (index, step) in steps.iter().enumerate() {
             if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
                 assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
@@ -651,8 +681,22 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1",
         "gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture",
         "gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1",
+        "gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_health_returns_managed_health_json -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::hook_doctor_repair_does_not_persist_path_local_build_binary -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::new_for_hooks_keeps_detached_cache_root -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::env::tests::owner_runtime_override_requires_complete_explicit_loopback_environment -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture",
+        "gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt app_runtime::tests::continuation_authority_tests::continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt tests::powershell_agent_wrapper_quotes_spaced_path_and_single_quotes -- --exact --test-threads=1 --nocapture",
+        "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin -- --exact --test-threads=1 --nocapture",
+        "gwt test hook_contracts hook_health_test::managed_hook_health_understands_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
+        "gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 50);
+    assert_eq!(expected_filters.len(), 64);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

@@ -945,6 +945,44 @@ mod tests {
             .unwrap()["resulting_revision"],
             2
         );
+        crate::pm_planning::mutate_planning_state(&planning_path, 2, |state| {
+            state.roadmap_items.push(crate::pm_planning::RoadmapItem {
+                id: "goal-link".into(),
+                goal_id: Some("goal-1".into()),
+                issues: vec![9, 7, 9],
+                ..Default::default()
+            });
+            state.milestones.push(crate::pm_planning::Milestone {
+                id: "release".into(),
+                issues: vec![9, 7, 9],
+                ..Default::default()
+            });
+            Ok(())
+        })
+        .unwrap();
+        let bytes = fs::read(&planning_path).unwrap();
+        let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["goals"][0]["issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0]["unobserved_issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0]["missing_inputs"],
+            serde_json::json!(["metric_evidence"])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0]["observed_issue_states"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0]["unobserved_issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(fs::read(&planning_path).unwrap(), bytes);
     }
 
     /// Issue #4249 AC-4 / T-121 / T-122: every dispatched operation is listed
