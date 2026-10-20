@@ -88,7 +88,9 @@ test.describe("Project open entry surfaces", () => {
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const trigger = page.locator("#window-list-button");
+    await expect(trigger).toBeEnabled();
     await trigger.focus();
+    await expect(trigger).toBeFocused();
     await page.keyboard.press('Control+o');
     const modal = page.locator('#open-project-path-modal');
     await expect(modal).toBeVisible();
