@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -682,11 +682,9 @@ where
                         Some(match decode(line.as_bytes()) {
                             Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
                                 if event.execution_container.is_none() && !is_close_kind(&event) {
-                                    tracing::warn!(
-                                        event_id = %event.id,
-                                        work_item_id = %event.work_item_id,
-                                        source = ?source.source_execution_container,
-                                        "work events intake: event has no explicit container; retaining history without a Work ref"
+                                    warn_containerless_event_once(
+                                        &event,
+                                        source.source_execution_container.as_deref(),
                                     );
                                 }
                                 CachedSharedWorkEventLine::Known(event)
@@ -729,6 +727,37 @@ where
         }
     }
     Ok(incoming)
+}
+
+/// Reader aliases, retries and rebuilds may decode the same historical event.
+/// Diagnose it once per process without changing the accepted history or cache.
+fn warn_containerless_event_once(
+    event: &WorkEvent,
+    source: Option<&WorkspaceExecutionContainerRef>,
+) {
+    if !tracing::enabled!(tracing::Level::WARN) {
+        return;
+    }
+    static REPORTED_EVENTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = {
+        let mut reported = REPORTED_EVENTS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reported.contains(&event.id) {
+            false
+        } else {
+            reported.insert(event.id.clone())
+        }
+    };
+    if first {
+        tracing::warn!(
+            event_id = %event.id,
+            work_item_id = %event.work_item_id,
+            source = ?source,
+            "work events intake: event has no explicit container; retaining history without a Work ref"
+        );
+    }
 }
 
 fn collect_machine_local_work_events(content: &str) -> Result<Vec<(WorkEvent, String)>> {
@@ -1581,6 +1610,101 @@ mod tests {
             pr_url: None,
             pr_state: None,
         }
+    }
+
+    #[test]
+    fn issue_5380_containerless_warning_is_once_per_event_across_sources_and_rebuilds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let works = tmp.path().join("works.json");
+        let log = tmp.path().join("trace.log");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(std::fs::File::create(&log).unwrap()))
+            .finish();
+        let first = event_json(
+            "issue-5380-warning-first",
+            "issue-5380-warning-work",
+            "start",
+            "2026-10-20T00:00:00Z",
+            "",
+        );
+        let second = first.replace("warning-first", "warning-second");
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                // Separate allocations and reader contexts must still share one warning.
+                let sources = ["work/one", "work/two"].map(|branch| {
+                    SharedWorkEventsSource::new(first.as_str(), Some(source_container(branch)))
+                });
+                ingest_work_events_sources(&works, sources).unwrap();
+            }
+            rebuild_work_events_contents(&works, [first.as_str(), second.as_str()], None).unwrap();
+        });
+        let output = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            output.matches("event has no explicit container").count(),
+            2,
+            "one warning for each event, regardless of sources or prior intake: {output}"
+        );
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.work_items.len(), 1);
+        assert_eq!(projection.work_items[0].events.len(), 2);
+        assert!(projection.work_items[0].execution_containers.is_empty());
+    }
+
+    /// AC-3: run this identical fixture on the control and treatment binaries.
+    #[test]
+    #[ignore = "paired intake timing and log-volume measurement for Issue #5380"]
+    fn issue_5380_measure_replayed_containerless_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let works = tmp.path().join("works.json");
+        let content = (0..74)
+            .map(|index| {
+                event_json(
+                    &format!("issue-5380-probe-{index:03}"),
+                    &format!("issue-5380-probe-work-{}", index % 2),
+                    "start",
+                    "2026-10-20T00:00:00Z",
+                    "",
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let log = tmp.path().join("trace.log");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(std::fs::File::create(&log).unwrap()))
+            .finish();
+        let started = std::time::Instant::now();
+        tracing::subscriber::with_default(subscriber, || {
+            // One day-equivalent replay count from the Issue's reported warning rate.
+            for _ in 0..7_770 {
+                ingest_work_events_content(&works, &content).unwrap();
+            }
+        });
+        let elapsed = started.elapsed();
+        let output = std::fs::read_to_string(&log).unwrap();
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.work_items.len(), 2);
+        assert!(projection
+            .work_items
+            .iter()
+            .all(|item| item.events.len() == 37));
+        let history = serde_json::to_string(&projection.work_items).unwrap();
+        eprintln!(
+            "issue-5380 passes=7770 events=74 elapsed_ms={:.3} warnings={} log_bytes={} history_sha256={}",
+            elapsed.as_secs_f64() * 1000.0,
+            output.matches("event has no explicit container").count(),
+            output.len(),
+            content_fingerprint(&history)
+        );
     }
 
     #[test]
