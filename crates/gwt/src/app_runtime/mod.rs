@@ -5214,7 +5214,7 @@ impl AppRuntime {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(event) =
-                    Self::prepare_work_merge_status_scan(project_root.clone(), &mut merge_cache)
+                    Self::prepare_work_merge_status_scan(&context, &mut merge_cache)
                 {
                     proxy.send(event);
                 }
@@ -5252,9 +5252,10 @@ impl AppRuntime {
 
     /// Synchronous worker body, also used by the process-budget regression.
     fn prepare_work_merge_status_scan(
-        project_root: PathBuf,
+        context: &ProjectContext,
         cache: &mut WorkMergeScanCache,
     ) -> Option<UserEvent> {
+        let project_root = context.project_root.clone();
         cache.measured = false;
         let Ok(projection) =
             gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&project_root)
@@ -5273,7 +5274,9 @@ impl AppRuntime {
             if cache
                 .last_inputs
                 .as_ref()
-                .is_some_and(|(previous, at)| previous == &targets && *at == revision)
+                .is_some_and(|(previous, at, destination)| {
+                    previous == &targets && *at == revision && destination == context
+                })
             {
                 if let Some(snapshot) = &cache.snapshot {
                     return Some(snapshot.event(project_root, live_process_branches));
@@ -5290,7 +5293,7 @@ impl AppRuntime {
         );
         if successful && revision.is_some() && revision == cache.inputs.current_revision() {
             cache.snapshot = Some(WorkMergeScanSnapshot::from_event(&event));
-            cache.last_inputs = revision.map(|revision| (targets, revision));
+            cache.last_inputs = revision.map(|revision| (targets, revision, context.clone()));
         }
         Some(event)
     }
@@ -15001,7 +15004,7 @@ impl WorkMergeScanQueue {
 pub(crate) struct WorkMergeScanCache {
     readiness: gwt_git::branch::CleanupReadinessCache,
     inputs: work_scans::WorkScanInputs,
-    last_inputs: Option<(Vec<WorkBranchScanTarget>, u64)>,
+    last_inputs: Option<(Vec<WorkBranchScanTarget>, u64, ProjectContext)>,
     snapshot: Option<WorkMergeScanSnapshot>,
     measured: bool,
 }

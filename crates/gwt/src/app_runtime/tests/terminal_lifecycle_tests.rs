@@ -2476,6 +2476,17 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         &repo,
         &["update-ref", "refs/remotes/origin/develop", "HEAD"],
     );
+    let external_ignore = temp.path().join("external-ignore");
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    run_git(
+        &repo,
+        &[
+            "config",
+            "core.excludesFile",
+            external_ignore.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.join("ignored-user-change.txt"), "uncommitted\n").unwrap();
     gwt_core::workspace_projection::record_workspace_work_event(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
@@ -2494,13 +2505,16 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         event
     })
     .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut context = runtime.project_context_for_root(&repo).unwrap();
     let mut cache = super::super::WorkMergeScanCache::default();
-    let first = AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+    let first = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
     assert!(
         matches!(first, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
     );
     let before = gwt_core::process::thread_git_spawn_count();
-    let repeated = AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+    let repeated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
     assert!(
         matches!(repeated, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
     );
@@ -2530,7 +2544,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
     });
     let treatment = capture_tracing_events(|| {
         for _ in 0..10 {
-            AppRuntime::prepare_work_merge_status_scan(repo.clone(), &mut cache).unwrap();
+            AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
             assert!(!cache.measured);
         }
     });
@@ -2564,6 +2578,34 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         })
     );
 
+    // Reopening clears the UI's tip subjects. The new generation must run
+    // the worker's tip-subject measurement even when Git inputs are unchanged.
+    context.generation += 1;
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "reopened project must republish tip subjects"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(!cache.measured);
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(&external_ignore, "").unwrap();
+    assert_ne!(
+        cache.inputs.observe(&repo, std::slice::from_ref(&repo)),
+        Some(revision),
+        "an external ignore edit must invalidate the dirty verdict"
+    );
+    let external_dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(external_dirty, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/reuse"))
+    );
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+
     let revision = cache.inputs.current_revision().unwrap();
     fs::write(repo.join("user-change.txt"), "uncommitted\n").unwrap();
     // test-hygiene: allow-wall-clock-deadline Real notify-to-Git invalidation contract; only bounds a hung OS delivery probe.
@@ -2576,7 +2618,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let dirty = AppRuntime::prepare_work_merge_status_scan(repo, &mut cache).unwrap();
+    let dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
     assert!(
         matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
         if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
