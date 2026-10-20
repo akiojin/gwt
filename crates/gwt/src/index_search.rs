@@ -3857,12 +3857,16 @@ mod tests {
             let rebuild_scope = rebuild_scope_for_name(name)
                 .unwrap_or_else(|| panic!("scope {name} has no search-queued rebuild target"));
             assert_eq!(rebuild_scope.label(), name);
+            let writer_label = match scope {
+                IndexSearchScope::Specs => "issues",
+                _ => name,
+            };
             assert!(
-                crate::index_worker::rebuild_action_for_scope(rebuild_scope).label == name,
+                crate::index_worker::rebuild_action_for_scope(rebuild_scope).label == writer_label,
                 "scope {name} has no production rebuild action"
             );
             assert!(
-                manual_labels.contains(&name),
+                manual_labels.contains(&writer_label),
                 "scope {name} is missing from the manual `index.rebuild` path"
             );
         }

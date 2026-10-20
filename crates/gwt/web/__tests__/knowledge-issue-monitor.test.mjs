@@ -455,6 +455,10 @@ test("Issue #3620: capacity details open in the center without generating passiv
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const status = capacityStatus({ max_active_agents: 0 });
   status.agent_capacity.recommended_worker_limit = 0;
+  status.agent_capacity.constraints.push({
+    resource: "disk", capacity: 18446744073709551615, binding: false,
+    reason: "measured target 0 bytes; no additional target storage required",
+  });
   surface.applyIssueMonitorStatus(status);
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/0");
   assert.equal(notices.length, 0, "healthy capacity does not create a notification on opening a window");
@@ -464,6 +468,7 @@ test("Issue #3620: capacity details open in the center without generating passiv
   assert.match(notices[0].details, /Machine budget: 6.*Machine live: 5.*This project: 3.*PM: 1.*Other projects: 2/);
   assert.match(notices[0].details, /GUI CPU reserved: 0\.375 cores/);
   assert.match(notices[0].details, /CPU: 6.*limiting.*GUI CPU reserved/);
+  assert.match(notices[0].details, /Disk: unlimited agent slots.*no additional target storage required/);
   assert.equal(body.querySelector(".knowledge-monitor-capacity"), null, "no inline diagnostic block");
 });
 

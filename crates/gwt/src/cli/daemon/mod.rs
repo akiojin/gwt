@@ -750,7 +750,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let project_root = temp.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -793,7 +793,9 @@ mod tests {
         if let Some(parent) = socket.path.parent() {
             std::fs::create_dir_all(parent).expect("socket parent");
         }
-        let _listener = UnixListener::bind(&socket.path).expect("bind canonical socket");
+        let _listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket.path))
+                .expect("bind canonical socket");
         let mut serving_out = String::new();
         run(&mut env, DaemonCommand::Status, &mut serving_out)
             .expect("status with a served socket and no descriptor");
@@ -834,7 +836,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let caller_root = temp.path().join("caller");
         let sibling_root = temp.path().join("sibling");
@@ -851,7 +853,9 @@ mod tests {
         )
         .expect("sibling scope");
         let socket_path = temp.path().join("sibling.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind sibling socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind sibling socket");
         let endpoint = DaemonEndpoint::new(
             sibling_scope.clone(),
             std::process::id(),
@@ -901,7 +905,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let cwd_root = temp.path().join("cwd-project");
         let explicit_root = temp.path().join("explicit-project");
@@ -916,9 +920,14 @@ mod tests {
             .expect("explicit scope");
         let cwd_socket_path = temp.path().join("cwd.sock");
         let explicit_socket_path = temp.path().join("explicit.sock");
-        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
-        let explicit_listener =
-            UnixListener::bind(&explicit_socket_path).expect("bind explicit socket");
+        let cwd_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &cwd_socket_path,
+        ))
+        .expect("bind cwd socket");
+        let explicit_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &explicit_socket_path,
+        ))
+        .expect("bind explicit socket");
         let cwd_endpoint = DaemonEndpoint::new(
             cwd_scope.clone(),
             std::process::id(),
@@ -984,7 +993,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
         let cwd_root = temp.path().join("cwd-project");
         std::fs::create_dir_all(&cwd_root).expect("cwd root");
@@ -998,7 +1007,10 @@ mod tests {
         }
 
         let cwd_socket_path = temp.path().join(format!("cwd-{case}.sock"));
-        let cwd_listener = UnixListener::bind(&cwd_socket_path).expect("bind cwd socket");
+        let cwd_listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(
+            &cwd_socket_path,
+        ))
+        .expect("bind cwd socket");
         let cwd_endpoint = DaemonEndpoint::new(
             cwd_scope.clone(),
             std::process::id(),

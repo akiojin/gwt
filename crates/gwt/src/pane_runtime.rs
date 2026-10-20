@@ -14,6 +14,9 @@ use gwt_terminal::{Pane, PaneStatus};
 
 use crate::WindowProcessStatus;
 
+/// Bound each parse and GUI notification while allowing PTY bursts in one read.
+pub const OUTPUT_BATCH_MAX_BYTES: usize = 64 * 1024;
+
 /// Observations from one exact pane incarnation, before any GUI adaptation.
 #[derive(Debug)]
 pub enum PaneRuntimeEvent {
@@ -22,6 +25,7 @@ pub enum PaneRuntimeEvent {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        screen: Option<String>,
     },
     Status {
         id: String,
@@ -61,7 +65,7 @@ pub fn spawn_output_thread(
         };
 
         let mut reader = reader;
-        let mut buffer = [0u8; 4096];
+        let mut buffer = [0u8; OUTPUT_BATCH_MAX_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -69,11 +73,13 @@ pub fn spawn_output_thread(
                     let chunk = buffer[..read].to_vec();
                     let lock_started = Instant::now();
                     let mut seq = 0;
+                    let mut screen = None;
                     if let Ok(mut pane) = pane.lock() {
                         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
                         let parse_started = Instant::now();
                         pane.process_bytes(&chunk);
                         seq = pane.output_seq();
+                        screen = Some(pane.screen().contents());
                         let parse_us = parse_started.elapsed().as_micros() as u64;
                         // Log only when the contention window is large enough
                         // to plausibly starve a concurrent `write_input`. The
@@ -96,6 +102,7 @@ pub fn spawn_output_thread(
                         incarnation,
                         data: chunk,
                         seq,
+                        screen,
                     });
                 }
                 Err(error) => {
@@ -308,7 +315,10 @@ mod tests {
                     incarnation,
                     data,
                     seq,
+                    screen,
                 } => {
+                    assert!(data.len() <= super::OUTPUT_BATCH_MAX_BYTES);
+                    assert!(screen.is_some(), "the parser worker supplies the screen");
                     identities.push((id, incarnation));
                     bytes.extend(data);
                     sequences.push(seq);

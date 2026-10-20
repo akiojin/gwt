@@ -23,6 +23,7 @@ class SearchSourceCacheTests(unittest.TestCase):
             revision = root / "source-revision"
             revision.write_text(str(uuid.uuid4()), encoding="utf-8")
             first = runner._issue_cache_source_snapshot("repo")
+            issues = runner._load_cached_issue_documents("repo")
             specs = runner._load_cached_spec_documents("repo")
             read_text = Path.read_text
 
@@ -33,6 +34,7 @@ class SearchSourceCacheTests(unittest.TestCase):
 
             with mock.patch.object(Path, "read_text", read_stamp):
                 self.assertEqual(runner._issue_cache_source_snapshot("repo"), first)
+                self.assertEqual(runner._load_cached_issue_documents("repo"), issues)
                 self.assertEqual(runner._load_cached_spec_documents("repo"), specs)
             meta["title"] = "beta"
             (issue / "meta.json").write_text(json.dumps(meta), encoding="utf-8")

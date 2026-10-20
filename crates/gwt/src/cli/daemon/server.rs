@@ -3488,10 +3488,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
 /// registry is reachable, and then ON stays refused exactly as before.
 // Only the tests decode without a repository: the worker always has
 // `scope.project_root`, so a production build has no caller for this shape.
-// Some of those tests are platform-gated, so on Windows the test build can
-// compile every caller out — the helper is still the right shape to keep.
 #[cfg(test)]
-#[allow(dead_code)]
 fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonitorControl> {
     decode_issue_monitor_control_in_repo(payload, None)
 }
@@ -7091,7 +7088,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
@@ -7108,8 +7105,10 @@ mod tests {
         let socket_path = gwt_core::daemon::resolve_daemon_socket_path(&endpoint_path)
             .expect("resolve socket path")
             .path;
-        let _listener =
-            std::os::unix::net::UnixListener::bind(&socket_path).expect("bind live daemon socket");
+        let _listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .expect("bind live daemon socket");
         let live = sample_endpoint(scope.clone(), &socket_path, "live-token");
         gwt_core::daemon::persist_endpoint(&endpoint_path, &live).expect("persist live descriptor");
         let descriptor_before = fs::read(&endpoint_path).expect("descriptor before");
@@ -8599,10 +8598,12 @@ exit 0
         use crate::cli::daemon::client::DaemonClient;
         use gwt_core::daemon::VerificationSpawnRequest;
 
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
-        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind daemon socket");
         let hub = BroadcastHub::new();
         let server_hub = hub.clone();
         let server_endpoint = Arc::new(endpoint.clone());
@@ -8663,10 +8664,12 @@ exit 0
     async fn materializer_presence_is_acquired_once_per_connection_and_released_on_eof() {
         use crate::cli::daemon::client::DaemonClient;
 
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
-        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind daemon socket");
         let hub = BroadcastHub::new();
         let server_hub = hub.clone();
         let server_endpoint = Arc::new(endpoint.clone());
@@ -15514,7 +15517,6 @@ exit 0
 
         let hub = BroadcastHub::new();
         let _materializer = hub.acquire_issue_monitor_materializer();
-        let mut statuses = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let shutdown = Arc::new(DaemonShutdown::new());
         let worker = spawn_issue_monitor_worker_with_config_and_timeout(
             scope,
@@ -15557,20 +15559,24 @@ exit 0
             fs::write(&issue_list, serde_json::to_vec(&issues).unwrap())
                 .expect("refresh candidates");
             fs::write(scan_release.join(scan.to_string()), b"release").expect("release scan");
-            scans.push(started && tokio::select! {
-                biased;
-                committed = recv_issue_monitor_status_matching(&mut statuses, HANG_GUARD, |status| {
-                    status.last_scan_at.is_some() && status.last_error.is_none()
-                        && hub.issue_monitor_status().is_some_and(|published| {
-                            published["inbox"].as_array().is_some_and(|rows| rows.iter().any(|row| {
-                                row["issue_number"] == 44 && row["issue_updated_at"] == revision
-                            }))
-                        })
-                }) => committed.is_some(),
-                // A coalesced retry reaching the next barrier without publishing
-                // this revision proves the captured scan was discarded.
-                _ = wait_for_marker_count(&scan_started, scan + 1) => false,
-            });
+            // The worker publishes before starting the next scan, which stops
+            // at its release barrier. Read that stable projection directly:
+            // a broadcast receiver can yield even with the committed frame
+            // queued, so losing a select to this marker does not prove discard.
+            let next_started = wait_for_marker_count(&scan_started, scan + 1).await;
+            scans.push(
+                started
+                    && next_started
+                    && hub.issue_monitor_status().is_some_and(|published| {
+                        published["last_scan_at"].as_str().is_some()
+                            && published["last_error"].is_null()
+                            && published["inbox"].as_array().is_some_and(|rows| {
+                                rows.iter().any(|row| {
+                                    row["issue_number"] == 44 && row["issue_updated_at"] == revision
+                                })
+                            })
+                    }),
+            );
         }
         if scans.iter().all(|committed| *committed) {
             hub.publish_issue_monitor_control(DaemonFrame::Event {
@@ -16045,7 +16051,7 @@ exit 0
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
@@ -17185,13 +17191,14 @@ exit 1
     #[allow(clippy::await_holding_lock)]
     async fn project_daemon_failed_start_releases_startup_lease() {
         let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project");
         let scope = RuntimeScope::from_project_root(&project, RuntimeTarget::Host).expect("scope");
         let socket = temp.path().join("occupied.sock");
-        let _listener = UnixListener::bind(&socket).expect("occupy socket");
+        let _listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket))
+            .expect("occupy socket");
         let endpoint_path = temp.path().join("failed.json");
         let result = run_server_with_shutdown_and_worker_config(
             sample_endpoint(scope.clone(), &socket, "failed"),
@@ -17229,7 +17236,7 @@ exit 1
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn project_daemon_start_refuses_overlap_before_binding() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project");
@@ -23337,7 +23344,7 @@ exit 1
     #[tokio::test]
     async fn run_server_accepts_handshake_and_acknowledges_frames() {
         let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");

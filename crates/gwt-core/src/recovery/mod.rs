@@ -23,7 +23,8 @@ use crate::{
         sanitize_board_terms, AuthorKind, BoardEntry, BoardEntryKind, BoardMention,
         BoardWorktreeForm,
     },
-    paths::{gwt_project_dir_for_repo_path, project_scope_hash},
+    paths::{gwt_project_dir, gwt_project_dir_for_repo_path, project_scope_hash},
+    repo_hash::RepoHash,
 };
 
 const RECOVERY_SCHEMA_VERSION: u32 = 1;
@@ -512,8 +513,18 @@ impl RecoveryStore {
         session_id: impl Into<String>,
     ) -> RecoveryResult<Option<Self>> {
         let project_hash = project_scope_hash(repo_root.as_ref());
+        Self::open_for_project_if_exists(&project_hash, session_id)
+    }
+
+    /// Open one saved project/session authority without resolving a repository
+    /// path or materializing storage. The project identity remains valid after
+    /// its producing worktree has moved or been removed.
+    pub fn open_for_project_if_exists(
+        project_hash: &RepoHash,
+        session_id: impl Into<String>,
+    ) -> RecoveryResult<Option<Self>> {
         let authority = RecoveryAuthority::new(project_hash.as_str(), session_id)?;
-        let project_root = gwt_project_dir_for_repo_path(repo_root.as_ref());
+        let project_root = gwt_project_dir(project_hash);
         match fs::symlink_metadata(&project_root) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => return Err(RecoveryError::Storage),
@@ -710,11 +721,24 @@ impl RecoveryStore {
     }
 
     pub fn list(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
+        self.list_records(false)
+    }
+
+    /// Read committed records without creating files, changing permissions, or
+    /// repairing missing heads. Missing or busy record locks fail closed.
+    pub fn list_read_only(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
+        self.list_records(true)
+    }
+
+    fn list_records(&self, read_only: bool) -> RecoveryResult<Vec<RecoveryRecord>> {
         let mut records = Vec::new();
         let entries = fs::read_dir(&self.root).map_err(|_| RecoveryError::Storage)?;
         for entry in entries {
             let entry = entry.map_err(|_| RecoveryError::Storage)?;
             let file_type = entry.file_type().map_err(|_| RecoveryError::Storage)?;
+            if read_only && file_type.is_symlink() {
+                return Err(RecoveryError::Storage);
+            }
             if !file_type.is_dir() {
                 continue;
             }
@@ -725,7 +749,11 @@ impl RecoveryStore {
             if !is_storage_key(key) {
                 continue;
             }
-            let locked = self.lock_record_dir(entry.path())?;
+            let locked = if read_only {
+                self.lock_record_dir_read_only(entry.path())?
+            } else {
+                self.lock_record_dir(entry.path())?
+            };
             if let Some(latest) = locked.revisions.last() {
                 records.push(latest.record.clone());
             }
@@ -785,7 +813,44 @@ impl RecoveryStore {
         // permissions or publishing which process is editing a record, so a
         // contended deadline here stays anonymous on purpose.
         crate::operation_deadline::lock_exclusive(&lock).map_err(|_| RecoveryError::Storage)?;
-        let revisions = load_revisions(&revisions_dir, &heads_dir, &record_dir, &self.authority)?;
+        let revisions = load_revisions(
+            &revisions_dir,
+            &heads_dir,
+            &record_dir,
+            &self.authority,
+            true,
+        )?;
+        Ok(LockedRecord {
+            _lock: lock,
+            revisions_dir,
+            heads_dir,
+            revisions,
+        })
+    }
+
+    fn lock_record_dir_read_only(&self, record_dir: PathBuf) -> RecoveryResult<LockedRecord> {
+        let revisions_dir = record_dir.join("revisions");
+        let heads_dir = record_dir.join("heads");
+        for directory in [&record_dir, &revisions_dir, &heads_dir] {
+            let metadata = fs::symlink_metadata(directory).map_err(|_| RecoveryError::Storage)?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(RecoveryError::Storage);
+            }
+        }
+        let lock_path = record_dir.join(".lock");
+        let metadata = fs::symlink_metadata(&lock_path).map_err(|_| RecoveryError::Storage)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(RecoveryError::Storage);
+        }
+        let lock = File::open(lock_path).map_err(|_| RecoveryError::Storage)?;
+        fs2::FileExt::try_lock_shared(&lock).map_err(|_| RecoveryError::Storage)?;
+        let revisions = load_revisions(
+            &revisions_dir,
+            &heads_dir,
+            &record_dir,
+            &self.authority,
+            false,
+        )?;
         Ok(LockedRecord {
             _lock: lock,
             revisions_dir,
@@ -1336,6 +1401,7 @@ fn load_revisions(
     heads_dir: &Path,
     record_dir: &Path,
     authority: &RecoveryAuthority,
+    repair_missing_heads: bool,
 ) -> RecoveryResult<Vec<RevisionEnvelope>> {
     let storage_key = record_dir
         .file_name()
@@ -1414,7 +1480,7 @@ fn load_revisions(
         )?;
         revisions.push(envelope);
     }
-    reconcile_revision_heads(heads_dir, &revisions)?;
+    reconcile_revision_heads(heads_dir, &revisions, repair_missing_heads)?;
     Ok(revisions)
 }
 
@@ -1459,6 +1525,7 @@ fn validate_revision_transition(
 fn reconcile_revision_heads(
     heads_dir: &Path,
     revisions: &[RevisionEnvelope],
+    repair_missing_heads: bool,
 ) -> RecoveryResult<()> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(heads_dir).map_err(|_| RecoveryError::Storage)? {
@@ -1506,8 +1573,10 @@ fn reconcile_revision_heads(
         }
     }
 
-    for revision in revisions.iter().skip(paths.len()) {
-        persist_revision_head(heads_dir, revision)?;
+    if repair_missing_heads {
+        for revision in revisions.iter().skip(paths.len()) {
+            persist_revision_head(heads_dir, revision)?;
+        }
     }
     Ok(())
 }

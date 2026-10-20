@@ -164,7 +164,13 @@ fn fetch_issue_page_uncached(path: &str) -> std::result::Result<String, String> 
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
         &["api", path, "--include"],
-        gwt_core::process_console::SpawnOptions::new("gh api issues"),
+        gwt_core::process_console::SpawnOptions::new("gh api issues").github_caller(
+            if path.contains("labels=gwt-queued") {
+                "issue-monitor.queued-issues"
+            } else {
+                "issue-monitor.open-issues"
+            },
+        ),
     )
     .map_err(|e| e.to_string())?;
     if output.success() {

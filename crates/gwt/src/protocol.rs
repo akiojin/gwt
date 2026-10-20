@@ -303,6 +303,7 @@ pub enum RecoveryCenterItemState {
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryCenterLoadStatus {
     Ready,
+    NotFound,
     Error,
 }
 
@@ -2045,6 +2046,8 @@ pub enum BackendEvent {
         generation: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         board_entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -2203,6 +2206,7 @@ pub enum BackendEvent {
     IssueMonitorProfiles {
         project_root: String,
         profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        choices: crate::launch_wizard::IssueMonitorProfileChoices,
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
     },
@@ -6287,6 +6291,7 @@ mod tests {
             request_id: "request-2".to_string(),
             generation: 3,
             board_entry_id: Some("public-board-entry".to_string()),
+            error: None,
         };
         let value = serde_json::to_value(event).expect("serialize recovery center action");
         assert_eq!(value["kind"], "recovery_center_board_entry");

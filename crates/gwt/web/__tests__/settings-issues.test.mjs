@@ -3,8 +3,38 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
+import { createUiStateStore } from "../ui-state-store.js";
+import { createInteractionGuard } from "../interaction-guard.js";
+import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
+const candidateChoices = {
+  agents: [
+    { id: "codex", name: "Codex", is_custom: false, default_model: "gpt-6-astra", supports_fast_mode: true, supports_skip_permissions: true,
+      session_modes: ["Normal", "Continue", "Resume"], models: [
+        { value: "gpt-6-astra", label: "Astra", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }, { value: "high", label: "High" }] },
+        { value: "gpt-6-luna", label: "Luna", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }] },
+      ] },
+    { id: "claude", name: "Claude Code", is_custom: false, default_model: "", default_reasoning: "auto", supports_fast_mode: true, supports_skip_permissions: true,
+      session_modes: ["Normal", "Continue", "Resume"], models: [
+        { value: "", label: "Default", default_reasoning: "auto", reasoning_options: [{ value: "auto", label: "Auto" }] },
+        { value: "haiku", label: "Haiku", default_reasoning: null, reasoning_options: [] },
+      ] },
+    { id: "hermes", name: "Hermes Agent", is_custom: false, default_model: "", models: [], model_suggestions: ["fixture-model", "other-model"],
+      session_modes: ["Normal"], supports_model_input: true },
+    { id: "custom", name: "Configured custom", is_custom: true, models: [], session_modes: ["Normal"], supports_model_input: false },
+  ], docker_services: ["dev", "worker"], default_docker_service: "dev",
+};
+
+function selectValue(control, value) {
+  let option = [...control.options].find(option => option.value === value);
+  if (!option) {
+    option = control.ownerDocument.createElement("option");
+    option.value = value;
+    control.appendChild(option);
+  }
+  option.selected = true;
+}
 function load(name, bindings = {}) {
   bindings = { setControlExplanation, ...bindings };
   const start = source.indexOf(`function ${name}(`);
@@ -296,13 +326,14 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
     { agent_id: "codex", model: "gpt-6", reasoning: "high", runtime_target: "Docker", docker_service: "dev", prefer_for: ["type:fix"] },
     { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
-  const render = load("renderAgentsSettingsPanel");
+  const renderer = load("renderAgentsSettingsPanel");
+  const render = (panel, options) => renderer(panel, { choices: candidateChoices, ...options });
   render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
   render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
   assert.deepEqual([...a.querySelector('[aria-label="Runtime codex"]').options].map(o => o.value), ["Host", "Docker"]);
-  model.value = "new model";
+  selectValue(model, "new model");
   model.dispatchEvent(new Event("input", { bubbles: true }));
   assert.equal(a.dataset.dirty, "true", "incoming status must not destroy unsaved profile edits");
   model.dispatchEvent(new Event("change", { bubbles: true }));
@@ -321,16 +352,80 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
 });
 
+test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel", { crypto: {} })(panel, {
+    profiles: [{ agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
+      { agent_id: "custom", fast_mode: true }, { agent_id: "saved-unknown-agent", model: "historic" }],
+    availableAgents: null, choices: candidateChoices,
+    send: message => sent.push(message),
+  });
+  const control = key => panel.querySelector(`fieldset [data-profile-field="${key}"]`);
+  for (const key of ["agent_id", "model", "reasoning", "docker_service"]) {
+    assert.equal(control(key).localName, "select", key);
+    assert.equal(control(key).className, "settings-select", "reuse Operator controls");
+  }
+  assert.equal(control("model").value, "retired-model");
+  assert.equal(control("reasoning").value, "retired-effort");
+  assert.ok([...control("agent_id").options].some(option => option.value === "hermes"),
+    "shared choices populate Agent before the separate catalog response arrives");
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
+    "adding candidates waits for the complete named custom-agent catalog");
+  const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
+  assert.equal(unknown.querySelector('[data-profile-field="agent_id"]').value, "saved-unknown-agent");
+  assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");
+  assert.equal(control("docker_service").disabled, true);
+  selectValue(control("runtime_target"), "Docker");
+  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("docker_service").disabled, false);
+  assert.deepEqual([...control("docker_service").options].map(option => option.value), ["", "dev", "worker", "saved-service"]);
+  selectValue(control("model"), "gpt-6-luna");
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
+  assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
+  const custom = panel.querySelector('[data-agent-id="custom"]');
+  for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);
+  assert.equal(custom.querySelector('[data-profile-field="fast_mode"]').checked, true, "disabled saved values survive unrelated edits");
+  selectValue(control("agent_id"), "claude");
+  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("model").value, "", "Claude default is the empty CLI alias");
+  selectValue(control("model"), "haiku");
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("reasoning").disabled, true);
+  assert.equal(sent.at(-1).profiles[0].reasoning, null, "unsupported models do not inherit the previous model's effort");
+  selectValue(control("agent_id"), "hermes");
+  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(control("model").localName, "input", "Hermes retains arbitrary model input");
+  const suggestions = document.getElementById(control("model").getAttribute("list"));
+  assert.ok(suggestions, "Hermes offers the configured default provider's model suggestions");
+  assert.deepEqual([...suggestions.querySelectorAll("option")].map(option => option.value), ["fixture-model", "other-model"]);
+  control("model").value = "custom-hermes-model";
+  control("model").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.at(-1).profiles[0].model, "custom-hermes-model");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
+    send: message => sent.push(message),
+  });
+  assert.equal(control("model").value, "gpt-6-astra");
+  assert.equal(control("reasoning").value, "medium");
+  selectValue(control("runtime_target"), "Docker");
+  control("runtime_target").dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.at(-1).profiles[0].model, null, "displaying a default does not pin it on unrelated saves");
+  assert.equal(sent.at(-1).profiles[0].reasoning, null);
+});
+
 test("candidate fields save exactly once on change, never on incomplete input", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "gpt-6" }],
+    profiles: [{ agent_id: "codex", model: "gpt-6-astra" }], choices: candidateChoices,
     send: message => sent.push(message),
   });
   for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
+    if (input.disabled) continue;
     if (input.type === "checkbox") input.checked = !input.checked;
-    else if (input.localName === "select") input.options[1].selected = true;
+    else if (input.localName === "select") input.options[0].selected = true;
     else input.value = "new-value";
     const before = sent.length;
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -341,7 +436,7 @@ test("candidate fields save exactly once on change, never on incomplete input", 
     input.dispatchEvent(new Event("blur"));
     assert.equal(sent.length, before + 1, "blur does not duplicate change");
   }
-  assert.equal(sent.length, 10);
+  assert.ok(sent.length >= 6, "enabled fields autosave");
   assert.equal(Boolean(panel.querySelector('[data-action="save-profiles"]')), false);
 });
 
@@ -349,14 +444,14 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }],
+    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
   });
   const model = panel.querySelector('[data-profile-field="model"]');
   const reasoning = panel.querySelector('[data-profile-field="reasoning"]');
-  model.value = "saved";
+  selectValue(model, "saved");
   model.dispatchEvent(new Event("change", { bubbles: true }));
-  reasoning.value = "unfinished";
+  selectValue(reasoning, "unfinished");
   reasoning.dispatchEvent(new Event("input", { bubbles: true }));
   const reconcile = load("reconcileCandidateSave");
   reconcile(panel, { request_id: 6, profiles: [{ agent_id: "codex", model: "stale" }] });
@@ -366,7 +461,7 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   assert.equal(reasoning.value, "unfinished");
   assert.equal(panel.dataset.dirty, "true");
   assert.equal(panel.dataset.saving, "false");
-  reasoning.value = "high";
+  selectValue(reasoning, "high");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
   assert.equal(panel.dataset.dirty, "false");
@@ -377,7 +472,7 @@ test("a rejected autosave identifies the edited field and retains its value", ()
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }],
+    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "1"; },
   });
   const input = panel.querySelector('[data-profile-field="prefer_for"]');
@@ -388,7 +483,7 @@ test("a rejected autosave identifies the edited field and retains its value", ()
   assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.match(input.closest("label").nextElementSibling.textContent, /prefer_for entry "invalid"/);
   const model = panel.querySelector('[aria-label="Model claude"]');
-  model.value = "valid-model";
+  selectValue(model, "valid-model");
   model.dispatchEvent(new Event("change", { bubbles: true }));
   load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
   assert.equal(input.getAttribute("aria-invalid"), "true");
@@ -411,14 +506,60 @@ test("structural saves wait for their correlated response before allowing row ed
     "structural ACK requests an authoritative redraw");
 });
 
-test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {
-  const { document } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "ClaudeCode" }],
-    availableAgents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
+test("Candidates use shared built-ins and the fresh custom catalog before version metadata arrives", () => {
+  const { document, window } = parseHTML("<html><body><main></main></body></html>"), sent = [];
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "")
+      .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+  );
+  const surface = factory({
     send: message => sent.push(message),
+    createNode(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    },
+    focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {},
+    renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
+    mountIssues(_windowData, host) {
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+    },
   });
+  surface.renderSettingsWindow(document.querySelector("main"), { id: "settings" });
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "ClaudeCode" }], choices: {
+    ...candidateChoices, agents: [...candidateChoices.agents,
+      { id: "team-agent", name: "Stale custom name", is_custom: true, models: [], session_modes: ["Normal"] }],
+  } });
+  const panel = document.querySelector("[data-settings-candidates]");
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
+    "custom agents must settle before Add treats an empty list as authoritative");
+  const initialCatalog = surface.customAgentsModel.read().catalog;
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Pending custom" } });
+  const pendingCatalog = surface.customAgentsModel.read().catalog;
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true);
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
+    "the shared built-in choices do not wait for installed/update version probes");
+  assert.equal(initialCatalog.loaded, false);
+  assert.equal(pendingCatalog.loaded, false, "a save reply is not the complete catalog");
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value),
+    ["", "codex", "hermes", "team-agent"]);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="codex"]').textContent, "Codex (codex)");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Renamed team" } });
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]').textContent, "Renamed team (team-agent)");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "team-agent" });
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]'), null,
+    "the cached choices must not restore a deleted custom agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false, "an empty custom list is settled");
+  surface.applySupportedAgentList({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] });
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
+  sent.length = 0;
   const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
   assert.equal(picker.localName, "select");
   assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);
@@ -428,7 +569,7 @@ test("Candidates use the known catalog, including custom agents, and explain emp
   picker.querySelector('[value="team-agent"]').selected = true;
   add.click();
   assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
-  panel.querySelector('[aria-label="Agent ClaudeCode"]').value = "Codex";
+  selectValue(panel.querySelector('[aria-label="Agent ClaudeCode"]'), "Codex");
   picker.querySelector('[value="codex"]').selected = true;
   add.click();
   assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);

@@ -22,13 +22,21 @@ fn emit_build_stamp() {
     let commit = git_output(&workspace_root, &["rev-parse", "HEAD"]).unwrap_or_default();
     println!("cargo:rustc-env=GWT_BUILD_COMMIT={commit}");
 
-    let epoch = build_epoch(
-        &workspace_root,
-        std::env::var("CARGO_LLVM_COV").as_deref() == Ok("1"),
-        std::time::SystemTime::now(),
-    );
+    let coverage = std::env::var("CARGO_LLVM_COV").as_deref() == Ok("1");
+    let epoch = build_epoch(&workspace_root, coverage, std::time::SystemTime::now());
     println!("cargo:rustc-env=GWT_BUILD_EPOCH={epoch}");
     println!("cargo:rerun-if-env-changed=CARGO_LLVM_COV");
+    println!("cargo:rerun-if-env-changed=GWT_COVERAGE_REVISION");
+
+    // CI regenerates this from actual HEAD immediately before Cargo. Watching
+    // that revision avoids fresh-checkout metadata invalidating identical
+    // coverage objects. Never cache or manually pin the caller's revision env.
+    if coverage
+        && !commit.is_empty()
+        && std::env::var("GWT_COVERAGE_REVISION").as_deref() == Ok(commit.as_str())
+    {
+        return;
+    }
 
     // Without these the stamp survives a rebuild and starts lying, which is
     // the exact failure this feature exists to report. HEAD covers a checkout;
@@ -42,8 +50,9 @@ fn emit_build_stamp() {
         let Some(resolved) = git_output(&workspace_root, &["rev-parse", "--git-path", path]) else {
             continue;
         };
-        if std::path::Path::new(&resolved).exists() {
-            println!("cargo:rerun-if-changed={resolved}");
+        let resolved = workspace_root.join(resolved);
+        if resolved.exists() {
+            println!("cargo:rerun-if-changed={}", resolved.display());
         }
     }
 }

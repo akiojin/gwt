@@ -1412,7 +1412,7 @@ pub fn refresh_issue_cache_for_scan_if_stale(
         return Ok(false);
     }
     run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
-        crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)
+        crate::issue_cache::sync_issue_cache_from_remote_for_monitor(repo_path, cache_root)
     })
     .map_err(|error| error.to_string())?;
     Ok(true)
@@ -2551,7 +2551,7 @@ fn advance_one_autonomous_issue(
                 }
                 crate::issue_monitor_gate::GateAction::WaitForCi => {}
                 crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                    monitor.record_autonomous_failure(issue_number, reason, now);
+                    monitor.remediate_autonomous_gate(issue_number, reason, &body, now);
                 }
                 // Issue #3944 AC-1: an environment hold is not a human
                 // decision — keep the PR in flight, ask the PM to steer,

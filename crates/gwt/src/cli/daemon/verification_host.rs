@@ -2,10 +2,10 @@
 //!
 //! [`locate`] answers the one question the placement decision needs — is there
 //! a daemon that can launch this workload outside the caller's process tree —
-//! and [`run`] hands one command over to it.
+//! and [`run_cancellable`] hands one command over to it.
 //!
-//! The connection is the leash. `run` holds it open for the child's whole
-//! lifetime, so a caller that dies mid-run drops the socket and the daemon
+//! The connection is the leash. `run_cancellable` holds it open for the child's
+//! whole lifetime, so a caller that dies mid-run drops the socket and the daemon
 //! reclaims the workload without anyone having to notice (AC-2).
 
 use std::path::Path;
@@ -293,17 +293,6 @@ fn live_daemon_pids_in(scope: &RuntimeScope) -> Vec<u32> {
     pids
 }
 
-/// Run one verification command on the daemon and wait for it to finish.
-#[allow(dead_code)] // Retained for callers that do not need cancellation.
-pub(crate) fn run<G>(
-    endpoint: &DaemonEndpoint,
-    request: &VerificationSpawnRequest,
-    on_started: impl FnOnce(u32) -> G,
-    timeout: Option<std::time::Duration>,
-) -> Result<DelegatedRun, DelegatedRunError> {
-    run_cancellable(endpoint, request, on_started, timeout, None)
-}
-
 /// Cancellation closes only this command's connection leash.
 pub(crate) fn run_cancellable<G>(
     endpoint: &DaemonEndpoint,
@@ -325,7 +314,7 @@ pub(crate) fn run_cancellable<G>(
     ))
 }
 
-#[allow(dead_code)] // Retained for cancellation-free callers and fixtures.
+#[cfg(test)]
 async fn run_async<G>(
     endpoint: &DaemonEndpoint,
     request: &VerificationSpawnRequest,
@@ -433,7 +422,7 @@ mod tests {
     use gwt_core::verification_priority::LauncherPriority;
 
     fn scratch() -> tempfile::TempDir {
-        tempfile::tempdir().expect("temp dir")
+        gwt_core::test_support::socket_tempdir().expect("temp dir")
     }
 
     fn fixture_endpoint(root: &Path) -> DaemonEndpoint {
@@ -507,8 +496,10 @@ mod tests {
         for complete_handshake in [false, true] {
             let directory = scratch();
             let endpoint = fixture_endpoint(directory.path());
-            let mut listener =
-                super::super::transport::IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+            let mut listener = super::super::transport::IpcListener::bind(
+                gwt_core::test_support::checked_socket_path(Path::new(&endpoint.bind)),
+            )
+            .unwrap();
             let response = IpcHandshakeResponse {
                 protocol_version: endpoint.protocol_version,
                 daemon_version: "fixture".into(),

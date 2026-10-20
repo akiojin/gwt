@@ -17,6 +17,7 @@ export function createConnectionOverlay({
   let graceTimer = null;
   let overlayEl = null;
   let inputDropped = false;
+  let disposed = false;
 
   function reportInputDropped() {
     inputDropped = true;
@@ -26,7 +27,7 @@ export function createConnectionOverlay({
 
   function show() {
     graceTimer = null;
-    if (overlayEl || !documentRef || !documentRef.body) return;
+    if (disposed || overlayEl || !documentRef || !documentRef.body) return;
     const overlay = documentRef.createElement("div");
     overlay.className = "connection-overlay";
     overlay.setAttribute("role", "alert");
@@ -66,6 +67,7 @@ export function createConnectionOverlay({
   }
 
   function setConnected(connected) {
+    if (disposed) return;
     if (connected) {
       hide();
       if (inputDropped) {
@@ -78,5 +80,10 @@ export function createConnectionOverlay({
     graceTimer = setTimeoutFn(show, CONNECTION_OVERLAY_GRACE_MS);
   }
 
-  return { setConnected, reportInputDropped };
+  function dispose() {
+    disposed = true;
+    hide();
+  }
+
+  return { setConnected, reportInputDropped, dispose };
 }

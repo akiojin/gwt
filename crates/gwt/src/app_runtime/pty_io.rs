@@ -1700,11 +1700,13 @@ fn pane_runtime_user_event(event: gwt::pane_runtime::PaneRuntimeEvent) -> UserEv
             incarnation,
             data,
             seq,
+            screen,
         } => UserEvent::RuntimeOutput {
             id,
             incarnation,
             data,
             seq,
+            screen,
         },
         gwt::pane_runtime::PaneRuntimeEvent::Status {
             id,

@@ -1,5 +1,7 @@
 //! Shared operating-system process-tree ownership primitives.
 
+pub mod job_cpu;
+
 /// `CREATE_NO_WINDOW`, retained when a health probe adds suspended creation.
 pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// `CREATE_SUSPENDED`, used to prevent child code from running before Job assignment.
@@ -157,10 +159,10 @@ fn unix_priority_report(launcher_nice: i32, child_nice: i32) -> ChildPriorityRep
 
 #[cfg(windows)]
 mod windows_job {
-    use std::process::Command;
+    use std::{path::PathBuf, process::Command};
 
     use windows::{
-        core::{Error as WindowsError, HRESULT},
+        core::{Error as WindowsError, HRESULT, PCWSTR},
         Win32::{
             Foundation::{CloseHandle, HANDLE},
             System::{
@@ -207,6 +209,8 @@ mod windows_job {
         InvalidCpuRate(u8),
         /// A priority class gwt does not model (for example HIGH or REALTIME).
         UnsupportedPriorityClass(u32),
+        /// A pane Job could not publish its CPU-observation descriptor.
+        Registration(std::io::Error),
     }
 
     impl std::fmt::Display for WindowsJobError {
@@ -219,6 +223,7 @@ mod windows_job {
                 Self::UnsupportedPriorityClass(class) => {
                     write!(formatter, "unsupported priority class {class:#x}")
                 }
+                Self::Registration(error) => write!(formatter, "register Windows Job: {error}"),
             }
         }
     }
@@ -227,6 +232,7 @@ mod windows_job {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             match self {
                 Self::Operation { source, .. } => Some(source),
+                Self::Registration(source) => Some(source),
                 Self::InvalidCpuRate(_) | Self::UnsupportedPriorityClass(_) => None,
             }
         }
@@ -294,6 +300,7 @@ mod windows_job {
     /// final handle closes.
     pub struct WindowsJobObject {
         handle: Option<HANDLE>,
+        registration: Option<PathBuf>,
     }
 
     // Job handles are kernel-owned values. Access to the optional owner is
@@ -303,9 +310,17 @@ mod windows_job {
 
     impl WindowsJobObject {
         pub fn new() -> Result<Self, WindowsJobError> {
-            // SAFETY: null name/security create a private Job Object owned by
-            // the returned handle.
-            let job = unsafe { CreateJobObjectW(None, None) }
+            Self::create(None)
+        }
+
+        fn create(name: Option<&str>) -> Result<Self, WindowsJobError> {
+            let wide_name = name.map(|name| name.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+            let name = wide_name
+                .as_ref()
+                .map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr()));
+            // SAFETY: the caller's default security applies. An optional UUID
+            // name stays live for this call, which returns an owned handle.
+            let job = unsafe { CreateJobObjectW(None, name) }
                 .map_err(|source| operation_error("CreateJobObjectW", source))?;
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -326,7 +341,10 @@ mod windows_job {
                 }
                 return Err(operation_error("SetInformationJobObject", source));
             }
-            Ok(Self { handle: Some(job) })
+            Ok(Self {
+                handle: Some(job),
+                registration: None,
+            })
         }
 
         /// Configure a command to start suspended and without a console
@@ -344,8 +362,13 @@ mod windows_job {
         /// not expose a pre-execution creation hook. New direct spawn paths
         /// should use `new` + `configure_suspended` + `assign_and_resume`.
         pub fn attach_running(process_id: u32) -> Result<Self, WindowsJobError> {
-            let mut job = Self::new()?;
+            // Only pane Jobs need cross-process observation. Deadline-bounded
+            // child Jobs created with `new` remain private and unregistered.
+            let name = format!("Local\\gwt-pane-{}", uuid::Uuid::new_v4());
+            let mut job = Self::create(Some(&name))?;
             job.assign_process(process_id)?;
+            job.registration =
+                Some(super::job_cpu::register(&name).map_err(WindowsJobError::Registration)?);
             Ok(job)
         }
 
@@ -386,32 +409,31 @@ mod windows_job {
             .map_err(|source| operation_error("SetInformationJobObject", source))
         }
 
+        /// Disable rate control during canonical verification. A 100% hard
+        /// cap still enables quota scheduling and does not remove an ancestor's
+        /// cap. Kill-on-close and the process priority class remain unchanged.
+        pub fn disable_cpu_rate_control(&mut self) -> Result<(), WindowsJobError> {
+            let job = self.handle.expect("live Windows Job handle");
+            let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+            // SAFETY: the zero flags disable this information class only;
+            // the exact structure remains live throughout the call.
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectCpuRateControlInformation,
+                    &info as *const _ as _,
+                    std::mem::size_of_val(&info) as u32,
+                )
+            }
+            .map_err(|source| operation_error("SetInformationJobObject", source))
+        }
+
         /// Read back the configured hard CPU cap, or `None` when rate control
         /// is not a hard cap.
         pub fn cpu_rate_hard_cap_percent(&self) -> Result<Option<u8>, WindowsJobError> {
             let job = self.handle.expect("live Windows Job handle");
-            let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
-            let info_size = std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32;
-            // SAFETY: `info` is the exact buffer required by the selected
-            // information class and is writable for the duration of the call.
-            unsafe {
-                QueryInformationJobObject(
-                    Some(job),
-                    JobObjectCpuRateControlInformation,
-                    &mut info as *mut _ as _,
-                    info_size,
-                    None,
-                )
-            }
-            .map_err(|source| operation_error("QueryInformationJobObject", source))?;
-            let required =
-                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE.0 | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP.0;
-            if info.ControlFlags.0 & required != required {
-                return Ok(None);
-            }
-            // SAFETY: with HARD_CAP set the union carries `CpuRate`.
-            let rate = unsafe { info.Anonymous.CpuRate };
-            Ok(Some((rate / CPU_RATE_PER_PERCENT).min(100) as u8))
+            super::job_cpu::hard_cap_percent(Some(job))
+                .map_err(|source| operation_error("QueryInformationJobObject", source))
         }
 
         /// Whether `process_id` currently runs inside this Job. Descendants
@@ -458,11 +480,15 @@ mod windows_job {
         /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, this terminates every member
         /// and descendant still assigned to the Job.
         pub fn terminate(&mut self) -> bool {
-            self.handle.take().is_none_or(|job| {
+            let closed = self.handle.take().is_none_or(|job| {
                 // SAFETY: `job` is owned by `self` and removed before close,
                 // making repeated termination and Drop idempotent.
                 unsafe { CloseHandle(job).is_ok() }
-            })
+            });
+            if let Some(path) = self.registration.take() {
+                let _ = std::fs::remove_file(path);
+            }
+            closed
         }
 
         /// Relinquish this process' Job handle without terminating processes
@@ -668,5 +694,11 @@ mod tests {
             job.cpu_rate_hard_cap_percent().expect("query cap"),
             Some(100)
         );
+        job.disable_cpu_rate_control()
+            .expect("disable rate control");
+        assert_eq!(job.cpu_rate_hard_cap_percent().expect("query cap"), None);
+        assert!(job.kill_on_close_enabled().expect("query kill on close"));
+        job.set_cpu_rate_hard_cap(35).expect("restore policy cap");
+        assert_eq!(job.cpu_rate_hard_cap_percent().unwrap(), Some(35));
     }
 }

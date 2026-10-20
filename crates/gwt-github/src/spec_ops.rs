@@ -14,7 +14,7 @@ use crate::{
     cache::{Cache, CacheError},
     client::{
         ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
-        IssueState, UpdatedAt,
+        UpdatedAt,
     },
     routing::{decide_routing, split_section_into_parts},
     sections::SectionName,
@@ -663,8 +663,3 @@ fn render_body(
 
     out
 }
-
-// Keep these types used so clippy does not complain about unused imports in
-// configurations where only some of them are touched.
-#[allow(dead_code)]
-fn _keep_types_used(_c: BodyComment, _s: IssueState) {}

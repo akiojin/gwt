@@ -251,10 +251,58 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
     assert!(saves.contains("github.event_name == 'schedule'"));
     assert!(saves.contains("github.event_name == 'workflow_dispatch'"));
     assert!(saves.contains("matrix.shard == 1"));
+    assert!(cache["if"]
+        .as_str()
+        .unwrap()
+        .contains("steps.cache-mode.outputs.rolling != 'true'"));
+    let restore = steps
+        .iter()
+        .find(|s| s["id"] == "instrumented-cache")
+        .unwrap();
+    assert_eq!(restore["uses"], "actions/cache/restore@v6");
+    let key = restore["with"]["key"].as_str().unwrap();
+    assert!(key.ends_with("-${{ steps.cache-mode.outputs.revision }}"));
+    assert!(key.contains("steps.cache-mode.outputs.compiler"));
+    let paths = restore["with"]["path"].as_str().unwrap();
+    assert!(paths.contains("target/llvm-cov-target"));
+    assert!(paths.contains("target/coverage-cache-source.json"));
+    assert!(!paths.contains("target/coverage-cache-inputs.json"));
+    let restore_inputs = steps
+        .iter()
+        .find(|s| s["run"] == "python3 scripts/ci_coverage_cache.py restore")
+        .unwrap();
+    assert_eq!(
+        restore_inputs["env"]["COVERAGE_CACHE_RESTORED"],
+        "${{ steps.instrumented-cache.outputs.cache-matched-key }}"
+    );
+    let save = steps
+        .iter()
+        .find(|s| s["uses"] == "actions/cache/save@v6")
+        .unwrap();
+    assert_eq!(
+        save["with"]["key"],
+        "${{ steps.instrumented-cache.outputs.cache-primary-key }}"
+    );
+    assert_eq!(save["with"]["path"], restore["with"]["path"]);
+    let guard = save["if"].as_str().unwrap();
+    assert!(guard.contains("steps.cache-source.outputs.cacheable == 'true'"));
+    assert!(guard.contains("github.ref == 'refs/heads/develop'"));
+    assert!(guard.contains("matrix.shard == 1"));
     assert!(steps
         .iter()
         .any(|s| s["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")));
-    let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features")).unwrap();
+    let summary = steps
+        .iter()
+        .find(|s| s["name"] == "Run and export coverage shard")
+        .unwrap();
+    assert_eq!(
+        summary["run"].as_str().unwrap(),
+        concat!(
+            "GWT_COVERAGE_REVISION=\"$(git rev-parse HEAD)\"\n",
+            "export GWT_COVERAGE_REVISION\n",
+            "node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features\n"
+        )
+    );
     assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%8m.profraw");
     assert_eq!(summary["env"]["NEXTEST_PROFILE"], "coverage");
     assert!(steps
@@ -270,4 +318,31 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         nextest["profile"]["coverage"]["junit"]["path"].as_str(),
         Some("junit.xml")
     );
+}
+
+#[test]
+fn unused_dependency_check_blocks_the_required_lint_job() {
+    let lint = workflow("lint.yml");
+    let job = &lint["jobs"]["lint"];
+    assert_eq!(job["name"], "Clippy & Rustfmt");
+    let steps = job["steps"].as_sequence().unwrap();
+    let install = steps
+        .iter()
+        .find(|step| step["with"]["tool"].as_str() == Some("cargo-machete@0.9.2"))
+        .expect("install a pinned cargo-machete in the required lint job");
+    assert_eq!(install["uses"], "taiki-e/install-action@v2");
+    let check = steps
+        .iter()
+        .find(|step| step["run"].as_str() == Some("cargo machete --with-metadata crates"))
+        .expect("check unused dependencies with Cargo metadata");
+    for entry in [job, install, check] {
+        assert!(
+            entry.get("if").is_none(),
+            "the dependency gate must always run"
+        );
+        assert!(
+            entry.get("continue-on-error").is_none(),
+            "unused dependencies must fail the required lint job"
+        );
+    }
 }

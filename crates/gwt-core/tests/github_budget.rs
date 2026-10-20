@@ -130,6 +130,78 @@ fn recorded_probe_and_block_are_visible_across_ledger_instances() {
     assert_eq!(block.reset_at, at(600));
 }
 
+/// Issue #5737: REST can report a larger GraphQL budget than the query
+/// response. Neither arrival order may reopen the same reset window.
+#[test]
+fn conflicting_graphql_and_rest_observations_keep_the_lower_remaining() {
+    for graphql_first in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("budget");
+        let graphql = BudgetLedger::at(&path);
+        let rest = BudgetLedger::at(&path);
+        let mut rest_probe = probe(4744, at(0));
+        rest_probe.probed_at = at(20); // Keep the same reset_at as the response.
+        let response = github_budget::GraphQlRateLimit {
+            cost: 1,
+            remaining: 0,
+            reset_at: at(2400),
+            node_count: 1,
+        };
+        if graphql_first {
+            graphql.record_graphql_response("monitor", &response, at(10));
+            rest.record_probe(&rest_probe);
+        } else {
+            rest.record_probe(&rest_probe);
+            graphql.record_graphql_response("monitor", &response, at(30));
+        }
+
+        let snapshot = BudgetLedger::at(&path).snapshot(at(30));
+        let saved = snapshot.probe.as_ref().expect("saved observations");
+        assert_eq!(saved.resources["graphql"].remaining, 0);
+        assert_eq!(saved.resources["core"], rest_probe.resources["core"]);
+        let policy = ThrottlePolicy::default();
+        let reason =
+            github_budget::throttle_reason(&snapshot, GitHubQuota::GraphQl, &policy, at(30))
+                .expect("the observed exhaustion still closes the GraphQL reserve");
+        assert!(reason.contains("remaining=0"), "{reason}");
+        assert!(
+            github_budget::throttle_reason(&snapshot, GitHubQuota::Rest, &policy, at(30)).is_none()
+        );
+    }
+}
+
+#[test]
+fn a_new_graphql_reset_window_recovers_and_ignores_delayed_old_observations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let exhausted = github_budget::GraphQlRateLimit {
+        cost: 1,
+        remaining: 0,
+        reset_at: at(60),
+        node_count: 1,
+    };
+    ledger.record_graphql_response("monitor", &exhausted, at(0));
+    let recovered = probe(4900, at(61));
+    BudgetLedger::at(dir.path()).record_probe(&recovered);
+    let policy = ThrottlePolicy::default();
+    assert!(github_budget::throttle_reason(
+        &ledger.snapshot(at(61)),
+        GitHubQuota::GraphQl,
+        &policy,
+        at(61)
+    )
+    .is_none());
+
+    ledger.record_graphql_response("monitor", &exhausted, at(62));
+    let snapshot = ledger.snapshot(at(62));
+    let saved = snapshot.probe.as_ref().expect("new window retained");
+    assert_eq!(saved.resources["graphql"], recovered.resources["graphql"]);
+    assert_eq!(saved.resources["core"], recovered.resources["core"]);
+    assert!(
+        github_budget::throttle_reason(&snapshot, GitHubQuota::GraphQl, &policy, at(62)).is_none()
+    );
+}
+
 // ── AC-4: throttle decision ──
 
 #[test]
@@ -620,6 +692,34 @@ fn spawn_source_names_the_process_and_the_gh_command_shape() {
         github_budget::spawn_source(&["api", "graphql", "-f", "q"]).ends_with(" gh api graphql")
     );
     assert!(github_budget::spawn_source(&["--version"]).ends_with(" gh"));
+}
+
+#[test]
+fn explicit_callers_keep_identical_requests_separate_from_legacy_sources() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let args = ["api", "https://api.github.com/repos/o/r/issues?page=2"];
+    let legacy = github_budget::spawn_source(&args);
+    let options = gwt_core::process_console::SpawnOptions::new("gh api issues");
+    assert!(options.github_caller.is_none());
+    let options = options.github_caller("issue-monitor.issues");
+    let monitor = github_budget::spawn_source_for_caller(
+        &args,
+        options.github_caller.as_deref().expect("explicit caller"),
+    );
+    let refresh = github_budget::spawn_source_for_caller(&args, "issue-cache.refresh");
+    assert_eq!(monitor, format!("{legacy} [issue-monitor.issues]"));
+    assert_eq!(refresh, format!("{legacy} [issue-cache.refresh]"));
+    for source in [&monitor, &monitor, &refresh, &legacy] {
+        ledger.record_spawn_from(GitHubQuota::Rest, source, at(0));
+    }
+    let snapshot = ledger.snapshot(at(30));
+    let core = &snapshot.local["core"];
+    assert_eq!(core.calls_last_minute, 4);
+    for (source, calls) in [(&monitor, 2), (&refresh, 1), (&legacy, 1)] {
+        assert_eq!(core.sources_last_minute[source], calls);
+        assert_eq!(core.points_last_hour_by_source[source], calls);
+    }
 }
 
 #[test]

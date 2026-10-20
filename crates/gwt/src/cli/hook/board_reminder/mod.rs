@@ -1195,6 +1195,37 @@ mod tests {
                     < text.find(r#""operation":"workspace.update""#),
                 "naming must precede the purpose update: {text}"
             );
+            // Issue #5705: execute the actual injected startup instructions
+            // against the gate that runs before an Agent has set its identity.
+            let startup_commands = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+                .take(2)
+                .collect::<Vec<_>>();
+            assert_eq!(startup_commands.len(), 2, "name and purpose commands");
+            for envelope in startup_commands {
+                let command = format!("gwtd <<'JSON'\n{envelope}\nJSON");
+                let hook_event = HookEvent {
+                    tool_name: Some("Bash".to_string()),
+                    tool_input: Some(serde_json::json!({"command": command})),
+                    transcript_path: None,
+                    active_skill: None,
+                    active_plugin: None,
+                    cwd: None,
+                };
+                let context = super::super::workflow_policy::WorkflowContext::unknown()
+                    .with_title_summary_missing(true);
+                assert_eq!(
+                    super::super::workflow_policy::evaluate_with_context(
+                        &hook_event,
+                        &repo,
+                        &context,
+                    )
+                    .expect("startup policy"),
+                    HookOutput::Silent,
+                    "{event}: startup command must pass before identity: {envelope}"
+                );
+            }
         }
     }
 

@@ -144,6 +144,11 @@ fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
 
     for provider in [".claude", ".codex"] {
         let skills_root = dir.path().join(provider).join("skills");
+        // A clean checkout has no runtime-generated coordination guidance.
+        let generated_board = skills_root.join("gwt-coordination/references/board.md");
+        if generated_board.exists() {
+            fs::remove_file(generated_board).expect("exclude locally generated guidance");
+        }
         for entry in fs::read_dir(&skills_root).expect("distributed skills") {
             let skill_dir = entry.expect("skill entry").path();
             if skill_dir.file_name().unwrap() == "gwt-coordination" {
@@ -1177,6 +1182,57 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
                 && content.contains("<2hex>/<64hex>.jsonl"),
             "generated guidance must safely discover every ignored canonical shard"
         );
+    }
+}
+
+#[test]
+fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        let board = fs::read_to_string(skills.join("gwt-coordination/references/board.md"))
+            .expect("materialized authority guidance");
+        let authority = markdown_block(
+            &board,
+            "## Autonomous investigation authority",
+            Some("## Board (coordination history)"),
+        );
+        for required in [
+            "`execution.status`",
+            "`launch_route: autonomous`",
+            "Investigation-First",
+            "do not wait for `進めて`",
+            "owner Issue's purpose and acceptance criteria",
+            "Update the plan/tasks before resuming implementation",
+            "new feature, a change to the SPEC's purpose, or another Issue's domain",
+            "`agent:pm`",
+            "Manual or unknown launch routes keep the existing interactive",
+            "Permission, safety, and verification gates still apply",
+            "Issue #5566: post-delivery measurement identifies the root cause",
+            "Issue #5016: slice verification exposes an existing lifecycle defect",
+        ] {
+            assert!(
+                authority.contains(required),
+                "{provider}: missing {required}"
+            );
+        }
+        assert_eq!(
+            authority
+                .matches("update plan/tasks and continue without PM approval")
+                .count(),
+            2,
+            "both reported in-scope regressions must continue autonomously"
+        );
+        let ownership = fs::read_to_string(skills.join("gwt-execute/references/ownership.md"))
+            .expect("materialized execution ownership");
+        assert!(ownership.contains("`Autonomous investigation authority`"));
+        assert!(ownership.contains("generated `gwt-coordination` skill's `references/board.md`"));
+        assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
+        assert!(ownership.contains("first apply the launch-route authority below"));
     }
 }
 
