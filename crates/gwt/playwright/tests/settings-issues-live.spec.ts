@@ -21,6 +21,15 @@ const panel = (page: Page, section: string) => section === "agents"
   : settings(page).locator(`[data-settings-panel="${section}"]`);
 const autonomous = (page: Page) => panel(page, "issues").locator('[data-action="monitor-autonomous"]');
 
+test.afterEach(async ({ page }) => {
+  if (!process.env.GWT_PLAYWRIGHT_BASE_URL || page.isClosed()) return;
+  // Release the fixed surface before closing its disposable backing window.
+  await page.locator('button[data-surface="agents"]').click();
+  const ids = await settings(page).evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
+  for (const id of ids) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await expect(settings(page)).toHaveCount(0);
+});
+
 test("Issue #5787 candidate choices preserve saved values and persist dependent selections", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base, "requires browser-check's isolated checkout");

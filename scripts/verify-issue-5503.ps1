@@ -73,6 +73,7 @@ $isolatedEnv['GWT_HOOK_BIN'] = $hookBin
 $isolatedEnv['GIT_TERMINAL_PROMPT'] = '0'
 if ($CandidateSettings) {
     $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1'
+    $isolatedEnv['RUST_LOG'] = 'warn,gwt.process.summary=info'
     # Load custom-agent configuration before either runtime caches its catalog.
     @'
 [tools.customCodingAgents.fixture-candidate]
@@ -98,6 +99,9 @@ $stdoutTask = $null
 $stderrTask = $null
 $anchorSocket = $null
 $savedVars = @{}
+# Preserve diagnostics even when verify.run removes its disposable TEMP.
+$artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5503-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 try {
     if ($CandidateSettings) {
         # Profile writes use the production daemon transport. The 250ms GUI
@@ -121,6 +125,38 @@ try {
             if (!$lineTask.Wait(30000) -or !$lineTask.Result -or !$lineTask.Result.StartsWith($expected)) { throw 'Isolated daemon did not become ready.' }
         }
         $daemonStdoutTask = $ownedDaemon.StandardOutput.ReadToEndAsync()
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $probeInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwtd)
+            $probeInfo.WorkingDirectory = $repoRoot
+            $probeInfo.UseShellExecute = $false
+            $probeInfo.CreateNoWindow = $true
+            $probeInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $probeInfo.RedirectStandardInput = $true
+            $probeInfo.RedirectStandardOutput = $true
+            $probeInfo.RedirectStandardError = $true
+            $probeInfo.Environment.Clear()
+            foreach ($name in $isolatedEnv.Keys) { $probeInfo.Environment[$name] = $isolatedEnv[$name] }
+            $probe = [Diagnostics.Process]::Start($probeInfo)
+            try {
+                $probeOutput = $probe.StandardOutput.ReadToEndAsync()
+                $probeError = $probe.StandardError.ReadToEndAsync()
+                $probe.StandardInput.WriteLine('{"schema_version":1,"operation":"daemon.status","params":{}}')
+                $probe.StandardInput.Close()
+                if (!$probe.WaitForExit(10000)) { throw 'Isolated daemon status probe timed out.' }
+                if ($probe.ExitCode) { throw $probeError.GetAwaiter().GetResult() }
+                $daemonStatus = ($probeOutput.GetAwaiter().GetResult() | ConvertFrom-Json).output
+            } finally {
+                if (!$probe.HasExited) { $probe.Kill(); $probe.WaitForExit(10000) | Out-Null }
+                $probe.Dispose()
+            }
+            if ($daemonStatus -match '^running pid=(\d+).*probe=ok') {
+                if ([int]$Matches[1] -ne $ownedDaemon.Id) { throw 'Isolated daemon PID does not match its owner.' }
+                break
+            }
+            if ($ownedDaemon.HasExited -or [DateTime]::UtcNow -ge $readyDeadline) { throw 'Isolated daemon did not pass its authenticated status probe.' }
+            Start-Sleep -Milliseconds 200
+        } while ($true)
         Write-Output "Fresh checkout daemon PID: $($ownedDaemon.Id); isolated HOME: $checkHome"
     }
     $startInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwt)
@@ -195,9 +231,6 @@ Module._resolveFilename = function(request, parent, ...rest) {
     }
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
-    # Keep evidence outside verify.run's disposable TEMP, as run-visual-tests.sh does.
-    $artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5503-' + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
     $specs = if ($CandidateSettings) { @('settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts', '--grep', 'Issue #5787|Issue Monitor candidate pool') } else { @('provider-usage.spec.ts') }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output $artifacts `
@@ -217,8 +250,14 @@ Module._resolveFilename = function(request, parent, ...rest) {
     if ($anchorSocket) { $anchorSocket.Abort(); $anchorSocket.Dispose() }
     $remaining = @(@($ownedGui, $ownedDaemon) | Where-Object { $_ -and !$_.HasExited })
     if ($remaining.Count) { throw "Owned PID(s) remain alive: $(($remaining | ForEach-Object { $_.Id }) -join ', ')." }
-    if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'startup.log') }
-    if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'stderr.log') }
-    if ($daemonStdoutTask) { $daemonStdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'daemon-startup.log') }
-    if ($daemonStderrTask) { $daemonStderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'daemon-stderr.log') }
+    if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'startup.log') }
+    if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'stderr.log') }
+    if ($daemonStdoutTask) { $daemonStdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-startup.log') }
+    if ($daemonStderrTask) { $daemonStderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-stderr.log') }
+    if ($daemonStatus) { $daemonStatus | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-status.txt') }
+    $fixtureLogs = Join-Path $checkHome '.gwt/logs'
+    if (Test-Path -LiteralPath $fixtureLogs -PathType Container) {
+        Copy-Item -LiteralPath $fixtureLogs -Destination (Join-Path $artifacts 'fixture-logs') -Recurse
+    }
+    Write-Output "Browser evidence: $artifacts"
 }

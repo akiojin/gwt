@@ -11,6 +11,16 @@ import {
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const CUSTOM_ID = "fixture-candidate";
 
+test.afterEach(async ({ page }) => {
+  if (!BASE || page.isClosed()) return;
+  // The fixed Issues surface recreates its Settings window while selected.
+  await page.locator('button[data-surface="agents"]').click();
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  const ids = await settings.evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
+  for (const id of ids) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await expect(settings).toHaveCount(0);
+});
+
 async function seedCustomCandidate(): Promise<void> {
   const isolatedHome = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
   expect(isolatedHome, "requires browser-check's isolated HOME").toBeTruthy();
@@ -55,17 +65,6 @@ test.describe("Issue Monitor candidate pool", () => {
         && payload.request_id === 532101)?.payload).then(handle => handle.jsonValue());
       expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
       expect(seeded.profiles.map((profile: any) => profile.agent_id)).toEqual(["claude"]);
-      const beforeIds = await page.locator(".workspace-window").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.id));
-      await sendLiveGwtEvent(page, {
-        kind: "create_window", preset: "issue",
-        bounds: { x: 60, y: 50, width: 1040, height: 820 },
-      });
-      const windowId = await page.waitForFunction((before) => {
-        const node = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="settings"]')]
-          .find(node => !before.includes(node.dataset.id));
-        return node?.dataset.id;
-      }, beforeIds).then(handle => handle.jsonValue());
-      const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const pool = settings.locator('[data-settings-candidates]');
       const openCandidates = async () => {
@@ -96,9 +95,8 @@ test.describe("Issue Monitor candidate pool", () => {
         await expect(pool).toHaveAttribute("data-dirty", String(dirty));
       };
       await openCandidates();
-      // A backend-created window does not select the frontend rail after
-      // reconnect; the Settings entry point above owns that focus change.
-      await expect(surface).toBeVisible();
+      const windowId = await settings.getAttribute("data-id");
+      await expect(settings).toBeVisible();
       await expect(pool.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);
       const rows = pool.locator("fieldset[data-agent-id]");
       await expect(rows).toHaveCount(1);
@@ -220,6 +218,7 @@ test.describe("Issue Monitor candidate pool", () => {
       // Commit, then close immediately without awaiting the save response.
       await reloadedPool.getByLabel("Model claude", { exact: true }).selectOption("opus");
       await reloadedPool.getByLabel("Model claude", { exact: true }).press("Tab");
+      await page.locator('button[data-surface="agents"]').click();
       await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])

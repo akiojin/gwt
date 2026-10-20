@@ -367,6 +367,8 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   assert.equal(control("reasoning").value, "retired-effort");
   assert.ok([...control("agent_id").options].some(option => option.value === "hermes"),
     "shared choices populate Agent before the separate catalog response arrives");
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
+    "adding candidates waits for the complete named custom-agent catalog");
   const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
   assert.equal(unknown.querySelector('[data-profile-field="agent_id"]').value, "saved-unknown-agent");
   assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");
