@@ -3358,15 +3358,11 @@ pub(super) const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
 fn record_issue_monitor_gui_spawn_phase(
     issue_number: Option<u64>,
     phase: &'static str,
-    started: &mut std::time::Instant,
+    started: &mut super::wizard::IssueMonitorGuiPhases,
 ) {
-    let now = std::time::Instant::now();
     if let Some(issue_number) = issue_number {
-        tracing::info!(target: "gwt.launch.timing", phase, issue_number,
-            elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0,
-            thread = "gui", "Issue Monitor launch phase");
+        started.record(phase, issue_number, None, None);
     }
-    *started = now;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6727,7 +6723,8 @@ impl AppRuntime {
         mut config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
-        let mut phase_started = std::time::Instant::now();
+        let mut phase_started =
+            super::wizard::IssueMonitorGuiPhases::new(self.blocking_tasks.clone());
         if self.agent_maintenance.busy {
             return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
         }

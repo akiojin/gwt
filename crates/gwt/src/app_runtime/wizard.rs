@@ -454,9 +454,86 @@ fn issue_monitor_prepared_prefs_path(context: &super::ProjectContext) -> PathBuf
     gwt_core::paths::gwt_project_dir(&context.project_key).join("project-state/issue-monitor.json")
 }
 
+struct IssueMonitorGuiPhase {
+    phase: &'static str,
+    issue_number: u64,
+    delivery_id: Option<String>,
+    elapsed_ms: f64,
+    prefs_stamp_elapsed_ms: Option<f64>,
+    captured_at: chrono::DateTime<Utc>,
+}
+
+impl IssueMonitorGuiPhase {
+    fn emit(&self) {
+        tracing::info!(target: "gwt.launch.timing", phase = self.phase,
+            issue_number = self.issue_number, delivery_id = self.delivery_id.as_deref().unwrap_or("none"),
+            elapsed_ms = self.elapsed_ms, prefs_stamp_elapsed_ms = self.prefs_stamp_elapsed_ms,
+            captured_at = %self.captured_at.to_rfc3339(), thread = "gui", emitter = "worker",
+            "Issue Monitor launch phase");
+    }
+}
+
+/// Measure on the GUI; format optional diagnostics on the existing worker.
+pub(super) struct IssueMonitorGuiPhases {
+    started: std::time::Instant,
+    spawner: super::BlockingTaskSpawner,
+    span: tracing::Span,
+    phases: Vec<IssueMonitorGuiPhase>,
+}
+
+impl IssueMonitorGuiPhases {
+    pub(super) fn new(spawner: super::BlockingTaskSpawner) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            spawner,
+            span: tracing::Span::current(),
+            phases: Vec::new(),
+        }
+    }
+
+    pub(super) fn record(
+        &mut self,
+        phase: &'static str,
+        issue_number: u64,
+        delivery_id: Option<&str>,
+        prefs_stamp_elapsed_ms: Option<f64>,
+    ) {
+        let now = std::time::Instant::now();
+        let row = IssueMonitorGuiPhase {
+            phase,
+            issue_number,
+            delivery_id: delivery_id.map(str::to_owned),
+            elapsed_ms: now.duration_since(self.started).as_secs_f64() * 1000.0,
+            prefs_stamp_elapsed_ms,
+            captured_at: Utc::now(),
+        };
+        self.phases.push(row);
+        self.started = now;
+    }
+}
+
+impl Drop for IssueMonitorGuiPhases {
+    fn drop(&mut self) {
+        if self.phases.is_empty() {
+            return;
+        }
+        let phases = std::mem::take(&mut self.phases);
+        let span = self.span.clone();
+        // Diagnostics are best effort; never panic or format synchronously
+        // when a worker cannot be scheduled during shutdown/failure handling.
+        let _ = self.spawner.try_spawn(move || {
+            span.in_scope(|| {
+                for phase in phases {
+                    phase.emit();
+                }
+            });
+        });
+    }
+}
+
 fn record_issue_monitor_gui_phase(
     phase: &'static str,
-    started: &mut std::time::Instant,
+    started: &mut IssueMonitorGuiPhases,
     issue_number: u64,
     delivery_id: Option<&str>,
 ) {
@@ -465,21 +542,12 @@ fn record_issue_monitor_gui_phase(
 
 fn record_issue_monitor_gui_phase_with_prefs(
     phase: &'static str,
-    started: &mut std::time::Instant,
+    started: &mut IssueMonitorGuiPhases,
     issue_number: u64,
     delivery_id: Option<&str>,
     prefs_stamp_elapsed_ms: Option<f64>,
 ) {
-    let now = std::time::Instant::now();
-    tracing::info!(target: "gwt.launch.timing", phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0, prefs_stamp_elapsed_ms, thread = "gui", "Issue Monitor launch phase");
-    let log_elapsed = now.elapsed();
-    if log_elapsed > std::time::Duration::from_millis(50) {
-        // Keep the historical phase boundaries: the following phase includes
-        // this log call. Attribute its wait explicitly rather than to I/O in
-        // that following phase. Never recursively measure the diagnostic.
-        tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_logging_slow", source_phase = phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = log_elapsed.as_secs_f64() * 1000.0, thread = "gui", "Issue Monitor phase logging exceeded the handler budget");
-    }
-    *started = now;
+    started.record(phase, issue_number, delivery_id, prefs_stamp_elapsed_ms);
 }
 
 fn record_issue_monitor_worker_phase(phase: &'static str, started: &mut std::time::Instant) {
@@ -3966,7 +4034,7 @@ impl AppRuntime {
             provider_usage,
             mut delivery,
         } = prepared;
-        let mut phase_started = std::time::Instant::now();
+        let mut phase_started = IssueMonitorGuiPhases::new(self.blocking_tasks.clone());
         let correlation_delivery_id = request.delivery_id.clone();
         let correlation_issue_number = request.issue_number;
         let key = issue_monitor_launch_preparation_key(&context, &request);
@@ -4113,7 +4181,13 @@ impl AppRuntime {
                     Some(attempt),
                 );
             }
-            tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, thread = "gui", "Issue Monitor launch facts require revalidation");
+            let captured_at = Utc::now();
+            let span = tracing::Span::current();
+            let _ = self.blocking_tasks.try_spawn(move || {
+                span.in_scope(|| {
+                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
+                });
+            });
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
                 .then(|| delivery.reusable_fresh_launch(request.launch_session_strategy))
                 .flatten();
@@ -4791,7 +4865,7 @@ impl AppRuntime {
             delivery_id,
             launch_session_strategy,
         } = request;
-        let mut phase_started = std::time::Instant::now();
+        let mut phase_started = IssueMonitorGuiPhases::new(self.blocking_tasks.clone());
         let correlation_delivery_id = delivery_id.clone();
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
         else {

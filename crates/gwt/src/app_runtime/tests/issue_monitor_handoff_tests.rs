@@ -1722,6 +1722,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         events.is_empty(),
         "completion is emitted by the worker callback: {events:#?}"
     );
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &[1]);
     assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
@@ -1925,6 +1926,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .expect("holder pane")
         .shared_pty()
         .invalidate_input_generation();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &[1]);
     queued_tasks
         .lock()
         .expect("queued tasks")
@@ -1989,6 +1991,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         Some(delivery_id.clone()),
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &[0]);
     assert!(
         retry_tasks.lock().expect("retry tasks").is_empty(),
         "an ambiguous submit must never enqueue a second physical write",
@@ -2032,6 +2035,7 @@ fn app_runtime_answered_handoff_waits_for_a_materializing_holder() {
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         )
         .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &[0]);
     assert!(queued_tasks.lock().expect("queued tasks").is_empty());
     let pending = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,

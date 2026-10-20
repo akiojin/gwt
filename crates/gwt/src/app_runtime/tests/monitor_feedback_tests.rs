@@ -509,6 +509,7 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
         .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 0]);
     assert_eq!(
         queued.lock().expect("retry queue").len(),
         1,
@@ -627,6 +628,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         take_monitor_launch_complete_event("facts-prefetch", &fixture.recorded_events);
     assert!(first_result.is_ok(), "first launch: {first_result:?}");
     assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[3, 2, 1]);
     assert_eq!(
         queued.lock().unwrap().len(),
         2,
@@ -862,7 +864,6 @@ fn issue5596_same_project_preparation_overlaps_after_pane_registration() {
             &fixture.recorded_events,
         ));
     fixture.runtime.advance_issue_monitor_launch_queue_events();
-    let next_preparation_count = queued.lock().expect("next preparation").len();
     let first_pane_inflight = fixture
         .runtime
         .inflight_launches
@@ -882,6 +883,8 @@ fn issue5596_same_project_preparation_overlaps_after_pane_registration() {
     let (window_id, result) =
         take_monitor_launch_complete_event("serial-preparation", &fixture.recorded_events);
     assert!(result.is_ok(), "first launch: {result:?}");
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 1, 0]);
+    let next_preparation_count = queued.lock().expect("next preparation").len();
     assert_eq!(
         next_preparation_count, 1,
         "the next facts preparation must start after the first pane is registered"
@@ -1105,6 +1108,7 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
         1,
         "a conflicting reserved initial must not publish a pane"
     );
+    run_queued_monitor_gui_diagnostics(&queued, &[3, 1, 0]);
     assert_eq!(queued.lock().unwrap().len(), 1, "reprepare on a worker");
     drain_queued_blocking_tasks(&queued);
     fixture
@@ -1268,6 +1272,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
         .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 0]);
     assert_eq!(
         queued.lock().unwrap().len(),
         1,
@@ -1705,6 +1710,7 @@ fn issue5596_answer_worker_uses_current_autonomous_mode() {
             &fixture.recorded_events,
         ))
         .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 1]);
     assert_eq!(
         queued.lock().expect("queued answer worker").len(),
         1,

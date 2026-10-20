@@ -246,6 +246,42 @@ fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
     captured_events
 }
 
+#[test]
+fn issue_5596_gui_phase_logging_waits_for_worker_dispatch() {
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let inline = capture_tracing_events(|| {
+        let mut phases = super::wizard::IssueMonitorGuiPhases::new(spawner);
+        phases.record("monitor_gui_context", 5596, Some("delivery-5596"), None);
+        phases.record(
+            "monitor_gui_freshness",
+            5596,
+            Some("delivery-5596"),
+            Some(0.125),
+        );
+    });
+    assert!(
+        inline.is_empty(),
+        "GUI phase recording invoked the subscriber inline"
+    );
+    let queued = std::mem::take(&mut *tasks.lock().unwrap());
+    assert_eq!(queued.len(), 1, "one worker batch for both phases");
+    let emitted = capture_tracing_events(|| queued.into_iter().for_each(|task| task()));
+    assert_eq!(emitted.len(), 2);
+    for event in &emitted {
+        assert_eq!(event.target, "gwt.launch.timing");
+        assert_eq!(event.fields["issue_number"], "5596");
+        assert_eq!(event.fields["delivery_id"], "delivery-5596");
+        assert_eq!(event.fields["thread"], "gui");
+        assert_eq!(event.fields["emitter"], "worker");
+        assert!(event.fields["elapsed_ms"].parse::<f64>().unwrap() >= 0.0);
+        let observed = chrono::DateTime::parse_from_rfc3339(&event.fields["captured_at"]).unwrap();
+        assert_eq!(observed.offset().local_minus_utc(), 0);
+    }
+    assert_eq!(emitted[0].fields["phase"], "monitor_gui_context");
+    assert_eq!(emitted[1].fields["phase"], "monitor_gui_freshness");
+    assert_eq!(emitted[1].fields["prefs_stamp_elapsed_ms"], "0.125");
+}
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<OsString>,
@@ -3381,6 +3417,23 @@ fn take_project_navigation_completion(
     match events.remove(index) {
         UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
         _ => unreachable!("matched project navigation completion"),
+    }
+}
+
+/// Run known telemetry jobs without advancing the business work under test.
+fn run_queued_monitor_gui_diagnostics(tasks: &BlockingTestTaskQueue, indices: &[usize]) {
+    for &index in indices {
+        let task = tasks.lock().expect("queued diagnostic").remove(index);
+        let events = capture_tracing_events(task);
+        assert!(!events.is_empty(), "selected task must emit diagnostics");
+        assert!(
+            events.iter().all(|event| {
+                event.target == "gwt.launch.timing"
+                    && event.fields.get("thread").map(String::as_str) == Some("gui")
+                    && event.fields.get("emitter").map(String::as_str) == Some("worker")
+            }),
+            "selected task must contain only GUI phase diagnostics",
+        );
     }
 }
 
