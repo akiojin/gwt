@@ -256,6 +256,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status: Box::new(IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -299,7 +300,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         value["status"]["launch_profile_candidates"],
         serde_json::json!([])
     );
-    assert_eq!(value["status"]["usage_threshold_percent"], 80);
+    assert!(value["status"].get("usage_threshold_percent").is_none());
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);

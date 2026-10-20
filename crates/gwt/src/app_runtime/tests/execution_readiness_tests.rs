@@ -1188,15 +1188,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             );
             gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
                 .unwrap();
-            gwt_core::workspace_projection::record_workspace_work_event(
-                &fixture.repo,
-                gwt_core::workspace_projection::WorkEvent::new(
-                    gwt_core::workspace_projection::WorkEventKind::Discard,
-                    &work_id,
-                    Utc::now(),
-                ),
-            )
-            .unwrap();
+            // Active foreign ownership must reject activation; terminal roots allow a successor.
             message = format!("the fresh generation activation transaction was rejected: Work {work_id} owner mismatch: expected Issue #2359, actual Issue #999");
         }
         let deferred = matches!(
@@ -2784,6 +2776,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
             UserEvent::LaunchComplete {
                 window_id: event_window_id,
                 result,
+                ..
             } if event_window_id == &window_id => Some(result.as_ref().clone()),
             _ => None,
         })

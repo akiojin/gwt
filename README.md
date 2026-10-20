@@ -283,11 +283,19 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
-browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
-the server to drain PTYs and exit gracefully. The tray-resident process is one
-per OS-login user; a second `gwt` invocation prints the existing URL and exits
-instead of starting a second server.
+Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
+tray mode, closing a browser tab leaves the project and its running agents active;
+reopen its project URL to return to the same workspace. To stop a project, choose
+**Close Project**
+in its page header or beside it in the Hub's open-project list. If agents are
+running, a confirmation dialog lists them: **Cancel** keeps them running, while
+**Close Project** stops that project's runtime and agents. Other projects keep
+running, and every browser tab showing the closed project returns to the Hub.
+
+To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
+`SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
+is one per OS-login user; a second `gwt` invocation prints the existing URL and
+exits instead of starting a second server.
 
 gwtd operations run through stdin JSON envelopes without opening a GUI window:
 
@@ -433,6 +441,8 @@ Common windows include:
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
   the same Issues section to edit launch profiles and candidate order/preferences.
+  Candidate edits save automatically when committed; text fields save when focus
+  leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
   `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
@@ -489,7 +499,10 @@ expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Autonomous and Start / Stop return to the summary when collapsed.
 Auto-apply updates is in **System**. Select **Manual** to edit
-Max active; **Auto** displays the calculated value without editing. Auto-refill is
+Max active, then select **Apply** to save the final number. **Auto** disables editing
+and shows the effective limit, with **Measuring capacity…** while measurement is pending.
+Lowering the limit below the active count keeps existing agents running; new launches
+wait until the active count falls below the limit. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
@@ -509,13 +522,15 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number to keep a **Manual** override, or select **Use Auto** to
+Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
 follow the recommendation again. Existing saved limits remain Manual. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_last_change` records the last explicit setting change with `changed_at`
+and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
 **Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
@@ -767,6 +782,29 @@ decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
+Ask the PM to link planned Issues to a project goal or an explicit maintenance
+or compliance category. `pm.plan.status` shows the saved planning revision and a
+`policy` assessment with unlinked or invalid work, Now/Next/Later items, and
+missing milestone information. Monitor observations include their source and
+scan time; unavailable or incomplete observations do not prove full coverage.
+Reported milestone health and confidence remain unverified until supporting
+evidence is connected.
+Milestone diagnostics also show the observed Monitor inbox states and unobserved
+Issues from explicit milestone membership and roadmap references to a unique,
+nonempty milestone ID. These are reference facts, not proof of goal alignment.
+Use the states to inspect holds, failures or claim contention; missing observations
+and Merged/Released states do not prove milestone health or completion.
+Goal diagnostics list roadmap references, Issue numbers, observed inbox states and
+unobserved Issues for links explicitly naming a unique, nonempty exact goal ID.
+Invalid links remain reference facts; milestone-only or category-only links do
+not expand membership, and empty or duplicate goal IDs resolve no links.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` remains missing until a supporting source is connected.
+Goal, milestone and roadmap changes also retain their reason, revision, changed
+values and directly affected Issues in the planning audit receipts. Goal changes
+include only Issues explicitly linked to that goal through roadmap items. These records do
+not confirm that dependent work or its agents have been notified.
+
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
 claim/slot path does the launching, so the duplicate-launch protections are
@@ -961,14 +999,18 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you choose `Clone from GitHub...` from
-either the Project Picker (shown when no tab is open) or the top toolbar's
-`Open Project ▾` split-button dropdown (always reachable from an active
-project). The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
+`gwt` auto-creates this layout when you choose `Clone from GitHub…` from
+the Hub or system tray. The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
 repositories through `gh search repos`, then asks for a destination parent
 folder. The new project is created at `<parent>/<project>/`, with a bare
 `<project>.git/` repository and an initial worktree on `develop` when it
 exists, otherwise on the remote default branch.
+
+Clone reserves a browser tab when you submit and opens the project's URL there
+after success, keeping the Hub available. If popups are blocked or you close
+that tab, use the completion link in the Hub. Failure closes the reserved tab
+and shows the reason. If the repository is already registered in Open or
+Recent, cloning is refused and **Open existing project** opens its existing URL.
 
 Existing Normal Git repositories (`.git/` directly under the project
 directory) are recognised so a migration to the Nested Bare + Worktree layout

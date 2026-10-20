@@ -984,6 +984,91 @@ fn stale_prepared_cleanup_preserves_same_id_replacement_and_inflight_key() {
 }
 
 #[test]
+fn issue_5642_old_launch_completion_cannot_replace_another_issue_reusing_its_window_id() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded, tasks, window_id, mut result) =
+        queued_agent_completion_fixture(temp.path());
+    let completion = result.as_mut().unwrap();
+    completion.6 = Some(42);
+    completion.9 = gwt_agent::SessionMode::Resume;
+    let mut old_session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+            .unwrap();
+    old_session.linked_issue_number = Some(42);
+    old_session.save(&runtime.sessions_dir).unwrap();
+    let old_completion = UserEvent::LaunchComplete {
+        window_id: window_id.clone(),
+        window_generation: runtime
+            .window_lifecycle_generations
+            .lock()
+            .unwrap()
+            .get(&window_id)
+            .copied(),
+        result: Box::new(result),
+    };
+
+    runtime.close_window_after_issue_monitor_finalize_events(&window_id);
+    drain_queued_blocking_tasks(&tasks);
+    let new_window = runtime.tabs[0]
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    assert_eq!(combined_window_id("tab-1", &new_window.id), window_id);
+    runtime.register_window("tab-1", &new_window.id);
+    let mut new_session =
+        gwt_agent::Session::new(temp.path(), "work/issue-43", gwt_agent::AgentId::Codex);
+    new_session.linked_issue_number = Some(43);
+    new_session.save(&runtime.sessions_dir).unwrap();
+    runtime.tabs[0]
+        .workspace
+        .set_linked_issue_number(&new_window.id, Some(43));
+    runtime.tabs[0]
+        .workspace
+        .set_session_id(&new_window.id, Some(new_session.id.clone()));
+    let mut feedback = issue_monitor_feedback(43);
+    feedback.issue_monitor_project_root = Some(temp.path().into());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), feedback);
+
+    let UserEvent::LaunchComplete {
+        window_id,
+        window_generation,
+        result,
+    } = old_completion
+    else {
+        unreachable!()
+    };
+    runtime.handle_launch_complete_for_generation(window_id.clone(), window_generation, *result);
+    drain_queued_blocking_tasks(&tasks);
+    if recorded.lock().unwrap().iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::AgentLaunchPrepared(_)
+        )
+    }) {
+        runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    }
+    let current_session = runtime.tabs[0]
+        .workspace
+        .window(&new_window.id)
+        .unwrap()
+        .session_id
+        .clone();
+    let pending_issue = runtime
+        .pending_launch_feedback_contexts
+        .get(&window_id)
+        .and_then(|feedback| feedback.issue_monitor_issue_number);
+    runtime.stop_window_runtime_without_session_projection(&window_id);
+    assert_eq!(
+        current_session,
+        Some(new_session.id),
+        "an old completion must not install its Session in another Issue's replacement pane"
+    );
+    assert_eq!(pending_issue, Some(43), "the new launch keeps its feedback");
+}
+
+#[test]
 fn launch_complete_defers_all_session_and_pty_work() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

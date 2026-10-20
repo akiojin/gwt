@@ -21,6 +21,11 @@ updates:
       - "dependencies"
       - "automerge"
     open-pull-requests-limit: 10
+    # Issue #5724 / PR #5741: action-only updates drift from the repository pin.
+    # Remove this ignore in the Issue that updates rust-toolchain.toml
+    # and the matching CI toolchain pins together.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -35,3 +40,8 @@ updates:
       - "dependencies"
       - "automerge"
     open-pull-requests-limit: 10
+    # Issue #5724 / PR #5702: 0.11 removes LowerHex from digest output.
+    # Revisit after the hash formatting call sites have been migrated together.
+    ignore:
+      - dependency-name: "sha2"
+        versions: [">=0.11, <0.12"]

@@ -1,5 +1,5 @@
 /* SPEC #5023: explicit durable reports -> backend -> read-only PM view. */
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -10,10 +10,119 @@ const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? '';
 const ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? '';
 const SESSION = 'pm-reports-fixture';
 
+async function gotoPmReports(page: Page) {
+  await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+  // PM registration settles after the first workspace projection in this
+  // stopped-PM fixture. Read its current projection before testing views.
+  await expect.poll(async () => {
+    await sendLiveGwtEvent(page, { kind: 'frontend_ready' });
+    return page.locator('.workspace-window .pm-chat').count();
+  }, { timeout: 30_000 }).toBe(1);
+  // Open the existing stopped PM through its normal rail entry; this
+  // selects its surface without starting an agent.
+  await expect(page.locator('#op-pm-entry')).toHaveAttribute('data-pm-state', 'stopped');
+  await page.locator('#op-pm-entry').click();
+}
+
 test.describe('PM reports', () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
+
+  test('Reports and Execution log render the same window version for every receive', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      const terminal = await pane.locator('.terminal-root').elementHandle();
+      const marker = `Shared version ${theme}`;
+
+      // Controlled inbound frames exercise the real checkout receive/model/view
+      // path. These are functional observations, not a real PTY or latency run.
+      const evidence = await page.evaluate(async ({ id, marker }) => {
+        const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+        const reportRoot = pane.querySelector<HTMLElement>('.pm-chat')!;
+        const logRoot = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+        const versions = () => [reportRoot.dataset.stateVersion, logRoot.dataset.stateVersion];
+        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+        const original = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+          .findLast((event: any) => event.kind === 'pm_reports' && event.id === id);
+        if (!socket || !original) throw new Error('Missing live project socket or hydrated Reports');
+        const dispatch = (...events: object[]) => new Promise<{ before: (string | undefined)[]; after: (string | undefined)[] }>((resolve, reject) => {
+          const before = versions();
+          const observer = new MutationObserver(() => {
+            observer.disconnect();
+            clearTimeout(timeout);
+            resolve({ before, after: versions() });
+          });
+          const timeout = setTimeout(() => {
+            observer.disconnect();
+            reject(new Error('Receive did not advance the Reports window version'));
+          }, 5_000);
+          observer.observe(reportRoot, { attributes: true, attributeFilter: ['data-state-version'] });
+          for (const event of events) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+        });
+        const snapshot = await dispatch({ kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
+        const report = await dispatch({ ...original, reports: [...original.reports, {
+          id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
+          body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
+        }] });
+        const reportNodes = [...reportRoot.querySelectorAll('article')];
+        const output = await dispatch({ kind: 'terminal_output', id, data_base64: btoa('PAIR RAW appended\r\n') });
+        const reportsRetainedOnOutput = reportNodes.every((node, index) => node === reportRoot.querySelectorAll('article')[index]);
+        const reportText = reportRoot.textContent;
+        // The following valid packet fences dispatcher processing of the stale
+        // frame: only that valid packet may advance the shared version.
+        const stale = await dispatch(
+          { ...original, session_id: 'stale-session', reports: [], error: 'STALE REPORT ERROR' },
+          { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW fence\r\n') },
+        );
+        return { snapshot, report, output, stale, reportsRetainedOnOutput,
+          reportsRetainedOnStale: reportRoot.textContent === reportText };
+      }, { id, marker });
+      for (const step of [evidence.snapshot, evidence.report, evidence.output, evidence.stale]) {
+        expect(step.before[0]).toMatch(/^\d+$/);
+        expect(Number(step.before[0])).toBeGreaterThan(0);
+        expect(step.before[1], 'both views start at the same window version').toBe(step.before[0]);
+        expect(step.after, 'each receive advances both views together').toEqual([
+          String(Number(step.before[0]) + 1), String(Number(step.before[0]) + 1),
+        ]);
+      }
+      expect(evidence.reportsRetainedOnOutput).toBe(true);
+      expect(evidence.reportsRetainedOnStale).toBe(true);
+      await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      await expect(reports).not.toContainText('PAIR RAW');
+      await expect(reports).not.toContainText('STALE REPORT ERROR');
+      const reportsImage = info.outputPath(`shared-reports-${theme}.png`);
+      await pane.screenshot({ path: reportsImage });
+      await info.attach('Reports shared version', { path: reportsImage, contentType: 'image/png' });
+      await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect(pane.locator('.xterm')).toContainText('PAIR RAW snapshot');
+      await expect(pane.locator('.xterm')).toContainText('PAIR RAW appended');
+      await expect(pane.locator('.xterm')).toContainText('PAIR RAW fence');
+      await expect(pane.locator('.xterm')).not.toContainText(marker);
+      expect(await pane.locator('.terminal-root').evaluate((node, original) => node === original, terminal)).toBe(true);
+      const logImage = info.outputPath(`shared-execution-log-${theme}.png`);
+      await pane.screenshot({ path: logImage });
+      await info.attach('Execution log shared version', { path: logImage, contentType: 'image/png' });
+      const versionsFile = info.outputPath(`shared-window-versions-${theme}.json`);
+      writeFileSync(versionsFile, JSON.stringify(evidence, null, 2));
+      await info.attach('Per-receive window versions (controlled inbound frames)', {
+        path: versionsFile, contentType: 'application/json',
+      });
+      expect(errors).toEqual([]);
+    });
+  });
 
   test('unchanged polls are silent, changed reports arrive and reconnect hydrates', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
@@ -22,7 +131,7 @@ test.describe('PM reports', () => {
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
-      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await gotoPmReports(page);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
       await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible({ timeout: 30_000 });
@@ -57,7 +166,7 @@ test.describe('PM reports', () => {
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
-      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await gotoPmReports(page);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
       await expect(reports).toBeVisible({ timeout: 30_000 });
@@ -163,7 +272,7 @@ test.describe('PM reports', () => {
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
-      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await gotoPmReports(page);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
       await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible({ timeout: 30_000 });
@@ -216,7 +325,7 @@ test.describe('PM reports', () => {
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
-      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await gotoPmReports(page);
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
       // Startup restores the PM registration after the canvas-ready round trip.

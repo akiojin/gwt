@@ -675,8 +675,8 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     else {
         panic!("the first delivery must still be materializing");
     };
-    *started_at =
-        Instant::now() - super::super::ISSUE_MONITOR_MATERIALIZING_TTL - Duration::from_secs(1);
+    // Inject expired Materializing age relative to its recorded start, without waiting.
+    *started_at -= super::super::ISSUE_MONITOR_MATERIALIZING_TTL + Duration::from_secs(1);
     // Ordinary expired-delivery recovery may queue, but its tracked pane
     // makes another speculative facts calculation unnecessary.
     fixture

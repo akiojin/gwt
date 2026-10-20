@@ -1,0 +1,220 @@
+{
+  "issue": 5561,
+  "theme": "light",
+  "passed": false,
+  "failure": {
+    "message": "owned GUI RSS budget\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThanOrEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: <= \u001b[32m1500000000\u001b[39m\nReceived:    \u001b[31m1572171776\u001b[39m",
+    "stack": "Error: owned GUI RSS budget\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThanOrEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: <= \u001b[32m1500000000\u001b[39m\nReceived:    \u001b[31m1572171776\u001b[39m\n    at E:\\gwt\\work\\issue-5561\\crates\\gwt\\playwright\\tests\\runtime-memory-budget-live.spec.ts:85:67"
+  },
+  "gui_pid": 35704,
+  "checkout_sha": "815fcff09d93fb3e88229445cf2239ed5bf98369",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe",
+  "checkout_branch": "work/issue-5561",
+  "source_worktree_count": 523,
+  "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-runtime-memory-e208c925-a211-4ac6-9108-1c46e8323f76",
+  "started_at": "2026-10-16T23:06:31.515Z",
+  "ended_at": "2026-10-16T23:09:04.701Z",
+  "observation_started_at": "2026-10-16T23:09:04.688Z",
+  "requested_duration_seconds": 60,
+  "budget_bytes": 1500000000,
+  "pane_ids": [
+    "memory-workload-0::agent-1",
+    "memory-workload-1::agent-1",
+    "memory-workload-2::agent-1",
+    "memory-workload-3::agent-1",
+    "memory-workload-4::agent-1",
+    "memory-workload-5::agent-1",
+    "memory-workload-6::agent-1",
+    "memory-workload-7::agent-1",
+    "memory-workload-8::agent-1",
+    "memory-workload-9::agent-1",
+    "memory-workload-10::agent-1",
+    "memory-workload-11::agent-1"
+  ],
+  "workload": "12 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
+  "limitations": "12 deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "fail",
+  "initial_producers": [
+    {
+      "pid": 18132,
+      "started_at": 1792192024424.0598,
+      "session": "58b2f107-8e60-4611-9d9a-ea7d1a73ea19",
+      "tick": 110,
+      "observed_at": "2026-10-16T23:09:03.891Z"
+    },
+    {
+      "pid": 25160,
+      "started_at": 1792192001564.6648,
+      "session": "031b7f57-a695-45b5-b6d7-cb7d3515f731",
+      "tick": 133,
+      "observed_at": "2026-10-16T23:09:04.124Z"
+    },
+    {
+      "pid": 30172,
+      "started_at": 1792192131928.73,
+      "session": "694518d7-ccea-4f4e-9f60-082776a5b384",
+      "tick": 12,
+      "observed_at": "2026-10-16T23:09:04.044Z"
+    },
+    {
+      "pid": 34424,
+      "started_at": 1792192061865.5405,
+      "session": "bbdb0c6a-9bce-4e86-9bc8-251ca531ce16",
+      "tick": 75,
+      "observed_at": "2026-10-16T23:09:03.892Z"
+    },
+    {
+      "pid": 36592,
+      "started_at": 1792192120991.8518,
+      "session": "15c238cc-c975-4a8e-b6db-e646e5772d76",
+      "tick": 22,
+      "observed_at": "2026-10-16T23:09:04.124Z"
+    },
+    {
+      "pid": 46732,
+      "started_at": 1792192074068.2524,
+      "session": "60afb736-ffad-4353-9d47-4a8a2d49f69a",
+      "tick": 64,
+      "observed_at": "2026-10-16T23:09:04.124Z"
+    },
+    {
+      "pid": 47592,
+      "started_at": 1792192014279.847,
+      "session": "7d88a341-e31e-447b-8cf3-7322108c47ef",
+      "tick": 120,
+      "observed_at": "2026-10-16T23:09:03.854Z"
+    },
+    {
+      "pid": 52304,
+      "started_at": 1792192142346.8384,
+      "session": "79a07387-5ae2-4626-baa7-373b7b59e477",
+      "tick": 2,
+      "observed_at": "2026-10-16T23:09:04.386Z"
+    },
+    {
+      "pid": 53092,
+      "started_at": 1792192086913.2866,
+      "session": "5dc61e75-84df-4ee7-a6f5-87ddc75093e1",
+      "tick": 52,
+      "observed_at": "2026-10-16T23:09:04.121Z"
+    },
+    {
+      "pid": 61648,
+      "started_at": 1792192033412.889,
+      "session": "77168138-ee5c-41a5-9f11-4b835c96fabb",
+      "tick": 101,
+      "observed_at": "2026-10-16T23:09:03.891Z"
+    },
+    {
+      "pid": 66084,
+      "started_at": 1792192046178.8738,
+      "session": "8c232128-d404-4a67-ae5f-f0b6f50afe30",
+      "tick": 91,
+      "observed_at": "2026-10-16T23:09:04.124Z"
+    },
+    {
+      "pid": 67952,
+      "started_at": 1792192099118.1602,
+      "session": "82021947-8a32-4efa-962f-6bf51649cd29",
+      "tick": 41,
+      "observed_at": "2026-10-16T23:09:03.891Z"
+    }
+  ],
+  "final_producers": [],
+  "rss_samples": [
+    {
+      "rss_bytes": 1403101184,
+      "cpu_seconds": 5950.953125,
+      "private_bytes": 1404792832,
+      "timestamp": "2026-10-16T23:06:43.8396846Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1223843840,
+      "cpu_seconds": 5967.46875,
+      "private_bytes": 1332133888,
+      "timestamp": "2026-10-16T23:06:56.0566075Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1285029888,
+      "cpu_seconds": 5979.375,
+      "private_bytes": 1577127936,
+      "timestamp": "2026-10-16T23:07:05.8911659Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1299718144,
+      "cpu_seconds": 5991.484375,
+      "private_bytes": 1592598528,
+      "timestamp": "2026-10-16T23:07:15.3633922Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1320009728,
+      "cpu_seconds": 6002.921875,
+      "private_bytes": 1612951552,
+      "timestamp": "2026-10-16T23:07:28.5259469Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1354465280,
+      "cpu_seconds": 6016.3125,
+      "private_bytes": 1647349760,
+      "timestamp": "2026-10-16T23:07:43.6709967Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1353392128,
+      "cpu_seconds": 6029.140625,
+      "private_bytes": 1646125056,
+      "timestamp": "2026-10-16T23:07:56.0777879Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1421991936,
+      "cpu_seconds": 6041.234375,
+      "private_bytes": 1714745344,
+      "timestamp": "2026-10-16T23:08:09.3745849Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1428955136,
+      "cpu_seconds": 6052.546875,
+      "private_bytes": 1722142720,
+      "timestamp": "2026-10-16T23:08:20.7773376Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1426657280,
+      "cpu_seconds": 6069.578125,
+      "private_bytes": 1718706176,
+      "timestamp": "2026-10-16T23:08:43.3395922Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1427292160,
+      "cpu_seconds": 6082.921875,
+      "private_bytes": 1719435264,
+      "timestamp": "2026-10-16T23:08:53.4365208Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1571581952,
+      "cpu_seconds": 6095.8125,
+      "private_bytes": 1856299008,
+      "timestamp": "2026-10-16T23:09:04.4137024Z",
+      "elapsed_ms": 0
+    },
+    {
+      "rss_bytes": 1572171776,
+      "cpu_seconds": 6096.09375,
+      "private_bytes": 1856299008,
+      "timestamp": "2026-10-16T23:09:04.6900164Z",
+      "elapsed_ms": 0.0010999999940395355
+    }
+  ],
+  "browser_errors": []
+}

@@ -8,6 +8,7 @@
 // its original app.js indentation.
 import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
 import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -118,6 +119,12 @@ export function createTerminalAttachments({
       }
 
       const attachmentProgressControllers = new Map();
+      const attachmentProgressModel = createUiStateStore(null);
+      // This surface shares the app's document lifetime. Keep only the latest
+      // received snapshot; upload controllers and timers stay outside the model.
+      attachmentProgressModel.subscribe(progress => progress, progress => {
+        if (progress) renderAttachmentProgress(progress);
+      });
 
       function ensureAttachmentProgressSurface(windowId) {
         const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
@@ -278,6 +285,19 @@ export function createTerminalAttachments({
       }
 
       function handleAttachmentProgress(event) {
+        if (!event?.operation_id) return;
+        attachmentProgressModel.update(() => ({
+          id: event.id,
+          operation_id: event.operation_id,
+          phase: event.phase,
+          filename: event.filename,
+          bytes_total: event.bytes_total,
+          bytes_done: event.bytes_done,
+          message: event.message,
+        }));
+      }
+
+      function renderAttachmentProgress(event) {
         const operationId = event?.operation_id || "";
         if (!operationId) {
           return;

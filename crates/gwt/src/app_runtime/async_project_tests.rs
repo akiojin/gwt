@@ -128,6 +128,7 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
     let worker = proxy.for_project(context);
     worker.send(UserEvent::LaunchComplete {
         window_id: window_id.clone(),
+        window_generation: None,
         result: Box::new(Ok((
             ProcessLaunch {
                 initial_prompt_file: None,

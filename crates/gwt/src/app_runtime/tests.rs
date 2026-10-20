@@ -894,6 +894,140 @@ fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSess
     }
 }
 
+// Issue #3287 T-103: replay must select payloads as well as the reply client.
+#[test]
+fn project_event_isolation_full_sync_filters_each_project_payload() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tabs = ["a", "b"].map(|tab_id| {
+        let root = temp.path().join(tab_id);
+        fs::create_dir_all(&root).unwrap();
+        let mut tab = sample_project_tab_with_window_at(
+            tab_id,
+            "agent",
+            root,
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        tab.migration_pending = true;
+        tab
+    });
+    let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    for tab_id in ["a", "b"] {
+        let id = combined_window_id(tab_id, "agent");
+        insert_test_pane_runtime(&mut runtime, &id);
+        runtime.runtimes[&id]
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(format!("snapshot-project-{tab_id}").as_bytes());
+        runtime
+            .window_details
+            .insert(id.clone(), format!("detail-{tab_id}"));
+        let mut session = sample_active_agent_session(tab_id, &id);
+        session.session_id = format!("session-{tab_id}");
+        runtime.active_agent_sessions.insert(id, session);
+    }
+
+    for tab_id in ["a", "b"] {
+        let context = runtime.project_context(tab_id).unwrap();
+        let client = format!("client-{tab_id}");
+        let id = combined_window_id(tab_id, "agent");
+        let events = runtime.handle_frontend_event_in_scope(
+            client.clone(),
+            FrontendEvent::FrontendReady,
+            &super::ClientScope::Project(context.project_key),
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client(client.clone())));
+        let statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::TerminalStatus { id, detail, .. } => {
+                    Some((id.clone(), detail.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![(id.clone(), Some(format!("detail-{tab_id}")))]
+        );
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::TerminalSnapshot { id, data_base64 } => Some((id, data_base64)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, &id);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(snapshots[0].1)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains(&format!("snapshot-project-{tab_id}")));
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("project projection");
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, format!("session-{tab_id}"));
+        let migrations: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::MigrationDetected { tab_id, .. } => Some(tab_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(migrations, vec![tab_id]);
+    }
+}
+
+#[test]
+fn project_event_isolation_inactive_runtime_events_keep_the_window_owner() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tabs = ["a", "b"].map(|tab_id| {
+        sample_project_tab_with_window_at(
+            tab_id,
+            "agent",
+            temp.path().join(tab_id),
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        )
+    });
+    let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    let id = combined_window_id("b", "agent");
+    let context = runtime.project_context("b").unwrap();
+    runtime
+        .active_agent_sessions
+        .insert(id.clone(), sample_active_agent_session("b", &id));
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let mut events =
+        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1);
+    events.extend(runtime.handle_runtime_status(
+        id.clone(),
+        WindowProcessStatus::Error,
+        Some("B error".into()),
+    ));
+    let mut hook = runtime_hook_coordination_event("session-1");
+    hook.project_root = Some(temp.path().join("b").display().to_string());
+    events.extend(runtime.handle_runtime_hook_event(hook));
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalOutput { id: owner, .. } if owner == &id)));
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalStatus { id: owner, .. } if owner == &id)));
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::RuntimeHookEvent { .. })));
+    assert!(events
+        .iter()
+        .all(|event| event.target == DispatchTarget::Project(context.project_key.clone())));
+}
+
 fn save_assigned_workspace_projection_for_test(
     repo: &Path,
     session: &ActiveAgentSession,
@@ -1018,7 +1152,9 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
         .expect("active tab for projection completion");
     let recorded_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+        AppEventProxy::Real(_)
+        | AppEventProxy::Project { .. }
+        | AppEventProxy::Notifying { .. } => {
             panic!("test runtime must use a stub event proxy")
         }
     };
@@ -1135,12 +1271,10 @@ fn long_running_test_pane(id: &str) -> Pane {
             ],
         )
     } else {
-        (
-            "/bin/sh".to_string(),
-            // Keep this basic fixture in one process: killing a shell can leave
-            // its sleep child orphaned after the direct child has been reaped.
-            vec!["-lc".to_string(), "exec sleep 30".to_string()],
-        )
+        // One direct child, blocked on stdin until the fixture kills it.
+        // A login shell can fork profile children before exec; reaping only
+        // its leader then races the successor's process-group death proof.
+        ("/bin/cat".to_string(), Vec::new())
     };
     Pane::new(
         id.to_string(),
@@ -1243,39 +1377,46 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
 /// Coverage for the still-running path belongs to Issue #3744, which restores
 /// a bounded guarantee instead of dropping the proof.
 ///
-/// Twenty seconds preserves the established fixture budget while allowing
-/// shared CI runners to reap a PTY process tree under saturation. Both waits
-/// poll positive settlement signals, so this is an upper bound rather than a
-/// fixed delay (Issue #3751).
+/// Reap through the OS exit notification instead of a polling deadline.
+/// The separate durable-stop polling fixture below retains its own bounds.
 const TEST_PTY_STOP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(20);
+// test-hygiene: allow-short-duration Poll an external durable stop proof; assertions inspect identity/status, not ordering inside this interval.
 const TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
-    let pane = runtime
+    let pty = runtime
         .runtimes
         .get(window_id)
         .expect("window runtime for settle")
-        .pane
+        .pty
         .clone();
-    pane.lock()
-        .expect("test pane")
-        .kill()
-        .expect("kill test child");
-    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
+    pty.kill().expect("kill test child");
+    pty.wait()
+        .expect("reap test child after its exit notification");
+}
+
+/// Wake only when the stub publishes an event. The shared fixture hang guard
+/// detects a stuck producer; scheduler speed does not decide the assertion.
+fn notify_on_test_events(runtime: &mut AppRuntime) -> mpsc::Receiver<()> {
+    let (sent, received) = mpsc::channel();
+    runtime.proxy = AppEventProxy::Notifying {
+        inner: Box::new(runtime.proxy.clone()),
+        sent,
+    };
+    received
+}
+
+fn wait_for_notified_event(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    notifications: &mpsc::Receiver<()>,
+    predicate: impl Fn(&[UserEvent]) -> bool,
+) {
     loop {
-        if pane
-            .lock()
-            .expect("test pane")
-            .process_has_exited()
-            .expect("test child exit probe")
-        {
+        if predicate(&events.lock().expect("event log")) {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "test child for {window_id} did not exit before the deadline"
-        );
-        std::thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
+        gwt_core::test_support::recv_event(notifications, label);
     }
 }
 
@@ -1418,6 +1559,7 @@ fn sample_runtime_with_events(
 
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
+        initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
         deferred_issue_monitor_launches: None,
@@ -1552,6 +1694,9 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
     runtime
         .runtime_hook_agent_failures_in_flight
         .insert(window_id.to_string(), identity);
+    runtime
+        .initial_launch_workers
+        .insert(window_id.to_string(), None);
     runtime
         .launch_error_terminal_details
         .insert(window_id.to_string(), "x".repeat(64 * 1024));
@@ -5674,7 +5819,9 @@ impl AppRuntime {
         fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
             match proxy {
                 AppEventProxy::Stub(events) => events.clone(),
-                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Project { inner, .. } | AppEventProxy::Notifying { inner, .. } => {
+                    recording(inner)
+                }
                 AppEventProxy::Real(_) => panic!("test drain must use a recording proxy"),
             }
         }
@@ -5712,7 +5859,9 @@ impl AppRuntime {
         fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
             match proxy {
                 AppEventProxy::Stub(events) => events.clone(),
-                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Project { inner, .. } | AppEventProxy::Notifying { inner, .. } => {
+                    recording(inner)
+                }
                 AppEventProxy::Real(_) => panic!("test launch must use a recording proxy"),
             }
         }
@@ -7130,8 +7279,9 @@ fn take_monitor_launch_complete_event(
             )
         })
         .expect("launch complete event");
-    let UserEvent::LaunchComplete { window_id, result } =
-        into_recorded_project_payload(events.remove(index))
+    let UserEvent::LaunchComplete {
+        window_id, result, ..
+    } = into_recorded_project_payload(events.remove(index))
     else {
         unreachable!("matched launch complete above")
     };

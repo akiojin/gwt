@@ -223,15 +223,17 @@ test("update_state removes stale split toast and button DOM before showing CTA",
 
 test("app.js delegates update handling to the unified update CTA controller", () => {
   assert.match(appSource, /createUpdateCtaController/);
-  assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
+  assert.match(appSource, /handleUpdateState: applyUpdateState/);
+  assert.match(appSource, /applyUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
-  assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateProgress\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
-  assert.match(
-    appSource,
-    /updateCtaController\.handleUpdateApplyPendingPersisted\(/,
-  );
+  assert.match(appSource, /handleUpdateApplyError: applyUpdateApplyError/);
+  assert.match(appSource, /applyUpdateApplyError\(/);
+  assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
+  assert.match(appSource, /applyUpdateProgress\(/);
+  assert.match(appSource, /handleUpdateReady: applyUpdateReady/);
+  assert.match(appSource, /applyUpdateReady\(/);
+  assert.match(appSource, /handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted/);
+  assert.match(appSource, /applyUpdateApplyPendingPersisted\(/);
 });
 
 test("legacy split update toast and button surfaces are removed", () => {
@@ -348,6 +350,25 @@ test("phase19: click no longer uses window.confirm and instead opens #update-mod
     fixture.document.getElementById("update-cta").dataset.status,
     "applying",
   );
+});
+
+test("update progress retains an immutable snapshot before the modal mounts", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  const payload = { downloaded: 1024 * 1024, total: 4 * 1024 * 1024 };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = payload.total;
+
+  fixture.document.getElementById("update-cta").click();
+  const progress = fixture.document.querySelector("[data-update-modal-progress]");
+  const counter = fixture.document.querySelector("[data-update-modal-byte-counter]");
+  assert.equal(progress.getAttribute("aria-valuenow"), "25");
+  assert.equal(counter.textContent, "1.0 MB / 4.0 MB");
+
+  controller.handleUpdateProgress({ downloaded: 3 * 1024 * 1024, total: payload.total });
+  assert.equal(progress.getAttribute("aria-valuenow"), "75");
+  assert.equal(counter.textContent, "3.0 MB / 4.0 MB");
 });
 
 test("phase19: update_progress events update modal progress bar and byte counter", () => {
@@ -1163,7 +1184,7 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
   assert.match(
     appSource,
-    /case "update_auto_apply":[\s\S]{0,200}updateCtaController\.handleUpdateAutoApply\(/,
+    /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
     "app.js must hand update_auto_apply to the update CTA controller",
   );
 });

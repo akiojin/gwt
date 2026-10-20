@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Issue #3287: isolated checkout notification verification. Build gwt/gwtd first.
+# Issue #3287: isolated checkout acceptance. Build gwt/gwtd first.
 set -euo pipefail
+
+# Keep hook/caller repository state out of every fixture Git command.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_NAMESPACE GIT_COMMON_DIR
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CHECKOUT_GWT="$REPO_ROOT/target/debug/gwt"
@@ -60,6 +65,49 @@ cat > "$CHECK_PROJECT_STATE/issue-monitor.json" <<'JSON'
 {"enabled":false,"max_active_agents":1,"priority_order":[]}
 JSON
 # browser-check-agent-seed-end
+
+# Each theme clones its own local repository through the production Git path.
+# Disable resident agents for the canonical source/clone identity before open.
+CHECK_CLONE_SOURCES="$CHECK_HOME/clone-sources"
+CHECK_CLONE_DESTINATIONS="$CHECK_HOME/clone-destinations"
+for CHECK_THEME in dark light; do
+  CHECK_CLONE_SOURCE="$CHECK_CLONE_SOURCES/clone-$CHECK_THEME"
+  mkdir -p "$CHECK_CLONE_SOURCE" "$CHECK_CLONE_DESTINATIONS/$CHECK_THEME"
+  git init --quiet --initial-branch=develop "$CHECK_CLONE_SOURCE"
+  git -C "$CHECK_CLONE_SOURCE" -c user.name='GWT acceptance' -c user.email='acceptance@example.invalid' \
+    commit --quiet --allow-empty -m 'chore: seed Clone acceptance'
+  git -C "$CHECK_CLONE_SOURCE" remote add origin "$CHECK_CLONE_SOURCE"
+  CHECK_CLONE_HASH="$(
+    cd "$CHECK_CLONE_SOURCE" && printf '%s\n' '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' \
+      | "$CHECKOUT_GWTD" | jq -er 'select(.ok == true) | .project_store.hash'
+  )"
+  CHECK_CLONE_STATE="$CHECK_HOME/.gwt/projects/$CHECK_CLONE_HASH/project-state"
+  mkdir -p "$CHECK_CLONE_STATE"
+  printf '%s\n' '{"settings":{"auto_start":false}}' > "$CHECK_CLONE_STATE/pm.json"
+  printf '%s\n' '{"enabled":false,"max_active_agents":1,"priority_order":[]}' > "$CHECK_CLONE_STATE/issue-monitor.json"
+done
+
+# The isolation suite needs an independent Project B, with no resident agents.
+if [ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" = crates/gwt/playwright/tests/project-per-browser-tab.spec.ts ]; then
+  CHECK_SECOND_ROOT="$CHECK_HOME/project-b"
+  mkdir -p "$CHECK_SECOND_ROOT"
+  # A .git marker keeps this fixture on the supported workspace route,
+  # without a normal-repository migration or non-repository onboarding.
+  git init --quiet --initial-branch=develop \
+    --separate-git-dir "$CHECK_HOME/project-b.git" "$CHECK_SECOND_ROOT"
+  CHECK_SECOND_HASH="$(
+    cd "$CHECK_SECOND_ROOT" && printf '%s\n' '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' \
+      | "$CHECKOUT_GWTD" | jq -er 'select(.ok == true) | .project_store.hash'
+  )"
+  CHECK_SECOND_STATE="$CHECK_HOME/.gwt/projects/$CHECK_SECOND_HASH/project-state"
+  mkdir -p "$CHECK_SECOND_STATE"
+  printf '%s\n' '{"settings":{"auto_start":false}}' > "$CHECK_SECOND_STATE/pm.json"
+  printf '%s\n' '{"enabled":false,"max_active_agents":1,"priority_order":[]}' > "$CHECK_SECOND_STATE/issue-monitor.json"
+  jq --arg root "$CHECK_SECOND_ROOT" \
+    '.tabs += [{id:"isolation-b",title:"Isolation B",project_root:$root,kind:"git"}]' \
+    "$CHECK_HOME/.gwt/session.json" > "$CHECK_HOME/session-with-b.json"
+  mv "$CHECK_HOME/session-with-b.json" "$CHECK_HOME/.gwt/session.json"
+fi
 
 # browser-check-hook-authority-begin
 CHECKOUT_LOCAL_HOOK_PATTERN='(^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?([^[:alnum:]_.-]|$)'
@@ -254,12 +302,11 @@ if [ -n "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" ]; then
   CHECK_SPECS=("$GWT_PLAYWRIGHT_LIVE_SPEC")
 else
   CHECK_SPECS=(
-    crates/gwt/playwright/tests/agent-state-notifications.spec.ts
-    crates/gwt/playwright/tests/project-notifications.spec.ts
-    crates/gwt/playwright/tests/project-page-metadata.spec.ts
+    crates/gwt/playwright/tests/project-hub.spec.ts
   )
 fi
 GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
+  GWT_PLAYWRIGHT_CLONE_SOURCES="$CHECK_CLONE_SOURCES" GWT_PLAYWRIGHT_CLONE_DESTINATIONS="$CHECK_CLONE_DESTINATIONS" \
   GWT_PLAYWRIGHT_PROJECT_ROOT="$REPO_ROOT" \
   GWT_PLAYWRIGHT_GWTD="$CHECKOUT_GWTD" GWT_PLAYWRIGHT_PROJECT_HASH="$CHECK_REPO_HASH" \
   GWT_PLAYWRIGHT_PROJECT_KEY="$CHECK_REPO_HASH" \

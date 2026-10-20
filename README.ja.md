@@ -270,11 +270,17 @@ server (X11 / Wayland) を要求します。macOS / Windows のブラウザサ�
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。ブラウザの
-タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取ったときに、
-PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。tray 常駐
-プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
-出して終了します。
+Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。既定のトレイ常駐
+モードでは、ブラウザのタブを閉じてもプロジェクトと実行中の agent は継続し、
+プロジェクト URL を開き直すと同じワークスペースに戻れます。プロジェクトを停止するには、そのページのヘッダーか
+Hub の開いているプロジェクト一覧にある **Close Project** を選びます。実行中の agent が
+ある場合は、対象を列挙した確認ダイアログが表示されます。**Cancel** なら実行を継続し、
+**Close Project** ならそのプロジェクトの runtime と agent を停止します。他のプロジェクトは
+継続し、閉じたプロジェクトを表示していたすべてのブラウザタブは Hub に戻ります。
+
+サーバー全体を停止するには、トレイの **Quit**、または `Ctrl-C` / `SIGTERM` を使います。
+gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
+1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
 `gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
 
@@ -408,8 +414,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
-  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
-  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  順序・優先条件を同じ欄で編集できます。
+  起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
+  拒否された入力は保持され、該当欄の近くにエラーを表示します。
+  Settings は Application / Project の左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
@@ -461,7 +469,10 @@ Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Activ
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
 設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
-Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
+Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
+**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
+稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
+Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
 
@@ -479,12 +490,14 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+**Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
 既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`、共有実測値の `agent_capacity` を返します。
+`max_active_last_change` は最後の明示的な設定変更の `changed_at` と
+`source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
 **Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
@@ -706,6 +719,26 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
 同じ会話の中で行われます。
 
+計画中の Issue をプロジェクト目標、または明示的な maintenance / compliance
+区分へ紐付けるよう PM に依頼できます。`pm.plan.status` は保存済み計画の revision と、
+未紐付け・不正な紐付け、Now/Next/Later、マイルストーン情報の不足を示す `policy`
+診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
+観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
+証拠が接続されるまでは検証済みとして扱いません。
+マイルストーン診断では、明示的な所属 Issue と、一意かつ空でないマイルストーン ID を
+参照するロードマップ項目の Issue について、Monitor inbox の観測状態と未観測番号も示します。
+これは参照の事実であり、目標との整合を証明するものではありません。保留・失敗・claim 競合を
+状態から確認できますが、観測の欠落や Merged / Released を健康・完了の証拠にはしません。
+目標診断でも、一意かつ空でない目標 ID と完全一致する明示的なリンクについて、
+ロードマップ参照・Issue 番号・inbox の観測状態・未観測 Issue を示します。
+不正なリンクも参照の事実として残し、マイルストーンや区分だけのリンクは所属を広げません。
+空または重複した目標 ID ではリンクを解決しません。観測から目標達成や指標の裏付けを
+証明せず、正本となる情報源が接続されるまで `metric_evidence` は不足として残します。
+目標・マイルストーン・ロードマップの変更では、理由・revision・変更前後の値・直接影響する
+Issue も計画の監査記録に残します。目標変更では、ロードマップ項目からその目標へ明示的に
+紐付く Issue のみが対象です。この記録だけでは、依存先や担当エージェントへの
+通知済みとは判断しません。
+
 PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
 スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
 担うため、多重起動の防止機構はそのまま維持されます。
@@ -891,14 +924,18 @@ Agent session の隔離と再現性のため、gwt は各プロジェクトを�
 └── .gwt/project.toml       # gwt が管理するプロジェクトメタデータ
 ```
 
-Project Picker の `Clone from GitHub...` (タブ未選択時の全画面ピッカー) と、
-トップツールバーの `Open Project ▾` split-button ドロップダウン (アクティブな
-プロジェクトがある状態でも到達可能) のどちらからでも clone を開始できます。
+Hub またはシステムトレイの `Clone from GitHub…` から clone を開始できます。
 clone modal では GitHub HTTPS / SSH URL を直接入力するか、`gh search repos`
 による repository 検索から候補を選択し、保存先の親フォルダを指定します。新しい
 プロジェクトは `<parent>/<project>/` に作成され、`<project>.git/` bare リポジトリ
 と initial worktree が配置されます。remote に `develop` が存在する場合は
 `develop` worktree を作成し、存在しない場合は remote default branch を使います。
+
+Clone を実行するとブラウザタブを確保し、成功後にそのタブでプロジェクトの URL を
+開きます。Hub はそのまま残ります。ポップアップがブロックされた場合や確保した
+タブを閉じた場合は、Hub の完了リンクから開けます。失敗時は確保したタブを閉じて
+理由を表示します。同じリポジトリが Open または Recent に登録済みなら clone を
+拒否し、**Open existing project** から既存の URL を開けます。
 
 既存の Normal Git リポジトリ（プロジェクト直下に `.git/` がある通常レイアウト）
 は検出され、要望に応じて Nested Bare + Worktree 構成へマイグレーションできます。

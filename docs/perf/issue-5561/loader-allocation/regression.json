@@ -1,0 +1,14 @@
+{
+  "green": {
+    "toolchain": "1.99.1",
+    "command": "cargo test -p gwt --bin gwt work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations -- --exact",
+    "exit_code": 0,
+    "log": "   Compiling gwt v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 39s\r\n     Running unittests src\\main.rs (target\\debug\\deps\\gwt-480aafd0944af995.exe)\r\n\r\nrunning 1 test\r\ntest work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations ... ok\r\n\r\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1965 filtered out; finished in 0.00s\r\n\r\n"
+  },
+  "red": {
+    "toolchain": "1.99.1",
+    "command": "cargo test -p gwt --bin gwt work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations -- --exact",
+    "exit_code": 101,
+    "log": "   Compiling gwt-core v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-core)\r\n   Compiling gwt v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt)\r\n   Compiling gwt-docker v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-docker)\r\n   Compiling gwt-skills v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-skills)\r\n   Compiling gwt-git v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-git)\r\n   Compiling gwt-agent v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-agent)\r\n   Compiling gwt-github v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-github)\r\n   Compiling gwt-clipboard v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-clipboard)\r\n   Compiling gwt-terminal v9.126.1 (E:\\gwt\\work\\issue-5561\\crates\\gwt-terminal)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 56s\r\n     Running unittests src\\main.rs (target\\debug\\deps\\gwt-480aafd0944af995.exe)\r\n\r\nrunning 1 test\r\ntest work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations ... FAILED\r\n\r\nfailures:\r\n\r\n---- work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations stdout ----\r\n\r\nthread 'work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations' (63696) panicked at crates\\gwt\\src\\work_events_ingest.rs:1640:9:\r\nassertion `left == right` failed\r\n  left: 0x1bc995968c0\r\n right: 0x1bc99596480\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\n\r\n\r\nfailures:\r\n    work_events_ingest::tests::rebuild_loader_transfers_ref_source_allocations\r\n\r\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1965 filtered out; finished in 0.00s\r\n\r\nerror: test failed, to rerun pass `-p gwt --bin gwt`\r\n"
+  }
+}

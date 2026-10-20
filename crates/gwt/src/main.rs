@@ -2298,6 +2298,7 @@ enum UserEvent {
     },
     LaunchComplete {
         window_id: String,
+        window_generation: Option<u64>,
         result: Box<AgentLaunchResult>,
     },
     AgentLaunchPrepared(Box<crate::app_runtime::PreparedAgentLaunch>),
@@ -2433,13 +2434,17 @@ enum UserEvent {
         recovery: gwt_core::migration::RecoveryState,
     },
     CloneProjectProgress {
+        client_id: String,
         message: String,
     },
     CloneProjectDone {
+        client_id: String,
         workspace_home: PathBuf,
     },
     CloneProjectError {
+        client_id: String,
         message: String,
+        existing_project_key: Option<String>,
     },
     /// Graceful GUI shutdown (tray Quit, SIGINT/SIGTERM, the migration
     /// modal's Quit, or an update apply). `reason` names who asked for logs
@@ -3288,6 +3293,7 @@ mod tests {
         let status = gwt::IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
@@ -4630,7 +4636,9 @@ mod tests {
             .expect("active tab for projection completion");
         let recorded_events = match &runtime.proxy {
             AppEventProxy::Stub(events) => events.clone(),
-            AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+            AppEventProxy::Real(_)
+            | AppEventProxy::Project { .. }
+            | AppEventProxy::Notifying { .. } => {
                 panic!("test runtime must use a stub event proxy")
             }
         };
@@ -4749,6 +4757,7 @@ mod tests {
             pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
+            initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
@@ -11755,8 +11764,8 @@ fn main() -> std::io::Result<()> {
                     },
                 )]);
             }
-            Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
-                let events = app.handle_launch_complete(window_id, *result);
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, result }) => {
+                let events = app.handle_launch_complete_for_generation(window_id, window_generation, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {
@@ -12204,21 +12213,33 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_migration_error(&context, phase, message, recovery);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::CloneProjectProgress { message }) => {
-                clients.dispatch(vec![OutboundEvent::hub(
+            Event::UserEvent(UserEvent::CloneProjectProgress { client_id, message }) => {
+                clients.dispatch(vec![OutboundEvent::reply(
+                    client_id,
                     BackendEvent::CloneProjectProgress { message },
                 )]);
             }
-            Event::UserEvent(UserEvent::CloneProjectDone { workspace_home }) => {
-                let events = app.handle_clone_project_done(&workspace_home);
+            Event::UserEvent(UserEvent::CloneProjectDone {
+                client_id,
+                workspace_home,
+            }) => {
+                let events = app.handle_clone_project_done(&client_id, &workspace_home);
                 board_projection_watchers.sync(app, proxy.clone());
                 workspace_projection_watchers.sync(app, proxy.clone());
                 board_daemon_subscribers.sync(app, proxy.clone());
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::CloneProjectError { message }) => {
-                clients.dispatch(vec![OutboundEvent::hub(
-                    BackendEvent::CloneProjectError { message },
+            Event::UserEvent(UserEvent::CloneProjectError {
+                client_id,
+                message,
+                existing_project_key,
+            }) => {
+                clients.dispatch(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::CloneProjectError {
+                        message,
+                        existing_project_key,
+                    },
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now

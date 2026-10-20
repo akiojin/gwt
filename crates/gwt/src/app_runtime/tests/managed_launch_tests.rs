@@ -2,6 +2,17 @@ use super::*;
 
 #[test]
 fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
+    assert_registered_pm_successor_recovery("Issue #42", true);
+}
+
+#[test]
+fn registered_pm_can_recover_a_foreign_owner_invalid_successor() {
+    for terminal in [false, true] {
+        assert_registered_pm_successor_recovery("Issue #43", terminal);
+    }
+}
+
+fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool) {
     use gwt_core::workspace_projection as work;
     let _env_lock = env_test_lock()
         .lock()
@@ -26,10 +37,13 @@ fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
     work::record_workspace_work_event(&repo, start.clone()).unwrap();
     start.id = "invalid-parentless-start".to_string();
     start.work_item_id = occupied_id.clone();
+    start.owner = Some(occupied_owner.to_string());
     start.agent_session_id = Some("invalid-member".to_string());
     work::record_workspace_work_event(&repo, start).unwrap();
     work::emit_workspace_done_event_if_absent(&repo, &predecessor_id, now).unwrap();
-    work::emit_workspace_done_event_if_absent(&repo, &occupied_id, now).unwrap();
+    if terminal {
+        work::emit_workspace_done_event_if_absent(&repo, &occupied_id, now).unwrap();
+    }
     let principal = AgentSessionPrincipal::for_test(&repo, "pm-session-live").unwrap();
     let ordinary = AgentSessionPrincipal::for_test(&repo, "other-session").unwrap();
     assert!(runtime
@@ -44,6 +58,12 @@ fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
         .close_work_for_agent(&principal, &occupied_id, "superseded")
         .is_err());
     runtime.active_agent_sessions.remove("tab-1::invalid");
+    let member_path = runtime.sessions_dir.join("invalid-member.toml");
+    fs::write(&member_path, b"malformed session").unwrap();
+    assert!(runtime
+        .close_work_for_agent(&principal, &occupied_id, "superseded")
+        .is_err());
+    fs::remove_file(member_path).unwrap();
     assert!(runtime
         .close_work_for_agent(&principal, &occupied_id, "superseded")
         .expect("PM has a real exact-target recovery even for terminal invalid occupancy"));
@@ -56,11 +76,9 @@ fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
         .iter()
         .find(|item| item.id == occupied_id)
         .unwrap();
-    assert_eq!(
-        occupied.status_category,
-        work::WorkspaceStatusCategory::Done
-    );
-    assert_eq!(occupied.completed_at, Some(now));
+    assert_eq!(occupied.owner.as_deref(), Some(occupied_owner));
+    assert_eq!(occupied.completed_at, terminal.then_some(now));
+    assert!(occupied.is_terminal());
     assert_eq!(
         occupied
             .events
@@ -74,6 +92,53 @@ fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
         .iter()
         .filter(|event| event.is_successor_supersession())
         .all(|event| event.agent_session_id.is_none()));
+
+    let session = ActiveAgentSession {
+        session_id: "fresh-owner-session".to_string(),
+        branch_name: "work/issue-42".to_string(),
+        worktree_path: repo.clone(),
+        ..sample_active_agent_session("tab-1", "tab-1::fresh")
+    };
+    let mut projection = work::WorkspaceProjection::default_for_project(&repo);
+    let events = super::super::workspace::apply_workspace_launch_for_current_work(
+        &repo,
+        &mut projection,
+        &items,
+        &session,
+        super::super::workspace::WorkspaceLaunchTransition {
+            work_id: None,
+            base_branch: None,
+            linked_issue_number: Some(42),
+            canonical_owner: Some(gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            }),
+            resume_context: None,
+            kind: WorkspaceLaunchProjectionKind::StartWork,
+            live_session_ids: &HashSet::new(),
+            now: Utc::now(),
+        },
+        true,
+    )
+    .expect("fresh activation follows the PM audit into a new owner lifetime");
+    let expected_id = work::successor_work_id(&occupied_id);
+    assert_eq!(projection.id, expected_id);
+    let mut updated = items.clone();
+    for event in events {
+        updated.apply_event(event);
+    }
+    assert_eq!(
+        work::current_work_id(&updated, &repo, Some("work/issue-42"), None),
+        Some(expected_id)
+    );
+    assert_eq!(
+        updated
+            .work_items
+            .iter()
+            .find(|item| item.id == occupied_id),
+        Some(occupied),
+        "fresh activation preserves the retired foreign history"
+    );
 }
 
 #[test]
@@ -2281,6 +2346,15 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
     let mut completion =
         bound_runtime_launch_completion(&repo, session_id, identity.clone(), command, args);
     completion.11.active_launch_handshake = Some(handshake);
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Restore the bound Work".into()),
+            owner: Some("SPEC-42".into()),
+            summary: None,
+            next_action: None,
+        },
+    );
     let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
 
     assert!(events.iter().all(|event| !matches!(
@@ -2290,6 +2364,20 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
             ..
         }
     )));
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load resumed Work")
+        .expect("resumed Work");
+    let work = works
+        .work_items
+        .iter()
+        .find(|work| {
+            work.agents
+                .iter()
+                .any(|agent| agent.session_id == session_id)
+        })
+        .expect("Work attached to the authenticated Resume");
+    assert_eq!(work.owner.as_deref(), Some("Issue #42"));
+    assert_eq!(work.title, "Restore the bound Work");
     let incarnation = runtime
         .runtimes
         .get(&window_id)

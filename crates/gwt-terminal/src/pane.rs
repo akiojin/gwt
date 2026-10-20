@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::SystemTime,
 };
@@ -145,6 +145,9 @@ pub struct Pane {
     /// so a client that resets to the snapshot continues the sequence with
     /// the next chunk exactly like the pane's own parser does.
     incomplete_escape_tail: Vec<u8>,
+    /// Reconnects frequently request the same idle screen. Serialize it once
+    /// until output or a successful resize changes the parser state.
+    snapshot_cache: OnceLock<Vec<u8>>,
 }
 
 /// A pane whose trusted gate helper is running but whose target is still
@@ -177,6 +180,7 @@ impl PendingPane {
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            snapshot_cache: OnceLock::new(),
         })
     }
 
@@ -261,6 +265,7 @@ impl Pane {
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            snapshot_cache: OnceLock::new(),
         })
     }
 
@@ -311,6 +316,7 @@ impl Pane {
     /// (Issue #4234: a raw line store that no reader consumed used to grow
     /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
+        self.snapshot_cache.take();
         // Update vt100 screen state
         self.parser.process(data);
         // Issue #4909: publish the child's bracketed-paste mode on the shared
@@ -369,12 +375,16 @@ impl Pane {
     /// cursor/attributes are best effort. Representable saved states remain
     /// exact.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        let mut snapshot = self
-            .parser
-            .screen()
-            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-        snapshot.extend_from_slice(&self.incomplete_escape_tail);
-        snapshot
+        self.snapshot_cache
+            .get_or_init(|| {
+                let mut snapshot = self
+                    .parser
+                    .screen()
+                    .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+                snapshot.extend_from_slice(&self.incomplete_escape_tail);
+                snapshot
+            })
+            .clone()
     }
 
     /// Get the current pane status.
@@ -503,6 +513,7 @@ impl Pane {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let started = std::time::Instant::now();
         self.pty.resize(cols, rows)?;
+        self.snapshot_cache.take();
         let pty_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let parser_started = std::time::Instant::now();
         resize_parser_preserving_state(&mut self.parser, rows, cols);
@@ -1349,6 +1360,39 @@ mod tests {
         assert_eq!(
             replay.screen().cursor_position(),
             source.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn unchanged_snapshot_only_allocates_the_returned_bytes() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("idle-snapshot", 6, sleep_command("60"));
+        for line in 0..600 {
+            pane.process_bytes(format!("\x1b[36mhistory-{line:04}\x1b[0m\r\n").as_bytes());
+        }
+        let expected = pane.snapshot_bytes();
+        let before = crate::test_util::thread_allocations();
+        let repeated = pane.snapshot_bytes();
+        let allocations = crate::test_util::thread_allocations().wrapping_sub(before);
+        assert_eq!(repeated, expected);
+        assert!(
+            allocations <= 2,
+            "unchanged snapshot allocated {allocations} times"
+        );
+
+        // Output (including an unfinished escape) and resize must both replace
+        // the serialized state even when the PTY emits nothing after resize.
+        pane.process_bytes(b"changed\x1b[");
+        let changed = pane.snapshot_bytes();
+        assert_ne!(changed, expected);
+        assert!(changed.ends_with(b"\x1b["));
+        pane.process_bytes(b"31mred");
+        let _ = pane.snapshot_bytes();
+        pane.resize(40, 8).unwrap();
+        assert_eq!(
+            pane.snapshot_bytes(),
+            pane.screen()
+                .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
         );
     }
 

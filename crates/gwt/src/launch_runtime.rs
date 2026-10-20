@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_worktree_materialization_waits_for_the_same_branch_lock() {
+    fn launch_worktree_materialization_waits_for_same_branch_lock() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = init_launch_test_repo(temp.path());

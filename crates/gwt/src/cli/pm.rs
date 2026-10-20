@@ -29,6 +29,12 @@ use crate::pm_registry;
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    /// Read the canonical project's durable planning snapshot.
+    PlanStatus,
+    /// Apply one planning-only update as the ambient registered PM.
+    PlanApply {
+        request: Box<crate::pm_planning::PlanningApplyRequest>,
+    },
     /// Direct project-to-project PM communication; never a pane command.
     PeerSend {
         project: String,
@@ -225,6 +231,45 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::PlanStatus => {
+            let state = crate::pm_planning::load_planning_state(
+                &peer_project_dir(env.repo_path()).join("project-state/pm-planning.json"),
+            )
+            .map_err(|error| refusal(format!("pm.plan.status: {error}")))?;
+            // Optional observation must not hide the canonical planning data.
+            // Read the atomic publication directly: the combined status loader
+            // also refreshes capacity and can emit diagnostics.
+            let monitor = crate::daemon_publisher::read_issue_monitor_status(env.repo_path())
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_value(value).ok());
+            #[derive(Serialize)]
+            struct PlanningStatus<'a> {
+                #[serde(flatten)]
+                state: &'a crate::pm_planning::PmPlanningState,
+                policy: crate::pm_policy::PlanningAssessment,
+            }
+            let status = PlanningStatus {
+                state: &state,
+                policy: crate::pm_policy::assess_planning(&state, monitor.as_ref()),
+            };
+            out.push_str(
+                &serde_json::to_string_pretty(&status)
+                    .map_err(|error| refusal(format!("pm.plan.status: {error}")))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::PlanApply { request } => {
+            let receipt = apply_plan(env.repo_path(), &request)
+                .map_err(|error| refusal(format!("pm.plan.apply: {error}")))?;
+            out.push_str(
+                &serde_json::to_string_pretty(&receipt)
+                    .map_err(|error| refusal(format!("pm.plan.apply: {error}")))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::PeerSend {
             project,
             kind,
@@ -581,6 +626,38 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
+fn apply_plan(
+    repo: &Path,
+    request: &crate::pm_planning::PlanningApplyRequest,
+) -> std::io::Result<crate::pm_planning::PlanningReceipt> {
+    let denied = || {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "requires this project's registered PM session; inspect pm.status",
+        )
+    };
+    // This protected operation uses the exact ambient identity, never an
+    // override or a normalized near-match. A direct user CLI has no PM role.
+    let actor = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| denied())?;
+    let record = peer_registration(repo)?
+        .filter(|record| record.registration.session_id == actor)
+        .ok_or_else(denied)?;
+    // Registration writers use this same sibling lock. Recheck after waiting
+    // and retain it through publication so replacement cannot race the write.
+    let _authority_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &record.prefs_path.with_extension("lock"),
+        "pm_plan_apply",
+    )?;
+    if !pm_registry::session_is_registered_pm(&record.prefs_path, &actor) {
+        return Err(denied());
+    }
+    crate::pm_planning::apply_planning_action(
+        &peer_project_dir(repo).join("project-state/pm-planning.json"),
+        &actor,
+        request,
+    )
+}
+
 fn resolve_repo_path<E: CliEnv>(env: &E, project_root: Option<String>) -> PathBuf {
     project_root
         .map(PathBuf::from)
@@ -769,6 +846,144 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use std::fs;
+
+    #[test]
+    fn pm_plan_adapter_binds_authority_to_current_project_and_registration() {
+        use crate::{cli::env::TestEnv, pm_planning::PlanningApplyRequest};
+        let _lock = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let planning_path = peer_project_dir(&repo).join("project-state/pm-planning.json");
+        let request: PlanningApplyRequest = serde_json::from_value(serde_json::json!({
+            "action":{"kind":"goal","value":{"id":"goal-1","outcome":"Ship safely"}},
+            "expected_revision":0,"reason":"Accepted plan","idempotency_key":"first"
+        }))
+        .unwrap();
+        let apply = || PmCommand::PlanApply {
+            request: Box::new(request.clone()),
+        };
+        let invoke = |repo: &Path, command: PmCommand| {
+            let mut env = TestEnv::new(repo.to_path_buf());
+            let mut output = String::new();
+            run(&mut env, command, &mut output)
+                .map(|_| serde_json::from_str::<serde_json::Value>(&output).unwrap())
+        };
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert_eq!(invoke(&repo, PmCommand::PlanStatus).unwrap()["revision"], 0);
+        assert!(!planning_path.exists());
+        assert!(invoke(&repo, apply()).is_err());
+        let _unregistered = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        assert!(invoke(&repo, apply()).is_err());
+        let register = |id: &str| {
+            pm_registry::save_pm_prefs(
+                &prefs_path,
+                &pm_registry::PmPrefs {
+                    registration: Some(pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: pm_registry::pm_worktree_path_for_repo_path(&repo)
+                            .display()
+                            .to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register("pm-a");
+        for id in ["implementation-agent", "foreign-pm", " pm-a "] {
+            let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, id);
+            assert!(invoke(&repo, apply()).is_err(), "refuse {id}");
+            assert!(!planning_path.exists());
+        }
+        let prefs_bytes = fs::read(&prefs_path).unwrap();
+        let receipt = invoke(&repo, apply()).unwrap();
+        assert_eq!(receipt["resulting_revision"], 1);
+        assert_eq!(receipt["actor"], "pm-a");
+        let runtime = peer_project_dir(&repo).join("pm/runtime/nested");
+        fs::create_dir_all(&runtime).unwrap();
+        let planning_bytes = fs::read(&planning_path).unwrap();
+        let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
+        assert_eq!(status["revision"], 1);
+        assert_eq!(status["goals"][0]["outcome"], "Ship safely");
+        assert_eq!(status["policy"]["planning_revision"], 1);
+        assert_eq!(
+            status["policy"]["monitor"]["active_launches_incomplete"],
+            true
+        );
+        assert_eq!(invoke(&runtime, apply()).unwrap(), receipt);
+        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_bytes);
+        let bytes = fs::read(&planning_path).unwrap();
+        register("pm-b");
+        assert!(
+            invoke(&repo, apply()).is_err(),
+            "old PM cannot replay after replacement"
+        );
+        let _replacement = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+        assert!(
+            invoke(&repo, apply()).is_err(),
+            "new PM cannot replay another actor's receipt"
+        );
+        assert_eq!(fs::read(&planning_path).unwrap(), bytes);
+        let mut next = request;
+        next.expected_revision = 1;
+        next.idempotency_key = "replacement".into();
+        assert_eq!(
+            invoke(
+                &runtime,
+                PmCommand::PlanApply {
+                    request: Box::new(next)
+                }
+            )
+            .unwrap()["resulting_revision"],
+            2
+        );
+        crate::pm_planning::mutate_planning_state(&planning_path, 2, |state| {
+            state.roadmap_items.push(crate::pm_planning::RoadmapItem {
+                id: "goal-link".into(),
+                goal_id: Some("goal-1".into()),
+                issues: vec![9, 7, 9],
+                ..Default::default()
+            });
+            state.milestones.push(crate::pm_planning::Milestone {
+                id: "release".into(),
+                issues: vec![9, 7, 9],
+                ..Default::default()
+            });
+            Ok(())
+        })
+        .unwrap();
+        let bytes = fs::read(&planning_path).unwrap();
+        let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["goals"][0]["issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0]["unobserved_issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0]["missing_inputs"],
+            serde_json::json!(["metric_evidence"])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0]["observed_issue_states"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0]["unobserved_issues"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(fs::read(&planning_path).unwrap(), bytes);
+    }
 
     /// Issue #4249 AC-4 / T-121 / T-122: every dispatched operation is listed
     /// as executable, straight from the catalog, and each thing the PM cannot

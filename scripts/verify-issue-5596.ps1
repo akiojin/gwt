@@ -181,9 +181,8 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   # Queue admission and upstream claim creation are outside this acceptance run.
   [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=$deliveries} | ConvertTo-Json -Depth 8))
   $start = New-OwnedProcess $gwt @('--no-tray','--no-open')
-  # Runtime authority must use this checkout too. Keep GWT_HOOK_BIN pinned to
-  # the stable public hook fallback audited above.
-  $start.Environment['GWT_BIN_PATH'] = $gwtd
+  # The agent launch pipeline injects checkout gwtd; the GUI keeps only the
+  # stable public hook fallback audited above.
   $start.Environment['GWT_BROWSER_URL_FILE'] = "$checkHome/url"
   $gui = [Diagnostics.Process]::Start($start)
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()

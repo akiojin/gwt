@@ -4,11 +4,41 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
+
+test("runtime health cell and detail subscribe to the same immutable snapshot", async () => {
+  const { subscribeRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof subscribeRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const model = createUiStateStore(null);
+  const unsubscribe = subscribeRuntimeHealth(document, model);
+  const payload = { state: "hot", cpu_percent: 80, memory_bytes: 1024 ** 3,
+    processes: [{ pid: 7, name: "original", cpu_percent: 80, memory_bytes: 1024 ** 3 }] };
+  model.update(() => payload);
+  const previous = model.read();
+  payload.processes[0].name = "mutated";
+  payload.cpu_percent = 5;
+  const cell = document.getElementById("op-strip-runtime-health-value");
+  const detail = document.getElementById("op-runtime-health-detail");
+  detail.querySelector('[data-sort="cpu"]')?.dispatchEvent(new window.Event("click"));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  assert.match(detail.textContent, /original/);
+  assert.doesNotMatch(detail.textContent, /mutated/);
+  assert.equal(previous.processes[0].name, "original");
+  model.update(() => ({ state: "ok", cpu_percent: 5, processes: [] }));
+  assert.match(cell.textContent, /^OK 5%/);
+  assert.doesNotMatch(detail.textContent, /original/);
+  assert.equal(previous.cpu_percent, 80);
+  unsubscribe();
+  const last = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 50 }));
+  assert.equal(cell.textContent, last);
+});
 
 test("clock uses second boundaries and cancels all work while hidden", async () => {
   const { wireStatusStripClock } = await importOperatorShell();
