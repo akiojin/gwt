@@ -13300,8 +13300,10 @@ command = "my-agent-cli"
             "test".into(),
         );
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let received_waits = Arc::new(std::sync::Mutex::new(Vec::new()));
         let server = std::thread::spawn({
             let home = home.clone();
+            let received_waits = Arc::clone(&received_waits);
             move || {
                 let _home = ScopedGwtHome::set(home);
                 tokio::runtime::Builder::new_current_thread()
@@ -13324,7 +13326,7 @@ command = "my-agent-cli"
                             for _ in 0..16 {
                                 let stream = listener.accept().await.unwrap();
                                 let status = status.clone();
-                                let repo = repo.clone();
+                                let received_waits = Arc::clone(&received_waits);
                                 handlers.spawn(async move {
                                     let (reader, mut writer) = stream.into_split();
                                     let mut reader = BufReader::new(reader);
@@ -13365,15 +13367,10 @@ command = "my-agent-cli"
                                         }),
                                         ClientFrame::Publish { payload, .. } => {
                                             let wait = &payload["payload"]["wait"];
-                                            record_monitor_wait_in_prefs(
-                                                &repo,
-                                                wait["issue_number"].as_u64().unwrap(),
-                                                wait["reason"].as_str().unwrap(),
-                                                wait["resume_condition"].as_str().unwrap(),
-                                                false,
-                                                wait["at"].as_str().unwrap(),
-                                            )
-                                            .unwrap();
+                                            // This transport mock must not serialize eight fsyncs
+                                            // on its current-thread runtime before replying.
+                                            // Real-daemon wait-control tests cover commit-before-ACK.
+                                            received_waits.lock().unwrap().push(wait.clone());
                                             DaemonFrame::Ack
                                         }
                                         other => panic!("unexpected frame: {other:?}"),
@@ -13456,6 +13453,26 @@ command = "my-agent-cli"
             complete,
             "all eight status reads and single publishes must arrive"
         );
+        let waits = received_waits.lock().unwrap();
+        let mut numbers: Vec<_> = waits
+            .iter()
+            .map(|wait| wait["issue_number"].as_u64().unwrap())
+            .collect();
+        numbers.sort_unstable();
+        assert_eq!(numbers, (1..=8).collect::<Vec<_>>());
+        // Replay the captured declarations after the loaded transport window;
+        // retain the durable-content check without timing filesystem throughput.
+        for wait in waits.iter() {
+            record_monitor_wait_in_prefs(
+                &repo,
+                wait["issue_number"].as_u64().unwrap(),
+                wait["reason"].as_str().unwrap(),
+                wait["resume_condition"].as_str().unwrap(),
+                false,
+                wait["at"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert_eq!(persisted.autonomous_records.len(), 8);
         assert!(persisted.autonomous_records.iter().all(|record| record
