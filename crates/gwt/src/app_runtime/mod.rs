@@ -646,6 +646,7 @@ mod ui_trace;
 mod window;
 mod wizard;
 pub(crate) use wizard::IssueMonitorLaunchPrepared;
+mod work_scans;
 mod workspace;
 mod workspace_views;
 use attachments::UploadedImagePasteOperation;
@@ -1955,9 +1956,9 @@ pub struct AppRuntime {
     /// consumes only this cache and never enumerates OS processes.
     pub(crate) work_live_process_branches: HashMap<PathBuf, HashSet<String>>,
     /// Immutable merge verdicts shared by successive workers for each repo.
-    pub(crate) work_merge_status_cache: std::cell::RefCell<
-        HashMap<PathBuf, Arc<std::sync::Mutex<gwt_git::branch::CleanupReadinessCache>>>,
-    >,
+    pub(crate) work_merge_status_cache:
+        std::cell::RefCell<HashMap<PathBuf, Arc<std::sync::Mutex<WorkMergeScanCache>>>>,
+    pub(crate) work_merge_scan_queue: Arc<WorkMergeScanQueue>,
     /// Issue #3611: short branch names (`work/x`, `origin/work/x`) present in
     /// the latest background ref snapshot, per project. The projection resolves
     /// Session resumability from this set instead of spawning
@@ -4865,6 +4866,7 @@ impl AppRuntime {
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
             work_merge_status_cache: std::cell::RefCell::new(HashMap::new()),
+            work_merge_scan_queue: Default::default(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -5148,9 +5150,8 @@ impl AppRuntime {
                 .borrow_mut()
                 .insert(project_root.clone(), local_branches);
         }
-        self.spawn_work_merge_status_scan(project_root.clone());
-        self.spawn_work_tip_subjects_scan(project_root.clone());
-        self.spawn_work_pr_titles_scan(project_root.clone());
+        let scan_pr_titles = self.note_work_pr_titles_scan_attempt(&project_root);
+        self.spawn_work_merge_status_scan_with_pr_titles(project_root.clone(), scan_pr_titles);
         self.spawn_work_ai_summaries_scan(project_root.clone());
         if changed {
             self.refresh_active_work_projection_for_project_root(&project_root)
@@ -5180,68 +5181,173 @@ impl AppRuntime {
         events
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
+        self.spawn_work_merge_status_scan_with_pr_titles(project_root, false);
+    }
+
+    fn spawn_work_merge_status_scan_with_pr_titles(
+        &self,
+        project_root: PathBuf,
+        scan_pr_titles: bool,
+    ) {
         let Some(context) = self.project_context_for_root(&project_root) else {
             return;
         };
-        let proxy = self.proxy.for_project(context);
         let merge_cache = self
             .work_merge_status_cache
             .borrow_mut()
             .entry(project_root.clone())
             .or_default()
             .clone();
+        let queue = self.work_merge_scan_queue.clone();
+        let Some(mut worker) = queue.request(context.clone(), scan_pr_titles) else {
+            return;
+        };
+        let proxy = self.proxy.clone();
         thread::spawn(move || {
-            let Ok(projection) =
-                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                    &project_root,
-                )
-            else {
-                return;
-            };
-            let mut targets = work_branch_scan_targets(&projection);
-            append_workspace_projection_scan_target(&project_root, &mut targets);
-            // One ref snapshot replaces the former per-target `rev-parse`
-            // probes. Historical Work rows routinely outlive their branches;
-            // rejecting those rows in memory prevents hundreds of short-lived
-            // Git processes from competing with the GUI and agent PTYs.
-            // Issue #3611: it is resolved before the empty-target exit because
-            // the projection also consumes it, as the process-free answer to
-            // "can this Session's worktree be re-materialized?".
-            let tip_times = gwt_git::refs::branch_tip_snapshot(&project_root);
-            // A failed snapshot publishes `None`, not an empty set: an empty
-            // set would claim every branch is gone and silently strip working
-            // Resume controls.
-            let known_branch_refs: Option<HashSet<String>> = tip_times
+            let mut context = context;
+            loop {
+                let project_root = context.project_root.clone();
+                let proxy = proxy.for_project(context.clone());
+                let mut merge_cache = merge_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(event) =
+                    Self::prepare_work_merge_status_scan(&context, &mut merge_cache)
+                {
+                    proxy.send(event);
+                }
+                if merge_cache.measured {
+                    match gwt_git::refs::branch_tip_subjects(&project_root) {
+                        Ok(tip_subjects) if !tip_subjects.is_empty() => {
+                            proxy.send(UserEvent::WorkTipSubjects {
+                                project_root,
+                                tip_subjects,
+                            });
+                        }
+                        Err(_) => merge_cache.last_inputs = None,
+                        _ => {}
+                    }
+                }
+                drop(merge_cache);
+                if queue.take_pr_request(&context) {
+                    let pr_titles =
+                        gwt_git::pr_status::fetch_pr_titles_by_branch(&context.project_root)
+                            .unwrap_or_default();
+                    if !pr_titles.is_empty() {
+                        proxy.send(UserEvent::WorkPrTitles {
+                            project_root: context.project_root.clone(),
+                            pr_titles,
+                        });
+                    }
+                }
+                let Some(next) = worker.finish_pass() else {
+                    break;
+                };
+                context = next;
+            }
+        });
+    }
+
+    /// Synchronous worker body, also used by the process-budget regression.
+    fn prepare_work_merge_status_scan(
+        context: &ProjectContext,
+        cache: &mut WorkMergeScanCache,
+    ) -> Option<UserEvent> {
+        let project_root = context.project_root.clone();
+        cache.measured = false;
+        let Ok(projection) =
+            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&project_root)
+        else {
+            return None;
+        };
+        let mut targets = work_branch_scan_targets(&projection);
+        append_workspace_projection_scan_target(&project_root, &mut targets);
+        let paths: Vec<PathBuf> = targets
+            .iter()
+            .flat_map(|target| target.worktree_paths.iter().cloned())
+            .collect();
+        let revision = cache.inputs.observe(&project_root, &paths);
+        let live_process_branches = work_branches_with_live_processes(&targets);
+        if let Some(revision) = revision {
+            if cache
+                .last_inputs
                 .as_ref()
-                .ok()
-                .map(|tip_times| tip_times.keys().cloned().collect());
-            if targets.is_empty() {
-                proxy.send(UserEvent::WorkMergeStatus {
+                .is_some_and(|(previous, at, destination)| {
+                    previous == &targets && *at == revision && destination == context
+                })
+            {
+                if let Some(snapshot) = &cache.snapshot {
+                    return Some(snapshot.event(project_root, live_process_branches));
+                }
+            }
+        }
+        cache.last_inputs = None;
+        cache.measured = true;
+        let (event, successful) = Self::measure_work_merge_status_scan(
+            project_root,
+            &mut cache.readiness,
+            &targets,
+            live_process_branches,
+        );
+        if successful && revision.is_some() && revision == cache.inputs.current_revision() {
+            cache.snapshot = Some(WorkMergeScanSnapshot::from_event(&event));
+            cache.last_inputs = revision.map(|revision| (targets, revision, context.clone()));
+        }
+        Some(event)
+    }
+
+    fn measure_work_merge_status_scan(
+        project_root: PathBuf,
+        merge_cache: &mut gwt_git::branch::CleanupReadinessCache,
+        targets: &[WorkBranchScanTarget],
+        live_process_branches: HashSet<String>,
+    ) -> (UserEvent, bool) {
+        // One ref snapshot replaces the former per-target `rev-parse`
+        // probes. Historical Work rows routinely outlive their branches;
+        // rejecting those rows in memory prevents hundreds of short-lived
+        // Git processes from competing with the GUI and agent PTYs.
+        // Issue #3611: it is resolved before the empty-target exit because
+        // the projection also consumes it, as the process-free answer to
+        // "can this Session's worktree be re-materialized?".
+        let tip_times = gwt_git::refs::branch_tip_snapshot(&project_root);
+        // A failed snapshot publishes `None`, not an empty set: an empty
+        // set would claim every branch is gone and silently strip working
+        // Resume controls.
+        let known_branch_refs: Option<HashSet<String>> = tip_times
+            .as_ref()
+            .ok()
+            .map(|tip_times| tip_times.keys().cloned().collect());
+        if targets.is_empty() {
+            let successful = known_branch_refs.is_some();
+            return (
+                UserEvent::WorkMergeStatus {
                     project_root,
                     merged_branches: HashMap::new(),
                     cleanup_ready_branches: HashMap::new(),
                     dirty_branches: HashSet::new(),
                     live_process_branches: HashSet::new(),
                     known_branch_refs,
-                });
-                return;
-            }
-            let live_process_branches = work_branches_with_live_processes(&targets);
-            // Issue #3629 AC-4: a workspace-home project root is not a git
-            // work tree — run the per-branch merge/readiness git work in the
-            // resolved repository so it does not fail (or spawn doomed
-            // processes) for the nested-bare layout.
-            let git_root = gwt_git::worktree::effective_repo_root(&project_root);
-            let tip_times = match tip_times {
-                Ok(tip_times) => tip_times,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        project = %project_root.display(),
-                        "work merge ref snapshot failed; publishing fail-closed dirty verdicts"
-                    );
-                    proxy.send(UserEvent::WorkMergeStatus {
+                },
+                successful,
+            );
+        }
+        // Issue #3629 AC-4: a workspace-home project root is not a git
+        // work tree — run the per-branch merge/readiness git work in the
+        // resolved repository so it does not fail (or spawn doomed
+        // processes) for the nested-bare layout.
+        let git_root = gwt_git::worktree::effective_repo_root(&project_root);
+        let tip_times = match tip_times {
+            Ok(tip_times) => tip_times,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    project = %project_root.display(),
+                    "work merge ref snapshot failed; publishing fail-closed dirty verdicts"
+                );
+                return (
+                    UserEvent::WorkMergeStatus {
                         project_root,
                         merged_branches: HashMap::new(),
                         cleanup_ready_branches: HashMap::new(),
@@ -5252,64 +5358,72 @@ impl AppRuntime {
                             .collect(),
                         live_process_branches,
                         known_branch_refs,
-                    });
-                    return;
+                    },
+                    false,
+                );
+            }
+        };
+        let mut merged: Vec<String> = Vec::new();
+        let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
+        let mut dirty_branches = HashSet::new();
+        let mut successful = true;
+        for target in targets {
+            let branch = target.branch.clone();
+            let readiness = match merge_cache.base_target(&git_root, &branch, &tip_times) {
+                Ok(readiness) => readiness,
+                Err(_) => {
+                    successful = false;
+                    None
                 }
             };
-            let mut merge_cache = merge_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut merged: Vec<String> = Vec::new();
-            let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
-            let mut dirty_branches = HashSet::new();
-            for target in &targets {
-                let branch = target.branch.clone();
-                let readiness = merge_cache
-                    .base_target(&git_root, &branch, &tip_times)
-                    .ok()
-                    .flatten();
-                if !work_merge_scan_needs_dirty_check(readiness.as_ref(), target.has_merged_pr) {
-                    continue;
-                }
-                if work_branch_has_dirty_worktree(target) {
-                    dirty_branches.insert(branch);
-                    continue;
-                }
-                if let Some(readiness) = readiness {
-                    let reason = match readiness.reason {
-                        gwt_git::branch::CleanupReadinessReason::Merged => {
-                            merged.push(branch.clone());
-                            gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
-                        }
-                        gwt_git::branch::CleanupReadinessReason::NoChanges => {
-                            gwt_core::workspace_projection::WorkspaceCleanupReason::NoChanges
-                        }
-                    };
-                    cleanup_ready_branches.insert(branch, reason.as_str().to_string());
-                }
+            if !work_merge_scan_needs_dirty_check(readiness.as_ref(), target.has_merged_pr) {
+                continue;
             }
-            let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
-                .into_iter()
-                .map(|branch| {
-                    let unix = tip_times
-                        .get(&branch)
-                        .or_else(|| tip_times.get(&format!("origin/{branch}")))
-                        .map(|tip| tip.committer_time);
-                    let reference = unix
-                        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-                        .unwrap_or_else(chrono::Utc::now);
-                    (branch, reference)
-                })
-                .collect();
-            proxy.send(UserEvent::WorkMergeStatus {
+            let dirty = work_branch_dirty_state(target).unwrap_or_else(|_| {
+                successful = false;
+                true
+            });
+            if dirty {
+                dirty_branches.insert(branch);
+                continue;
+            }
+            if let Some(readiness) = readiness {
+                let reason = match readiness.reason {
+                    gwt_git::branch::CleanupReadinessReason::Merged => {
+                        merged.push(branch.clone());
+                        gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+                    }
+                    gwt_git::branch::CleanupReadinessReason::NoChanges => {
+                        gwt_core::workspace_projection::WorkspaceCleanupReason::NoChanges
+                    }
+                };
+                cleanup_ready_branches.insert(branch, reason.as_str().to_string());
+            }
+        }
+        let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
+            .into_iter()
+            .map(|branch| {
+                let unix = tip_times
+                    .get(&branch)
+                    .or_else(|| tip_times.get(&format!("origin/{branch}")))
+                    .map(|tip| tip.committer_time);
+                let reference = unix
+                    .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                    .unwrap_or_else(chrono::Utc::now);
+                (branch, reference)
+            })
+            .collect();
+        (
+            UserEvent::WorkMergeStatus {
                 project_root,
                 merged_branches,
                 cleanup_ready_branches,
                 dirty_branches,
                 live_process_branches,
                 known_branch_refs,
-            });
-        });
+            },
+            successful,
+        )
     }
 
     /// SPEC-3075: cache the resolved `branch -> tip commit subject` map and
@@ -5322,30 +5436,6 @@ impl AppRuntime {
         self.work_tip_subjects
             .insert(project_root.to_path_buf(), tip_subjects);
         self.refresh_active_work_projection_for_project_root(project_root)
-    }
-
-    /// SPEC-3075: resolve every branch's tip commit subject off the UI thread in
-    /// ONE `for-each-ref` spawn, then hand the map to the event loop via
-    /// [`UserEvent::WorkTipSubjects`]. This is the "what work was running" signal
-    /// for historical Works with no recorded purpose. Mirrors
-    /// [`Self::spawn_work_merge_status_scan`] but runs for every project (not
-    /// just merged branches) since every Workspace row benefits.
-    pub(crate) fn spawn_work_tip_subjects_scan(&self, project_root: PathBuf) {
-        let Some(context) = self.project_context_for_root(&project_root) else {
-            return;
-        };
-        let proxy = self.proxy.for_project(context);
-        thread::spawn(move || {
-            let tip_subjects =
-                gwt_git::refs::branch_tip_subjects(&project_root).unwrap_or_default();
-            if tip_subjects.is_empty() {
-                return;
-            }
-            proxy.send(UserEvent::WorkTipSubjects {
-                project_root,
-                tip_subjects,
-            });
-        });
     }
 
     /// SPEC-3075: cache the resolved `branch -> PR title` map and rebroadcast so
@@ -5392,27 +5482,6 @@ impl AppRuntime {
         }
         last.insert(project_root.to_path_buf(), now);
         true
-    }
-
-    pub(crate) fn spawn_work_pr_titles_scan(&self, project_root: PathBuf) {
-        if !self.note_work_pr_titles_scan_attempt(&project_root) {
-            return;
-        }
-        let Some(context) = self.project_context_for_root(&project_root) else {
-            return;
-        };
-        let proxy = self.proxy.for_project(context);
-        thread::spawn(move || {
-            let pr_titles =
-                gwt_git::pr_status::fetch_pr_titles_by_branch(&project_root).unwrap_or_default();
-            if pr_titles.is_empty() {
-                return;
-            }
-            proxy.send(UserEvent::WorkPrTitles {
-                project_root,
-                pr_titles,
-            });
-        });
     }
 
     /// SPEC-3075 FR-006: cache the AI-polished `branch -> summary` map and
@@ -14897,6 +14966,88 @@ struct WorkBranchScanTarget {
     has_merged_pr: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct WorkMergeScanQueue {
+    workers: Arc<crate::work_events_ingest::WorkEventsIngestQueue>,
+    pr_requests: std::sync::Mutex<HashMap<gwt_core::repo_hash::ProjectKey, ProjectContext>>,
+}
+
+impl WorkMergeScanQueue {
+    fn request(
+        &self,
+        context: ProjectContext,
+        pr_titles: bool,
+    ) -> Option<crate::work_events_ingest::WorkEventsIngestWorker> {
+        if pr_titles {
+            self.pr_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(context.project_key.clone(), context.clone());
+        }
+        self.workers.request(context)
+    }
+
+    fn take_pr_request(&self, context: &ProjectContext) -> bool {
+        let mut pending = self
+            .pr_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.get(&context.project_key) != Some(context) {
+            return false;
+        }
+        pending.remove(&context.project_key);
+        true
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct WorkMergeScanCache {
+    readiness: gwt_git::branch::CleanupReadinessCache,
+    inputs: work_scans::WorkScanInputs,
+    last_inputs: Option<(Vec<WorkBranchScanTarget>, u64, ProjectContext)>,
+    snapshot: Option<WorkMergeScanSnapshot>,
+    measured: bool,
+}
+
+struct WorkMergeScanSnapshot {
+    merged: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    cleanup: HashMap<String, String>,
+    dirty: HashSet<String>,
+    refs: Option<HashSet<String>>,
+}
+
+impl WorkMergeScanSnapshot {
+    fn from_event(event: &UserEvent) -> Self {
+        let UserEvent::WorkMergeStatus {
+            merged_branches,
+            cleanup_ready_branches,
+            dirty_branches,
+            known_branch_refs,
+            ..
+        } = event
+        else {
+            unreachable!("merge worker produces only merge status");
+        };
+        Self {
+            merged: merged_branches.clone(),
+            cleanup: cleanup_ready_branches.clone(),
+            dirty: dirty_branches.clone(),
+            refs: known_branch_refs.clone(),
+        }
+    }
+
+    fn event(&self, project_root: PathBuf, live_process_branches: HashSet<String>) -> UserEvent {
+        UserEvent::WorkMergeStatus {
+            project_root,
+            merged_branches: self.merged.clone(),
+            cleanup_ready_branches: self.cleanup.clone(),
+            dirty_branches: self.dirty.clone(),
+            live_process_branches,
+            known_branch_refs: self.refs.clone(),
+        }
+    }
+}
+
 fn work_branch_scan_targets(
     projection: &gwt_core::workspace_projection::WorkItemsProjection,
 ) -> Vec<WorkBranchScanTarget> {
@@ -14994,17 +15145,39 @@ fn work_merge_scan_needs_dirty_check(
     readiness.is_some() || has_merged_pr
 }
 
+#[cfg(test)]
 fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {
-    target.worktree_paths.iter().any(|path| {
-        gwt_git::diff::get_status(path)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .any(|entry| !work_branch_status_entry_is_gwt_write(path, entry))
-            })
-            // Cannot prove the worktree is clean — fail closed (dirty).
-            .unwrap_or(true)
-    })
+    work_branch_dirty_state(target).unwrap_or(true)
+}
+
+fn work_branch_dirty_state(target: &WorkBranchScanTarget) -> gwt_core::Result<bool> {
+    for path in &target.worktree_paths {
+        // A projected worktree may belong to another host or be removed.
+        // Its absence is a stable input and must keep cleanup conservative.
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(true);
+        }
+        // This scan only reads status. Refreshing/writing the index would
+        // invalidate its own inputs (including creation of an empty index).
+        let output = gwt_core::process::run_git_logged(
+            &["--no-optional-locks", "status", "--porcelain=v1"],
+            Some(path),
+        )
+        .map_err(|error| gwt_core::GwtError::Git(format!("status: {error}")))?;
+        if !output.status.success() {
+            return Err(gwt_core::GwtError::Git(format!(
+                "status: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        if gwt_git::diff::parse_porcelain_status(&String::from_utf8_lossy(&output.stdout))
+            .iter()
+            .any(|entry| !work_branch_status_entry_is_gwt_write(path, entry))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Issue #4009: gwt rewrites the merged hook configs on every materialization
