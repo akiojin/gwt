@@ -128,7 +128,9 @@ test.describe("runtime memory budget (live backend)", () => {
           user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail",
           initial_producers: initial, final_producers: final, rss_samples: samples, browser_errors: errors,
         };
-        const body = JSON.stringify(evidence, null, 2);
+        const body = JSON.stringify(evidence, (_key, value) => typeof value === "string"
+          ? value.replace(/([a-z]:[\\/]+Users[\\/]+)[^\\/]+/gi, "$1<redacted>")
+          : value, 2);
         await writeFile(join(HOME, `runtime-memory-${theme}.json`), body);
         await info.attach(`runtime-memory-${theme}`, { body, contentType: "application/json" });
         for (const surface of surfaces) await sendLiveGwtEvent(surface.page, { kind: "close_window", id: surface.id }).catch(() => undefined);
@@ -168,6 +170,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
       try { $process = [Diagnostics.Process]::GetProcessById([int]$targetId) }
       catch [ArgumentException] { continue }
       try { @{Id=$process.Id;started_at=([DateTimeOffset]$process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()} }
+      catch [InvalidOperationException], [ComponentModel.Win32Exception] { continue }
       finally { $process.Dispose() }
     })
     [Console]::WriteLine((@{request_id=$query.request_id;sample=$sample;processes=$processes} | ConvertTo-Json -Depth 4 -Compress))

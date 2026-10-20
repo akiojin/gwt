@@ -633,13 +633,6 @@ fn prepare_rebuilt_work_events(
     Ok((report, projection, corrupt_state))
 }
 
-#[derive(Debug, Clone)]
-enum CachedSharedWorkEventLine {
-    Known(Box<WorkEvent>),
-    Opaque,
-    Invalid(String),
-}
-
 fn collect_shared_work_event_sources(
     sources: impl IntoIterator<Item = SharedWorkEventsSource>,
     report: &mut WorkEventsIntakeReport,
@@ -659,72 +652,72 @@ fn collect_shared_work_event_sources_with_decoder<F>(
 where
     F: FnMut(&[u8]) -> Result<DecodedWorkspaceWorkEvent>,
 {
+    // A shard can be offered by hundreds of refs. Keep one raw source and
+    // its multiplicity instead of retaining every decoded event in a cache.
+    // Retaining the Arc also keeps its pointer identity valid while grouping.
+    let mut grouped = Vec::<(SharedWorkEventsSource, usize)>::new();
+    let mut group_by_identity = HashMap::<usize, usize>::new();
+    for source in sources {
+        let identity = Arc::as_ptr(&source.content) as *const () as usize;
+        if let Some(&index) = group_by_identity.get(&identity) {
+            grouped[index].1 += 1;
+        } else {
+            group_by_identity.insert(identity, grouped.len());
+            grouped.push((source, 1));
+        }
+    }
+    drop(group_by_identity);
+
     let mut incoming = Vec::new();
-    let mut decoded_by_content_identity = HashMap::<usize, Vec<CachedSharedWorkEventLine>>::new();
     // Issue #4371: one shard is offered once per origin ref that holds it
     // (701 refs peaked the rebuild at 4.7 GB). The fold keeps the canonical
     // event, and the first identical duplicate records its provenance; any
     // further identical copy is a no-op it would only count as a duplicate.
     let mut copies_by_stable_key = HashMap::<String, u8>::new();
-    for source in sources {
-        let content_identity = Arc::as_ptr(&source.content) as *const () as usize;
-        let decoded = decoded_by_content_identity
-            .entry(content_identity)
-            .or_insert_with(|| {
-                source
-                    .content
-                    .lines()
-                    .filter_map(|line| {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            return None;
-                        }
-                        Some(match decode(line.as_bytes()) {
-                            Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
-                                if event.execution_container.is_none() && !is_close_kind(&event) {
-                                    tracing::warn!(
-                                        event_id = %event.id,
-                                        work_item_id = %event.work_item_id,
-                                        source = ?source.source_execution_container,
-                                        "work events intake: event has no explicit container; retaining history without a Work ref"
-                                    );
-                                }
-                                CachedSharedWorkEventLine::Known(event)
-                            }
-                            Ok(DecodedWorkspaceWorkEvent::Opaque) => {
-                                CachedSharedWorkEventLine::Opaque
-                            }
-                            Err(error) => CachedSharedWorkEventLine::Invalid(error.to_string()),
-                        })
-                    })
-                    .collect()
-            });
-        for cached in decoded.iter() {
-            let event = match cached {
-                CachedSharedWorkEventLine::Known(event) => event.as_ref().clone(),
-                CachedSharedWorkEventLine::Opaque => {
-                    report.skipped_opaque += 1;
+    for (source, multiplicity) in grouped {
+        for line in source
+            .content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let event = match decode(line.as_bytes()) {
+                Ok(DecodedWorkspaceWorkEvent::Known(event)) => *event,
+                Ok(DecodedWorkspaceWorkEvent::Opaque) => {
+                    report.skipped_opaque += multiplicity;
                     continue;
                 }
-                CachedSharedWorkEventLine::Invalid(error) => {
-                    report.skipped_invalid += 1;
-                    tracing::warn!(%error, "work events intake: skipping malformed line");
+                Err(error) => {
+                    report.skipped_invalid += multiplicity;
+                    tracing::warn!(%error, multiplicity, "work events intake: skipping malformed line");
                     continue;
                 }
             };
             if is_close_kind(&event) {
-                report.skipped_close_kind += 1;
+                report.skipped_close_kind += multiplicity;
                 continue;
+            }
+            if event.execution_container.is_none() {
+                tracing::warn!(
+                    event_id = %event.id,
+                    work_item_id = %event.work_item_id,
+                    source = ?source.source_execution_container,
+                    "work events intake: event has no explicit container; retaining history without a Work ref"
+                );
             }
             let stable_key = serde_json::to_string(&event).map_err(|error| {
                 GwtError::Other(format!("work events intake stable key: {error}"))
             })?;
-            let copies = copies_by_stable_key.entry(stable_key.clone()).or_default();
-            if *copies >= 2 {
-                report.skipped_duplicate += 1;
+            let copies = copies_by_stable_key.get(&stable_key).copied().unwrap_or(0);
+            let accepted = multiplicity.min(usize::from(2 - copies));
+            report.skipped_duplicate += multiplicity - accepted;
+            if accepted == 0 {
                 continue;
             }
-            *copies += 1;
+            copies_by_stable_key.insert(stable_key.clone(), copies + accepted as u8);
+            if accepted == 2 {
+                incoming.push((event.clone(), stable_key.clone()));
+            }
             incoming.push((event, stable_key));
         }
     }
@@ -1624,11 +1617,16 @@ mod tests {
         ];
         let mut report = WorkEventsIntakeReport::default();
         let mut decode_calls = 0;
+        let mut decoded_title = None;
 
         let incoming =
             collect_shared_work_event_sources_with_decoder(sources, &mut report, |line| {
                 decode_calls += 1;
-                decode_workspace_work_event_line(line)
+                let decoded = decode_workspace_work_event_line(line);
+                if let Ok(DecodedWorkspaceWorkEvent::Known(event)) = &decoded {
+                    decoded_title = event.title.as_ref().map(|title| title.as_ptr());
+                }
+                decoded
             })
             .expect("collect contextual sources");
 
@@ -1636,6 +1634,12 @@ mod tests {
         assert_eq!(report.skipped_opaque, 2, "accounting remains per source");
         assert_eq!(report.skipped_invalid, 2, "accounting remains per source");
         assert_eq!(incoming.len(), 2);
+        assert!(
+            incoming.iter().any(|(event, _)| {
+                event.title.as_ref().map(|title| title.as_ptr()) == decoded_title
+            }),
+            "the decoded event must move into the output instead of remaining in a cloned cache"
+        );
         assert!(incoming
             .iter()
             .all(|(event, _)| event.execution_container.is_none()));
