@@ -1596,9 +1596,9 @@ impl AppRuntime {
         }
         let notice = screen
             .and_then(|screen| {
-                gwt_core::usage::detect_provider_limit_notice(
+                gwt_core::usage::limit_notice::detect_provider_limit_notice_with_clock(
                     screen,
-                    &now.with_timezone(&chrono::Local),
+                    || now.with_timezone(&chrono::Local),
                 )
             })
             .filter(|notice| notice.provider == self.quota_provider_for_window(window_id));
