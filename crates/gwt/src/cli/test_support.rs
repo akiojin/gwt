@@ -316,11 +316,23 @@ fn main() -> ExitCode {
                 && allow == "--allow-escape-sequences"
                 && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
         {
+            if mode == "job-log-unsupported-escape-flag" {
+                eprintln!("unknown flag: --allow-escape-sequences");
+                return ExitCode::FAILURE;
+            }
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {
                 print!("job log 91");
             }
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint]
+            if mode == "job-log-unsupported-escape-flag"
+                && api == "api"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
+            print!("unrelated output\n\x1b[31mtest fails ... FAILED\x1b[0m\nthread 'fails' panicked at src/lib.rs:1:1\n");
             return ExitCode::SUCCESS;
         }
         [api, graphql, ..] if api == "api" && graphql == "graphql" => {
