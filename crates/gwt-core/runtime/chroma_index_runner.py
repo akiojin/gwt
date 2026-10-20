@@ -4812,6 +4812,9 @@ def _validated_file_index_v2_action_inputs(
     return root, descriptor
 
 
+_FILE_INDEX_V2_YIELDED = False
+
+
 def _file_index_v2_yielded_result(
     scope: str, requested: int, computed: int, cache_hits: int
 ) -> dict:
@@ -4819,6 +4822,8 @@ def _file_index_v2_yielded_result(
     (FR-418). No View is materialized and no head is replaced, so readers keep
     serving whatever was already published. `yielded` is the flag the Rust
     orchestrator reads to reschedule the continuation."""
+    global _FILE_INDEX_V2_YIELDED
+    _FILE_INDEX_V2_YIELDED = True
     emit_progress(
         {
             "phase": "yielded",
@@ -10378,4 +10383,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if exit_code == 0 and _FILE_INDEX_V2_YIELDED:
+        # Issue #5782: the yielded action has closed Chroma, persisted its CAS
+        # checkpoint and unwound its locks. Avoid seconds of unused PyTorch
+        # interpreter teardown; the parent still reaps us before releasing the
+        # heavy lease (FR-417). Other success/failure paths retain normal exit.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    raise SystemExit(exit_code)

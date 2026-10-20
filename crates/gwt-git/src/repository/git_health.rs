@@ -9,6 +9,7 @@ use std::{
 };
 
 const MAX_METADATA_BYTES: u64 = 65_536;
+const MAX_FAILURES: usize = 64;
 type Metadata = Vec<(PathBuf, Result<MetadataContents, io::ErrorKind>)>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,10 +22,42 @@ struct Failure {
     metadata: Metadata,
     extra_files: Vec<PathBuf>,
     diagnosis: String,
+    last_access: u64,
 }
 
-fn failures() -> &'static Mutex<BTreeMap<PathBuf, Failure>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, Failure>>> = OnceLock::new();
+#[derive(Default)]
+struct FailureCache {
+    entries: BTreeMap<PathBuf, Failure>,
+    access_counter: u64,
+}
+
+impl FailureCache {
+    fn get(&mut self, key: &Path) -> Option<&Failure> {
+        let failure = self.entries.get_mut(key)?;
+        self.access_counter += 1;
+        failure.last_access = self.access_counter;
+        Some(failure)
+    }
+
+    fn insert(&mut self, key: PathBuf, mut failure: Failure) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_FAILURES {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, failure)| failure.last_access)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.access_counter += 1;
+        failure.last_access = self.access_counter;
+        self.entries.insert(key, failure);
+    }
+}
+
+fn failures() -> &'static Mutex<FailureCache> {
+    static CACHE: OnceLock<Mutex<FailureCache>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -123,7 +156,7 @@ pub fn cached_metadata_failure(repo: &Path) -> Option<String> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = cache_key(repo);
-    if let Some(failure) = cache.get(&key) {
+    if let Some(failure) = cache.entries.get(&key) {
         observed.extend(
             failure
                 .extra_files
@@ -134,10 +167,11 @@ pub fn cached_metadata_failure(repo: &Path) -> Option<String> {
         observed.dedup_by(|a, b| a.0 == b.0);
     }
     if cache
+        .entries
         .get(&key)
         .is_some_and(|failure| failure.metadata != observed)
     {
-        cache.remove(&key);
+        cache.entries.remove(&key);
     }
     cache.get(&key).map(|failure| failure.diagnosis.clone())
 }
@@ -249,15 +283,13 @@ pub fn record_metadata_failure(repo: &Path, command: &str, stderr: &str) -> Opti
     let mut cache = failures()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cache.len() >= 64 {
-        cache.pop_first();
-    }
     cache.insert(
         cache_key(repo),
         Failure {
             metadata: observed,
             extra_files,
             diagnosis: diagnosis.clone(),
+            last_access: 0,
         },
     );
     Some(diagnosis)
@@ -287,6 +319,46 @@ pub fn validate_project_git(repo: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failure() -> Failure {
+        Failure {
+            metadata: Vec::new(),
+            extra_files: Vec::new(),
+            diagnosis: String::new(),
+            last_access: 0,
+        }
+    }
+
+    fn full_failure_cache() -> FailureCache {
+        let mut cache = FailureCache::default();
+        for index in 0..MAX_FAILURES {
+            cache.insert(PathBuf::from(format!("middle-{index:02}")), failure());
+        }
+        cache
+    }
+
+    #[test]
+    fn failure_cache_preserves_new_entries_and_replacements_at_capacity() {
+        let mut cache = full_failure_cache();
+        let recent = PathBuf::from("a-recent");
+        cache.insert(recent.clone(), failure());
+        cache.insert(PathBuf::from("z-other"), failure());
+        assert!(cache.entries.contains_key(&recent));
+        assert_eq!(cache.entries.len(), MAX_FAILURES);
+        cache.insert(PathBuf::from("z-other"), failure());
+        assert!(cache.entries.contains_key(&recent));
+        assert_eq!(cache.entries.len(), MAX_FAILURES);
+    }
+
+    #[test]
+    fn failure_cache_access_protects_the_recently_used_entry() {
+        let mut cache = full_failure_cache();
+        assert!(cache.get(Path::new("middle-00")).is_some());
+        cache.insert(PathBuf::from("a-new"), failure());
+        assert!(cache.entries.contains_key(Path::new("middle-00")));
+        assert!(!cache.entries.contains_key(Path::new("middle-01")));
+        assert_eq!(cache.entries.len(), MAX_FAILURES);
+    }
 
     #[test]
     fn normal_checkout_directory_and_head_repairs_invalidate_failures() {

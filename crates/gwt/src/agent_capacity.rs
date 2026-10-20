@@ -1911,9 +1911,10 @@ mod tests {
             std::fs::write(root.join("target/artifact"), [0_u8; 1]).unwrap();
         }
         let mut probe = RuntimeProbe::default();
-        probe
-            .refresh_projects(&[first.clone(), second.clone()])
-            .unwrap();
+        let roots = [normalized(&first), normalized(&second)];
+        for root in &roots {
+            refresh_target_measurement(root, || probe.refresh_projects(&roots));
+        }
         let path = snapshot_path();
         assert_eq!(path, snapshot_path());
         let snapshot = read_snapshot(&path).unwrap();
