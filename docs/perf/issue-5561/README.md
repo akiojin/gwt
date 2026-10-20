@@ -29,6 +29,8 @@ installed v9.123.2 の GUI（PID 36240、2026-10-15T14:11:46Z 起動）で priva
 
 ## GUI の短時間比較
 
+公開用の runtime JSON は、パス中のアカウント成分だけを秘匿化している。計測値・原本の割当ログ・再現入力は変更していない。
+
 変更前 GUI を、この checkout と fresh HOME、実 Chromium の headed dark/light で起動した。12個の custom command Agent PTY は各1秒に512文字を出力し、プロセス開始時刻と PID を照合した。各テーマの全12起動後に60秒観測した。
 
 | テーマ | 観測最大 WS | console/page error |
@@ -117,5 +119,26 @@ peakは約51.06%減り、返却後の保持量はほぼ同じだった。必要�
 所有 Issue は未証明の条件を残して OPEN を維持する。配信スライスは source metadata の保持量と複製ピークの削減、およびその回帰・計測証跡である。schema migration は不要で、rollback はこの変更の revert。実 fleet の追加観測は既存 Issue #5561 で追跡する。
 
 2026-10-19 の再開時に fetch した `origin/develop` (`f16d1243095672d50fdd7e4b4681d0832ce68a6c`) は、修正3コミット `109b7c5b7` / `815fcff09` / `5767b7cfa` を含んでいない。未配信ソースは AC 達成の証拠とせず、まず保持量削減の独立配信と互換性を検証する。AC-1 は上記の範囲付き allocation 計測、AC-3 は区間・単位・失敗を明記した増加率を証拠とする。AC-2 は実モデル Agent 10〜12窓・同条件4時間での観測が引き続き必要で、短時間の headed 回帰が成功してもチェックしない。
+
+## v9.129.4 の実運用で残った増加
+
+2026-10-20 の再開時、PR #5742 は `origin/develop` に包含済みで、元の3つの修正コミットに未配信分はなかった。稼働 GUI はそれを含む installed v9.129.4、PID 13508、00:34:05Z 起動だった。03:10:59Z の読み取りでは WS 2,276,139,008 B、private 2,301,476,864 B と、既に1.5GBの予算を超えていた。[プロセス識別と限界](release-9.129.4-failed/metadata.json)、[サンプル](release-9.129.4-failed/process-samples.jsonl)。12 Codex と1 PMの13窓、provider process は14本で、制御された10〜12窓の比較ではない。この失敗を AC-2 の成功や修正後の増加率には使わない。
+
+共有 perf stream には、worktree_scan 5,784,699 ms、続く ref_scan 8,634 ms と、その後の intake 未完了が記録されていた。[区間](release-9.129.4-failed/ingest-phases.json)。このログには PID がなく、稼働 GUI への帰属は推論である。非停止の native stack でも worker のファイル操作を観測したため、loader の再走査も候補に残す。private page の固定マーカー集計は解放済み領域を含み、live heap の証明には使わない。[集計](release-9.129.4-failed/private-region-sample.json)。最後に保存された advisory index は1,291 groups / 2,926,491 sources / group file 584,186,244 Bだったが、現在の走査入力や生存量ではない。[index](release-9.129.4-failed/intake-index-state.json)。
+
+local source 20万件だけの loader 抜粋比較でも、入力 live 73,600,056 B に対して peak 113,560,396 B、全 source の remove 後・返却直前 69,840,700 B、返却後52,801,080 Bを観測した。[結果](release-9.129.4-failed/local-loader-before.jsonl)。空になった prelock HashMap の bucket は返却まで残る。この合成経路はファイル読取・検証・実 container を stub にしており、GUI の2GB全体を説明しない。再現ソースは後述の archive に含めた。
+
+## collector の decoded cache と重複割当
+
+既存 collector は unique content ごとの decoded WorkEvent 全件を返却直前まで保持し、source の alias ごとに event を clone・JSON 化してから2件上限を判定していた。返却時の列挙順を変える accumulator 案や全経路の streaming 化と比較し、先頭出現順の content identity 集約と multiplicity を選んだ。raw Arc は identity の有効期間を保ち、各 line は1度 decode・serializeし、採用する event を既存の返却 Vec へ moveする。完全同一イベントの canonical と provenance 用 duplicate の最大2件、全 report 件数、source container の診断専用扱いと破損復旧条件は維持する。既存 contextual-content test に allocation 移譲の assertion を加え、修正前の失敗を確認した。[RED](release-9.129.4-failed/collector-red.log)。
+
+実 WorkEvent と decoder をリンクした合成入力で、旧本文と修正後の製品関数を抜粋して比較した。変更は関数名と3つの計測器だけで、復元した候補関数の hash は製品と一致する。[結果・関数 hash](collector-allocation/collector-product.json)、[再実行手順と限界](collector-allocation/collector-reproduce.md)、[全 source](collector-allocation/probes.zip)。
+
+| 同一入力 | 旧 peak live | 修正後 peak live | 旧累積割当要求 | 修正後累積割当要求 |
+| --- | ---: | ---: | ---: | ---: |
+| 64 unique × 4 events × 701 aliases、title 1,024 B | 4,262,061 B | 2,108,784 B | 1,061,810,568 B | 3,923,640 B |
+| 2,000 unique × 4 events × 8 aliases、title 2,048 B | 150,055,181 B | 115,225,280 B | 787,427,448 B | 188,809,304 B |
+
+後者の peak は約23.21%、累積割当要求は約76.02%減った。両入力とも完全 stable key のソート済み digest、key総bytes、decode・返却・duplicate件数が一致した。close/opaque/invalidやcontainer警告の意味は製品回帰で検証し、この合成入力の等価性だけで一般化しない。測定値は System allocator への成功要求で、GUI WS/private、再走査、fold、永続化、実 Agent の4時間運用を含まない。AC-2 と同条件の前後 MB/時は引き続き未証明である。
 
 User Verification Result: n/a (autonomous)
