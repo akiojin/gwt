@@ -14537,7 +14537,16 @@ impl IssueMonitorState {
     fn occupied_slot_count(&self) -> usize {
         let mut reviews = self
             .monitor_canvas_windows()
-            .filter(|window| window.review_dispatch)
+            .filter(|window| {
+                window.review_dispatch
+                    && idle_window_is_alive(window.status)
+                    // A settled Idle reviewer releases its active slot in the
+                    // same scan (#4084), but still blocks duplicate reviews.
+                    && !(window.status == WindowState::Idle
+                        && window
+                            .issue_number
+                            .is_some_and(|issue| self.review_verdict_published(issue)))
+            })
             .map(|window| window.window_id.as_str())
             .collect::<BTreeSet<_>>();
         let mut pending_reviews = 0;
@@ -15138,12 +15147,14 @@ impl IssueMonitorState {
                         AutonomousPhase::Reviewing | AutonomousPhase::Implementing
                     ) && record.reviewed_sha.is_some()
                         && record.review_passed.is_none();
-                    if !awaiting_review && !bound_implementation {
-                        self.request_review_pane_close(
-                            issue_number,
-                            observed.window_id.clone(),
-                            IssueMonitorIdleKind::ReviewVerdictPublished,
-                        );
+                    if !awaiting_review {
+                        if !bound_implementation {
+                            self.request_review_pane_close(
+                                issue_number,
+                                observed.window_id.clone(),
+                                IssueMonitorIdleKind::ReviewVerdictPublished,
+                            );
+                        }
                         continue;
                     }
                     let Some(pr_number) = record.pr_number else {
