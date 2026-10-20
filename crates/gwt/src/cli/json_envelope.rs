@@ -865,6 +865,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "release.metadata.set"
         | "pr.reopen"
         | "pr.review.submit"
+        | "pr.auto_merge.enable"
         | "update.settings.set"
         | "pm.approval.request"
         | "pm.approval.status"
@@ -3350,6 +3351,8 @@ mod tests {
                 url: "https://example.com/pr/4139".to_string(),
                 is_draft,
                 head_ref_name: "work/issue-4131".to_string(),
+                head_sha: None,
+                is_cross_repository: None,
                 updated_at: Some(now),
                 mergeable: mergeable.to_string(),
                 merge_state_status: merge_state_status.to_string(),

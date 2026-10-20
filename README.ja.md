@@ -785,6 +785,14 @@ GitHub review、`release.metadata.set` による既存 release の名前・説�
 変更も依頼できます。topics の置換は `topics` だけを指定します。既存の review・CI チェックは
 維持し、release の公開・asset・latest の選択には既存の gated workflow を使います。
 
+リポジトリの自動マージ対象から外れる外部 fork の PR は、レビュー済みの PR 番号と
+head SHA をオーナーが同じ範囲付き許可で PM に委任できます。`pr.auto_merge.enable` に `number` と
+`reviewed_head_sha` を指定すると、現在の PR・CI・review 状態を確認し、その SHA に限って
+GitHub の auto-merge を有効にします。監査記録には PR 番号・SHA・許可の根拠を残します。
+head が変わった場合は再レビューと新しい許可が必要です。この経路が利用できない、または
+委任が無い場合は人によるマージが必要です。`pr.list` はマージ提案を繰り返す代わりに、
+外部 fork のため自動化の対象外になり得る理由と代替経路を示します。
+
 明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
 `pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /
 `pm.message.send` の3種類に限られ、それぞれの既存のチェックを維持します。

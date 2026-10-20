@@ -48,6 +48,7 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
@@ -115,6 +116,7 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
@@ -400,6 +402,31 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.pr_auto_merge_call_log
+            .push((number, reviewed_head_sha.to_string()));
+        let snapshot = self
+            .completion_prs
+            .get_mut(&number)
+            .ok_or_else(|| io::Error::other("no auto-merge PR"))?;
+        if snapshot.head_sha != reviewed_head_sha {
+            return Err(io::Error::other("PR head changed"));
+        }
+        snapshot.inventory.auto_merge_enabled = true;
+        Ok(
+            serde_json::json!({"number":number,"reviewed_head_sha":reviewed_head_sha,"auto_merge_enabled":true,"state":"OPEN"}),
+        )
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.fetch_completion_pr(number)
     }
     fn edit_pr(
         &mut self,
