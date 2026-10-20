@@ -34,17 +34,23 @@ test("Max active commits the final stepper value once and Auto never saves numbe
       return envelope;
     };
     await gotoLiveGwt(page, base, { enableTestBridge: true });
+    // Opening Issues requests the Monitor snapshot in a fresh workspace.
+    await page.locator('button[data-surface="issues"]').click();
+    const issues = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]');
+    await expect(issues).toBeVisible();
     await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .some(({ payload }: any) => payload.kind === "issue_monitor_status"));
+    const waitForLimit = (override: number | null) => page.waitForFunction(expected =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter(({ payload }: any) => payload.kind === "issue_monitor_status")
+        .at(-1)?.payload.status.max_active_agents_override === expected, override);
     operation("issue.monitor.config.set", { max_active: 6 });
+    await waitForLimit(6);
     const initial = operation("issue.monitor.status");
     expect(JSON.parse(initial.output).max_active_last_change).toMatchObject({ source: "json_operation" });
     const preferences = join(home, ".gwt/projects", initial.project_store.hash, "project-state/issue-monitor.json");
     const prefs = async () => JSON.parse(await readFile(preferences, "utf8"));
 
-    await page.locator('button[data-surface="issues"]').click();
-    const issues = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]');
-    await expect(issues).toBeVisible();
     const disclosure = issues.locator(".settings-issues-options");
     if (!await disclosure.evaluate(element => (element as HTMLDetailsElement).open)) {
       await disclosure.locator(":scope > summary").click();
@@ -56,6 +62,7 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     await expect(input).toHaveValue("6");
     await input.fill("2");
     operation("issue.monitor.config.set", { max_active_mode: "auto" });
+    await waitForLimit(null);
     await expect(mode).toHaveValue("auto");
     await expect(input).toBeDisabled();
     await expect(apply).toBeDisabled();
@@ -63,6 +70,7 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     expect(saves).toEqual([]);
     expect((await prefs()).max_active_last_change.source).toBe("json_operation");
     operation("issue.monitor.config.set", { max_active: 6 });
+    await waitForLimit(6);
     await expect(mode).toHaveValue("manual");
     await expect(input).toHaveValue("6");
     await expect(apply).toBeDisabled();
