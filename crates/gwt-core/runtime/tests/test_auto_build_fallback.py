@@ -505,6 +505,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertEqual(result.get("error_code"), "EMPTY_CORPUS", result)
             self.assertEqual(result.get("scope"), "specs", result)
             self.assertIn("cache", result.get("error", "").lower(), result)
+            self.assertFalse(db_root.exists(), "diagnose an unsynced cache before creating a store")
 
     def test_search_issues_empty_corpus_returns_diagnostic_when_cache_unpopulated(self):
         with tempfile.TemporaryDirectory() as tmp:

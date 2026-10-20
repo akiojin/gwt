@@ -2012,10 +2012,11 @@ def _chroma_store_path(db_path: Path) -> str:
     but every later process reads the collection as unloadable, so the index
     looks empty and is rebuilt forever. Use the ASCII 8.3 alias instead, and
     refuse loudly when the volume has none rather than build an unreadable
-    store.
+    store. Normalize ASCII spellings too, so a short profile path and its
+    resolved long spelling identify the same Chroma System.
     """
     text = str(db_path)
-    if os.name != "nt" or text.isascii():
+    if os.name != "nt":
         return text
     short = _windows_short_path(text)
     if not short.isascii():
@@ -3053,7 +3054,7 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging, target)
+    _replace_staging_generation(staging, target)
     _fsync_directory(target.parent)
 
 
@@ -8487,6 +8488,12 @@ def action_search_v2(
                 "error_code": "BAD_ARGS",
                 "error": "project_root required for auto-build",
             }
+        if (
+            scope in {"issues", "specs"}
+            and not health["exists"]
+            and not _issue_cache_is_populated(repo_hash)
+        ):
+            return _empty_corpus_diagnostic(scope, repo_hash)
         emit_progress({"phase": "indexing", "scope": scope, "done": 0, "total": 0})
         if scope == "issues":
             build = action_index_issues_v2(
