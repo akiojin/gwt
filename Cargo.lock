@@ -1461,10 +1461,12 @@ dependencies = [
  "dirs 7.0.0",
  "gwt-core",
  "libc",
+ "notify",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
