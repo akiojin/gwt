@@ -216,7 +216,6 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
     assert!(targets.contains(&&expected_base));
     for scope in [
         RefreshScope::Issues,
-        RefreshScope::Specs,
         RefreshScope::Memory,
         RefreshScope::Discussions,
         RefreshScope::Board,
@@ -227,11 +226,11 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
     }
     assert_eq!(
         snapshot.target_count(),
-        8,
-        "one Files pair and seven repo scopes, no overlays"
+        7,
+        "one Files pair and six repo scopes, no overlays"
     );
     assert!(
-        snapshot.queue_depth() <= 8,
+        snapshot.queue_depth() <= 7,
         "startup queue must remain bounded by the distinct scope targets"
     );
     assert_eq!(

@@ -305,6 +305,13 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
         )
 
     def test_issue_build_yields_to_a_verification_reservation_and_resumes(self):
+        # SPEC chunks share the same continuation and must also survive a
+        # background yield without embedding the staged chunk a second time.
+        cache = self.home / ".gwt/cache/issues" / ISSUE_REPO_HASH
+        for path in cache.glob("*/meta.json"):
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            meta["labels"] = ["gwt-spec"]
+            path.write_text(json.dumps(meta), encoding="utf-8")
         pending = _write_reservation(
             self.coordinator_root, "manual-rebuild", int(time.time() * 1000) + 600_000
         )

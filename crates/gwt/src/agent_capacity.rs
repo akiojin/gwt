@@ -275,14 +275,14 @@ fn calculate(input: &Inputs) -> AgentCapacity {
             .live
             .saturating_add(usize::try_from(bytes / input.ram_per_agent).unwrap_or(usize::MAX))
     });
-    let disk = input
-        .disk
-        .zip(input.target.filter(|bytes| *bytes > 0))
-        .map(|(free, target)| {
-            input
-                .live
-                .saturating_add(usize::try_from(free / target).unwrap_or(usize::MAX))
-        });
+    let disk = input.disk.zip(input.target).map(|(free, target)| {
+        if target == 0 {
+            return usize::MAX;
+        }
+        input
+            .live
+            .saturating_add(usize::try_from(free / target).unwrap_or(usize::MAX))
+    });
     let complete = input.inventory_complete && cpu.is_some() && ram.is_some() && disk.is_some();
     let budget = complete.then(|| cpu.unwrap().min(ram.unwrap()).min(disk.unwrap()));
     let constraints = [
@@ -315,10 +315,15 @@ fn calculate(input: &Inputs) -> AgentCapacity {
             "disk",
             disk,
             format!(
-                "free disk {}; measured target {}; live {}",
+                "free disk {}; measured target {}; live {}{}",
                 format_bytes(input.disk),
                 format_bytes(input.target),
-                input.live
+                input.live,
+                if input.target == Some(0) {
+                    "; no additional target storage required"
+                } else {
+                    ""
+                }
             ),
         ),
     ]
@@ -490,7 +495,6 @@ fn project_capacity_at(
         .iter()
         .filter(|(path, measurement)| {
             own_targets.contains(*path)
-                && measurement.bytes > 0
                 && fresh(
                     measurement.observed_at,
                     measurement.observed_at.saturating_add(TARGET_TTL_SECS),
@@ -500,7 +504,7 @@ fn project_capacity_at(
         .map(|(_, measurement)| measurement.bytes)
         .max();
     // The largest completed fresh target is conservative across the machine;
-    // a requested project still needs its own measured representative first.
+    // a requested project still needs its own measured representative, including zero.
     let target = target.map(|own| {
         snapshot
             .targets
@@ -602,7 +606,7 @@ fn capacity_reason_summary(mut reason: String, diagnostics: &[String]) -> String
 }
 
 /// GUI-independent refresh. CPU baselines and target walks survive ticks;
-/// only complete positive target measurements enter the shared atomic file.
+/// only complete target measurements enter the shared atomic file.
 pub fn refresh_machine_capacity(project_root: &Path) -> io::Result<()> {
     refresh_machine_capacity_for_projects(&[project_root.to_path_buf()])
 }
@@ -703,7 +707,7 @@ impl RuntimeProbe {
                     Ok(bytes) => Some(bytes),
                     Err(error) => {
                         disk_errors.push(format!(
-                            "disk_measurement_unavailable: {}: {error}; check volume/path access or use Manual",
+                            "disk_measurement_unavailable: {}: {error}; excluded from disk estimate; check volume/path access",
                             root.display()
                         ));
                         None
@@ -713,14 +717,10 @@ impl RuntimeProbe {
             })
             .collect::<BTreeMap<_, _>>();
         let disk_observations = merge_disk_observations(previous.disk_observations, updates, now);
-        let free_disk_bytes = if disk_errors.is_empty() {
-            disk_observations
-                .values()
-                .map(|sample| sample.available_bytes)
-                .min()
-        } else {
-            None
-        };
+        let free_disk_bytes = disk_observations
+            .values()
+            .map(|sample| sample.available_bytes)
+            .min();
         let mut diagnostics = machine.diagnostics;
         diagnostics.extend(disk_errors);
         let mut targets = previous.targets;
@@ -742,10 +742,9 @@ impl RuntimeProbe {
         let deadline = Instant::now() + SCAN_TIME_PER_REFRESH;
         let mut remaining = SCAN_ENTRIES_PER_REFRESH;
         for path in paths {
-            if targets
-                .get(&path)
-                .is_some_and(|sample| now < sample.observed_at.saturating_add(TARGET_TTL_SECS / 2))
-            {
+            if targets.get(&path).is_some_and(|sample| {
+                sample.bytes > 0 && now < sample.observed_at.saturating_add(TARGET_TTL_SECS / 2)
+            }) {
                 continue;
             }
             let walk = self
@@ -753,24 +752,21 @@ impl RuntimeProbe {
                 .entry(path.clone())
                 .or_insert_with(|| TargetWalk::new(path.clone()));
             walk.last_requested_at = now;
-            match walk.advance(&mut remaining, deadline) {
+            let measurement = match walk.advance(&mut remaining, deadline) {
+                // Missing build output is known zero consumption, not a failed sensor.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Some(0)),
+                result => result,
+            };
+            match measurement {
                 Ok(Some(bytes)) => {
                     self.walks.remove(&path);
-                    if bytes > 0 {
-                        targets.insert(
-                            path,
-                            TargetMeasurement {
-                                bytes,
-                                observed_at: now,
-                            },
-                        );
-                    } else {
-                        targets.remove(&path);
-                        diagnostics.push(format!(
-                            "target_measurement_empty: {}; build the project or use Manual",
-                            path.display()
-                        ));
-                    }
+                    targets.insert(
+                        path,
+                        TargetMeasurement {
+                            bytes,
+                            observed_at: now,
+                        },
+                    );
                 }
                 Ok(None) => diagnostics.push(format!(
                     "target_measurement_in_progress: {}; wait for the scan or use Manual",
@@ -780,7 +776,7 @@ impl RuntimeProbe {
                     self.walks.remove(&path);
                     targets.remove(&path);
                     diagnostics.push(format!(
-                        "target_measurement_unavailable: {}: {error}; check path access, build the project or use Manual",
+                        "target_measurement_unavailable: {}: {error}; excluded from disk estimate; check path access or use Manual",
                         path.display()
                     ));
                 }
@@ -1164,13 +1160,15 @@ mod tests {
         assert_eq!(zero.machine_budget, Some(0));
         assert!(zero.measurement_complete);
         assert_eq!(zero.recommended_worker_limit, 0);
+        let empty_target = calculate(&Inputs {
+            target: Some(0),
+            ..measured()
+        });
+        assert!(empty_target.measurement_complete);
+        assert_eq!(empty_target.machine_budget, Some(8));
         for missing in [
             Inputs {
                 target: None,
-                ..measured()
-            },
-            Inputs {
-                target: Some(0),
                 ..measured()
             },
             Inputs {
@@ -1931,6 +1929,70 @@ mod tests {
             .contains_key(&normalized(&second)));
     }
 
+    #[test]
+    fn missing_foreign_targets_and_failed_disks_do_not_block_auto_capacity() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let own = temp.path().join("own");
+        let foreign = gwt_core::paths::gwt_projects_dir().join("foreign/pm/worktree");
+        for root in [&own, &foreign] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        std::fs::create_dir(own.join("target")).unwrap();
+        let own = normalized(&own);
+        let foreign = normalized(&foreign);
+        // Windows resolves missing directories to their volume; an invalid drive
+        // makes the disk probe fail without depending on host drive assignments.
+        #[cfg(windows)]
+        let unavailable = PathBuf::from(r"?:\unavailable");
+        #[cfg(not(windows))]
+        let unavailable = temp.path().join("unavailable");
+        let now = epoch_seconds();
+        let mut machine = snapshot(&own);
+        machine.observed_at = now;
+        machine.expires_at = now + SNAPSHOT_TTL_SECS;
+        machine.inventory.sessions =
+            vec![row(&foreign, "foreign-pm", MachineSessionRole::Pm, false)];
+        let mut probe = RuntimeProbe {
+            runtime_dir: capacity_directory(),
+            machine_sample: Some(machine),
+            machine_sample_completed_at: Some(Instant::now()),
+            ..RuntimeProbe::default()
+        };
+        let sample = refresh_target_measurement(&own, || {
+            probe.refresh_projects(&[own.clone(), foreign.clone(), unavailable.clone()])
+        });
+        assert_eq!(sample.targets[&foreign.join("target")].bytes, 0);
+        assert_eq!(sample.targets[&own.join("target")].bytes, 0);
+        let view = project_capacity(&own, &BTreeSet::new(), 0);
+        assert!(view.measurement_complete, "{}", view.reason);
+        assert_eq!(view.machine_budget, Some(8));
+        assert_eq!(view.recommended_total_count, 7);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        monitor.set_agent_capacity(view.clone());
+        assert_eq!(monitor.effective_max_active_agents(), 6);
+        assert!(view.reason.contains("excluded"), "{}", view.reason);
+        assert!(view.reason.contains(&unavailable.display().to_string()));
+
+        let foreign_target = foreign.join("target");
+        std::fs::write(&foreign_target, b"not a directory").unwrap();
+        std::fs::write(own.join("target/artifact"), [0_u8; 7]).unwrap();
+        let sample = refresh_target_measurement(&own, || probe.refresh(&own));
+        assert_eq!(sample.targets[&own.join("target")].bytes, 7);
+        assert!(!sample.targets.contains_key(&foreign_target));
+        let view = project_capacity(&own, &BTreeSet::new(), 0);
+        assert!(view.measurement_complete, "{}", view.reason);
+        assert_eq!(view.recommended_total_count, 7);
+        assert!(view.reason.contains(&foreign_target.display().to_string()));
+        assert!(view.reason.contains("excluded from disk estimate"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn shared_runtime_symlink_does_not_share_mutable_capacity_observations_between_homes() {
@@ -1988,6 +2050,7 @@ mod tests {
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
+        std::fs::write(&target, b"not a directory").unwrap();
         let failed = refresh_target_measurement(&root, || probe.refresh(&root));
         assert!(
             !failed.targets.contains_key(&target),
@@ -1995,6 +2058,7 @@ mod tests {
         );
         let view = project_capacity(&root, &BTreeSet::new(), 0);
         assert_eq!(view.recommended_worker_limit, 0);
+        std::fs::remove_file(&target).unwrap();
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
         let recovered = refresh_target_measurement(&root, || probe.refresh(&root));

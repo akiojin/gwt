@@ -4603,6 +4603,10 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
         .find(|window| window.preset == WindowPreset::Agent)
         .expect("silent auto launch agent window");
     assert_eq!(agent_window.agent_id.as_deref(), Some("codex"));
+    assert!(
+        runtime.has_pending_agent_launch_worker(&agent_window.id),
+        "initial launch must remain registered until its worker completion is applied"
+    );
     assert_eq!(agent_window.geometry.x, 96.0);
     assert_eq!(agent_window.geometry.y, 96.0);
     assert_eq!(agent_window.geometry.width, 860.0);

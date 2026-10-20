@@ -549,6 +549,10 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    // Issue #5684: hold preparation until the pre-completion assertions finish;
+    // real Git and asset work must not race the shared event-wait deadline.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     let events =
         runtime.ensure_pm_agent_for_tab("tab-1", super::super::pm::PmEnsureTrigger::Automatic);
@@ -578,6 +582,32 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
         "the on-loop part of the ensure only reports PM status"
     );
 
+    let task = {
+        let mut tasks = queued.lock().expect("queued tasks");
+        assert_eq!(tasks.len(), 1, "exactly one preparation must be queued");
+        tasks.remove(0)
+    };
+    let preparation_finished = || {
+        recorded_events
+            .lock()
+            .expect("event log")
+            .iter()
+            .any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::PmWorktreePrepared { .. }
+                )
+            })
+    };
+    assert!(
+        !preparation_finished(),
+        "preparation must not report completion before its worker task runs"
+    );
+    task();
+    assert!(
+        preparation_finished(),
+        "the worker task must report preparation completion before dispatch"
+    );
     let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(

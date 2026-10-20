@@ -151,7 +151,10 @@ jobs:
           # profiles per instrumented module instead of one copy per PID.
           LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
           NEXTEST_PROFILE: coverage
-        run: node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
+        run: |
+          GWT_COVERAGE_REVISION="$(git rev-parse HEAD)"
+          export GWT_COVERAGE_REVISION
+          node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
         timeout-minutes: 20
       - name: Run pre-shard head coverage
         if: ${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}

@@ -34,8 +34,11 @@ class IndexHealthTests(unittest.TestCase):
                 self.assertTrue(built["ok"], built)
                 noop = action(str(home), self.REPO_HASH, None, mode="incremental", db_root=db_root)
                 self.assertTrue(noop["ok"], noop)
-                self.assertEqual(noop["indexed"], 0)
-                meta = runner._read_scope_meta(self.REPO_HASH, None, scope, db_root)
+                self.assertEqual(noop["newly_embedded" if scope == "specs" else "indexed"], 0)
+                meta = (
+                    runner._read_issue_meta(runner.resolve_db_path(self.REPO_HASH, None, scope, db_root))
+                    if scope == "specs" else runner._read_scope_meta(self.REPO_HASH, None, scope, db_root)
+                )
                 self.assertEqual(meta["document_count"], built["indexed"])
                 self.assertEqual(meta["source_document_count"], built["indexed"])
                 with mock.patch.object(runner, "_scope_document_count", return_value=(True, 1)):

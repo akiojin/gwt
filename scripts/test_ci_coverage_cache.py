@@ -58,8 +58,8 @@ pub fn compile(&mut self)->std::io::Result<()>{Ok(())}}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def command(self, *args):
-        result = subprocess.run(args, cwd=self.root, env={**os.environ, "CARGO_LLVM_COV": "1"}, capture_output=True, text=True)
+    def command(self, *args, env=None):
+        result = subprocess.run(args, cwd=self.root, env={**os.environ, "CARGO_LLVM_COV": "1", **(env or {})}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
@@ -88,9 +88,10 @@ pub fn compile(&mut self)->std::io::Result<()>{Ok(())}}
     def metadata(self):
         return {str(p): p.lstat().st_mtime_ns for p in (self.root / ".git").rglob("*")}
 
-    def build(self):
+    def build(self, revision=None):
         log = self.command("cargo", "build", "--color", "never", "--offline", "--manifest-path", str(self.root / "Cargo.toml"),
-                           "--target-dir", str(self.root / "target/llvm-cov-target"), "-j", "1", "-vv")
+                           "--target-dir", str(self.root / "target/llvm-cov-target"), "-j", "1", "-vv",
+                           env={"GWT_COVERAGE_REVISION": revision} if revision is not None else None)
         return "\n".join(line for line in log.splitlines() if any(word in line for word in ("Dirty", "Fresh", "Compiling", "Finished")))
 
     def test_real_cargo_reuses_unchanged_inputs_and_rebuilds_changes(self):
@@ -154,6 +155,28 @@ pub fn compile(&mut self)->std::io::Result<()>{Ok(())}}
         self.assertEqual(self.metadata(), metadata)
         self.assertIn("Compiling coverage-cache-fixture", self.build())
         self.assertEqual(self.command(binary).strip(), "two:new.txt|" + head)
+
+        # CI regenerates the revision immediately before Cargo. Same-revision
+        # Git metadata churn must preserve the actual executable unchanged.
+        self.build(revision=head)
+        executable_bytes = Path(binary).read_bytes()
+        self.cli("capture")
+        self.refresh()
+        stamp = time.time_ns()
+        os.utime(self.root / ".git/HEAD", ns=(stamp, stamp))
+        metadata = self.metadata()
+        self.cli("restore")
+        self.assertEqual(self.metadata(), metadata)
+        revision = self.command("git", "rev-parse", "HEAD").strip()
+        self.assertIn("Fresh coverage-cache-fixture", self.build(revision=revision))
+        self.assertEqual(Path(binary).read_bytes(), executable_bytes)
+        self.cli("capture")
+        self.command("git", "commit", "--quiet", "--allow-empty", "-m", "test: regenerated coverage revision")
+        self.refresh()
+        self.cli("restore")
+        revision = self.command("git", "rev-parse", "HEAD").strip()
+        self.assertIn("Compiling coverage-cache-fixture", self.build(revision=revision))
+        self.assertEqual(self.command(binary).strip(), "two:new.txt|" + revision)
 
     def test_bad_metadata_clears_only_instrumented_target(self):
         self.cli("restore")
