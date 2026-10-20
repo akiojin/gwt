@@ -1436,7 +1436,7 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
         .clone();
 
     assert!(!runtime
-        .close_window_after_issue_monitor_finalize_events(&window_id)
+        .issue_monitor_idle_pane_close_events(&window_id, Some(4117), "review_verdict_published")
         .is_empty());
 
     let deadline = Instant::now() + Duration::from_secs(3);
