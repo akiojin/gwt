@@ -1577,6 +1577,8 @@ pub fn rebuild_index_target(
             project_root: ctx.project_root.clone(),
             action: action.action.to_string(),
             qos: qos.to_string(),
+            session_id: None,
+            artifact_lock: None,
         }),
         || {
             let rebuild_started = Instant::now();

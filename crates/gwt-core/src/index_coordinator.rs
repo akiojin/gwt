@@ -267,6 +267,11 @@ pub struct HeavyHolderContext {
     pub project_root: PathBuf,
     pub action: String,
     pub qos: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Exact lock acquired by the holder; never resolve its command in a waiter's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_lock: Option<PathBuf>,
 }
 
 /// Diagnostic ticket persisted next to each kernel lock.
@@ -2281,8 +2286,19 @@ impl HeavyLease {
             project_root: project_root.to_path_buf(),
             action: action.to_string(),
             qos: qos.to_string(),
+            session_id: std::env::var("GWT_SESSION_ID")
+                .ok()
+                .filter(|session| !session.is_empty()),
+            artifact_lock: None,
         });
         let _ = write_json_atomic(&self.ticket_path, &self.ticket);
+    }
+
+    pub fn record_artifact_lock(&mut self, lock: &Path) {
+        if let Some(context) = &mut self.ticket.holder_context {
+            context.artifact_lock = Some(lock.to_path_buf());
+            let _ = write_json_atomic(&self.ticket_path, &self.ticket);
+        }
     }
 
     pub fn acquired_at_ms(&self) -> u64 {
