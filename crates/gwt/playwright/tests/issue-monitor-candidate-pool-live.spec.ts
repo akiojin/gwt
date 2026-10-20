@@ -17,7 +17,13 @@ test.afterEach(async ({ page }) => {
   await page.locator('button[data-surface="agents"]').click();
   const settings = page.locator('.workspace-window[data-preset="settings"]');
   const ids = await settings.evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
   for (const id of ids) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await sendLiveGwtEvent(page, { kind: "list_windows" });
+  // Wait for the backend's close/readback sequence before checking its DOM projection.
+  await page.waitForFunction(({ cursor, ids }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > cursor && payload.kind === "window_list"
+      && Array.isArray(payload.windows) && !payload.windows.some((window: any) => ids.includes(window.id))), { cursor, ids });
   await expect(settings).toHaveCount(0);
 });
 

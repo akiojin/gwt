@@ -26,7 +26,13 @@ test.afterEach(async ({ page }) => {
   // Release the fixed surface before closing its disposable backing window.
   await page.locator('button[data-surface="agents"]').click();
   const ids = await settings(page).evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
   for (const id of ids) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await sendLiveGwtEvent(page, { kind: "list_windows" });
+  // Wait for the backend's close/readback sequence before checking its DOM projection.
+  await page.waitForFunction(({ cursor, ids }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > cursor && payload.kind === "window_list"
+      && Array.isArray(payload.windows) && !payload.windows.some((window: any) => ids.includes(window.id))), { cursor, ids });
   await expect(settings(page)).toHaveCount(0);
 });
 
@@ -102,10 +108,12 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
     const hermesModel = candidates.getByLabel("Model hermes", { exact: true });
     await expect(hermesModel).toHaveJSProperty("tagName", "INPUT");
-    const suggestions = await hermesModel.getAttribute("list");
-    expect(suggestions).toBeTruthy();
-    expect(await candidates.locator(`[id="${suggestions}"] option`).evaluateAll(options =>
-      options.map(option => (option as HTMLOptionElement).value))).toEqual(["fixture-model", "fixture-alternative"]);
+    // A catalog reply may rerender the row between separate locator calls.
+    const suggestions = await hermesModel.evaluate((input: HTMLInputElement) => ({
+      id: input.getAttribute("list"), values: Array.from(input.list?.options ?? [], option => option.value),
+    }));
+    expect(suggestions.id).toBeTruthy();
+    expect(suggestions.values).toEqual(["fixture-model", "fixture-alternative"]);
     await save(async () => { await hermesModel.fill("custom-hermes-model"); await hermesModel.press("Tab"); });
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     await open();
