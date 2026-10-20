@@ -39,6 +39,8 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .some(({ payload }: any) => payload.kind === "workspace_state"));
     await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 578701,
       profiles: [{ agent_id: "codex", model: "saved-unlisted-model", reasoning: "high", docker_service: "saved-service", runtime_target: "Host" }] });
     const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
@@ -46,6 +48,9 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
         && payload.request_id === 578701)?.payload).then(handle => handle.jsonValue());
     expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
     const open = async () => {
+      // Restore the saved window before the disclosure can create another one.
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
       await expect(panel(page, "agents")).toBeVisible();
     };

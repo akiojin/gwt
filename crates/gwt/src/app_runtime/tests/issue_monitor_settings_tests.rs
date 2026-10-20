@@ -36,6 +36,20 @@ fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewri
         .collect::<Vec<_>>();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let before = fs::read(&prefs_path).expect("saved profiles");
+    let mut custom = agent_settings_option("fixture-candidate", "Fixture Candidate");
+    custom.custom_agent = Some(
+        serde_json::from_value(serde_json::json!({
+            "id": "fixture-candidate", "display_name": "Fixture Candidate",
+            "type": "command", "command": "fixture-candidate-cli"
+        }))
+        .expect("configured custom agent"),
+    );
+    let mut agent_options = runtime.launch_wizard_cache.agent_options();
+    agent_options.push(custom);
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(
+        &temp.path().join("sessions"),
+        agent_options,
+    );
     let events =
         runtime.handle_frontend_event("client-1".into(), FrontendEvent::GetIssueMonitorProfiles);
     let snapshot = events
@@ -54,6 +68,14 @@ fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewri
     let choices = &snapshot["choices"];
     let agents = choices["agents"].as_array().expect("agent choice catalog");
     let codex = agents.iter().find(|agent| agent["id"] == "codex").unwrap();
+    assert_eq!(codex["name"], "Codex");
+    assert_eq!(codex["is_custom"], false);
+    let custom = agents
+        .iter()
+        .find(|agent| agent["id"] == "fixture-candidate")
+        .expect("configured custom choice");
+    assert_eq!(custom["name"], "Fixture Candidate");
+    assert_eq!(custom["is_custom"], true);
     assert_eq!(
         codex["models"]
             .as_array()

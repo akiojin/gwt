@@ -2191,6 +2191,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
+    IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -4744,6 +4745,7 @@ mod tests {
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+            issue_monitor_profile_saves: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -11623,6 +11625,11 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorProfilesSaved(completion)) => {
+                let events = app.handle_issue_monitor_profiles_saved(*completion);
+                app.observe_notification_toasts(&events);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));

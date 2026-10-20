@@ -909,7 +909,7 @@ export function createSettingsSurface({
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
       const customAgentsModel = createUiStateStore({
-        catalog: { agents: [], loading: false },
+        catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
       });
@@ -1029,6 +1029,13 @@ export function createSettingsSurface({
           }
           send(message);
         };
+        const builtins = supportedAgentsModel.read().agents
+          ?? current.choices?.agents.filter(agent => !agent.is_custom) ?? null;
+        const customCatalog = customAgentsModel.read().catalog;
+        const availableAgents = builtins === null || !customCatalog.loaded || customCatalog.loading ? null : [
+          ...builtins,
+          ...customCatalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
+        ];
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
@@ -1037,10 +1044,7 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
-            availableAgents: supportedAgentsModel.read().agents === null || customAgentsModel.read().catalog.loading ? null : [
-              ...supportedAgentsModel.read().agents,
-              ...customAgentsModel.read().catalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
-            ],
+            availableAgents,
           });
         }
         positionIssuesLaunchControls(body);
@@ -2512,7 +2516,7 @@ export function createSettingsSurface({
         customAgentsModel.update(state => {
           switch (event.kind) {
             case "custom_agent_list":
-              return { ...state, catalog: { agents: event.agents || [], loading: false } };
+              return { ...state, catalog: { agents: event.agents || [], loading: false, loaded: true } };
             case "custom_agent_saved": {
               const agents = [...state.catalog.agents];
               if (event.agent) {
@@ -2520,7 +2524,7 @@ export function createSettingsSurface({
                 if (index >= 0) agents[index] = event.agent;
                 else agents.push(event.agent);
               }
-              return { ...state, catalog: { agents, loading: false },
+              return { ...state, catalog: { ...state.catalog, agents, loading: false },
                 statusMessage: `Saved custom agent "${event.agent ? event.agent.id : "?"}".`, statusKind: "success" };
             }
             case "custom_agent_deleted":
@@ -2528,7 +2532,7 @@ export function createSettingsSurface({
                   agents: state.catalog.agents.filter(agent => agent.id !== event.agent_id) },
                 statusMessage: `Deleted custom agent "${event.agent_id}".`, statusKind: "success" };
             case "custom_agent_error":
-              return { ...state, catalog: { ...state.catalog, loading: false },
+              return { ...state, catalog: { ...state.catalog, loading: false, loaded: true },
                 statusMessage: `Error [${event.code}]: ${event.message}`, statusKind: "error" };
             case "backend_connection_result":
               return { ...state, statusMessage: `/v1/models returned ${event.models.length} model(s).`, statusKind: "success" };

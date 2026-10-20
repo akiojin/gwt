@@ -73,6 +73,8 @@ impl LaunchWizardState {
                 }
                 IssueMonitorAgentChoices {
                     id: agent.id.clone(),
+                    name: agent.name.clone(),
+                    is_custom: agent.custom_agent.is_some(),
                     supports_model_input: !models.is_empty()
                         || state.current_agent_supports_freetext_model(),
                     models,

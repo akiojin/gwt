@@ -103,7 +103,19 @@ test.describe("Issue Monitor candidate pool", () => {
       await expect(pool.getByRole("button", { name: "Remove claude", exact: true })).toBeDisabled();
       const candidate = pool.getByLabel("Add candidate candidate", { exact: true });
       await expect(candidate).toHaveJSProperty("tagName", "SELECT");
-      await expect(candidate).toBeEnabled({ timeout: 30_000 });
+      try {
+        await expect(candidate).toBeEnabled({ timeout: 30_000 });
+      } catch (error) {
+        await testInfo.attach("candidate-catalog-state", { contentType: "application/json", body: JSON.stringify(await page.evaluate(() => ({
+          active: document.activeElement?.getAttribute("aria-label"),
+          dirty: document.querySelector<HTMLElement>("[data-settings-candidates]")?.dataset.dirty,
+          catalogs: ((window as any).__gwtPlaywrightMessages ?? [])
+            .filter(({ payload }: any) => ["supported_agent_list", "custom_agent_list", "system_settings_error", "custom_agent_error"].includes(payload.kind))
+            .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind, message: payload.message,
+              agents: payload.agents?.map((agent: any) => ({ id: agent.id, name: agent.name || agent.display_name })) })),
+        }))) });
+        throw error;
+      }
       await expect(candidate).toHaveValue("");
       await pool.getByRole("button", { name: "Add candidate", exact: true }).click();
       await expect(pool.getByRole("alert")).toHaveText("Select an agent to add.");

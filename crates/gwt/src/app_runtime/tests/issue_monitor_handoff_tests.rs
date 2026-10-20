@@ -3168,6 +3168,71 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     assert!(profile.skip_permissions);
 }
 
+fn queue_issue_monitor_profile_worker(runtime: &mut AppRuntime) -> BlockingTestTaskQueue {
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    queued
+}
+
+fn finish_queued_issue_monitor_profile_save(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("profile save test needs a queued worker");
+    };
+    let tasks = tasks.clone();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    drain_queued_blocking_tasks(&tasks);
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("profile save test needs a stub proxy");
+    };
+    let completion = {
+        let mut recorded = recorded.lock().expect("profile completions");
+        let index = recorded
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorProfilesSaved(_)))
+            .expect("profile completion must use the base proxy");
+        recorded.remove(index)
+    };
+    let UserEvent::IssueMonitorProfilesSaved(completion) = completion else {
+        unreachable!("matched profile completion");
+    };
+    runtime.handle_issue_monitor_profiles_saved(*completion)
+}
+
+fn replay_next_issue_monitor_profile_frontend(
+    runtime: &mut AppRuntime,
+) -> Option<Vec<OutboundEvent>> {
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("profile replay test needs a stub proxy");
+    };
+    let event = {
+        let mut recorded = recorded.lock().expect("deferred frontend events");
+        let index = recorded
+            .iter()
+            .position(|event| matches!(recorded_project_payload(event), UserEvent::Frontend { .. }))
+            .expect("deferred frontend event");
+        recorded.remove(index)
+    };
+    let UserEvent::Frontend {
+        client_id,
+        client_scope: Some(scope),
+        event,
+        ..
+    } = runtime.accept_project_completion(event)?
+    else {
+        panic!("deferred request must retain its authenticated project scope");
+    };
+    Some(runtime.handle_frontend_event_in_scope(client_id, event, &scope))
+}
+
+fn issue_monitor_profile_reasoning_edit(request_id: u64, reasoning: &str) -> FrontendEvent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "issue_monitor_profiles_set",
+        "profiles": [{"agent_id": "codex", "reasoning": reasoning}],
+        "request_id": request_id
+    }))
+    .expect("candidate edit")
+}
+
 #[test]
 fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() {
     let temp = tempdir().expect("tempdir");
@@ -3194,13 +3259,15 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    queue_issue_monitor_profile_worker(&mut runtime);
     let event = serde_json::from_value(serde_json::json!({
         "kind": "issue_monitor_profiles_set",
         "profiles": [{"agent_id": "codex", "prefer_for": ["kind:feature"]},
                      {"agent_id": "claude"}, {"agent_id": "grok"}]
     }))
     .expect("candidate editing event");
-    let events = runtime.handle_frontend_event("client-1".into(), event);
+    let mut events = runtime.handle_frontend_event("client-1".into(), event);
+    events.extend(finish_queued_issue_monitor_profile_save(&mut runtime));
     let errors: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -3236,12 +3303,258 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
     }))
     .expect("candidate removal event");
     runtime.handle_frontend_event("client-1".into(), event);
+    finish_queued_issue_monitor_profile_save(&mut runtime);
     let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload reduced pool");
     assert_eq!(saved.launch_profiles, vec![codex]);
     assert_eq!(saved.launch_usage_threshold_percent, 80);
     let wire = serde_json::to_value(&saved).expect("saved prefs JSON");
     assert!(wire.get("launch_usage_threshold_percent").is_none());
     assert_eq!(saved.max_active_agents, 7);
+}
+
+#[test]
+fn app_runtime_issue_monitor_profiles_set_waits_for_durable_worker() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut profile = pool_profile("codex");
+    profile.model = Some("saved-model-outside-catalog".to_string());
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![profile.clone()]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let before = fs::read(&prefs_path).expect("original prefs bytes");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let queued = queue_issue_monitor_profile_worker(&mut runtime);
+    let event = issue_monitor_profile_reasoning_edit(57875, "xhigh");
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+
+    let events = runtime.handle_frontend_event("client-1".into(), event);
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorProfiles {
+                request_id: Some(57875),
+                ..
+            }
+        )),
+        "profile save must wait for its durable worker before acknowledging success"
+    );
+    assert_eq!(
+        fs::read(&prefs_path).expect("prefs before worker"),
+        before,
+        "dispatch must leave persisted profiles and unknown saved values untouched"
+    );
+    assert_eq!(queued.lock().expect("queued tasks").len(), 1);
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".into(),
+            FrontendEvent::SetIssueMonitorEnabled { enabled: true },
+        )
+        .is_empty());
+    assert!(!gwt::load_issue_monitor_prefs(&prefs_path).unwrap().enabled);
+    assert_eq!(queued.lock().expect("queued tasks").len(), 1);
+
+    let events = finish_queued_issue_monitor_profile_save(&mut runtime);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorProfiles { profiles, request_id: Some(57875), .. }
+            if profiles[0].model == profile.model
+    )));
+    profile.reasoning = Some("xhigh".to_string());
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("canonical profiles");
+    assert_eq!(saved.launch_profile_pool(), vec![profile.clone()]);
+    assert!(!saved.enabled, "Enable must not overtake the profile ACK");
+    assert!(serde_json::to_value(&saved)
+        .unwrap()
+        .get("choices")
+        .is_none());
+
+    replay_next_issue_monitor_profile_frontend(&mut runtime).expect("current Enable request");
+    let enabled = gwt::load_issue_monitor_prefs(&prefs_path).expect("enabled after save");
+    assert!(enabled.enabled);
+    assert_eq!(enabled.launch_profile_pool(), vec![profile]);
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
+}
+
+#[test]
+fn app_runtime_issue_monitor_profiles_set_orders_reopened_project_after_old_worker() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let old_context = runtime.test_context();
+    let queued = queue_issue_monitor_profile_worker(&mut runtime);
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        issue_monitor_profile_reasoning_edit(57876, "high"),
+    );
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        issue_monitor_profile_reasoning_edit(57877, "xhigh"),
+    );
+
+    // Closing and reopening replaces the project state while the runtime lane survives.
+    runtime
+        .project_tab_incarnations
+        .get_mut("tab-1")
+        .unwrap()
+        .generation += 1;
+    runtime.refresh_project_state("tab-1");
+    assert!(!runtime.project_context_is_current(&old_context));
+    assert!(runtime
+        .issue_monitor_profile_saves
+        .contains_key(&old_context.project_key));
+    runtime.handle_frontend_event(
+        "client-2".into(),
+        issue_monitor_profile_reasoning_edit(57878, "low"),
+    );
+    assert_eq!(queued.lock().expect("old worker").len(), 1);
+
+    assert!(
+        finish_queued_issue_monitor_profile_save(&mut runtime).is_empty(),
+        "the old generation releases its lane without publishing a stale ACK"
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launch_profile_pool()[0]
+            .reasoning
+            .as_deref(),
+        Some("high")
+    );
+    assert!(replay_next_issue_monitor_profile_frontend(&mut runtime).is_none());
+    assert!(queued.lock().expect("stale request discarded").is_empty());
+    assert!(replay_next_issue_monitor_profile_frontend(&mut runtime)
+        .expect("new generation request")
+        .is_empty());
+    assert_eq!(queued.lock().expect("new worker").len(), 1);
+    let events = finish_queued_issue_monitor_profile_save(&mut runtime);
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorProfiles {
+            request_id: Some(57878),
+            ..
+        }
+    )));
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("new generation save");
+    assert_eq!(
+        saved.launch_profile_pool()[0].reasoning.as_deref(),
+        Some("low")
+    );
+    assert_eq!(
+        saved.effect_authority_epoch,
+        seeded.effect_authority_epoch + 2
+    );
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
+}
+
+#[test]
+fn app_runtime_issue_monitor_profiles_set_keeps_revocation_off_immediate() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs {
+        enabled: true,
+        autonomous_mode: true,
+        ..Default::default()
+    };
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed enabled pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let queued = queue_issue_monitor_profile_worker(&mut runtime);
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        issue_monitor_profile_reasoning_edit(57879, "xhigh"),
+    );
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        FrontendEvent::SetIssueMonitorEnabled { enabled: false },
+    );
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false },
+    );
+    let revoked = gwt::load_issue_monitor_prefs(&prefs_path).expect("immediate revocation");
+    assert!(!revoked.enabled && !revoked.autonomous_mode);
+    assert_eq!(queued.lock().expect("profile still waiting").len(), 1);
+    assert_eq!(runtime.issue_monitor_profile_saves.len(), 1);
+
+    let events = finish_queued_issue_monitor_profile_save(&mut runtime);
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorProfiles {
+            request_id: Some(57879),
+            ..
+        }
+    )));
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("save after revocation");
+    assert!(!saved.enabled && !saved.autonomous_mode);
+    assert_eq!(
+        saved.launch_profile_pool()[0].reasoning.as_deref(),
+        Some("xhigh")
+    );
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
+}
+
+#[test]
+fn app_runtime_issue_monitor_profiles_set_releases_lane_after_spawn_failure() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let before = fs::read(&prefs_path).expect("prefs before enqueue failure");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("profile worker unavailable");
+    let events = runtime.handle_frontend_event(
+        "client-1".into(),
+        issue_monitor_profile_reasoning_edit(57880, "high"),
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorProfilesWriteFailed { request_id: 57880, message, .. }
+            if message.contains("profile worker unavailable")
+    )));
+    assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
+
+    let queued = queue_issue_monitor_profile_worker(&mut runtime);
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        issue_monitor_profile_reasoning_edit(57881, "xhigh"),
+    );
+    assert_eq!(queued.lock().expect("next explicit save").len(), 1);
+    let events = finish_queued_issue_monitor_profile_save(&mut runtime);
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorProfiles {
+            request_id: Some(57881),
+            ..
+        }
+    )));
+    assert!(runtime.issue_monitor_profile_saves.is_empty());
 }
 
 #[test]
@@ -3265,12 +3578,14 @@ fn app_runtime_issue_monitor_profiles_set_acknowledges_save_with_git_attention()
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    queue_issue_monitor_profile_worker(&mut runtime);
     let event = serde_json::from_value(serde_json::json!({
         "kind": "issue_monitor_profiles_set",
         "profiles": [{"agent_id": "codex"}], "request_id": 43
     }))
     .expect("candidate editing event");
-    let events = runtime.handle_frontend_event("client-1".into(), event);
+    let mut events = runtime.handle_frontend_event("client-1".into(), event);
+    events.extend(finish_queued_issue_monitor_profile_save(&mut runtime));
     let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("saved pool");
     assert_eq!(saved.launch_profile_pool()[0].agent_id, "codex");
     assert!(
@@ -3313,6 +3628,7 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
     let project_root = repo.display().to_string();
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    queue_issue_monitor_profile_worker(&mut runtime);
     for payload in [
         serde_json::json!({"profiles": []}),
         serde_json::json!({"profiles": [{"agent_id": "claude", "prefer_for": ["invalid"]}]}),
@@ -3322,7 +3638,8 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
         payload["kind"] = "issue_monitor_profiles_set".into();
         payload["request_id"] = 42.into();
         let event = serde_json::from_value(payload).expect("candidate editing event");
-        let events = runtime.handle_frontend_event("client-1".into(), event);
+        let mut events = runtime.handle_frontend_event("client-1".into(), event);
+        events.extend(finish_queued_issue_monitor_profile_save(&mut runtime));
         assert!(events.iter().any(|event| matches!(
             &event.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error"
         )));
@@ -3354,11 +3671,13 @@ fn app_runtime_issue_monitor_profiles_set_epoch_overflow_is_zero_write_error() {
     let before = fs::read(&prefs_path).expect("read prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    queue_issue_monitor_profile_worker(&mut runtime);
     let event = serde_json::from_value(serde_json::json!({
         "kind": "issue_monitor_profiles_set", "profiles": [{"agent_id": "codex"}]
     }))
     .expect("candidate editing event");
-    let events = runtime.handle_frontend_event("client-1".into(), event);
+    let mut events = runtime.handle_frontend_event("client-1".into(), event);
+    events.extend(finish_queued_issue_monitor_profile_save(&mut runtime));
     assert!(events.iter().any(|event| matches!(
         &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains("authority epoch exhausted")

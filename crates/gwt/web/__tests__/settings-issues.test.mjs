@@ -3,23 +3,26 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
+import { createUiStateStore } from "../ui-state-store.js";
+import { createInteractionGuard } from "../interaction-guard.js";
+import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 const candidateChoices = {
   agents: [
-    { id: "codex", default_model: "gpt-6-astra", supports_fast_mode: true, supports_skip_permissions: true,
+    { id: "codex", name: "Codex", is_custom: false, default_model: "gpt-6-astra", supports_fast_mode: true, supports_skip_permissions: true,
       session_modes: ["Normal", "Continue", "Resume"], models: [
         { value: "gpt-6-astra", label: "Astra", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }, { value: "high", label: "High" }] },
         { value: "gpt-6-luna", label: "Luna", default_reasoning: "medium", reasoning_options: [{ value: "medium", label: "Medium" }] },
       ] },
-    { id: "claude", default_model: "", default_reasoning: "auto", supports_fast_mode: true, supports_skip_permissions: true,
+    { id: "claude", name: "Claude Code", is_custom: false, default_model: "", default_reasoning: "auto", supports_fast_mode: true, supports_skip_permissions: true,
       session_modes: ["Normal", "Continue", "Resume"], models: [
         { value: "", label: "Default", default_reasoning: "auto", reasoning_options: [{ value: "auto", label: "Auto" }] },
         { value: "haiku", label: "Haiku", default_reasoning: null, reasoning_options: [] },
       ] },
-    { id: "hermes", default_model: "", models: [], model_suggestions: ["fixture-model", "other-model"],
+    { id: "hermes", name: "Hermes Agent", is_custom: false, default_model: "", models: [], model_suggestions: ["fixture-model", "other-model"],
       session_modes: ["Normal"], supports_model_input: true },
-    { id: "custom", models: [], session_modes: ["Normal"], supports_model_input: false },
+    { id: "custom", name: "Configured custom", is_custom: true, models: [], session_modes: ["Normal"], supports_model_input: false },
   ], docker_services: ["dev", "worker"], default_docker_service: "dev",
 };
 
@@ -503,14 +506,60 @@ test("structural saves wait for their correlated response before allowing row ed
     "structural ACK requests an authoritative redraw");
 });
 
-test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {
-  const { document } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "ClaudeCode" }],
-    availableAgents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
+test("Candidates use shared built-ins and the fresh custom catalog before version metadata arrives", () => {
+  const { document, window } = parseHTML("<html><body><main></main></body></html>"), sent = [];
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "")
+      .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+  );
+  const surface = factory({
     send: message => sent.push(message),
+    createNode(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    },
+    focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {},
+    renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
+    mountIssues(_windowData, host) {
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+    },
   });
+  surface.renderSettingsWindow(document.querySelector("main"), { id: "settings" });
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "ClaudeCode" }], choices: {
+    ...candidateChoices, agents: [...candidateChoices.agents,
+      { id: "team-agent", name: "Stale custom name", is_custom: true, models: [], session_modes: ["Normal"] }],
+  } });
+  const panel = document.querySelector("[data-settings-candidates]");
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
+    "custom agents must settle before Add treats an empty list as authoritative");
+  const initialCatalog = surface.customAgentsModel.read().catalog;
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Pending custom" } });
+  const pendingCatalog = surface.customAgentsModel.read().catalog;
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true);
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
+    "the shared built-in choices do not wait for installed/update version probes");
+  assert.equal(initialCatalog.loaded, false);
+  assert.equal(pendingCatalog.loaded, false, "a save reply is not the complete catalog");
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value),
+    ["", "codex", "hermes", "team-agent"]);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="codex"]').textContent, "Codex (codex)");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Renamed team" } });
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]').textContent, "Renamed team (team-agent)");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "team-agent" });
+  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
+  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]'), null,
+    "the cached choices must not restore a deleted custom agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false, "an empty custom list is settled");
+  surface.applySupportedAgentList({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] });
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
+  sent.length = 0;
   const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
   assert.equal(picker.localName, "select");
   assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);

@@ -147,6 +147,8 @@ pub struct IssueMonitorProfileChoices {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IssueMonitorAgentChoices {
     pub id: String,
+    pub name: String,
+    pub is_custom: bool,
     pub models: Vec<IssueMonitorModelChoices>,
     pub model_suggestions: Vec<String>,
     pub default_model: String,
