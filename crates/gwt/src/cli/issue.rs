@@ -2277,6 +2277,7 @@ fn run_monitor_reconcile<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
+        monitor.record_window_snapshot(snapshot.clone());
         let readopted = monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at);
         let reconciled = monitor.prefs();
         if reconciled != *prefs {

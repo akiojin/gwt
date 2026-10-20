@@ -2551,7 +2551,7 @@ fn advance_one_autonomous_issue(
                 }
                 crate::issue_monitor_gate::GateAction::WaitForCi => {}
                 crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                    monitor.record_autonomous_failure(issue_number, reason, now);
+                    monitor.remediate_autonomous_gate(issue_number, reason, &body, now);
                 }
                 // Issue #3944 AC-1: an environment hold is not a human
                 // decision — keep the PR in flight, ask the PM to steer,
