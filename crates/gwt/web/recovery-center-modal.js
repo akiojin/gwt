@@ -83,6 +83,7 @@ export function createRecoveryCenterController({
     generation: 0,
     actionRequestId: null,
     selectedHandle: null,
+    actionError: null,
     stateFilter: "attention",
     worktreeFilter: "all",
   };
@@ -109,6 +110,7 @@ export function createRecoveryCenterController({
     const requestId = String(createRequestId?.() || "").trim();
     if (!requestId) return;
     state.actionRequestId = requestId;
+    state.actionError = null;
     send?.({
       kind: "open_recovery_center_board_entry",
       request_id: requestId,
@@ -218,14 +220,16 @@ export function createRecoveryCenterController({
     setSelectValue(stateFilterEl, state.stateFilter);
     setSelectValue(worktreeFilterEl, state.worktreeFilter);
     if (statusEl) {
-      statusEl.hidden = state.status === "ready";
+      statusEl.hidden = state.status === "ready" && !state.actionError;
       statusEl.className = `recovery-center-status is-${state.status}`;
-      statusEl.setAttribute("role", state.status === "error" ? "alert" : "status");
-      statusEl.textContent = state.status === "loading"
+      statusEl.setAttribute("role", state.status === "error" || state.actionError ? "alert" : "status");
+      statusEl.textContent = state.actionError || (state.status === "loading"
         ? "Loading recovery deliveries…"
+        : state.status === "not_found"
+          ? "No recovery Store was found for this project."
         : state.status === "error"
           ? "Recovery deliveries could not be loaded."
-          : "";
+          : "");
     }
     renderRows();
   }
@@ -239,6 +243,7 @@ export function createRecoveryCenterController({
     state.items = [];
     state.generation = 0;
     state.actionRequestId = null;
+    state.actionError = null;
     state.selectedHandle = null;
     const requestId = String(createRequestId?.() || "").trim();
     state.requestId = requestId || null;
@@ -269,6 +274,7 @@ export function createRecoveryCenterController({
     state.requestId = null;
     state.generation = 0;
     state.actionRequestId = null;
+    state.actionError = null;
     state.selectedHandle = null;
     render();
     if (releaseFocusTrap) releaseFocusTrap();
@@ -282,7 +288,7 @@ export function createRecoveryCenterController({
   function handleState(event) {
     if (!state.open || !state.requestId || event?.request_id !== state.requestId) return;
     if (event.status !== "ready") {
-      state.status = "error";
+      state.status = event.status === "not_found" ? "not_found" : "error";
       state.items = [];
       state.generation = 0;
       render();
@@ -304,6 +310,11 @@ export function createRecoveryCenterController({
       || event?.generation !== state.generation
     ) return;
     state.actionRequestId = null;
+    if (typeof event.error === "string" && event.error) {
+      state.actionError = event.error;
+      render();
+      return;
+    }
     if (typeof event.board_entry_id !== "string" || !event.board_entry_id.trim()) return;
     const entryId = event.board_entry_id;
     close();
@@ -315,6 +326,7 @@ export function createRecoveryCenterController({
     state.requestId = null;
     state.generation = 0;
     state.actionRequestId = null;
+    state.actionError = null;
     state.selectedHandle = null;
     if (state.open) startLoad();
     else render();
