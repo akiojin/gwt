@@ -10,6 +10,24 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && /^\/workspace_resume_agent_(error|started)(\||\/|$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const start = app.indexOf('function receive(event)');
+  assert.ok(start > 0);
+  for (const kind of ['workspace_resume_agent_error', 'workspace_resume_agent_started']) {
+    for (const bypass of ['document.body.textContent = event.message;', 'handleWorkspaceResumeAgentOutcome(event);']) {
+      const mutated = app.slice(0, start) + app.slice(start)
+        .replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
+      assert.notEqual(mutated, app);
+      assert.ok(findings(mutated).length > 0);
+    }
+  }
+});
+
 test("Continue work outcome receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');

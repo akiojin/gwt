@@ -4153,6 +4153,39 @@ import { createUiStateStore } from "/ui-state-store.js";
         launchPending,
       });
 
+      const workspaceResumeOutcomeModel = createUiStateStore(null);
+      workspaceResumeOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleWorkspaceResumeAgentOutcome(outcome);
+      });
+
+      function handleWorkspaceResumeAgentOutcome(event) {
+        switch (event.kind) {
+          case "workspace_resume_agent_error":
+            workspaceResumePicker.handleError(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh(true);
+              }
+            }
+            break;
+          // Backend accepted the request: settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            workspaceResumePicker.handleStarted(event);
+            launchPending.settleAck(event);
+            scheduleKnowledgeRelatedWorkRefresh(true);
+            break;
+        }
+      }
+
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface
       // (branch list state map, branch rows/list rendering, cleanup modal
       // flow, Workspace Overview cleanup entry, Branches window mount, and
@@ -5549,28 +5582,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             continueWorkOutcomeModel.update(() => ({ ...event }));
             break;
           case "workspace_resume_agent_error":
-            workspaceResumePicker.handleError(event);
-            {
-              const settled = launchPending.settleAck(event);
-              if (settled) {
-                alertsToasts.push({
-                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
-                  level: "error",
-                  title: "Resume failed",
-                  message: event?.message || "Failed to resume the selected session.",
-                  dismissible: true,
-                  timeoutMs: 0,
-                });
-                scheduleKnowledgeRelatedWorkRefresh(true);
-              }
-            }
-            break;
-          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
-          // accepted — settle pending UI and dismiss the picker.
           case "workspace_resume_agent_started":
-            workspaceResumePicker.handleStarted(event);
-            launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh(true);
+            workspaceResumeOutcomeModel.update(() => ({ ...event }));
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
