@@ -1,7 +1,5 @@
 [
   "[\"crates/gwt/web/app.js\",\"receive\",\"\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/active_work_projection\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/active_work_projection_patch\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/continue_work_outcome\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
@@ -20,8 +18,6 @@
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_entry_appended\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_error\"]",
-  "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/active_work_projection\"]",
-  "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/active_work_projection_patch\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_entries|board_history_page|log_entries|log_entry_appended/board_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_entries|board_history_page|log_entries|log_entry_appended/log_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_entries|board_history_page|log_entries|log_entry_appended/log_entry_appended\"]",
