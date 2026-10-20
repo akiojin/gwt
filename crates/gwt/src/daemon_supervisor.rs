@@ -718,12 +718,15 @@ mod tests {
     fn ensure_running_retires_a_live_daemon_of_another_version() {
         use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
 
-        let gwt_home = tempfile::TempDir::new().expect("gwt home");
+        let gwt_home = gwt_core::test_support::socket_tempdir().expect("gwt home");
         let project = tempfile::TempDir::new().expect("project");
         let scope =
             RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
         let socket_path = gwt_home.path().join("retire.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .unwrap();
         let endpoint = DaemonEndpoint::new(
             scope.clone(),
             std::process::id(),

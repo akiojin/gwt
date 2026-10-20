@@ -32,6 +32,36 @@ use std::{
     sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
 
+/// A short root for socket fixtures, independent of verification's nested TMPDIR.
+/// Windows fixtures retain the normal temporary directory for named pipes.
+pub fn socket_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    {
+        tempfile::tempdir_in("/tmp")
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::tempdir()
+    }
+}
+
+/// Validate fixture paths before either std or Tokio binds a Unix socket.
+///
+/// Use the macOS/BSD limit even on Linux so a regression fails on both hosts.
+/// Named pipes do not have this limit. Tests probing the kernel's actual path
+/// boundary bind directly with a reasoned hygiene exception.
+#[track_caller]
+pub fn checked_socket_path(path: &Path) -> &Path {
+    #[cfg(unix)]
+    assert!(
+        path.as_os_str().len() <= 103,
+        "socket fixture path exceeds 103 bytes ({}): {}; use test_support::socket_tempdir()",
+        path.as_os_str().len(),
+        path.display()
+    );
+    path
+}
+
 /// Receive a fixture event, with the shared hang guard for stuck producers.
 ///
 /// The event determines success. Production deadline pins and load-mode zero
@@ -1124,6 +1154,27 @@ pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_tempdir_ignores_long_tmpdir_and_binds() {
+        let _lock = env_lock().lock().unwrap();
+        let ambient = tempfile::tempdir().unwrap();
+        let nested = ambient.path().join("gwt-verify-".repeat(12));
+        std::fs::create_dir_all(&nested).unwrap();
+        let _tmpdir = ScopedEnvVar::set("TMPDIR", &nested);
+        let root = socket_tempdir().unwrap();
+        assert!(!root.path().starts_with(&nested));
+        let path = root.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(checked_socket_path(&path)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "socket fixture path exceeds 103 bytes")]
+    fn socket_path_rejects_overlong_utf8_bytes_before_bind() {
+        checked_socket_path(Path::new(&format!("/tmp/{}", "é".repeat(50))));
+    }
 
     #[test]
     fn recv_event_observes_producer_completion() {

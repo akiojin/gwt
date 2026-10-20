@@ -7088,7 +7088,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
@@ -7105,8 +7105,10 @@ mod tests {
         let socket_path = gwt_core::daemon::resolve_daemon_socket_path(&endpoint_path)
             .expect("resolve socket path")
             .path;
-        let _listener =
-            std::os::unix::net::UnixListener::bind(&socket_path).expect("bind live daemon socket");
+        let _listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .expect("bind live daemon socket");
         let live = sample_endpoint(scope.clone(), &socket_path, "live-token");
         gwt_core::daemon::persist_endpoint(&endpoint_path, &live).expect("persist live descriptor");
         let descriptor_before = fs::read(&endpoint_path).expect("descriptor before");
@@ -8596,10 +8598,12 @@ exit 0
         use crate::cli::daemon::client::DaemonClient;
         use gwt_core::daemon::VerificationSpawnRequest;
 
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
-        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind daemon socket");
         let hub = BroadcastHub::new();
         let server_hub = hub.clone();
         let server_endpoint = Arc::new(endpoint.clone());
@@ -8660,10 +8664,12 @@ exit 0
     async fn materializer_presence_is_acquired_once_per_connection_and_released_on_eof() {
         use crate::cli::daemon::client::DaemonClient;
 
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
-        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind daemon socket");
         let hub = BroadcastHub::new();
         let server_hub = hub.clone();
         let server_endpoint = Arc::new(endpoint.clone());
@@ -16042,7 +16048,7 @@ exit 0
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
@@ -17182,13 +17188,14 @@ exit 1
     #[allow(clippy::await_holding_lock)]
     async fn project_daemon_failed_start_releases_startup_lease() {
         let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project");
         let scope = RuntimeScope::from_project_root(&project, RuntimeTarget::Host).expect("scope");
         let socket = temp.path().join("occupied.sock");
-        let _listener = UnixListener::bind(&socket).expect("occupy socket");
+        let _listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket))
+            .expect("occupy socket");
         let endpoint_path = temp.path().join("failed.json");
         let result = run_server_with_shutdown_and_worker_config(
             sample_endpoint(scope.clone(), &socket, "failed"),
@@ -17226,7 +17233,7 @@ exit 1
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn project_daemon_start_refuses_overlap_before_binding() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project");
@@ -23334,7 +23341,7 @@ exit 1
     #[tokio::test]
     async fn run_server_accepts_handshake_and_acknowledges_frames() {
         let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");

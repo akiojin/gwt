@@ -95,7 +95,7 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let temp = TempDir::new().expect("tempdir");
+    let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
     let gwt_home = temp.path().join("gwt-home");
     let project_root = temp.path().join("project");
     std::fs::create_dir_all(&gwt_home).expect("gwt home");
@@ -370,8 +370,10 @@ fn shutdown_during_retirement_authentication_prevents_termination() {
     use std::io::{BufRead, Write};
     let fixture = fixture();
     let scope = seed_live_endpoint(&fixture.gwt_home, &fixture.project_root, std::process::id());
-    let listener =
-        std::os::unix::net::UnixListener::bind(fixture.gwt_home.join("daemon.sock")).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(
+        gwt_core::test_support::checked_socket_path(&fixture.gwt_home.join("daemon.sock")),
+    )
+    .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let retired = AtomicUsize::new(0);
     let supervisor = Arc::new(counting_supervisor(

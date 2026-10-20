@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn subscriber_forwards_events_through_callback() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn subscriber_stop_unblocks_thread_even_without_events() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn materializer_subscriber_holds_presence_only_for_its_live_connection() {
         run_isolated_daemon_fixture(async {
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -542,14 +542,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn materializer_subscriber_reasserts_role_after_forced_disconnect() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let socket_path = temp.path().join("daemon.sock");
         let endpoint = sample_endpoint(
             sample_scope(&temp),
             &socket_path,
             "materializer-reconnect-secret",
         );
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind fake daemon");
         let accepted_sessions = Arc::new(AtomicUsize::new(0));
         let accepted_sessions_for_server = Arc::clone(&accepted_sessions);
         let server_endpoint = endpoint.clone();
@@ -625,7 +627,7 @@ mod tests {
             // the live endpoint and the subscriber starts receiving
             // events without needing a re-spawn.
 
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");
@@ -730,7 +732,7 @@ mod tests {
             // resolver's state to the live token, the next session
             // (driven by run_loop's reconnect-on-error path) succeeds and
             // events flow through.
-            let temp = TempDir::new().expect("tempdir");
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
             let scope = sample_scope(&temp);
             let socket_path = temp.path().join("daemon.sock");
             let endpoint_path = temp.path().join("endpoint.json");

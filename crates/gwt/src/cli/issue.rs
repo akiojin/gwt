@@ -11063,7 +11063,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn issue_monitor_status_prefers_live_daemon_queue_over_cached_candidates() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -11140,7 +11140,9 @@ mod tests {
         )
         .expect("runtime scope");
         let socket_path = tmp.path().join("live-status.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind live daemon");
         listener
             .set_nonblocking(true)
             .expect("nonblocking live daemon");
@@ -13264,14 +13266,7 @@ command = "my-agent-cli"
         };
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        // Keep the Unix socket below sockaddr_un's limit even with a long TMPDIR.
-        #[cfg(unix)]
-        let tmp = tempfile::Builder::new()
-            .prefix("gwt-wait-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        #[cfg(not(unix))]
-        let tmp = TempDir::new().unwrap();
+        let tmp = gwt_core::test_support::socket_tempdir().unwrap();
         let home = tmp.path().join("home");
         let _home = ScopedGwtHome::set(&home);
         let repo = tmp.path().join("repo");
@@ -13313,7 +13308,10 @@ command = "my-agent-cli"
                     .build()
                     .unwrap()
                     .block_on(async move {
-                        let mut listener = IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+                        let mut listener = IpcListener::bind(
+                            gwt_core::test_support::checked_socket_path(Path::new(&endpoint.bind)),
+                        )
+                        .unwrap();
                         persist_endpoint(
                             &scope.endpoint_path(&gwt_core::paths::gwt_home()),
                             &endpoint,
@@ -15773,7 +15771,9 @@ command = "my-agent-cli"
         )
         .expect("runtime scope");
         let socket_path = tmp.join("quota-hold.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind live daemon");
         listener
             .set_nonblocking(true)
             .expect("nonblocking live daemon");
@@ -15857,7 +15857,7 @@ command = "my-agent-cli"
     #[test]
     #[cfg(unix)]
     fn quota_hold_clear_fails_closed_when_the_live_daemon_rejects_the_release() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
@@ -15910,7 +15910,7 @@ command = "my-agent-cli"
     #[test]
     #[cfg(unix)]
     fn quota_hold_clear_refuses_when_an_acking_daemon_does_not_adopt_the_release() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");

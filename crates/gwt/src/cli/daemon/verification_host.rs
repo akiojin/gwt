@@ -422,7 +422,7 @@ mod tests {
     use gwt_core::verification_priority::LauncherPriority;
 
     fn scratch() -> tempfile::TempDir {
-        tempfile::tempdir().expect("temp dir")
+        gwt_core::test_support::socket_tempdir().expect("temp dir")
     }
 
     fn fixture_endpoint(root: &Path) -> DaemonEndpoint {
@@ -496,8 +496,10 @@ mod tests {
         for complete_handshake in [false, true] {
             let directory = scratch();
             let endpoint = fixture_endpoint(directory.path());
-            let mut listener =
-                super::super::transport::IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+            let mut listener = super::super::transport::IpcListener::bind(
+                gwt_core::test_support::checked_socket_path(Path::new(&endpoint.bind)),
+            )
+            .unwrap();
             let response = IpcHandshakeResponse {
                 protocol_version: endpoint.protocol_version,
                 daemon_version: "fixture".into(),

@@ -878,7 +878,7 @@ mod persistent_event_publish_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
         let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
@@ -908,7 +908,7 @@ mod persistent_event_publish_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
         let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
@@ -945,7 +945,7 @@ mod persistent_event_publish_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
+        let home = gwt_core::test_support::socket_tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut publisher = PersistentEventPublisher::new().unwrap();
@@ -1001,7 +1001,7 @@ mod persistent_event_publish_tests {
             .unwrap();
         let mut listener = {
             let _entered = runtime.enter();
-            IpcListener::bind(bind).unwrap()
+            IpcListener::bind(gwt_core::test_support::checked_socket_path(bind)).unwrap()
         };
         let endpoint = DaemonEndpoint::new(
             scope,
@@ -1487,7 +1487,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = TempDir::new().expect("project tempdir");
         let sibling = TempDir::new().expect("sibling worktree tempdir");
-        let home = TempDir::new().expect("home tempdir");
+        let home = gwt_core::test_support::socket_tempdir().expect("home tempdir");
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
         let caller_scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
@@ -1500,7 +1500,9 @@ mod tests {
         )
         .expect("sibling runtime scope");
         let socket_path = home.path().join("sibling-control.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind sibling daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind sibling daemon");
         listener
             .set_nonblocking(true)
             .expect("nonblocking sibling daemon");
@@ -1753,13 +1755,15 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = TempDir::new().expect("project tempdir");
-        let home = TempDir::new().expect("home tempdir");
+        let home = gwt_core::test_support::socket_tempdir().expect("home tempdir");
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
         let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
             .expect("runtime scope");
         let socket_path = home.path().join("busy-retry.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind test daemon");
+        let listener =
+            UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+                .expect("bind test daemon");
         let endpoint = DaemonEndpoint::new(
             scope.clone(),
             std::process::id(),
