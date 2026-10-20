@@ -9,6 +9,14 @@ const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 const project = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? "";
 const checkout = process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? "";
 
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus || page.isClosed()) return;
+  const messages = await page.evaluate(() => (window as any).__gwtPlaywrightMessages ?? []);
+  await info.attach("max-active-backend-messages", {
+    body: JSON.stringify(messages), contentType: "application/json",
+  });
+});
+
 test("Max active commits the final stepper value once and Auto never saves numbers", async ({ page }, info) => {
   test.skip(!base || !home, "requires browser-check's isolated checkout backend");
   test.setTimeout(180_000);

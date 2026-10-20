@@ -234,7 +234,7 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
             max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             effect_authority_epoch: 7,
             pending_effects: journal.clone(),
-            max_active_agents: 1,
+            max_active_agents: 6,
             priority_order: vec![42],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -243,11 +243,56 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let (proxy, recorded) = AppEventProxy::stub();
+    runtime.proxy = proxy;
     let max_events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: Some(4),
+            max_active_agents: Some(3),
         },
+    );
+    assert!(
+        max_events.is_empty(),
+        "durable control must leave the GUI thread"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .max_active_agents,
+        6
+    );
+    assert!(runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SetIssueMonitorMaxActiveAgents {
+                max_active_agents: None
+            },
+        )
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "Auto waits for the preceding Manual save"
+    );
+    tasks.lock().unwrap().pop().unwrap()();
+    let completion = recorded.lock().unwrap().pop().unwrap();
+    let Some(UserEvent::IssueMonitorMaxActivePrepared(prepared)) =
+        runtime.accept_project_completion(completion)
+    else {
+        panic!("Max active completion expected");
+    };
+    let max_events = runtime.issue_monitor_max_active_prepared_events(*prepared);
+    assert!(max_events.iter().any(|event| matches!(
+        &event.event, BackendEvent::IssueMonitorStatus { status }
+            if status.max_active_agents_override == Some(3)
+    )));
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "completion starts the next save"
     );
     let reorder_events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -257,20 +302,73 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     );
 
     assert!(
-        !max_events.is_empty() && !reorder_events.is_empty(),
+        !reorder_events.is_empty(),
         "missing daemon forces the atomic GUI fallback writer"
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-    assert_eq!(persisted.max_active_agents, 4);
+    assert_eq!(persisted.max_active_agents, 3);
     let change =
         serde_json::to_value(&persisted).expect("prefs json")["max_active_last_change"].clone();
     assert_eq!(change["source"], "gui");
-    assert_eq!(change["max_active_agents_override"], 4);
+    assert_eq!(change["max_active_agents_override"], 3);
     chrono::DateTime::parse_from_rfc3339(change["changed_at"].as_str().expect("change time"))
         .expect("RFC3339 change time");
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.effect_authority_epoch, 7);
     assert_eq!(persisted.pending_effects, journal);
+
+    tasks.lock().unwrap().pop().unwrap()();
+    let completion = recorded.lock().unwrap().pop().unwrap();
+    let Some(UserEvent::IssueMonitorMaxActivePrepared(prepared)) =
+        runtime.accept_project_completion(completion)
+    else {
+        panic!("Auto completion expected");
+    };
+    runtime.issue_monitor_max_active_prepared_events(*prepared);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        persisted.max_active_agents_mode,
+        gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto
+    );
+    let change = persisted.max_active_last_change.unwrap();
+    assert_eq!(
+        change.source,
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui
+    );
+    assert_eq!(change.max_active_agents_override, None);
+    assert_eq!(persisted.priority_order, vec![99, 42]);
+    assert_eq!(persisted.pending_effects, journal);
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_max_active_requests
+        .is_empty());
+    assert!(tasks.lock().unwrap().is_empty());
+
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let failed = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: Some(9),
+        },
+    );
+    assert!(failed.iter().any(|event| matches!(
+        &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("worker unavailable")
+    )));
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_max_active_requests
+        .is_empty());
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .max_active_last_change
+            .unwrap()
+            .max_active_agents_override,
+        None
+    );
 }
 
 #[test]
