@@ -30,27 +30,32 @@ mod imp {
                 .map_err(|error| format!("Windows Job attach failed for child {pid}: {error}"))
         }
 
-        /// Issue #4405 AC-2: the verification lease serializes heavy
-        /// verification host-wide, so its holder must not run at the
-        /// per-agent CPU share. Lift this Job's cap while `holder_pid` runs
-        /// inside it and restore the policy cap once it does not. Nothing
+        /// Issues #4405 / #5816: canonical verification holders must not run
+        /// at the per-agent CPU share. Disable this Job's rate control while
+        /// any holder runs inside it and restore the policy cap afterwards. Nothing
         /// leaves the Job, so kill-on-close containment is untouched. Returns
         /// whether the cap changed.
-        pub fn relieve_cap_for_lease_holder(
+        pub fn relieve_cap_for_lease_holders(
             &mut self,
-            holder_pid: Option<u32>,
+            holder_pids: &[u32],
         ) -> Result<bool, String> {
             let (Some(cap), Some(job)) = (self.cpu_cap, self.job.as_mut()) else {
                 return Ok(false);
             };
             // A holder that exited between the lease read and this check is
             // no longer anyone's to relieve.
-            let holds = holder_pid.is_some_and(|pid| job.contains_process(pid).unwrap_or(false));
+            let holds = holder_pids
+                .iter()
+                .any(|pid| job.contains_process(*pid).unwrap_or(false));
             if holds == self.cap_lifted {
                 return Ok(false);
             }
-            job.set_cpu_rate_hard_cap(if holds { 100 } else { cap })
-                .map_err(|error| format!("configure Job CPU hard cap: {error}"))?;
+            if holds {
+                job.disable_cpu_rate_control()
+            } else {
+                job.set_cpu_rate_hard_cap(cap)
+            }
+            .map_err(|error| format!("configure Job CPU hard cap: {error}"))?;
             self.cap_lifted = holds;
             Ok(true)
         }
@@ -160,9 +165,9 @@ mod imp {
         /// reported rather than corrected: see `holder_activity` (AC-3) and
         /// the deferral text (AC-4). Lifting it belongs to `max_active` and to
         /// the gwt-side CPU burn tracked by #4397 / #4234.
-        pub fn relieve_cap_for_lease_holder(
+        pub fn relieve_cap_for_lease_holders(
             &mut self,
-            _holder_pid: Option<u32>,
+            _holder_pids: &[u32],
         ) -> Result<bool, String> {
             Ok(false)
         }
@@ -259,6 +264,16 @@ mod tests {
             .spawn()
             .expect("spawn paused child");
         let pid = child.id();
+        let mut ancestor = super::imp::ProcessGroup::attach(pid).expect("attach ancestor Job");
+        ancestor
+            .apply_policy(
+                pid,
+                ProcessPolicy {
+                    priority: ProcessPriority::BelowNormal,
+                    cpu_limit_percent: Some(40),
+                },
+            )
+            .unwrap();
         let mut group = super::imp::ProcessGroup::attach(pid).expect("attach Job");
         group
             .apply_policy(
@@ -272,20 +287,41 @@ mod tests {
         assert_eq!(group.cpu_cap_percent(), Some(25));
 
         let outsider = std::process::id();
-        assert!(!group.relieve_cap_for_lease_holder(Some(outsider)).unwrap());
+        assert!(!group.relieve_cap_for_lease_holders(&[outsider]).unwrap());
         assert_eq!(group.cpu_cap_percent(), Some(25), "a holder elsewhere");
         // A holder that already exited is simply not here: no error, no change.
         assert!(!group
-            .relieve_cap_for_lease_holder(Some(u32::MAX - 3))
+            .relieve_cap_for_lease_holders(&[u32::MAX - 3])
             .unwrap());
         assert_eq!(group.cpu_cap_percent(), Some(25), "a vanished holder");
 
-        assert!(group.relieve_cap_for_lease_holder(Some(pid)).unwrap());
-        assert_eq!(group.cpu_cap_percent(), Some(100), "the holder is here");
-        assert!(!group.relieve_cap_for_lease_holder(Some(pid)).unwrap());
+        assert!(group
+            .relieve_cap_for_lease_holders(&[outsider, pid])
+            .unwrap());
+        assert!(ancestor
+            .relieve_cap_for_lease_holders(&[outsider, pid])
+            .unwrap());
+        assert_eq!(group.cpu_cap_percent(), None, "the holder is here");
+        assert_eq!(
+            ancestor.cpu_cap_percent(),
+            None,
+            "the ancestor is also relieved"
+        );
+        assert!(!group.relieve_cap_for_lease_holders(&[pid]).unwrap());
+        assert_eq!(
+            gwt_core::process_tree::process_priority_class(pid).unwrap(),
+            gwt_core::process_tree::ProcessPriorityClass::BelowNormal,
+            "relief preserves the scheduling priority"
+        );
 
-        assert!(group.relieve_cap_for_lease_holder(None).unwrap());
+        assert!(group.relieve_cap_for_lease_holders(&[]).unwrap());
+        assert!(ancestor.relieve_cap_for_lease_holders(&[]).unwrap());
         assert_eq!(group.cpu_cap_percent(), Some(25), "the lease is free");
+        assert_eq!(
+            ancestor.cpu_cap_percent(),
+            Some(40),
+            "ancestor policy is restored"
+        );
 
         group.terminate();
         let _ = child.wait();

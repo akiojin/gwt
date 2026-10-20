@@ -1154,19 +1154,19 @@ impl PtyHandle {
             })
     }
 
-    /// Issue #4405 AC-2: lift this tree's CPU cap while it contains the
-    /// host-wide verification lease holder, and restore it afterwards.
+    /// Lift this tree's CPU cap while it contains any canonical verification
+    /// lease holder, and restore it afterwards (Issues #4405 / #5816).
     /// Returns whether the cap changed.
-    pub fn relieve_cap_for_lease_holder(
+    pub fn relieve_cap_for_lease_holders(
         &self,
-        holder_pid: Option<u32>,
+        holder_pids: &[u32],
     ) -> Result<bool, TerminalError> {
         let mut group = match self.process_group.lock() {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
         };
         group
-            .relieve_cap_for_lease_holder(holder_pid)
+            .relieve_cap_for_lease_holders(holder_pids)
             .map_err(|details| TerminalError::PtyIoError { details })
     }
 
