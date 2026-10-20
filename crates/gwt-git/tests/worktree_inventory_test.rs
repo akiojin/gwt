@@ -1,9 +1,9 @@
-use std::{path::Path, process::Command, sync::Barrier, time::Instant};
+use std::{path::Path, sync::Barrier, time::Instant};
 
 use gwt_git::WorktreeManager;
 
 fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .current_dir(root)
         .args(args)
         .output()
@@ -42,11 +42,9 @@ fn inventory_collapses_callers_and_ticks() {
     let baseline_start = Instant::now();
     for _tick in 0..5 {
         for _caller in 0..12 {
-            let output = gwt_core::process::run_git_logged(
-                &["worktree", "list", "--porcelain"],
-                Some(&root),
-            )
-            .unwrap();
+            let output =
+                gwt_core::process::run_git_logged(&["worktree", "list", "--porcelain"], Some(root))
+                    .unwrap();
             assert!(output.status.success());
         }
     }
@@ -60,7 +58,7 @@ fn inventory_collapses_callers_and_ticks() {
     let mut count = None;
     for _tick in 0..5 {
         for _caller in 0..12 {
-            let entries = WorktreeManager::new(&root).list().unwrap();
+            let entries = WorktreeManager::new(root).list().unwrap();
             assert!(!entries.is_empty());
             assert_eq!(*count.get_or_insert(entries.len()), entries.len());
         }
@@ -178,7 +176,7 @@ fn inventory_is_shared_between_processes() {
     }
     let root = repository();
     WorktreeManager::new(root.path()).list().unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
+    let child = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "inventory_is_shared_between_processes",
