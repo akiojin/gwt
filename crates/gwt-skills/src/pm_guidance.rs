@@ -60,6 +60,15 @@ key. Link each queued/active Issue to one complete goal or an explicit
 maintenance/compliance category. Never justify priority from an orphan or invalid trace.
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
+Each `policy.roadmap_items` row observes only its own directly saved Issues.
+Preserve the saved `issues` order and duplicates; `observed_issue_states` and
+`unobserved_issues` use distinct Issue numbers in ascending order. Typed states
+retain their supplied inbox order without duplicates. Keep separate rows for
+duplicate or empty IDs and invalid traces; never expand membership through a Goal,
+Milestone or another row. Queue/active membership alone supplies no inbox state.
+An absent Monitor leaves every direct Issue unobserved; degraded observations
+retain their provenance. Empty membership yields empty arrays. These observations
+do not establish health, completion, priority or permission to launch work.
 `target_date_observation` compares each saved milestone target with the scan's UTC calendar date.
 Only exact YYYY-MM-DD targets and valid RFC3339 scan timestamps supply
 `days_past_target_at_scan`; it is zero before or on the target date.
@@ -3968,6 +3977,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         for phrase in [
             "`pm.plan.status`",
             "`pm.plan.apply`",
+            "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",
             "Merged or Released does not prove milestone completion",

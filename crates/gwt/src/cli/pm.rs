@@ -1083,6 +1083,10 @@ mod tests {
         for trace in status["policy"]["issue_traces"].as_array().unwrap() {
             assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
         }
+        let roadmap = &status["policy"]["roadmap_items"][0];
+        assert_eq!(roadmap["issues"], serde_json::json!([9, 7, 9]));
+        assert_eq!(roadmap["observed_issue_states"], serde_json::json!([]));
+        assert_eq!(roadmap["unobserved_issues"], serde_json::json!([7, 9]));
         assert_eq!(
             status["policy"]["goals"][0]["issues"],
             serde_json::json!([7, 9])

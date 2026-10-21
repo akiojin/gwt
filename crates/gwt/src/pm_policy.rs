@@ -772,6 +772,9 @@ pub struct RoadmapHorizons {
 #[derive(Debug, Serialize)]
 pub struct RoadmapDiagnostic {
     pub id: String,
+    pub issues: Vec<u64>,
+    pub observed_issue_states: Vec<MilestoneIssueStates>,
+    pub unobserved_issues: Vec<u64>,
     pub diagnostics: Vec<&'static str>,
 }
 
@@ -999,8 +1002,14 @@ pub fn assess_planning(
                 RoadmapHorizon::Later => &mut roadmap.later,
             }
             .push(item.id.clone());
+            // Each row owns its direct references even when IDs are ambiguous.
+            let members = item.issues.iter().copied().collect();
+            let (observed_issue_states, unobserved_issues) = observe_issues(&members, monitor);
             RoadmapDiagnostic {
                 id: item.id.clone(),
+                issues: item.issues.clone(),
+                observed_issue_states,
+                unobserved_issues,
                 diagnostics: diagnose_link(state, item),
             }
         })
@@ -1471,6 +1480,66 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("missing_milestone")));
+    }
+
+    #[test]
+    fn roadmap_observations_use_each_rows_direct_issues_even_with_ambiguous_ids() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "roadmap_items":[
+                {"id":"same","horizon":"now","issues":[3,1,3,2]},
+                {"id":"same","horizon":"next","issues":[4]},
+                {"id":"","horizon":"later","issues":[]}
+            ],
+            "milestones":[{"id":"m","issues":[5]}]
+        }))
+        .unwrap();
+        let before = state.clone();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.queue = vec![2];
+        monitor.active_launches = vec![4];
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":1,"state":"launched","attempts":0},
+            {"issue_number":1,"state":"needs_human","attempts":0},
+            {"issue_number":1,"state":"launched","attempts":0},
+            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":5,"state":"merged","attempts":0}
+        ]))
+        .unwrap();
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = &report["roadmap_items"];
+        assert_eq!(rows[0]["issues"], json!([3, 1, 3, 2]));
+        assert_eq!(
+            rows[0]["observed_issue_states"],
+            json!([
+                {"issue_number":1,"states":["launched","needs_human"]},
+                {"issue_number":3,"states":["hold_excluded"]}
+            ])
+        );
+        assert_eq!(rows[0]["unobserved_issues"], json!([2]));
+        assert_eq!(
+            rows[0]["diagnostics"],
+            json!(["duplicate_roadmap_id", "missing_trace"])
+        );
+        assert_eq!(rows[1]["issues"], json!([4]));
+        assert_eq!(rows[1]["observed_issue_states"], json!([]));
+        assert_eq!(rows[1]["unobserved_issues"], json!([4]));
+        for field in ["issues", "observed_issue_states", "unobserved_issues"] {
+            assert_eq!(rows[2][field], json!([]));
+        }
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            absent["roadmap_items"][0]["observed_issue_states"],
+            json!([])
+        );
+        assert_eq!(
+            absent["roadmap_items"][0]["unobserved_issues"],
+            json!([1, 2, 3])
+        );
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["roadmap_items"], *rows);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert_eq!(state, before);
     }
 
     #[test]

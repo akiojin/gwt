@@ -733,6 +733,13 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+`policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
+保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
+昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
+空・重複 ID や不正な紐付けも行を分けて保持し、Goal・Milestone・他の行から所属を
+広げません。queue/active 所属だけでは inbox 状態を推定しません。Monitor がなければ
+直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属は
+空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
 マイルストーンの `target_date_observation` は、厳密な `YYYY-MM-DD` の目標日と、
 記録済みスキャンの UTC 暦日を比較します。`days_past_target_at_scan` は目標日の当日・
 以前なら 0、日付が欠落・不正なら不足情報名とともに不明を返し、現在時計を使いません。
