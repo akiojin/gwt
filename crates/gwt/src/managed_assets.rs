@@ -55,12 +55,12 @@ pub fn managed_asset_lock_path(worktree: &Path) -> PathBuf {
 /// --git-path` resolves into the common directory, and the workspace-home
 /// `.codex/hooks.json`, which for a linked worktree resolves to the main
 /// checkout's copy. Both are single small files, so holding this lock costs a
-/// fraction of a full materialization.
+/// fraction of a full materialization. Keep the lock in Git's common directory
+/// so writers with different HOME values still exclude each other (#5270).
 pub fn shared_repo_asset_lock_path(worktree: &Path) -> PathBuf {
-    let root = gwt_git::worktree::main_worktree_root(worktree)
-        .unwrap_or_else(|_| canonical_lock_identity(worktree));
-    let identity = gwt_core::repo_hash::compute_path_hash(&root);
-    managed_asset_lock_dir().join(format!("repo-{identity}.lock"))
+    gwt_core::repo_hash::repository_common_dir(worktree)
+        .unwrap_or_else(|| canonical_lock_identity(worktree))
+        .join("gwt-managed-assets.lock")
 }
 
 fn canonical_lock_identity(worktree: &Path) -> PathBuf {
@@ -2405,6 +2405,34 @@ mod tests {
         let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
         repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
         (RepointFixture { _home: home, temp }, worktree, target)
+    }
+
+    #[test]
+    fn shared_asset_lock_is_the_same_exclusive_file_across_homes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        repoint_git(&repo, &["init", "--quiet"]);
+        let first_home = temp.path().join("real-home");
+        let second_home = temp.path().join("fresh-home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(&first_home);
+        let shared_path = super::shared_repo_asset_lock_path(&repo);
+        let local_path = super::managed_asset_lock_path(&repo);
+        super::with_shared_repo_asset_lock(&repo, || {
+            let _fresh_home = gwt_core::test_support::ScopedGwtHome::set(&second_home);
+            let contender_path = super::shared_repo_asset_lock_path(&repo);
+            assert_eq!(contender_path, shared_path);
+            assert_ne!(super::managed_asset_lock_path(&repo), local_path);
+            let contender = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(contender_path)?;
+            let error = fs2::FileExt::try_lock_exclusive(&contender)
+                .expect_err("different HOME writers must contend on the shared asset lock");
+            assert!(gwt_core::operation_deadline::is_lock_contended(&error));
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

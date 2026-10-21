@@ -22,6 +22,18 @@ function fixture() {
   return { root, model, view, visibility, copied, update };
 }
 
+test('Reports commits the content type before any view renders it', () => {
+  const model = createPmWindowModel();
+  model.bindPmWindowState('pm', 'session');
+  const incoming = report();
+  model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'session', reports: [incoming] });
+  const committed = model.readPmWindowState().windows.pm.reports[0];
+  assert.deepEqual(committed.content, { type: 'markdown', body: incoming.body, body_html: incoming.body_html });
+  incoming.body_html = '<p>changed outside the model</p>';
+  assert.match(committed.content.body_html, /<strong>Ready<\/strong>/);
+  assert.ok(Object.isFrozen(committed.content));
+});
+
 test('current summary defaults to collapsed and keeps disclosure across polling per window', () => {
   const { root, update } = fixture();
   const current = { status: { items: [
@@ -235,7 +247,7 @@ test('Execution log toggle retains Reports; stale sessions and native transcript
 
 test('Reports reuses the content renderer and Operator tokens without an overlay shell', async () => {
   const renderer = await readFile(new URL('../pm-chat.js', import.meta.url), 'utf8');
-  assert.match(renderer, /markdownContent/);
+  assert.match(renderer, /renderUiContent\(document, report\.content/);
   assert.doesNotMatch(renderer, /Claude|Codex|OpenCode|agent_id|⏺|⎿|\\x1b/i);
   const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
   const section = css.slice(css.indexOf('/* PM conversation */'));

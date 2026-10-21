@@ -91,11 +91,11 @@ test("Board message body renders sanitized server Markdown with a plaintext fall
   // ui-content.test.mjs; this contract preserves the shared wiring and styles.
   assert.match(
     appSource,
-    /createKnowledgeMarkdownBody\(entry,\s*"board-message-body"\)/,
+    /renderUiContent\(document, entry\.content,\s*"board-message-body"\)/,
   );
   assert.match(
     appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,200}renderUiContent\(document, markdownContent\(section\)/,
+    /content: \{ type: "markdown", body: entry\.body/,
   );
   // Only the plaintext fallback forces pre-wrap; rendered HTML lays itself out.
   assert.match(

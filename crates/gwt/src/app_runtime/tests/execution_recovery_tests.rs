@@ -1161,6 +1161,7 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
         .runtime
         .sessions_dir
         .join(format!("{}.toml", fixture.candidate_session_id));
+    let original_session = gwt_agent::Session::load(&candidate_path).expect("original Session");
     fs::remove_file(&candidate_path).expect("observe missing startup candidate Session");
     let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
         &fixture.repo,
@@ -1169,22 +1170,28 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
     let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
     let sessions_dir = fixture.runtime.sessions_dir.clone();
     let repo = fixture.repo.clone();
+    let owner = fixture.owner;
     let expected_session_id = fixture.candidate_session_id.clone();
     set_missing_session_cleanup_hook_for_test(Box::new(move |session_id| {
         assert_eq!(session_id, expected_session_id);
-        let mut replacement =
-            gwt_agent::Session::new(&repo, "work/replacement", gwt_agent::AgentId::Codex);
-        replacement.id = session_id.to_string();
-        replacement
+        original_session
             .save(&sessions_dir)
-            .expect("materialize same-id Session after startup Missing observation");
+            .expect("materialize exact Session after startup Missing observation");
+        gwt::cli::execution_state::claim_prepared_session_launch(
+            &repo,
+            owner,
+            &sessions_dir,
+            &original_session,
+        )
+        .expect("claim materialized launch")
+        .expect("live Host launch handshake");
     }));
 
     fixture.runtime.reconcile_durable_fresh_execution_launches();
 
     assert!(
         candidate_path.exists(),
-        "replacement Session must be retained"
+        "exact live Session must be retained"
     );
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,

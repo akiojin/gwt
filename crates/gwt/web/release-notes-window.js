@@ -11,7 +11,7 @@
 // backend replies with `release_notes_payload` (or `release_notes_error`)
 // and `app.js` forwards it here.
 
-import { markdownContent, renderUiContent } from "./ui-content.js";
+import { renderUiContent } from "./ui-content.js";
 import { createUiStateStore } from "./ui-state-store.js";
 
 const CHANGELOG_URL =
@@ -159,8 +159,8 @@ export function createReleaseNotesWindow({
         h3.textContent = section.heading;
         sectionEl.appendChild(h3);
       }
-      if (typeof section.body_html === "string" && section.body_html.trim()) {
-        sectionEl.appendChild(renderUiContent(document, markdownContent(section)));
+      if (section.content) {
+        sectionEl.appendChild(renderUiContent(document, section.content));
       } else if (section.items && section.items.length > 0) {
         const ul = document.createElement("ul");
         for (const item of section.items) {
@@ -512,7 +512,11 @@ export function createReleaseNotesWindow({
       (payload.entries[0] && payload.entries[0].version) ||
       null;
     model.update(() => ({
-      entries: payload.entries,
+      entries: payload.entries.map(entry => ({ ...entry,
+        sections: (entry.sections || []).map(section => ({ ...section,
+          content: typeof section.body_html === "string" && section.body_html.trim()
+            ? { type: "markdown", body: section.body || "", body_html: section.body_html }
+            : null })) })),
       currentVersion,
       selectedVersion: requested,
       error: null,

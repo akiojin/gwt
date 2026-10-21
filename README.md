@@ -297,7 +297,8 @@ To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 is one per OS-login user; a second `gwt` invocation prints the existing URL and
 exits instead of starting a second server.
 
-gwtd operations run through stdin JSON envelopes without opening a GUI window:
+gwtd operations run through stdin JSON envelopes without opening the main gwt window.
+Operations requiring consent can show a native OS dialog:
 
 ```bash
 gwtd <<'JSON'
@@ -800,6 +801,21 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+Saved WIP policies are compared independently, in saved order, with the distinct
+observed Issue count. `observed_exceeded` means only that this snapshot's count
+strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
+limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
+missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+data the count is null; without policies the list is empty. This comparison does not
+establish canonical WIP, a current breach or permission to act, and does not select
+or combine policies. Verification and full WIP remain missing.
+Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
+idle classification and binding/pane facts. They show elapsed whole seconds from idle start
+to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
+invalid or future start times leave duration unknown with named missing inputs. No Monitor
+yields null; an observed snapshot without idle windows yields an empty list. Read the source
+and scan age alongside these facts. They do not establish queue age, SLA breaches, liveness
+or permission to release, and do not change classification, slots, claims or launches.
 Activity observations show elapsed whole seconds since the last activity of Launching/Launched
 Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
 Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable
@@ -818,6 +834,14 @@ cannot establish elapsed time, nor can expiration before start establish remaini
 Unavailable Monitor data yields null, while no matching rows yields an empty list.
 These observations retain scan provenance, omit free-text reasons and resume conditions,
 and do not determine queue age, SLA, liveness or full WIP, or change waits and slots.
+Retry-deadline observations retain each inbox row with a recorded `retry_not_before`,
+including repeated Issues and their states. They show whole seconds remaining at the supplied
+scan time, respecting time-zone offsets and rounding down fractions; elapsed deadlines show zero.
+Missing or invalid times, including `unknown`, leave the duration unknown. Hold age remains
+unknown because the snapshot has no hold-start time. Unavailable Monitor yields null;
+no matching rows yields an empty list. These observations retain Monitor provenance, omit
+invalid timestamp text and free-text reasons, and do not prove an active hold or authorize
+launch, release or any change to retry gates, waits, slots or priority.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
@@ -945,6 +969,22 @@ entrypoints are:
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent-pane inspection and control
+- `gwt-feedback` — report a gwt problem from any project
+
+For a gwt bug or workflow problem, PM and implementation agents can use
+`gwt-feedback` to collect the affected operation, original refusal,
+reproduction steps, and workaround. The `feedback.create` JSON operation always
+targets `akiojin/gwt` and adds source-project and environment information.
+It saves a local receipt. Outside the actual gwt repository, intake returns
+immediately so project work can continue; sending requires the user's **Send
+feedback** action in a native dialog. Cancellation or an unavailable desktop
+keeps the report locally. The actual gwt repository sends synchronously without
+that prompt and returns the Issue number and URL.
+
+Use `feedback.status` with the returned request id to obtain the Issue number
+and URL; a similar existing Issue may receive a comment. `feedback.retry`
+accepts declined or failed receipts and asks for fresh external-project consent.
+An uncertain delivery is retained for inspection and is not automatically resent.
 
 SPECs and plain Issues share one search index. SPECs are indexed once as heading
 chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
@@ -1711,7 +1751,10 @@ snapshot. Retain each unsubscribe function for views that can be removed. Keep
 DOM nodes and renderer functions outside the model. Notifications also run for
 unfocused windows, without a focus or animation-frame trigger. The shared
 `ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
-the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the content type. Assign `{ type: 'markdown', body, body_html }` to a record's
+`content` when accepting it into the model. Views pass that committed content
+to `renderUiContent`; they do not choose Markdown or accept an injected renderer.
+See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
 the migration inventory and acceptance criteria.
 
 ### Capacity for heavy verification

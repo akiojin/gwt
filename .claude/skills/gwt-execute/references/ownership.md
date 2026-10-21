@@ -4,6 +4,24 @@ Unified Execute-lane entrypoint for implementation work. Treat every owner as a
 Work Item: a GitHub Issue number plus labels and artifacts. `gwt-spec` is a
 design-required tag, not a separate execution kind.
 
+## Existing work preflight
+
+Before writing a RED test or changing production code, run `git fetch origin`
+and identify the current head branch. If `origin/<head>` exists, inspect
+`git log HEAD..origin/<head>` and compare the local and remote head tips.
+Read `issue.linked_prs` for the owner and `pr.current` for the current branch.
+Do not infer missing implementation from `origin/develop..HEAD` alone: a
+previous session may have already pushed the source or submitted a Draft or
+Ready PR. Preserve that work and continue its delivery or required remediation
+instead of implementing it again. The compatibility entrypoints
+`gwt-fix-issue` and `gwt-build-spec` use this same preflight.
+
+Evaluate acceptance against the fetched configured base (`origin/develop`
+by default). Commits found only on a work branch remain undelivered and do
+not satisfy acceptance. When source remains, verify and deliver it through
+the existing PR; when no source remains, evaluate the base itself before
+deciding that the owner needs no action.
+
 ## Execution ownership
 
 Once started, keep moving until one of these is true:

@@ -214,6 +214,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "feedback.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.process",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.retry",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.status",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },

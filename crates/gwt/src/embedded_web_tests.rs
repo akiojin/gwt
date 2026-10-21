@@ -2588,7 +2588,7 @@ fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
         "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
     );
     assert!(
-        html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+        html.contains("renderUiContent(document, entry.content, \"board-message-body\")"),
         "Board body must render via the shared Markdown renderer",
     );
     assert!(
@@ -2887,11 +2887,19 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     assert!(
-        wizard_state.is_match(html) && wizard_state_delegate.is_match(html),
+        wizard_state.is_match(html)
+            && wizard_state_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state updates to hydrate the shared wizard renderer",
     );
 }
@@ -3094,7 +3102,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // defer through `wizardInteractionGuard.defer(...)` before
     // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
     // mutation lives in the launch wizard surface appliers; the
-    // receive() updates the open-error model, whose subscriber delegates to
+    // receive() updates the state/error models, whose subscribers delegate to
     // the same guarded surface applier. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
@@ -3102,7 +3110,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     let wizard_open_error_event = regex::Regex::new(
@@ -3151,7 +3159,15 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
-        wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
+        wizard_event.is_match(html)
+            && wizard_event_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state events to render through the wizard surface unit",
     );
     assert!(

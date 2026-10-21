@@ -282,7 +282,8 @@ Hub の開いているプロジェクト一覧にある **Close Project** を選
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
-`gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
+`gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
+承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
 ```bash
 gwtd <<'JSON'
@@ -734,6 +735,18 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 統合した Issue 一覧はキュー待ちだけの作業を除く下限集合で、全工程の WIP ではありません。
 取得不能な観測は不明のまま扱い、verification と全工程 WIP の不足も示します。
 この診断の読み取りで起動判断や WIP 上限の強制は行いません。
+保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
+`observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
+示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
+必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
+返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
+超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
+idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
+pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
+現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。
+Monitor 不在なら null、観測済み idle window がなければ空リストです。取得元とスキャンの古さも
+併せて確認してください。キュー滞留時間・SLA・活動状態・解放の許可を証明せず、分類・slot・
+claim・起動も変更しません。
 活動観測は、Launching / Launched の Issue の最終活動から Monitor のスキャン時点までの
 経過秒を示します。与えられた時刻だけを使い、現在時刻は参照しません。時刻が欠ける・不正・
 スキャンより未来の場合は経過時間を不明とし、Monitor の取得不能は観測済みの空配列と区別して
@@ -749,6 +762,12 @@ claim 競合の観測は、別の claim に保留される Issue と、スキャ
 経過時間を求めたり、開始前の期限から残時間を求めたりはしません。Monitor が取得できなければ
 null、該当行がなければ空リストです。スキャンの取得元を保持し、理由や再開条件の自由文を省きます。
 キュー滞留時間・SLA・活動状態・全 WIP の判定や、待機・スロットの変更は行いません。
+再試行期限の観測は、`retry_not_before` を持つ inbox 行を、Issue の重複と状態も含めて保持し、
+スキャン時点の残秒を示します。タイムゾーンの差を反映し、端数秒は切り捨て、期限経過は 0 秒です。
+時刻の欠落・不正や `unknown` は残秒を不明とします。開始時刻がないため保留の継続時間も不明です。
+Monitor が取得できなければ null、該当行がなければ空リストを返します。取得元を保持し、不正な
+時刻文字列と理由の自由文を省きます。この観測で保留が有効であることや起動・解除の許可を証明せず、
+再試行ゲート・待機・スロット・優先順も変更しません。
 マイルストーン診断では、明示的な所属 Issue と、一意かつ空でないマイルストーン ID を
 参照するロードマップ項目の Issue について、Monitor inbox の観測状態と未観測番号も示します。
 これは参照の事実であり、目標との整合を証明するものではありません。保留・失敗・claim 競合を
@@ -864,6 +883,23 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+- `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
+
+gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+`gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
+報告できます。JSON operation `feedback.create` の宛先は常に
+`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
+即座に返るため、本来のプロジェクト作業を続けられます。送信には native
+dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
+不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
+Issue 番号と URL を返します。
+
+返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
+URL を確認できます。類似する既存 Issue があればコメントを追記します。
+`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
+では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+自動再送しません。
 
 SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
 `gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
@@ -1588,7 +1624,9 @@ workflow は `run_started_at` から `updated_at`、job は `started_at` から
 取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
 通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
 共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
-Markdown 描画を選びます。移行対象と受け入れ条件は
+Markdown 描画を選びます。モデルへの取り込み時に `{ type: 'markdown', body, body_html }`
+をレコードの `content` に設定します。各面は確定した content を `renderUiContent` に渡し、
+Markdown の選択や描画関数の注入を行いません。移行対象と受け入れ条件は
 [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
 
 ### 重量級検証の容量制御

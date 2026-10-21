@@ -1,6 +1,73 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.133.0] - 2026-10-21
+
+### Bug Fixes
+
+- **gui:** Focus existing Issue windows before windowizing
+- **gui:** Focus existing Issue windows from Agent Kanban
+- **gui:** Preserve live issue output and project queue guards
+- **work:** Host 間の tombstone shard 衝突を解消
+- **gui:** Restore agents with colliding saved initials
+- **workspace:** Protect live session ledgers during recovery
+- **workspace:** Retain live sessions after missing-ledger probes
+- **issue-monitor:** Exclude owners waiting on open pull requests
+- **feedback:** Synchronize receipts with writable handles
+- **feedback:** Serialize upstream deduplication and align skill routers
+- **hooks:** Stabilize shared Codex hook identities across writers
+
+### Documentation
+
+- **pm:** Explain stopping during blocked monitor recovery
+
+### Features
+
+- **pm:** Report retry deadlines from monitor snapshots
+- **monitor:** Add daily agent reliability measurements
+- **pm:** Compare observed issue counts with saved WIP limits
+- **feedback:** Add upstream reporting with native consent
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4804 delivery scope and acceptance audit
+- **work:** Record issue 5829 delivery continuation
+- **work:** Record wizard error delivery recovery
+- **work:** Record Issue #5864 pull request
+- **work:** Record retry deadline diagnostic pull request
+- **work:** Record retry deadline delivery continuation
+- **work:** Record restore fix PR
+- **work:** Record restore delivery handoff
+- **work:** Record issue 4157 delivery handoff
+- **work:** Record PR #5878 association
+- **work:** Record WIP comparison pull request
+- **work:** Record feedback delivery state
+- **work:** Record feedback successor delivery state
+- **work:** Record feedback delivery pull request
+
+### Performance
+
+- **health:** Skip pm home probes for ordinary work rows
+
+### Refactor
+
+- **frontend:** Render wizard open errors from shared state
+- **frontend:** Render wizard state from shared model
+- **issue-monitor:** Use entries for PR observations
+
+### Testing
+
+- **health:** Isolate external inventory fixtures on Windows
+- **frontend:** Verify wizard error subscription in embedded bundle
+- **windows:** Stabilize nightly acceptance measurements
+- **gui:** Use one receive hook for restore notifications
+- **gui:** Align restore route fixture with name reallocation
+- **issue-monitor:** Expect canonical quota diagnostic after PR discovery
+- **monitor:** Align status snapshot with reliability data
+- **feedback:** Isolate delivery verification fixtures
+- **feedback:** Remove redundant fixture path borrow
+- **hooks:** Align shared root fixtures with portable fallback
+
 ## [9.132.0] - 2026-10-21
 
 ### Bug Fixes

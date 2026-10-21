@@ -10,6 +10,23 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Launch wizard state receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
+  const surface = readFileSync(new URL('../launch-wizard-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([[surfaceFile, surface]]),
+  }).filter(finding => finding.context === '/launch_wizard_state');
+  assert.equal(findings(app).length, 0);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'applyLaunchWizardStateEvent(event);']) {
+    const mutated = app.replace('case "launch_wizard_state":',
+      `case "launch_wizard_state": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Launch wizard open error receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';

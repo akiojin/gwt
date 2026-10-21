@@ -950,6 +950,21 @@ pub struct IssueMonitorMaxActiveChange {
     pub max_active_agents_override: Option<usize>,
 }
 
+/// Issue #4157: an open PR whose current lifecycle needs no implementation launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorOpenPrHold {
+    pub pr_number: u64,
+    pub lifecycle: String,
+}
+
+/// A successful per-Issue observation, including an explicit release of a hold.
+/// Keeping the release revision prevents stale processes from restoring it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorOpenPrObservation {
+    pub observed_at: String,
+    pub hold: Option<IssueMonitorOpenPrHold>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -1019,6 +1034,9 @@ pub struct IssueMonitorPrefs {
     /// Last locally observed account per provider; timestamps order cross-process rebases.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
+    /// Issue #4157: fresh PR facts and release revisions, joined by observation time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub open_pr_observations: BTreeMap<u64, IssueMonitorOpenPrObservation>,
     /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_drain: Option<IssueMonitorUpdateDrain>,
@@ -1263,6 +1281,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
+            open_pr_observations: BTreeMap::new(),
             update_drain: None,
             candidate_pool_degradation: None,
             generation_reclaim: None,
@@ -4696,6 +4715,8 @@ pub struct IssueMonitorState {
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    open_pr_observations: BTreeMap<u64, IssueMonitorOpenPrObservation>,
     /// Issue #4037 AC-1: the update drain, held next to the provider holds it
     /// shares its admission gate with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7263,6 +7284,7 @@ impl IssueMonitorState {
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
+            open_pr_observations: BTreeMap::new(),
             update_drain: None,
             candidate_pool_degradation: None,
             generation_reclaim: None,
@@ -7351,6 +7373,7 @@ impl IssueMonitorState {
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
+        state.open_pr_observations = prefs.open_pr_observations;
         state.enforce_provider_quota_hold_releases();
         state.update_drain = prefs.update_drain.clone();
         state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
@@ -7490,6 +7513,7 @@ impl IssueMonitorState {
         state.apply_closed_issue_facts();
         state.enforce_provider_quota_account_bindings();
         state.enforce_provider_quota_hold_releases();
+        state.enforce_open_pr_holds();
         state
     }
 
@@ -7521,6 +7545,7 @@ impl IssueMonitorState {
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             provider_quota_accounts: self.provider_quota_accounts.clone(),
+            open_pr_observations: self.open_pr_observations.clone(),
             update_drain: self.update_drain.clone(),
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
@@ -11154,6 +11179,74 @@ impl IssueMonitorState {
         }
     }
 
+    /// Apply only successful PR observations. A missing key is unknown, while
+    /// an explicit `None` clears the hold after close, merge, or a repairable failure.
+    pub fn reconcile_open_pr_holds(
+        &mut self,
+        observations: &BTreeMap<u64, Option<IssueMonitorOpenPrHold>>,
+        observed_at: &str,
+    ) {
+        for (issue_number, hold) in observations {
+            self.merge_open_pr_observation(
+                *issue_number,
+                IssueMonitorOpenPrObservation {
+                    observed_at: observed_at.to_string(),
+                    hold: hold.clone(),
+                },
+            );
+        }
+        self.enforce_open_pr_holds();
+    }
+
+    fn merge_open_pr_observation(
+        &mut self,
+        issue_number: u64,
+        observation: IssueMonitorOpenPrObservation,
+    ) {
+        let Some(incoming_at) = parse_rfc3339_utc(&observation.observed_at) else {
+            return;
+        };
+        if self
+            .open_pr_observations
+            .get(&issue_number)
+            .is_some_and(|current| {
+                parse_rfc3339_utc(&current.observed_at).is_some_and(|current_at| {
+                    incoming_at < current_at
+                        || (incoming_at == current_at && observation.hold.is_some())
+                })
+            })
+        {
+            return;
+        }
+        self.open_pr_observations.insert(issue_number, observation);
+    }
+
+    pub fn open_pr_launch_held(&self, issue_number: u64) -> bool {
+        self.open_pr_observations
+            .get(&issue_number)
+            .is_some_and(|observation| observation.hold.is_some())
+    }
+
+    fn enforce_open_pr_holds(&mut self) {
+        let unlaunched = self
+            .open_pr_observations
+            .iter()
+            .filter_map(|(issue_number, observation)| {
+                (observation.hold.is_some()
+                    && !self.active_launches.contains(issue_number)
+                    && !self.has_observed_monitor_runtime(*issue_number))
+                .then_some(*issue_number)
+            })
+            .collect::<Vec<_>>();
+        for issue_number in unlaunched {
+            revoke_uncommitted_claims_for_issue(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                issue_number,
+            );
+        }
+    }
+
     /// Rebase a GUI observer on the latest committed prefs. The GUI does not
     /// drive autonomous lifecycle transitions, so disk owns the complete
     /// autonomous record map, including an updated value for an existing key.
@@ -11248,6 +11341,9 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        for (issue_number, observation) in &disk.open_pr_observations {
+            self.merge_open_pr_observation(*issue_number, observation.clone());
+        }
         for observation in disk.monitor_runtime_counts.values() {
             self.record_monitor_runtime_windows(
                 observation.host_pid,
@@ -11464,6 +11560,7 @@ impl IssueMonitorState {
                 self.record_candidate(issue.clone());
             }
         }
+        self.enforce_open_pr_holds();
         self.reconcile_terminal_queue();
     }
 
@@ -13153,11 +13250,7 @@ impl IssueMonitorState {
                         exclusion_reason: if item.state == MonitorInboxState::Queued {
                             let mut reasons =
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
-                            reasons.extend(
-                                self.claim_candidate_exclusions(item.issue.number)
-                                    .into_iter()
-                                    .map(str::to_string),
-                            );
+                            reasons.extend(self.claim_candidate_exclusions(item.issue.number));
                             (!reasons.is_empty()).then(|| reasons.join("; "))
                         } else {
                             item.exclusion_reason.clone()
@@ -14183,14 +14276,12 @@ impl IssueMonitorState {
         }
     }
 
-    fn claim_effect_is_blocked_by_provider_hold(
-        &self,
-        payload: &IssueMonitorEffectPayload,
-    ) -> bool {
+    fn claim_effect_is_blocked_by_admission(&self, payload: &IssueMonitorEffectPayload) -> bool {
         matches!(
             payload,
-            IssueMonitorEffectPayload::AcquireClaim { heartbeat_at, .. }
+            IssueMonitorEffectPayload::AcquireClaim { issue_number, heartbeat_at, .. }
                 if self.launch_admission_is_held_at(heartbeat_at)
+                    || self.open_pr_launch_held(*issue_number)
         )
     }
 
@@ -14200,7 +14291,7 @@ impl IssueMonitorState {
         if effect.effect_id.is_empty()
             || effect.state != IssueMonitorEffectState::Prepared
             || effect.authority_epoch != self.effect_authority_epoch
-            || self.claim_effect_is_blocked_by_provider_hold(&effect.payload)
+            || self.claim_effect_is_blocked_by_admission(&effect.payload)
             || (matches!(
                 &effect.payload,
                 IssueMonitorEffectPayload::RenewClaim { .. }
@@ -14226,7 +14317,7 @@ impl IssueMonitorState {
     ) -> Option<IssueMonitorEffectAttemptKey> {
         let effect_id = effect_id.into();
         if effect_id.is_empty()
-            || self.claim_effect_is_blocked_by_provider_hold(&payload)
+            || self.claim_effect_is_blocked_by_admission(&payload)
             || (matches!(&payload, IssueMonitorEffectPayload::RenewClaim { .. })
                 && !self.claim_renewal_is_current(&payload))
             || matches!(&payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
@@ -16375,10 +16466,9 @@ impl IssueMonitorState {
             return None;
         }
         self.reconcile_terminal_queue();
-        let position = self
-            .queue
-            .iter()
-            .position(|issue| !self.has_observed_monitor_runtime(*issue))?;
+        let position = self.queue.iter().position(|issue| {
+            !self.has_observed_monitor_runtime(*issue) && !self.open_pr_launch_held(*issue)
+        })?;
         let issue_number = self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
@@ -16480,30 +16570,46 @@ impl IssueMonitorState {
 
     /// Shared by the claim planner and its row diagnostics. Delivery
     /// annotations deliberately do not appear here: they are not holds.
-    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<&'static str> {
+    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
         if !self.terminal_queue_contains(issue_number) {
-            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push");
+            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push".to_string());
         }
         if !self.queue.contains(&issue_number) {
-            reasons.push("not_in_launch_queue: use issue.monitor.launch_now");
+            reasons.push("not_in_launch_queue: use issue.monitor.launch_now".to_string());
         }
         if self.has_observed_monitor_runtime(issue_number) {
-            reasons.push("runtime_already_present");
+            reasons.push("runtime_already_present".to_string());
+        }
+        if let Some(hold) = self
+            .open_pr_observations
+            .get(&issue_number)
+            .and_then(|observation| observation.hold.as_ref())
+        {
+            reasons.push(format!(
+                "open_pr_pending_delivery: PR #{} ({})",
+                hold.pr_number, hold.lifecycle
+            ));
         }
         for effect in &self.pending_effects {
             match effect.payload {
                 IssueMonitorEffectPayload::AcquireClaim {
                     issue_number: owner,
                     ..
-                } if owner == issue_number && !reasons.contains(&"claim_pending") => {
-                    reasons.push("claim_pending");
+                } if owner == issue_number
+                    && !reasons.iter().any(|reason| reason == "claim_pending") =>
+                {
+                    reasons.push("claim_pending".to_string());
                 }
                 IssueMonitorEffectPayload::SettleMergedIssue {
                     issue_number: owner,
                     ..
-                } if owner == issue_number && !reasons.contains(&"merged_settlement_pending") => {
-                    reasons.push("merged_settlement_pending");
+                } if owner == issue_number
+                    && !reasons
+                        .iter()
+                        .any(|reason| reason == "merged_settlement_pending") =>
+                {
+                    reasons.push("merged_settlement_pending".to_string());
                 }
                 _ => {}
             }
@@ -16679,6 +16785,7 @@ impl IssueMonitorState {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
                     && !self.has_observed_monitor_runtime(*issue_number)
+                    && !self.open_pr_launch_held(*issue_number)
                     && self.retry_ready_for_saved_profile(*issue_number, now)
             }) else {
                 break;
@@ -17193,6 +17300,7 @@ impl IssueMonitorState {
                 item.state == MonitorInboxState::Queued
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_observed_monitor_runtime(issue_number)
+                    && !self.open_pr_launch_held(issue_number)
                     && self.occupied_slot_count() < self.effective_max_active_agents()
             })
             .map(|item| item.issue.clone())
@@ -39931,6 +40039,186 @@ mod tests {
         reloaded.complete_active_launch(43, window_id);
         assert_eq!(reloaded.launched_window_issue(window_id), Some(43));
         assert_eq!(reloaded.prefs().launch_bindings.get(window_id), Some(&43));
+    }
+
+    #[test]
+    fn issue_4157_settled_ready_pr_blocks_three_scans_then_ci_red_relaunches() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: delivery pending\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(1);
+        let target = stop_target(&monitor, 42);
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+        let client = FakeIssueClient::new();
+        client.seed(IssueSnapshot {
+            number: IssueNumber(42),
+            title: candidate.title.clone(),
+            body: candidate.body.clone().unwrap(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: Vec::new(),
+        });
+
+        for (lifecycle, now) in [
+            ("IN-PROGRESS", "2026-06-26T00:01:00Z"),
+            ("BEHIND", "2026-06-26T00:02:00Z"),
+            ("MERGE-CANDIDATE", "2026-06-26T00:03:00Z"),
+        ] {
+            monitor.reconcile_open_pr_holds(
+                &BTreeMap::from([(
+                    42,
+                    Some(IssueMonitorOpenPrHold {
+                        pr_number: 7,
+                        lifecycle: lifecycle.into(),
+                    }),
+                )]),
+                now,
+            );
+            scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+            assert!(monitor.open_pr_launch_held(42));
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Queued
+            );
+            let row = monitor.agent_status_at(now).inbox.remove(0);
+            let reason = row.exclusion_reason.expect("the PR hold is visible");
+            assert!(
+                reason.contains("PR #7") && reason.contains(lifecycle),
+                "{reason}"
+            );
+            assert!(row.error_message.is_none());
+            assert!(monitor.clone().next_launch_request(now).is_none());
+            assert!(!monitor.clone().apply_confirmed_claim(
+                42,
+                "late-claim",
+                "host/session",
+                "late-effect",
+                now
+            ));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+                0
+            );
+            assert!(monitor
+                .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false)
+                .is_empty());
+            assert_eq!(monitor.active_count(), 0);
+        }
+
+        // A successful CI-RED observation removes the non-actionable PR hold.
+        let now = "2026-06-26T00:04:00Z";
+        monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), now);
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], now);
+        assert!(!monitor.open_pr_launch_held(42));
+        assert_eq!(
+            monitor
+                .clone()
+                .prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        let launches =
+            monitor
+                .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false);
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].issue_number, 42);
+    }
+
+    #[test]
+    fn issue_4157_pr_hold_clear_survives_roundtrip_and_stale_rebase() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let hold = BTreeMap::from([(
+            42,
+            Some(IssueMonitorOpenPrHold {
+                pr_number: 7,
+                lifecycle: "MERGE-CANDIDATE".into(),
+            }),
+        )]);
+        monitor.reconcile_open_pr_holds(&hold, "2026-06-26T00:01:00Z");
+        let stale: IssueMonitorPrefs =
+            serde_json::from_value(serde_json::to_value(monitor.prefs()).unwrap()).unwrap();
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale.clone());
+        assert!(restored.open_pr_launch_held(42));
+        restored.reconcile_open_pr_holds(&BTreeMap::new(), "2026-06-26T00:02:00Z");
+        assert!(
+            restored.open_pr_launch_held(42),
+            "an unobserved PR preserves its hold"
+        );
+
+        // A closed/merged PR, or one needing owner repair, is a successful clear.
+        restored.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:03:00Z");
+        restored.rebase_daemon_driver_prefs(&stale);
+        assert!(
+            !restored.open_pr_launch_held(42),
+            "a stale hold cannot undo the clear"
+        );
+        let cleared: IssueMonitorPrefs =
+            serde_json::from_value(serde_json::to_value(restored.prefs()).unwrap()).unwrap();
+        monitor.rebase_gui_observer_prefs(&cleared);
+        assert!(!monitor.open_pr_launch_held(42), "a newer disk clear wins");
+        let mut reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), cleared);
+        reloaded.reconcile_open_pr_holds(&hold, "2026-06-26T00:01:00Z");
+        assert!(
+            !reloaded.open_pr_launch_held(42),
+            "the empty observation revision persists"
+        );
+        reloaded.reconcile_open_pr_holds(&hold, "2026-06-26T00:04:00Z");
+        assert!(
+            reloaded.open_pr_launch_held(42),
+            "a newer PR observation can hold again"
+        );
+    }
+
+    #[test]
+    fn issue_4157_pr_hold_rejects_stale_acquire_claim_proposals() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "test", "2026-06-26T00:00:00Z");
+        let payload = IssueMonitorEffectPayload::AcquireClaim {
+            issue_number: 42,
+            claim_id: "claim-42".into(),
+            owner: "host/session".into(),
+            heartbeat_at: "2026-06-26T00:00:00Z".into(),
+            expires_at: "2026-06-26T00:30:00Z".into(),
+            launched_work_id: None,
+        };
+        assert!(monitor
+            .prepare_pending_effect("prepared-before-pr-read", payload.clone())
+            .is_some());
+        let stale_claim = monitor.prefs();
+        monitor.reconcile_open_pr_holds(
+            &BTreeMap::from([(
+                42,
+                Some(IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "MERGE-CANDIDATE".into(),
+                }),
+            )]),
+            "2026-06-26T00:01:00Z",
+        );
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "the PR observation revokes the old prepared claim"
+        );
+        monitor.rebase_daemon_driver_prefs(&stale_claim);
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "a stale rebase cannot restore the prepared claim"
+        );
+        assert!(!monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            "stale-scan-proposal",
+            monitor.effect_authority_epoch(),
+            payload.clone(),
+        )));
+        assert_eq!(
+            monitor.prepare_pending_effect("stale-direct-proposal", payload),
+            None
+        );
+        assert!(monitor.pending_effects().is_empty());
     }
 
     #[test]

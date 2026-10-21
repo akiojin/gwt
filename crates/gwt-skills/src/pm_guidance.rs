@@ -77,7 +77,31 @@ it deduplicates implementation, review, pending and human-wait owners, excluding
 Absent Monitor lists and missing legacy optional fields stay unknown rather than zero.
 Read the enclosing Monitor source, scan time and coverage alongside these observations;
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
-This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
+This projection never enforces WIP limits or changes admission, priority or launch decisions.
+
+`idle_windows` preserves every supplied Monitor idle window in order, including repeats
+and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
+`pane_present`; it does not reproduce rebind or requeue proposals.
+`idle_seconds_at_scan` uses only valid RFC3339 scan and idle-start timestamps, respecting
+offsets and rounding nonnegative fractions down to whole seconds. It never uses the current clock.
+Missing or invalid scan/start times and starts after the scan leave duration unknown with
+named missing inputs; invalid start text is not copied. Absent Monitor yields null;
+an observed snapshot without idle windows yields []. Keep the enclosing source and coverage:
+an old or degraded scan is only an observation at that scan, not current idle evidence.
+Idle timing does not prove queue age, SLA breaches, liveness or permission to release.
+Never recompute the Monitor's idle classification or change slots, claims or launches from it.
+
+`wip_limits` compares each saved policy independently in saved order, retaining its ID,
+version and optional limit alongside `observed_issue_count` and an assessment.
+`observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
+it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
+coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
+there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
+Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
+they do not establish a mathematical lower bound on canonical WIP or a current breach.
+Verification and full WIP remain missing. Never select or combine an active policy implicitly,
+recompute slot occupancy from Issue counts, or treat the comparison as permission to act.
 
 `launch_activity` reports only Launching/Launched inbox rows in supplied order,
 including repeated owners; it is not a complete process census.
@@ -108,6 +132,15 @@ Invalid timestamp text, free-text reason and resume condition are not copied.
 Absent Monitor yields null; no matching rows yields []. Keep Monitor provenance:
 wait timing does not establish queue/claim-block age, SLA, liveness or full WIP,
 and never changes protection, invalidates a wait, releases a slot or triggers execution.
+
+`retry_deadlines` reports every inbox row with `retry_not_before`, retaining supplied order,
+repeated owners and lifecycle states. Remaining whole seconds use only the supplied scan time
+and a valid RFC3339 deadline, respecting offsets, flooring fractions and clamping elapsed deadlines to zero.
+Missing/invalid scan or deadline, including canonical `unknown`, leaves duration unknown with named inputs;
+invalid deadline text and free-text hold reasons are not copied. `retry_hold_started_at` remains missing:
+the snapshot cannot establish hold age. Absent Monitor yields null; no matching rows yields [].
+Keep Monitor provenance. A retry deadline does not prove an active hold or authorize launch,
+even when elapsed; these observations never change retry gates, waits, slots or priority.
 
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
@@ -3876,10 +3909,16 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",
+            "`idle_windows` preserves every supplied Monitor idle window in order, including repeats",
+            "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
+            "`retry_deadlines` reports every inbox row with `retry_not_before`",
+            "`wip_limits` compares each saved policy independently in saved order",
+            "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
+            "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",
             "An elapsed claim deadline does not prove release or authorize requeue",
             "Activity timing does not establish queue age, SLA breaches or liveness",
