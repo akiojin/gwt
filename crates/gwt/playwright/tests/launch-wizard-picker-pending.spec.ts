@@ -2,6 +2,97 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
+test("live wizard state and open errors retain interaction deferral and local recovery", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+  test.skip(!base, "isolated checkout backend required");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await page.addInitScript(() => {
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (typeof data === "string" && JSON.parse(data).kind === "launch_wizard_action") return;
+      return send.call(this, data);
+    };
+  });
+  await gotoLiveGwt(page, base, { enableTestBridge: true });
+  await expect(page.locator("html")).toHaveAttribute("data-theme",
+    testInfo.project.name.includes("light") ? "light" : "dark");
+  const trigger = page.locator("#window-list-button");
+  await expect(trigger).toBeEnabled();
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  const emit = async (detail: unknown) => page.evaluate(detail => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+  }, detail);
+  const wizard = {
+    title: "Choose Agent", show_manual_setup: true, show_branch_controls: false,
+    show_agent_settings: true, runtime_context_resolved: true,
+    launch_summary: [], progress_steps: [], selected_launch_target: "agent",
+    launch_target_options: [{ label: "Agent", value: "agent" }],
+    agent_options: [{ label: "Codex", value: "codex" }], selected_agent_id: "codex",
+    model_options: [{ label: "Model A", value: "model-a" }], selected_model: "model-a",
+  };
+  await emit({ kind: "launch_wizard_state", wizard });
+  const modal = page.locator("#wizard-modal");
+  const model = modal.getByRole("combobox", { name: "Model", exact: true });
+  await expect(model).toBeEnabled();
+  await model.focus();
+  await model.evaluate(element => { (window as any).__wizardModel = element; });
+  // Exercise the real delegated interaction guard without opening an OS menu.
+  await model.dispatchEvent("pointerdown");
+  await page.evaluate(wizard => {
+    for (const title of ["Superseded state", "Updated Agent"]) {
+      const update = { ...wizard, title };
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "launch_wizard_state", wizard: update },
+      }));
+      update.title = "Mutated after receipt";
+    }
+  }, wizard);
+  await expect(modal.locator("#wizard-title")).toHaveText("Choose Agent");
+  await expect(model).toBeFocused();
+  expect(await model.evaluate(element => element === (window as any).__wizardModel)).toBe(true);
+  await model.dispatchEvent("change");
+  await expect(modal.locator("#wizard-title")).toHaveText("Updated Agent");
+  await model.focus();
+  await model.evaluate(element => { (window as any).__wizardModel = element; });
+  await model.dispatchEvent("pointerdown");
+  await emit({ kind: "launch_wizard_open_error", title: "Superseded error", message: "Old failure" });
+  const error = { kind: "launch_wizard_open_error", title: "Open failed", message: "<img src=x onerror=alert(1)>" };
+  await emit(error);
+  await expect(modal.locator("#wizard-title")).toHaveText("Updated Agent");
+  await expect(model).toBeFocused();
+  expect(await model.evaluate(element => element === (window as any).__wizardModel)).toBe(true);
+  await model.dispatchEvent("change");
+  await expect(modal.locator("#wizard-title")).toHaveText("Open failed");
+  await expect(modal.locator("#wizard-error")).toHaveText(error.message);
+  await expect(modal.locator("img")).toHaveCount(0);
+  await expect(modal).not.toContainText("Old failure");
+  await emit({ kind: "launch_wizard_state", wizard: null });
+  await expect(modal.locator("#wizard-error")).toHaveText(error.message);
+  await testInfo.attach("wizard-open-error", {
+    body: await modal.screenshot({ path: testInfo.outputPath("wizard-open-error.png") }),
+    contentType: "image/png",
+  });
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeHidden();
+  await expect(trigger).toBeFocused();
+  // A distinct receipt with identical fields must still open after local close.
+  await emit(error);
+  await expect(modal).toBeVisible();
+  await expect(modal.locator("#wizard-error")).toHaveText(error.message);
+  await emit({ kind: "launch_wizard_state", wizard });
+  await expect(modal.locator("#wizard-title")).toHaveText("Choose Agent");
+  await expect(modal.locator("#wizard-error")).toBeHidden();
+  await emit({ kind: "launch_wizard_state", wizard: null });
+  await expect(modal).toBeHidden();
+  await expect(trigger).toBeFocused();
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 test("live work advisory results preserve the prompt and ignore stale responses", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
   test.skip(!base, "isolated checkout backend required");

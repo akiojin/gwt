@@ -3579,6 +3579,89 @@ pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<Str
     try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
 }
 
+/// Fresh lifecycle evidence for the Issue Monitor's launch decision, without
+/// the completion gate's review-thread and body hydration.
+pub fn try_fetch_pr_lifecycle_for_monitor(
+    repo_path: &Path,
+    number: u64,
+) -> Result<(PrState, PrInventoryItem)> {
+    try_fetch_pr_lifecycle_for_monitor_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_lifecycle_for_monitor_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<(PrState, PrInventoryItem)>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number_arg = number.to_string();
+    let fields = "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup";
+    let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view {number}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
+    let state = match value.get("state").and_then(serde_json::Value::as_str) {
+        Some("OPEN") => PrState::Open,
+        Some("CLOSED") => PrState::Closed,
+        Some("MERGED") => PrState::Merged,
+        _ => return Err(GwtError::Other("PR state is unknown".into())),
+    };
+    if value.get("number").and_then(serde_json::Value::as_u64) != Some(number)
+        || value
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        || [
+            "headRefName",
+            "baseRefName",
+            "mergeable",
+            "mergeStateStatus",
+        ]
+        .iter()
+        .any(|field| {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+        })
+        || (state == PrState::Open
+            && value
+                .get("statusCheckRollup")
+                .and_then(serde_json::Value::as_array)
+                .is_none())
+    {
+        return Err(GwtError::Other(
+            "PR identity, Draft status or checks are unknown".into(),
+        ));
+    }
+    let now = Utc::now();
+    let options = PrInventoryOptions::default();
+    let mut inventory = inventory_item_from_value(&value, now, &options)?;
+    // A non-strict base makes failed CI actionable even while BEHIND. Other
+    // classes do not need another read for the monitor's launch decision.
+    if state == PrState::Open
+        && inventory.lifecycle == PrLifecycleClass::Behind.as_str()
+        && inventory.ci_status.eq_ignore_ascii_case("FAILURE")
+    {
+        probe_merge_queue(
+            repo_path,
+            std::slice::from_mut(&mut value),
+            &BudgetLedger::global(),
+            now,
+            &mut run_gh,
+        );
+        inventory = inventory_item_from_value(&value, now, &options)?;
+    }
+    Ok((state, inventory))
+}
+
 /// Fresh, targeted completion evidence. This never reads the PM inventory
 /// cache: a completion decision must describe the current PR head and gates.
 #[derive(Debug, Clone)]
@@ -5719,6 +5802,142 @@ mod tests {
                 .to_string(),
             ..sample_inventory_fields()
         }
+    }
+
+    fn monitor_lifecycle_payload() -> serde_json::Value {
+        serde_json::json!({
+            "number": 42, "title": "Fix issue", "url": "https://github.com/o/r/pull/42",
+            "state": "OPEN", "isDraft": false, "headRefName": "work/issue-4157",
+            "baseRefName": "develop", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]
+        })
+    }
+
+    #[test]
+    fn issue_4157_monitor_lifecycle_reads_pending_and_green_without_review_hydration() {
+        for (checks, expected) in [
+            (
+                serde_json::json!([{"status": "IN_PROGRESS"}]),
+                "IN-PROGRESS",
+            ),
+            (
+                serde_json::json!([{"conclusion": "SUCCESS"}]),
+                "MERGE-CANDIDATE",
+            ),
+        ] {
+            let mut value = monitor_lifecycle_payload();
+            value["statusCheckRollup"] = checks;
+            let mut calls = 0;
+            let (state, item) = try_fetch_pr_lifecycle_for_monitor_with(
+                Path::new("/repo"), 42, |_, args| {
+                    calls += 1;
+                    assert_eq!(&args[..4], &["pr", "view", "42", "--json"]);
+                    assert_eq!(args[4], "number,title,url,state,isDraft,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup");
+                    Ok(GhCliOutput { success: true, stdout: value.to_string(), stderr: String::new() })
+                },
+            ).unwrap();
+            assert_eq!(state, PrState::Open);
+            assert_eq!(item.lifecycle, expected);
+            assert_eq!(calls, 1);
+            assert_eq!(item.unresolved_review_threads, None);
+        }
+    }
+
+    #[test]
+    fn issue_4157_monitor_lifecycle_preserves_repair_classes_and_behind_policy() {
+        for (mergeable, merge_status, strict, expected) in [
+            ("MERGEABLE", "CLEAN", None, "CI-RED"),
+            ("CONFLICTING", "DIRTY", None, "CONFLICTED"),
+            ("MERGEABLE", "BEHIND", Some(false), "CI-RED"),
+            ("MERGEABLE", "BEHIND", Some(true), "BEHIND"),
+        ] {
+            let mut value = monitor_lifecycle_payload();
+            value["mergeable"] = mergeable.into();
+            value["mergeStateStatus"] = merge_status.into();
+            value["statusCheckRollup"] = serde_json::json!([{"conclusion": "FAILURE"}]);
+            let mut calls = 0;
+            let (_, item) = try_fetch_pr_lifecycle_for_monitor_with(
+                Path::new("/repo"), 42, |_, args| {
+                    calls += 1;
+                    let stdout = if args[0] == "pr" {
+                        value.to_string()
+                    } else {
+                        assert_eq!(&args[..2], &["api", "graphql"]);
+                        assert!(args.iter().any(|arg| arg.contains("requiresStrictStatusChecks")));
+                        assert!(!args.iter().any(|arg| arg.contains("reviewThreads")));
+                        serde_json::json!({"data":{"repository":{"pr_42":{
+                            "baseRef":{"branchProtectionRule":{"requiresStrictStatusChecks":strict}},
+                            "isMergeQueueEnabled":false
+                        }}}}).to_string()
+                    };
+                    Ok(GhCliOutput { success: true, stdout, stderr: String::new() })
+                },
+            ).unwrap();
+            assert_eq!(item.lifecycle, expected);
+            assert_eq!(item.required_status_checks_strict, strict);
+            assert_eq!(calls, if strict.is_some() { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn issue_4157_monitor_lifecycle_returns_terminal_state_without_checks() {
+        for (remote, expected) in [("CLOSED", PrState::Closed), ("MERGED", PrState::Merged)] {
+            let mut value = monitor_lifecycle_payload();
+            value["state"] = remote.into();
+            value.as_object_mut().unwrap().remove("statusCheckRollup");
+            let (state, _) =
+                try_fetch_pr_lifecycle_for_monitor_with(Path::new("/repo"), 42, |_, args| {
+                    assert_eq!(args[0], "pr");
+                    Ok(GhCliOutput {
+                        success: true,
+                        stdout: value.to_string(),
+                        stderr: String::new(),
+                    })
+                })
+                .unwrap();
+            assert_eq!(state, expected);
+        }
+    }
+
+    #[test]
+    fn issue_4157_monitor_lifecycle_refuses_incomplete_or_failed_reads() {
+        for field in [
+            "number",
+            "state",
+            "isDraft",
+            "headRefName",
+            "statusCheckRollup",
+        ] {
+            let mut value = monitor_lifecycle_payload();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                try_fetch_pr_lifecycle_for_monitor_with(Path::new("/repo"), 42, |_, _| Ok(
+                    GhCliOutput {
+                        success: true,
+                        stdout: value.to_string(),
+                        stderr: String::new(),
+                    }
+                ),)
+                .is_err(),
+                "missing {field} must not release the hold"
+            );
+        }
+        assert!(
+            try_fetch_pr_lifecycle_for_monitor_with(Path::new("/repo"), 42, |_, _| Ok(
+                GhCliOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "read failed".into(),
+                }
+            ),)
+            .is_err()
+        );
+        assert!(
+            try_fetch_pr_lifecycle_for_monitor_with(Path::new("/repo"), 42, |_, _| Err(
+                GwtError::Other("deadline".into())
+            ),)
+            .is_err()
+        );
     }
 
     #[test]

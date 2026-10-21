@@ -872,6 +872,8 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
     )
     .expect("seed latest disk authority");
     let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        open_pr_observations: std::collections::BTreeMap::new(),
+        open_pr_observed_at: None,
         issues: vec![gwt::IssueMonitorIssue {
             number: 42,
             title: "Issue Monitor local proposal".to_string(),
@@ -1024,6 +1026,8 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
     )
     .expect("seed disk authority");
     let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        open_pr_observations: std::collections::BTreeMap::new(),
+        open_pr_observed_at: None,
         issues: vec![gwt::IssueMonitorIssue {
             number: 42,
             title: "Issue Monitor slow persist".to_string(),

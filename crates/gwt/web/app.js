@@ -783,9 +783,11 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function agentKanbanBodyRenderKey(boardWindow) {
         const parts = [];
+        const windows = activeWorkspace().windows || [];
+        const linkedIssues = new Set();
         appendRenderKeyPart(parts, "board_id");
         appendRenderKeyPart(parts, boardWindow?.id || "");
-        for (const windowData of activeWorkspace().windows || []) {
+        for (const windowData of windows) {
           if (!isAgentKanbanPlacement(windowData)) {
             continue;
           }
@@ -797,6 +799,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, windowData.id || "");
           appendRenderKeyPart(parts, "preset");
           appendRenderKeyPart(parts, windowData.preset || "");
+          appendRenderKeyPart(parts, "linked_issue");
+          appendRenderKeyPart(parts, windowData.linked_issue_number ?? "");
+          const issueNumber = Number(windowData.linked_issue_number);
+          if (Number.isInteger(issueNumber) && issueNumber > 0) linkedIssues.add(issueNumber);
           appendRenderKeyPart(parts, "title");
           appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "role");
@@ -804,6 +810,14 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
           appendWindowPlacementRenderKey(parts, windowData);
+        }
+        for (const windowData of windows) {
+          const issueNumber = Number(windowData.linked_issue_number);
+          if (!isAgentWindowPreset(windowData.preset) || isOffCanvasPlacement(windowData)
+              || !linkedIssues.has(issueNumber)) continue;
+          appendRenderKeyPart(parts, "existing_issue_window");
+          appendRenderKeyPart(parts, windowData.id || "");
+          appendRenderKeyPart(parts, issueNumber);
         }
         return parts.join("");
       }
@@ -4275,6 +4289,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestWorkAdvisory,
       });
 
+      const launchWizardStateModel = createUiStateStore(null);
+      launchWizardStateModel.subscribe(state => state, state => {
+        if (state) applyLaunchWizardStateEvent(state);
+      });
+
+      const launchWizardOpenErrorModel = createUiStateStore(null);
+      launchWizardOpenErrorModel.subscribe(error => error, error => {
+        if (error) applyLaunchWizardOpenErrorEvent(error);
+      });
+
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
@@ -5585,7 +5609,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardOpenErrorEvent(event);
+            launchWizardOpenErrorModel.update(() => ({ title: event.title, message: event.message }));
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
@@ -5607,7 +5631,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardStateEvent(event);
+            launchWizardStateModel.update(() => ({ wizard: event.wizard }));
             break;
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan

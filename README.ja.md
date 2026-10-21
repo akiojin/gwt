@@ -282,7 +282,8 @@ Hub の開いているプロジェクト一覧にある **Close Project** を選
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
-`gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
+`gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
+承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
 ```bash
 gwtd <<'JSON'
@@ -734,6 +735,12 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 統合した Issue 一覧はキュー待ちだけの作業を除く下限集合で、全工程の WIP ではありません。
 取得不能な観測は不明のまま扱い、verification と全工程 WIP の不足も示します。
 この診断の読み取りで起動判断や WIP 上限の強制は行いません。
+保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
+`observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
+示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
+必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
+返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
+超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
 活動観測は、Launching / Launched の Issue の最終活動から Monitor のスキャン時点までの
 経過秒を示します。与えられた時刻だけを使い、現在時刻は参照しません。時刻が欠ける・不正・
 スキャンより未来の場合は経過時間を不明とし、Monitor の取得不能は観測済みの空配列と区別して
@@ -749,6 +756,12 @@ claim 競合の観測は、別の claim に保留される Issue と、スキャ
 経過時間を求めたり、開始前の期限から残時間を求めたりはしません。Monitor が取得できなければ
 null、該当行がなければ空リストです。スキャンの取得元を保持し、理由や再開条件の自由文を省きます。
 キュー滞留時間・SLA・活動状態・全 WIP の判定や、待機・スロットの変更は行いません。
+再試行期限の観測は、`retry_not_before` を持つ inbox 行を、Issue の重複と状態も含めて保持し、
+スキャン時点の残秒を示します。タイムゾーンの差を反映し、端数秒は切り捨て、期限経過は 0 秒です。
+時刻の欠落・不正や `unknown` は残秒を不明とします。開始時刻がないため保留の継続時間も不明です。
+Monitor が取得できなければ null、該当行がなければ空リストを返します。取得元を保持し、不正な
+時刻文字列と理由の自由文を省きます。この観測で保留が有効であることや起動・解除の許可を証明せず、
+再試行ゲート・待機・スロット・優先順も変更しません。
 マイルストーン診断では、明示的な所属 Issue と、一意かつ空でないマイルストーン ID を
 参照するロードマップ項目の Issue について、Monitor inbox の観測状態と未観測番号も示します。
 これは参照の事実であり、目標との整合を証明するものではありません。保留・失敗・claim 競合を
@@ -864,6 +877,23 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+- `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
+
+gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+`gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
+報告できます。JSON operation `feedback.create` の宛先は常に
+`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
+即座に返るため、本来のプロジェクト作業を続けられます。送信には native
+dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
+不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
+Issue 番号と URL を返します。
+
+返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
+URL を確認できます。類似する既存 Issue があればコメントを追記します。
+`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
+では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+自動再送しません。
 
 SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
 `gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
@@ -1001,6 +1031,22 @@ bare リポジトリを作り直し、各 worktree を新レイアウトに再�
 ストリーミング (Validate -> Backup -> Bareify -> Worktrees -> Submodules ->
 Tracking -> Cleanup -> Done) され、成功時はアプリを再起動せずに新しいブランチ
 worktree にプロジェクトタブが切り替わります。
+
+### 旧形式の Work event 衝突を復旧する
+
+未追跡の `.gwt/work/events/` shard が上書きされるとして Git merge が拒否された
+場合は、対象ブランチを fetch してから、プロジェクトディレクトリで次の JSON を
+`gwtd` の標準入力へ送ります。
+
+```json
+{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"origin/develop"}}
+```
+
+既定の dry run は、復旧可能な旧形式の successor tombstone 衝突を報告します。
+`"dry_run":false` を加えて再実行すると、双方の原文を報告された home 内の archive に
+保存し、内容ごとの ID で双方の event を公開します。その後 Git merge を再実行します。
+追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
+archive を上書きしません。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 

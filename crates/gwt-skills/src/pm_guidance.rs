@@ -77,7 +77,19 @@ it deduplicates implementation, review, pending and human-wait owners, excluding
 Absent Monitor lists and missing legacy optional fields stay unknown rather than zero.
 Read the enclosing Monitor source, scan time and coverage alongside these observations;
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
-This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
+This projection never enforces WIP limits or changes admission, priority or launch decisions.
+
+`wip_limits` compares each saved policy independently in saved order, retaining its ID,
+version and optional limit alongside `observed_issue_count` and an assessment.
+`observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
+it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
+coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
+there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
+Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
+they do not establish a mathematical lower bound on canonical WIP or a current breach.
+Verification and full WIP remain missing. Never select or combine an active policy implicitly,
+recompute slot occupancy from Issue counts, or treat the comparison as permission to act.
 
 `launch_activity` reports only Launching/Launched inbox rows in supplied order,
 including repeated owners; it is not a complete process census.
@@ -108,6 +120,15 @@ Invalid timestamp text, free-text reason and resume condition are not copied.
 Absent Monitor yields null; no matching rows yields []. Keep Monitor provenance:
 wait timing does not establish queue/claim-block age, SLA, liveness or full WIP,
 and never changes protection, invalidates a wait, releases a slot or triggers execution.
+
+`retry_deadlines` reports every inbox row with `retry_not_before`, retaining supplied order,
+repeated owners and lifecycle states. Remaining whole seconds use only the supplied scan time
+and a valid RFC3339 deadline, respecting offsets, flooring fractions and clamping elapsed deadlines to zero.
+Missing/invalid scan or deadline, including canonical `unknown`, leaves duration unknown with named inputs;
+invalid deadline text and free-text hold reasons are not copied. `retry_hold_started_at` remains missing:
+the snapshot cannot establish hold age. Absent Monitor yields null; no matching rows yields [].
+Keep Monitor provenance. A retry deadline does not prove an active hold or authorize launch,
+even when elapsed; these observations never change retry gates, waits, slots or priority.
 
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
@@ -919,6 +940,31 @@ same profile to try again.
   reset or switch the whole fleet's profile to work around a hold you
   can release by name.
 
+### Stop during blocked authority recovery
+
+When `issue.monitor.status` reports `authority recovery is blocked`,
+`issue.monitor.config.set` remains fail-closed, including OFF and
+`max_active` changes. Record the error and its preferences/fence paths;
+do not delete the fence or hand-edit the preferences to bypass it.
+
+- Apply `issue.label {number, action:"add", labels:["hold"]}` to each
+  affected owner and require successful GitHub readback. A `hold` label
+  prevents new admission; it does not stop a running agent. An in-flight
+  claim or materializer may already have passed admission, so label
+  readback alone is not proof that the fleet stopped.
+- The direct `issue.monitor.stop` path still works when typed preferences
+  are readable for an authority-fence recovery error. Use the exact launch
+  identity and reason described above for each affected launch. It commits
+  authority revocation and a durable owner hold without the daemon control
+  lane, and preserves the authority fence. Require a successful stop reply;
+  a refusal is not a revoked launch.
+- Close only the returned exact window with `pane.close`, then reread
+  `pane.list` to confirm the affected panes are gone or stopped. The close
+  requires a responsive GUI Host; cleared Monitor slots do not prove that
+  their processes exited. If preferences are unreadable, stop is refused,
+  or the Host cannot confirm the close, report physical shutdown as
+  unconfirmed and retain the error and durable holds for recovery.
+
 ### Closing an inactive Work
 
 Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
@@ -1087,6 +1133,31 @@ act.
   not re-sent the same line every cycle.
 
 ## Recovering a row with no live launch
+
+After a successful manual recovery, record the intervention with
+`issue.monitor.recovery.record`: pass `number`, a stable `recovery_id` for
+the incident, `recovered_at` (the actual intervention's RFC3339 timestamp),
+and `body` describing the observed failure and the recovery
+actions actually performed. Use one incident ID for the whole close/stop/
+requeue/launch sequence, reuse it when retrying the same record, and use a
+new ID for a separate intervention even when its reason is identical.
+Check that the reply's `state` is `acknowledged`; pending/refused is not a
+saved measurement. The record uses exact Board delivery and retains the
+actual author's identity. Do not count normal scheduling, no-ops, refusals
+or unattended recovery as manual intervention.
+
+Keep `recovered_at` unchanged on retries, including after PM replacement:
+posting or retrying an old record must not create a new day's recovery.
+
+`issue.monitor.status` includes `reliability`: seven completed UTC days
+and today's partial day, blocked declaration counts by cause, and manual
+recovery records with their source entry IDs. Classification uses only the
+cause line; ambiguous or unknown causes remain `Other`. The manual coverage
+is `explicit_records_only`, so missing records or empty days cannot prove
+that no intervention occurred. AC-10 remains `not_evaluated` until the
+seven-day observation is independently reconciled; never close its owner
+merely because this instrumentation merged. The capped/compressed requeue
+audit is not the measurement source.
 
 `agent_failed` and `launch_failed` rows have already lost their launch.
 That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
@@ -2180,6 +2251,8 @@ mod tests {
                 contract, SKILL_BODY_EN,
                 "every responsibility must survive, in order"
             );
+            assert!(contract.contains("issue.monitor.recovery.record"));
+            assert!(contract.contains("explicit_records_only"));
         }
     }
 
@@ -2518,6 +2591,26 @@ mod tests {
             "Force does not bypass live-launch or closed-Issue protections",
         ] {
             assert!(guidance.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    #[test]
+    fn contract_documents_recovery_blocked_stop_fallback() {
+        let guidance = unwrapped(&render_contract());
+        for phrase in [
+            "authority recovery is blocked",
+            "`issue.monitor.config.set` remains fail-closed",
+            "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
+            "The direct `issue.monitor.stop` path still works when typed preferences are readable",
+            "preserves the authority fence",
+            "Close only the returned exact window with `pane.close`",
+            "A `hold` label prevents new admission; it does not stop a running agent",
+            "report physical shutdown as unconfirmed",
+        ] {
+            assert!(
+                guidance.contains(phrase),
+                "missing recovery stop rule `{phrase}`"
+            );
         }
     }
 
@@ -3808,6 +3901,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
+            "`retry_deadlines` reports every inbox row with `retry_not_before`",
+            "`wip_limits` compares each saved policy independently in saved order",
+            "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
+            "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",
             "An elapsed claim deadline does not prove release or authorize requeue",
             "Activity timing does not establish queue age, SLA breaches or liveness",

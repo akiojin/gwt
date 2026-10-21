@@ -326,10 +326,11 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     );
     let codex_commands = json_commands(&codex_hooks);
     assert!(
-        codex_commands
-            .iter()
-            .any(|command| command.contains(&cli_bin_text)),
-        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
+        !codex_commands.is_empty()
+            && codex_commands
+                .iter()
+                .all(|command| command.contains("gwtd") && !command.contains(&cli_bin_text)),
+        "shared-root codex hooks must use portable gwtd\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         codex_commands.len(),
         codex_commands
             .iter()
@@ -469,7 +470,17 @@ fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hoo
         .iter()
         .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
         .collect::<Vec<_>>();
-    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, None);
+    // Shared-root Codex hooks use portable gwtd; other providers retain the pin.
+    let portable_hook_bin = stable_hook_bin.parent().unwrap().join("gwtd");
+    std::os::unix::fs::symlink(&stable_hook_bin, &portable_hook_bin)
+        .expect("expose stable hook bin as portable gwtd");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let audit_path = std::env::join_paths(
+        std::iter::once(portable_hook_bin.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose audit PATH");
+    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, Some(&audit_path));
     assert!(
         output.status.success(),
         "browser-check audit failed\nstdout:\n{}\nstderr:\n{}",

@@ -50,8 +50,6 @@
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/knowledge_error\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/knowledge_search_results\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/terminal_preview\"]",
-  "[\"crates/gwt/web/launch-wizard-surface.js\",\"receive\",\"/launch_wizard_open_error\"]",
-  "[\"crates/gwt/web/launch-wizard-surface.js\",\"receive\",\"/launch_wizard_state\"]",
   "[\"crates/gwt/web/operator-shell.js\",\"applyIssueMonitorStatus\",\"\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyPickerReceiveEvent\",\"\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyProjectOpenReceiveEvent\",\"\"]",

@@ -214,6 +214,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "feedback.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.process",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.retry",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.status",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },
@@ -381,6 +397,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.requeue",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.recovery.record",
         aliases: &[],
     },
     Operation {
@@ -761,6 +781,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "workspace.ensure",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.events_reconcile",
         aliases: &[],
     },
     Operation {

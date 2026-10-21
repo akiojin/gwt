@@ -477,6 +477,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "feedback.create" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            let input = serde_json::from_value(Value::Object(params.clone()))
+                .map_err(|err| CliParseError::InvalidJson(err.to_string()))?;
+            CliCommand::Feedback(super::feedback::FeedbackCommand::Create(Box::new(input)))
+        }
+        "feedback.status" | "feedback.retry" | "feedback.process" => {
+            reject_unknown_params(params, &["id"], &envelope.operation)?;
+            let id = required_string(params, "id")?;
+            let command = match envelope.operation.as_str() {
+                "feedback.status" => super::feedback::FeedbackCommand::Status { id },
+                "feedback.retry" => super::feedback::FeedbackCommand::Retry { id },
+                _ => super::feedback::FeedbackCommand::Process { id },
+            };
+            CliCommand::Feedback(command)
+        }
         "concern.create" | "concern.update" | "concern.list" | "concern.measure"
         | "concern.resolve" => {
             // These decode the whole `params` object through serde with
@@ -510,6 +526,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
         "workspace.ensure" => workspace_ensure(params)?,
+        "workspace.events_reconcile" => {
+            reject_unknown_params(
+                params,
+                &["reference", "dry_run"],
+                "workspace.events_reconcile",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile {
+                reference: required_string(params, "reference")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -710,6 +737,51 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.recovery.record" => {
+            let number = required_u64(params, "number")?;
+            let recovery_id = required_string(params, "recovery_id")?;
+            let body = required_string(params, "body")?;
+            let recovered_at = required_string(params, "recovered_at")?;
+            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+                .map_err(|_| {
+                    CliParseError::InvalidJson(
+                        "recovered_at must be an RFC3339 timestamp of the actual intervention"
+                            .into(),
+                    )
+                })?
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339();
+            if number == 0
+                || body.trim().is_empty()
+                || recovery_id.is_empty()
+                || recovery_id.len() > 128
+                || !recovery_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err(CliParseError::InvalidJson(
+                    "recovery.record requires a positive Issue number, a nonempty body and a stable ASCII recovery_id (1–128 letters, digits, -, _, . or :)".into(),
+                ));
+            }
+            let key = format!("{number}:{recovery_id}");
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                intent_id: format!("manual-recovery:{key}"),
+                command: Box::new(BoardPostCommand {
+                    kind: "decision".into(),
+                    body: Some(body),
+                    topics: vec![
+                        format!("{}{key}", super::reliability::MANUAL_RECOVERY_TOPIC),
+                        format!(
+                            "{}{recovered_at}",
+                            super::reliability::MANUAL_RECOVERY_AT_TOPIC
+                        ),
+                    ],
+                    owners: vec![number.to_string()],
+                    broadcast: true,
+                    ..Default::default()
+                }),
+            })
+        }
         "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -2742,6 +2814,23 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_create_accepts_structured_evidence() {
+        let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
+            "title":"Host bridge refusal", "kind":"bug", "operation":"workspace.update",
+            "refusal":"  exact\r\nrefusal  ", "reproduction":"unconfirmed", "workaround":null
+        }});
+        assert!(
+            super::parse(&input.to_string()).is_ok(),
+            "feedback.create must accept a structured report"
+        );
+        for forbidden in ["approved", "repo", "project_root"] {
+            let mut forged = input.clone();
+            forged["params"][forbidden] = serde_json::json!(true);
+            assert!(super::parse(&forged.to_string()).is_err());
+        }
+    }
+
     use super::{
         parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
         CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
@@ -4684,6 +4773,35 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn workspace_events_reconcile_requires_reference_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.events_reconcile", json!({})),
+            CliParseError::MissingFlag("reference")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "force":true})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
     /// Issue #4465 AC-4'': a scope parameter this operation does not implement
     /// must be refused, never dropped. `params.work` was silently ignored and
     /// the call then applied to the whole machine — the first specimen of the
@@ -5525,6 +5643,35 @@ mod tests {
             ),
             CliParseError::MissingFlag(_)
         ));
+    }
+
+    #[test]
+    fn manual_recovery_record_uses_the_exact_board_delivery_path() {
+        let command = ok(
+            "issue.monitor.recovery.record",
+            json!({
+                "number":5876, "recovery_id":"incident-a", "body":"停止窓を再投入した",
+                "recovered_at":"2026-10-20T10:00:00+09:00"
+            }),
+        );
+        assert!(matches!(command,
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            if intent_id == "manual-recovery:5876:incident-a"
+                && command.kind == "decision"
+                && command.owners == ["5876"]
+                && command.topics == ["gwt-manual-recovery:5876:incident-a", "gwt-manual-recovery-at:2026-10-20T01:00:00+00:00"]
+                && command.body.as_deref() == Some("停止窓を再投入した")
+        ));
+        for mut params in [
+            json!({"number":5876,"body":"recovered"}),
+            json!({"number":5876,"recovery_id":" ","body":"recovered"}),
+            json!({"number":0,"recovery_id":"incident","body":"recovered"}),
+            json!({"number":5876,"recovery_id":"incident","body":" "}),
+            json!({"number":5876,"recovery_id":"incident","body":"recovered","session_id":"fake"}),
+        ] {
+            params["recovered_at"] = json!("2026-10-20T01:00:00Z");
+            let _ = err("issue.monitor.recovery.record", params);
+        }
     }
 
     #[test]

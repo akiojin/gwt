@@ -447,15 +447,15 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   const workActions = ["continue-work", "resume-work", "cleanup-work"];
   // SPEC #3885 FR-015: stopping the agent is always last and always in the
   // overflow menu, so a live run is never one stray click away from ending.
-  if (inlineWindow) {
-    return {
-      order: ["windowize-issue-preview", "configure-issue", ...workActions, "stop-agent"],
-      limit: 1,
-    };
-  }
   if (canvasWindow) {
     return {
       order: ["focus-canvas-window", "configure-issue", ...workActions, "stop-agent"],
+      limit: 1,
+    };
+  }
+  if (inlineWindow) {
+    return {
+      order: ["windowize-issue-preview", "configure-issue", ...workActions, "stop-agent"],
       limit: 1,
     };
   }
@@ -653,6 +653,7 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, is
     if (Number.isFinite(linked) && Number.isFinite(wanted) && linked !== wanted) {
       return false;
     }
+    if (Number.isInteger(wanted) && wanted > 0 && linked === wanted) return true;
     if (remembered.has(windowData.id) || windowIds.has(windowData.id)) return true;
     return Boolean(windowData.session_id) && sessionIds.has(windowData.session_id);
   });
@@ -3249,7 +3250,7 @@ export function createKnowledgeKanbanSurface({
               return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
-                phase === "active" ? (getWorkspaceWindows?.() || []).filter(target =>
+                phase === "active" ? issueProjectWindows(windowId).filter(target =>
                   target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
                     work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
             },
@@ -3267,7 +3268,7 @@ export function createKnowledgeKanbanSurface({
               if (phase === "active") {
                 const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
                 const agents = work?.agents || [];
-                const windows = getWorkspaceWindows?.() || [];
+                const windows = issueProjectWindows(windowId);
                 for (const target of windows) {
                   if (!target.agent_id || target.preset === "pm" ||
                       !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
@@ -3340,7 +3341,7 @@ export function createKnowledgeKanbanSurface({
               feedback.textContent = `${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`;
               return;
             }
-            const origin = issueQueueColumnForEntry(entry);
+            const origin = issueQueueColumnForEntry(entry, windowId);
             if (origin !== "backlog" && origin !== "queued") {
               feedback.textContent = "Active and Done issues cannot be moved into the queue.";
               return;
@@ -3352,7 +3353,7 @@ export function createKnowledgeKanbanSurface({
               send({kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex});
             } else if (origin !== phase) {
               const numbers = state.queueSelection.has(number)
-                ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item) === origin).map(item => item.number)
+                ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item, windowId) === origin).map(item => item.number)
                 : [number];
               send({kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers});
             } else return;
@@ -3558,15 +3559,13 @@ export function createKnowledgeKanbanSurface({
       // mirror of the agent working on the selected Issue. Exactly one terminal is
       // mounted, and the only control it offers is Windowize.
       function renderIssueAgentPreview(windowId, state) {
-        const previews = issuePreviewWindowsForIssue(
-          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
-          windowId,
-          state.selectedNumber,
-        );
-        if (previews.length === 0) {
+        const entry = issueDetailEntry(state, state.selectedNumber);
+        const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
+        const faces = entry ? issueRowFaces(windowId, entry, work) : null;
+        const target = faces?.inlineWindow;
+        if (!target) {
           return null;
         }
-        const target = previews[0];
         const section = createNode("section", "issue-preview");
         section.dataset.windowId = target.id;
         section.dataset.issueNumber = String(state.selectedNumber);
@@ -3597,15 +3596,15 @@ export function createKnowledgeKanbanSurface({
         explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }), `preview-state-${target.id}`);
         header.appendChild(badge);
 
-        const windowize = createNode("button", "wizard-button", "Windowize");
+        const action = faces.canvasWindow ? "focus-canvas-window" : "windowize-issue-preview";
+        const windowize = createNode("button", "wizard-button", faces.canvasWindow ? "Focus window" : "Windowize");
         windowize.type = "button";
-        windowize.dataset.action = "windowize-issue-preview";
-        windowize.setAttribute("aria-label", "Windowize agent preview");
+        windowize.dataset.action = action;
+        windowize.setAttribute("aria-label", faces.canvasWindow ? "Focus existing Issue window" : "Windowize agent preview");
         windowize.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          windowizedAgentWindowIds.add(target.id);
-          windowizeIssuePreviewWindow?.(target.id);
+          runIssueRowAction(action, { windowId, state, entry, target, ...faces });
         });
         header.appendChild(windowize);
         section.appendChild(header);
@@ -3683,7 +3682,12 @@ export function createKnowledgeKanbanSurface({
         elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
         row.appendChild(elapsed);
 
-        row.appendChild(issueRowActionButton("windowize-issue-preview", context));
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const existingCanvas = issueRowFaces(windowId, entry, work).canvasWindow;
+        row.appendChild(issueRowActionButton(
+          existingCanvas ? "focus-canvas-window" : "windowize-issue-preview",
+          existingCanvas ? { ...context, target: existingCanvas } : context,
+        ));
 
         // Last in DOM order: the activity line spans the full width on its own
         // grid row, so it must follow every first-row cell (title / elapsed /
@@ -3717,7 +3721,7 @@ export function createKnowledgeKanbanSurface({
           inlineWindow: faces.inlineWindow,
           canvasWindow: faces.canvasWindow,
         });
-        const context = { windowId, state, entry, work, queue: null, target };
+        const context = { windowId, state, entry, work, queue: null, target, ...faces };
         const pair = createNode("div", "issue-split-pair");
         pair.setAttribute("role", "listitem");
         pair.dataset.issueNumber = String(entry.number);
@@ -4019,7 +4023,7 @@ export function createKnowledgeKanbanSurface({
               }));
               return;
             }
-            const column = entry ? issueQueueColumnForEntry(queueProjectedEntry(entry)) : null;
+            const column = entry ? issueQueueColumnForEntry(queueProjectedEntry(entry), windowId) : null;
             const reason = state.selectedNumber == null ? "Select an Issue to view its output."
               : !agentPreview ? "Agent output is shown in the split view."
               : column === "queued" ? "Waiting in queue. No agent has started."
@@ -4475,7 +4479,8 @@ export function createKnowledgeKanbanSurface({
       // even before the Work projection reports the agent's window id.
       const windowizedAgentWindowIds = new Set();
 
-      function runIssueRowAction(action, { windowId, state, entry, work, target, inlineWindow }) {
+      function runIssueRowAction(action, { windowId, state, entry, work, target, inlineWindow, canvasWindow }) {
+        if (action === "focus-canvas-window" && canvasWindow) target = canvasWindow;
         switch (action) {
           case "launch-now":
             send({
@@ -4516,8 +4521,8 @@ export function createKnowledgeKanbanSurface({
           // preview, or focus the agent that is already on the canvas.
           case "open-window":
             runIssueRowAction(
-              inlineWindow ? "windowize-issue-preview" : "focus-canvas-window",
-              { windowId, state, entry, work, target },
+              !canvasWindow && inlineWindow ? "windowize-issue-preview" : "focus-canvas-window",
+              { windowId, state, entry, work, target, canvasWindow },
             );
             return;
           case "continue-work":
@@ -4619,15 +4624,26 @@ export function createKnowledgeKanbanSurface({
         return menu;
       }
 
-      function issueRowFaces(windowId, entry, work) {
+      function issueProjectWindows(windowId) {
         const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
+        const tabs = windowCatalogModel?.read().catalog?.appState?.tabs;
+        if (!tabs) return windows;
+        const project = tabs.find(tab => tab.workspace?.windows?.some(window => window.id === windowId));
+        const ids = new Set((project?.workspace?.windows || []).map(window => window.id));
+        return windows.filter(window => ids.has(window.id));
+      }
+
+      function issueRowFaces(windowId, entry, work) {
+        const windows = issueProjectWindows(windowId);
         const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
         const canvas = issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
         const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
+        const liveCanvas = canvas.find(isLive);
+        if (liveCanvas) return { inlineWindow: null, canvasWindow: liveCanvas };
         const inlineWindow = inline.find(isLive) || null;
-        const canvasWindow = inlineWindow ? null : canvas.find(isLive) || null;
-        if (inlineWindow || canvasWindow) return { inlineWindow, canvasWindow };
-        return { inlineWindow: inline[0] || null, canvasWindow: inline.length ? null : canvas[0] || null };
+        if (inlineWindow) return { inlineWindow, canvasWindow: canvas[0] || null };
+        if (canvas[0]) return { inlineWindow: null, canvasWindow: canvas[0] };
+        return { inlineWindow: inline[0] || null, canvasWindow: null };
       }
 
       function renderIssueRow(windowId, state, entry) {
@@ -4664,6 +4680,7 @@ export function createKnowledgeKanbanSurface({
           work,
           queue,
           target: faces.inlineWindow || faces.canvasWindow,
+          ...faces,
         };
 
         const main = createNode("div", "knowledge-row-main");

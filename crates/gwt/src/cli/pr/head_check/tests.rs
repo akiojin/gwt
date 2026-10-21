@@ -24,6 +24,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 struct RemoteFixture {
+    _home_guard: gwt_core::test_support::ScopedGwtHome,
     _root: tempfile::TempDir,
     verified_repo: PathBuf,
     other_clone: PathBuf,
@@ -33,6 +34,9 @@ struct RemoteFixture {
 impl RemoteFixture {
     fn new() -> Self {
         let root = tempfile::tempdir().expect("remote-head fixture");
+        // Keep trusted checkpoints and their final record in the same store
+        // while sibling tests rewrite the process HOME.
+        let home_guard = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
         let remote = root.path().join("remote.git");
         let verified_repo = root.path().join("verified");
         let other_clone = root.path().join("other");
@@ -90,6 +94,7 @@ impl RemoteFixture {
         Self::configure(&other_clone);
         git(&other_clone, &["checkout", "--quiet", HEAD_BRANCH]);
         Self {
+            _home_guard: home_guard,
             _root: root,
             verified_repo,
             other_clone,
@@ -246,6 +251,19 @@ impl RemoteFixture {
         );
         out
     }
+}
+
+#[test]
+fn remote_fixture_keeps_its_store_when_the_process_home_changes() {
+    let _env = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _fixture = RemoteFixture::new();
+    let home = gwt_core::paths::gwt_home();
+    let moved = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", moved.path());
+    let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", moved.path());
+    assert_eq!(gwt_core::paths::gwt_home(), home);
 }
 
 #[test]

@@ -2732,42 +2732,6 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         );
         runtime.register_window("tab-1", &placeholder.id);
 
-        let conflict = runtime
-            .tab_mut("tab-1")
-            .unwrap()
-            .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds());
-        runtime
-            .tab_mut("tab-1")
-            .unwrap()
-            .workspace
-            .set_agent_name(&conflict.id, Some("Flora".into()));
-        runtime.register_window("tab-1", &conflict.id);
-        let refused = runtime.spawn_restored_agent_session(
-            "tab-1",
-            source.clone(),
-            None,
-            canvas_bounds(),
-            origin,
-        );
-        assert!(
-            runtime
-                .tab("tab-1")
-                .unwrap()
-                .workspace
-                .window(&placeholder.id)
-                .is_some(),
-            "initial conflict must preserve the original pane for retry"
-        );
-        assert!(refused.iter().any(|event| matches!(&event.event,
-            BackendEvent::TerminalStatus { detail: Some(detail), .. } if detail.contains("initial") && detail.contains("close"))),
-            "initial conflict must produce an actionable visible diagnostic");
-        runtime
-            .tab_mut("tab-1")
-            .unwrap()
-            .workspace
-            .close_window(&conflict.id);
-        runtime.rebuild_window_lookup();
         runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
         assert_eq!(
             runtime

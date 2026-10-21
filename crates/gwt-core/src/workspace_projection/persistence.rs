@@ -4201,7 +4201,7 @@ impl WorkItemsIntakeSnapshot {
         })
     }
 
-    fn detachments(&self) -> Result<ContainerDetachments> {
+    pub(crate) fn detachments(&self) -> Result<ContainerDetachments> {
         let (path, bytes) = &self.files[1];
         match bytes {
             Some(bytes) => serde_json::from_slice(bytes).map_err(|error| {

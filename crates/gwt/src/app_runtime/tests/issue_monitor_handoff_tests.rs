@@ -1066,6 +1066,84 @@ fn app_runtime_monitor_fresh_terminal_predecessor_5696_foreign_terminal_owner() 
 }
 
 #[test]
+fn invalid_successor_tombstones_have_content_bound_identity_across_hosts() {
+    use gwt_core::workspace_projection as work;
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-21T01:54:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let parent = "work-parent-5867";
+    let occupied_id = work::successor_work_id(parent);
+    let mut works = work::WorkItemsProjection::empty(now);
+    works.apply_event(work::WorkEvent::new(
+        work::WorkEventKind::Start,
+        parent,
+        now,
+    ));
+    works.apply_event(work::WorkEvent::new(work::WorkEventKind::Done, parent, now));
+    works.apply_event(work::WorkEvent::new(
+        work::WorkEventKind::Start,
+        &occupied_id,
+        now,
+    ));
+    let make = |path: &str, time| {
+        super::super::workspace::invalid_successor_supersession_event(
+            temp.path(),
+            works
+                .work_items
+                .iter()
+                .find(|item| item.id == parent)
+                .unwrap(),
+            works
+                .work_items
+                .iter()
+                .find(|item| item.id == occupied_id)
+                .unwrap(),
+            work::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-5867".to_string()),
+                worktree_path: Some(PathBuf::from(path)),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+            super::super::workspace::SuccessorSupersessionAuthority::RegisteredPm,
+            &HashSet::new(),
+            time,
+        )
+        .unwrap()
+    };
+    let windows = make(r"E:\gwt\work\issue-5867", now);
+    let mac = make(
+        "/Users/example/gwt/work/issue-5867",
+        now + chrono::Duration::minutes(31),
+    );
+    assert_ne!(
+        windows.id, mac.id,
+        "different host payloads must never target one immutable shard"
+    );
+    assert_eq!(
+        windows,
+        make(r"E:\gwt\work\issue-5867", now),
+        "same payload retries stay idempotent"
+    );
+    assert!(windows.is_successor_supersession());
+    assert!(mac.is_successor_supersession());
+    let mut changed = windows.clone();
+    changed.updated_at = mac.updated_at;
+    assert!(
+        !changed.is_successor_supersession(),
+        "a content-bound identity must authenticate its payload"
+    );
+    let mut legacy = windows;
+    legacy.id = format!("superseded-{}", legacy.work_item_id);
+    assert!(
+        legacy.is_successor_supersession(),
+        "historical tombstones remain readable"
+    );
+}
+
+#[test]
 fn invalid_successor_repair_rechecks_exact_runtime_outside_the_local_registry() {
     use gwt_core::workspace_projection as work;
     let _env_lock = env_test_lock()
