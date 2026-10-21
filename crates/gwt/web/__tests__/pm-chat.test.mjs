@@ -17,16 +17,68 @@ function fixture() {
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
-  const update = (reports = [], error = null, current = null) => model.applyPmWindowReceiveEvent({
-    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current });
+  let revision = 0;
+  const update = (reports = [], error = null, current = null) => {
+    const request = model.requestPmReports('pm');
+    const event = { kind: 'pm_reports', id: 'pm', request_id: request.request_id,
+      version: { epoch: 'fixture', revision: ++revision }, snapshot: request.version === null,
+      session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current };
+    model.applyPmWindowReceiveEvent(event);
+    return event;
+  };
   return { root, model, view, visibility, copied, update };
 }
+
+test('Reports revisions recover gaps and fence stale requests without starving slow replies', () => {
+  const model = createPmWindowModel();
+  model.bindPmWindowState('pm', 'session');
+  const request = model.requestPmReports('pm');
+  assert.equal(request.version, null);
+  const event = (request, revision, extra = {}) => ({ kind: 'pm_reports', id: 'pm', session_id: 'session',
+    request_id: request.request_id, version: { epoch: 'server', revision }, snapshot: request.version === null,
+    reports: [report(String(revision))], ...extra });
+  model.applyPmWindowReceiveEvent(event(request, 1));
+  const accepted = model.readPmWindowState().windows.pm;
+  const slow = model.requestPmReports('pm');
+  model.requestPmReports('pm'); // A later poll must not starve a slow valid reply.
+  model.applyPmWindowReceiveEvent(event(slow, 2));
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, '2');
+  model.applyPmWindowReceiveEvent(event(request, 1));
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, '2');
+  const ordinary = model.requestPmReports('pm');
+  assert.equal(model.applyPmWindowReceiveEvent(event(ordinary, 4)), true, 'gap requests a full reload');
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, '2');
+  const reset = model.requestPmReports('pm');
+  assert.equal(reset.version, null);
+  assert.deepEqual(model.requestPmReports('pm'), reset, 'retry the same force token after a lost reply');
+  model.applyPmWindowReceiveEvent(event(reset, 4));
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, '4');
+  assert.notEqual(model.readPmWindowState().windows.pm, accepted);
+  const oldEpoch = model.requestPmReports('pm', true);
+  const newEpoch = model.requestPmReports('pm', true);
+  model.applyPmWindowReceiveEvent(event(newEpoch, 1, { version: { epoch: 'restart', revision: 1 } }));
+  model.applyPmWindowReceiveEvent(event(oldEpoch, 99));
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, '1');
+  assert.equal(model.readPmWindowState().windows.pm.reportsVersion.epoch, 'restart');
+  const current = model.readPmWindowState().windows.pm;
+  const duplicate = model.requestPmReports('pm');
+  model.applyPmWindowReceiveEvent(event(duplicate, 1, { version: current.reportsVersion }));
+  assert.equal(model.readPmWindowState().windows.pm, current);
+  const resetAgain = model.requestPmReports('pm', true);
+  model.applyPmWindowReceiveEvent(event(resetAgain, 0, { version: { epoch: 'restart', revision: 0 } }));
+  assert.equal(model.readPmWindowState().windows.pm, current, 'force cannot roll back within an epoch');
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(event(resetAgain, 2));
+  assert.equal(model.readPmWindowState().windows.pm.loaded, false);
+});
 
 test('Reports commits the content type before any view renders it', () => {
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   const incoming = report();
-  model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'session', reports: [incoming] });
+  const request = model.requestPmReports('pm');
+  model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm', session_id: 'session', reports: [incoming],
+    request_id: request.request_id, version: { epoch: 'fixture', revision: 1 }, snapshot: true });
   const committed = model.readPmWindowState().windows.pm.reports[0];
   assert.deepEqual(committed.content, { type: 'markdown', body: incoming.body, body_html: incoming.body_html });
   incoming.body_html = '<p>changed outside the model</p>';
@@ -66,7 +118,7 @@ test('Reports has a single scroll body and compact token-based history', async (
 });
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
-  const { root, update } = fixture();
+  const { root, model, update } = fixture();
   const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
   assert.match(card.textContent, /No current status reported yet/);
@@ -79,7 +131,7 @@ test('current card stays above history and distinguishes PM explanation from aut
       release: { number: 5352, title: 'Release v9.117.2', url: 'https://github.com/akiojin/gwt/pull/5352' },
       release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
   };
-  update([report()], null, current);
+  const older = update([report()], null, current);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
   assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
   assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
@@ -96,7 +148,7 @@ test('current card stays above history and distinguishes PM explanation from aut
     items: [{ ...current.status.items[0], text: '公開結果を確認しています', kind: 'working' }], user_action: '配信設定を確認' } });
   assert.doesNotMatch(card.textContent, /公開を待っています|has not updated for 15 minutes/);
   assert.match(card.textContent, /公開結果を確認しています|配信設定を確認/);
-  update([report()], null, current);
+  model.applyPmWindowReceiveEvent(older);
   assert.match(card.textContent, /公開結果を確認しています/, 'an older concurrent snapshot cannot restore the earlier status');
   assert.doesNotMatch(card.textContent, /公開を待っています/);
   update([], 'Reports could not be loaded');
@@ -194,11 +246,11 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   assert.equal(transcript.scrollTop, 20);
   update([report(), report('two')]);
   assert.equal(root.querySelectorAll('article').length, 2);
-  // Concurrent reads may complete out of order; durable history only appends.
+  // A newer authoritative snapshot can remove history; ordering uses revision, not length.
   update([report()]);
-  assert.equal(root.querySelectorAll('article').length, 2);
+  assert.equal(root.querySelectorAll('article').length, 1);
   update([], 'Reports could not be loaded');
-  assert.equal(root.querySelectorAll('article').length, 2);
+  assert.equal(root.querySelectorAll('article').length, 1);
   assert.match(root.querySelector('[role="status"]').textContent, /could not be loaded/);
   update([report(), report('two'), report('pm-peer-a'), report('pm-peer-b')], null,
     { observed_at: '2026-10-15T00:00:00Z' });

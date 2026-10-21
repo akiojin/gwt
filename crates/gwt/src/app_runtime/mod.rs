@@ -11967,7 +11967,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12321,7 +12321,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12639,9 +12639,11 @@ impl AppRuntime {
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
             }
-            FrontendEvent::LoadPmReports { id } => {
-                self.load_pm_reports_events(context, client_id, &id)
-            }
+            FrontendEvent::LoadPmReports {
+                id,
+                request_id,
+                version,
+            } => self.load_pm_reports_events(context, client_id, &id, request_id, version),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)

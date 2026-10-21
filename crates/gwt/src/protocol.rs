@@ -21,6 +21,13 @@ impl Default for ContentLimits {
     }
 }
 
+/// Project Reports cursor. A new reader starts a new epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmReportsVersion {
+    pub epoch: String,
+    pub revision: u64,
+}
+
 /// Render-only HTML is derived from durable report Markdown on the host.
 #[derive(Debug, Clone, Serialize)]
 pub struct PmReportView {
@@ -605,6 +612,10 @@ pub enum FrontendEvent {
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
+        #[serde(default)]
+        request_id: u64,
+        #[serde(default)]
+        version: Option<PmReportsVersion>,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -2081,6 +2092,9 @@ pub enum BackendEvent {
     PmReports {
         id: String,
         session_id: Option<String>,
+        request_id: u64,
+        version: Option<PmReportsVersion>,
+        snapshot: bool,
         reports: Vec<PmReportView>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
@@ -3685,9 +3699,23 @@ mod tests {
             "kind": "load_pm_reports", "id": "pm"
         }))
         .unwrap();
-        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
+        assert!(
+            matches!(request, FrontendEvent::LoadPmReports { id, request_id: 0, version: None } if id == "pm")
+        );
+        let version = super::PmReportsVersion {
+            epoch: "reader-epoch".into(),
+            revision: 3,
+        };
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm", "request_id": 7, "version": version,
+        }))
+        .unwrap();
+        assert!(
+            matches!(request, FrontendEvent::LoadPmReports { request_id: 7, version: Some(cursor), .. } if cursor == version)
+        );
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
+            request_id: 7, version: Some(version.clone()), snapshot: false,
             current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
@@ -3699,6 +3727,9 @@ mod tests {
             })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["request_id"], 7);
+        assert_eq!(value["version"], serde_json::to_value(version).unwrap());
+        assert_eq!(value["snapshot"], false);
         let html = value["reports"][0]["body_html"].as_str().unwrap();
         for expected in [
             "<h1>Report</h1>",
