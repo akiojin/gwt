@@ -79,6 +79,18 @@ Read the enclosing Monitor source, scan time and coverage alongside these observ
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
 This projection never enforces WIP limits or changes admission, priority or launch decisions.
 
+`idle_windows` preserves every supplied Monitor idle window in order, including repeats
+and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
+`pane_present`; it does not reproduce rebind or requeue proposals.
+`idle_seconds_at_scan` uses only valid RFC3339 scan and idle-start timestamps, respecting
+offsets and rounding nonnegative fractions down to whole seconds. It never uses the current clock.
+Missing or invalid scan/start times and starts after the scan leave duration unknown with
+named missing inputs; invalid start text is not copied. Absent Monitor yields null;
+an observed snapshot without idle windows yields []. Keep the enclosing source and coverage:
+an old or degraded scan is only an observation at that scan, not current idle evidence.
+Idle timing does not prove queue age, SLA breaches, liveness or permission to release.
+Never recompute the Monitor's idle classification or change slots, claims or launches from it.
+
 `wip_limits` compares each saved policy independently in saved order, retaining its ID,
 version and optional limit alongside `observed_issue_count` and an assessment.
 `observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
@@ -3897,6 +3909,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",
+            "`idle_windows` preserves every supplied Monitor idle window in order, including repeats",
+            "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",

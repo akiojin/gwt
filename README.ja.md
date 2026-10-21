@@ -741,6 +741,12 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
 返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
 超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
+idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
+pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
+現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。
+Monitor 不在なら null、観測済み idle window がなければ空リストです。取得元とスキャンの古さも
+併せて確認してください。キュー滞留時間・SLA・活動状態・解放の許可を証明せず、分類・slot・
+claim・起動も変更しません。
 活動観測は、Launching / Launched の Issue の最終活動から Monitor のスキャン時点までの
 経過秒を示します。与えられた時刻だけを使い、現在時刻は参照しません。時刻が欠ける・不正・
 スキャンより未来の場合は経過時間を不明とし、Monitor の取得不能は観測済みの空配列と区別して

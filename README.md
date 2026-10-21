@@ -809,6 +809,13 @@ missing or degraded inputs yield `unknown`, never a within-limit PASS. Without M
 data the count is null; without policies the list is empty. This comparison does not
 establish canonical WIP, a current breach or permission to act, and does not select
 or combine policies. Verification and full WIP remain missing.
+Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
+idle classification and binding/pane facts. They show elapsed whole seconds from idle start
+to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
+invalid or future start times leave duration unknown with named missing inputs. No Monitor
+yields null; an observed snapshot without idle windows yields an empty list. Read the source
+and scan age alongside these facts. They do not establish queue age, SLA breaches, liveness
+or permission to release, and do not change classification, slots, claims or launches.
 Activity observations show elapsed whole seconds since the last activity of Launching/Launched
 Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
 Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable

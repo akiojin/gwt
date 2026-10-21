@@ -208,7 +208,61 @@ pub struct CapacityObservation {
     pub declared_waits: Option<Vec<DeclaredWaitObservation>>,
     pub retry_deadlines: Option<Vec<RetryDeadlineObservation>>,
     pub wip_limits: Vec<WipLimitObservation>,
+    pub idle_windows: Option<Vec<IdleWindowObservation>>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+/// Idle classification belongs to the Monitor; elapsed time grants no authority.
+#[derive(Debug, Serialize)]
+pub struct IdleWindowObservation {
+    pub window_id: String,
+    pub issue_number: Option<u64>,
+    pub idle_kind: crate::issue_monitor::IssueMonitorIdleKind,
+    pub bound: bool,
+    pub pane_present: bool,
+    pub idle_since: Option<String>,
+    pub idle_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+fn observe_idle_windows(status: &IssueMonitorAgentStatus) -> Vec<IdleWindowObservation> {
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    status
+        .idle_windows
+        .iter()
+        .map(|window| {
+            let since = chrono::DateTime::parse_from_rfc3339(&window.idle_since).ok();
+            let mut missing_inputs = Vec::new();
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            if since.is_none() {
+                missing_inputs.push("idle_since");
+            }
+            let idle_seconds_at_scan = scan.zip(since).and_then(|(scan, since)| {
+                match scan.signed_duration_since(since).to_std() {
+                    Ok(duration) => Some(duration.as_secs()),
+                    Err(_) => {
+                        missing_inputs.push("idle_after_scan");
+                        None
+                    }
+                }
+            });
+            IdleWindowObservation {
+                window_id: window.window_id.clone(),
+                issue_number: window.issue_number,
+                idle_kind: window.idle_kind,
+                bound: window.bound,
+                pane_present: window.pane_present,
+                idle_since: since.map(|value| value.to_rfc3339()),
+                idle_seconds_at_scan,
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 /// A saved-policy comparison, never a canonical WIP or admission verdict.
@@ -570,6 +624,7 @@ fn observe_capacity(
         declared_waits: monitor.map(observe_declared_waits),
         retry_deadlines: monitor.map(observe_retry_deadlines),
         wip_limits,
+        idle_windows: monitor.map(observe_idle_windows),
         missing_inputs,
     }
 }
@@ -1332,6 +1387,7 @@ mod tests {
                 "declared_waits":[],
                 "retry_deadlines":[],
                 "wip_limits":[],
+                "idle_windows":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1488,6 +1544,121 @@ mod tests {
         assert_eq!(
             evaluate(Some(&monitor))["capacity"]["wip_limits"][4]["assessment"],
             "unknown"
+        );
+    }
+
+    #[test]
+    fn idle_windows_preserve_monitor_facts_with_scan_relative_aging() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
+        let window = |id: &str, issue, kind, since, bound, pane_present| {
+            json!({
+                "window_id":id, "issue_number":issue, "idle_kind":kind,
+                "idle_since":since, "bound":bound, "pane_present":pane_present
+            })
+        };
+        monitor.idle_windows = serde_json::from_value(json!([
+            window(
+                "same",
+                Some(9),
+                "stuck_unknown",
+                "2026-10-21T09:00:00.1+09:00",
+                true,
+                true
+            ),
+            window(
+                "same",
+                Some(9),
+                "binding_pending",
+                "2026-10-21T09:01:00+09:00",
+                true,
+                false
+            ),
+            window(
+                "orphan",
+                None,
+                "execution_settled",
+                "invalid private timestamp",
+                false,
+                true
+            ),
+            window(
+                "future",
+                Some(3),
+                "binding_dead",
+                "2026-10-21T00:01:00.1Z",
+                false,
+                false
+            ),
+            window(
+                "review",
+                Some(3),
+                "review_verdict_published",
+                "2026-10-21T00:00:00Z",
+                true,
+                true
+            )
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let evaluate = |monitor: Option<&IssueMonitorAgentStatus>| {
+            serde_json::to_value(assess_planning(&state, monitor)).unwrap()
+        };
+        let report = evaluate(Some(&monitor));
+        let rows = report["capacity"]["idle_windows"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (&row["window_id"], &row["idle_seconds_at_scan"]))
+                .collect::<Vec<_>>(),
+            vec![
+                (&json!("same"), &json!(59)),
+                (&json!("same"), &json!(0)),
+                (&json!("orphan"), &Value::Null),
+                (&json!("future"), &Value::Null),
+                (&json!("review"), &json!(60))
+            ]
+        );
+        for (index, row) in rows.iter().enumerate() {
+            for key in [
+                "window_id",
+                "issue_number",
+                "idle_kind",
+                "bound",
+                "pane_present",
+            ] {
+                assert_eq!(row[key], before.1["idle_windows"][index][key], "{key}");
+            }
+        }
+        assert_eq!(rows[0]["idle_since"], "2026-10-21T09:00:00.100+09:00");
+        assert_eq!(rows[2]["idle_since"], Value::Null);
+        assert_eq!(rows[2]["missing_inputs"], json!(["idle_since"]));
+        assert_eq!(rows[3]["missing_inputs"], json!(["idle_after_scan"]));
+        assert!(!report.to_string().contains("invalid private timestamp"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        assert_eq!(
+            evaluate(None)["capacity"].get("idle_windows"),
+            Some(&Value::Null)
+        );
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = evaluate(Some(&monitor));
+        assert_eq!(
+            degraded["capacity"]["idle_windows"],
+            report["capacity"]["idle_windows"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+            monitor.last_scan_at = scan;
+            let untimed = evaluate(Some(&monitor));
+            let first = &untimed["capacity"]["idle_windows"][0];
+            assert_eq!(first["idle_seconds_at_scan"], Value::Null);
+            assert_eq!(first["missing_inputs"], json!(["monitor_scan_time"]));
+        }
+        monitor.idle_windows.clear();
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["idle_windows"],
+            json!([])
         );
     }
 
@@ -1784,6 +1955,7 @@ mod tests {
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent["capacity"].get("idle_windows"), Some(&Value::Null));
         assert_eq!(absent["capacity"].get("claim_blocks"), Some(&Value::Null));
         assert_eq!(absent["capacity"].get("declared_waits"), Some(&Value::Null));
         assert_eq!(

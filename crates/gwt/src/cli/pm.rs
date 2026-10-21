@@ -916,6 +916,10 @@ mod tests {
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
         assert_eq!(
+            status["policy"]["capacity"].get("idle_windows"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
             status["policy"]["capacity"].get("wip_limits"),
             Some(&serde_json::json!([]))
         );
