@@ -36,7 +36,7 @@ impl RemoteFixture {
         let root = tempfile::tempdir().expect("remote-head fixture");
         // Keep trusted checkpoints and their final record in the same store
         // while sibling tests rewrite the process HOME.
-        let home_guard = gwt_core::test_support::ScopedGwtHome::set(&root.path().join("home"));
+        let home_guard = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
         let remote = root.path().join("remote.git");
         let verified_repo = root.path().join("verified");
         let other_clone = root.path().join("other");
