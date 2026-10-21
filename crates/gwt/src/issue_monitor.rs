@@ -11212,6 +11212,9 @@ impl IssueMonitorState {
         issue: IssueMonitorIssue,
         record: &crate::cli::permission_readiness::PermissionReadinessRecord,
     ) {
+        if self.is_autonomous_in_flight(issue.number) {
+            self.set_autonomous_phase(issue.number, AutonomousPhase::Idle);
+        }
         self.queue.retain(|queued| *queued != issue.number);
         self.upsert_inbox(IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),

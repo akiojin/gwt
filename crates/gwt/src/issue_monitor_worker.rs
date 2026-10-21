@@ -4773,6 +4773,9 @@ mod tests {
         monitor.set_gui_connected(true);
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        // Autonomous eligibility marks a candidate Implementing before claims.
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_attempt(42);
         assert_eq!(
             monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
             1
@@ -4794,6 +4797,12 @@ mod tests {
         for _ in 0..2 {
             assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
         }
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::AutonomousPhase::Idle
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
         assert_eq!(monitor.active_count(), 0);
         assert!(monitor.take_pending_launch_requests().is_empty());
         let item = monitor.inbox_item(42).unwrap();
@@ -4806,6 +4815,17 @@ mod tests {
         assert!(matches!(&monitor.pending_effects()[0].payload,
             crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
                 if released == claim_id && released_owner == owner));
+
+        // The next scan may prepare eligibility again while the unsupported
+        // profile remains selected; every permission rejection must be idle.
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            0
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
 
         monitor.switch_launch_profile_agent("codex").unwrap();
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
