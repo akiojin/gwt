@@ -12391,6 +12391,7 @@ impl AppRuntime {
             FrontendEvent::SetIssueMonitorEnabled { .. }
                 | FrontendEvent::SetIssueMonitorAutonomousMode { .. }
                 | FrontendEvent::IssueMonitorProfilesSet { .. }
+                | FrontendEvent::GetIssueMonitorProfiles
                 | FrontendEvent::SetIssueMonitorMaxActiveAgents { .. }
                 | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
                 | FrontendEvent::ReorderIssueMonitorIssues { .. }
@@ -12431,7 +12432,9 @@ impl AppRuntime {
                     return Vec::new();
                 }
             }
-            self.invalidate_issue_monitor_list(&context.project_root);
+            if !matches!(event, FrontendEvent::GetIssueMonitorProfiles) {
+                self.invalidate_issue_monitor_list(&context.project_root);
+            }
         }
         match event {
             FrontendEvent::ProjectAggregateAck {

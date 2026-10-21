@@ -3525,6 +3525,12 @@ fn app_runtime_issue_monitor_profiles_set_waits_for_durable_worker() {
         "dispatch must leave persisted profiles and unknown saved values untouched"
     );
     assert_eq!(queued.lock().expect("queued tasks").len(), 1);
+    assert!(
+        runtime
+            .handle_frontend_event("client-2".into(), FrontendEvent::GetIssueMonitorProfiles)
+            .is_empty(),
+        "a reconnected client must wait for the pending durable profile save"
+    );
     assert!(runtime
         .handle_frontend_event(
             "client-1".into(),
@@ -3549,6 +3555,16 @@ fn app_runtime_issue_monitor_profiles_set_waits_for_durable_worker() {
         .get("choices")
         .is_none());
 
+    let readback =
+        replay_next_issue_monitor_profile_frontend(&mut runtime).expect("reconnected profile read");
+    assert!(readback.iter().any(|event| {
+        matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-2")
+            && matches!(
+                &event.event,
+                BackendEvent::IssueMonitorProfiles { profiles, request_id: None, .. }
+                    if profiles == &vec![profile.clone()]
+            )
+    }));
     replay_next_issue_monitor_profile_frontend(&mut runtime).expect("current Enable request");
     let enabled = gwt::load_issue_monitor_prefs(&prefs_path).expect("enabled after save");
     assert!(enabled.enabled);
