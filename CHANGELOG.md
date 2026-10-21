@@ -1,6 +1,90 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.134.0] - 2026-10-21
+
+### Bug Fixes
+
+- **execution:** Accept verified receipts after merged PRs
+- **monitor:** Continue completed spec slices with fresh context
+- **ui:** Drain terminal output when animation frames pause
+- **monitor:** Refresh launch prerequisites during fallback
+- **monitor:** 同revisionの起動前提差分を再検証する
+- **feedback:** Mask private content before public submission
+- **agent:** 容量エラーで停止したターンをPMへ通知する
+- **ui:** Reports の欠落応答を適用済み版から再同期する
+- **agent:** Retry autonomous capacity-ended turns once
+- **agent:** Retain capacity retry after trailing stop hook
+- **update:** Record polling and automatic apply decisions
+- **workspace:** Wait for in-flight launch transactions
+- **verify:** Yield idle slots after admission deferral
+- **feedback:** Gate upstream reports behind PM curation
+- **feedback:** Complete private evidence and result tracking
+- **review:** Defer verdicts until required CI completes
+- **monitor:** SPEC取得保留中の後継キュー選択を保持する
+
+### Features
+
+- **pm:** Report scan-relative idle window durations
+- **pm:** マイルストーン目標日の経過を観測する
+- **pm:** リスクと意思決定のレビュー日を観測する
+- **monitor:** Retry failed required CI once before remediation
+- **pm:** 定期作業の次回実行時刻を観測する
+- **pm:** 定期作業の設定不足と重複識別を診断する
+- **pm:** リスク情報の不足と重複識別を診断する
+- **ui:** Batch Usage views through shared frame subscriptions
+- **pm:** 意思決定記録の不足と重複識別を診断する
+- **pm:** 意思決定の参照revision差を観測する
+- **pm:** 保存済み予測の根拠不足を可視化する
+- **pm:** ロードマップ項目ごとの Issue 状態を示す
+- **pm:** ホストキューの滞留時間を観測する
+
+### Miscellaneous Tasks
+
+- **work:** Record PR #5878 merged state
+- **work:** Record PR #5885 association
+- **work:** Link idle observation delivery PR
+- **work:** マイルストーン期限観測のPR参照を記録する
+- **work:** Record PR #5885 merged state
+- **work:** Record PR #5890 association
+- **work:** レビュー日観測のPR参照を記録する
+- **work:** Record PR #5893 association
+- **work:** 定期作業観測のPR参照を記録する
+- **work:** Record PR #5896 association
+- **work:** 定期作業設定診断のPR参照を記録する
+- **work:** PR #5898 の関連を記録する
+- **work:** Record feedback privacy pull request
+- **work:** リスク診断のPR参照を記録する
+- **work:** PR #5903 の関連を記録する
+- **work:** 意思決定診断のPR参照を記録する
+- **work:** Issue #3431 のPR参照を記録する
+- **work:** Record PR #5907 association
+- **work:** Record Usage frame subscription recovery
+- **work:** Issue #3431 の PR 参照を記録する
+- **work:** Record PR #5910 reference
+- **work:** Record PR #5913 reference
+- **work:** Issue #3431 の PR 参照を記録する
+- **work:** Record intake pull request
+- **work:** Issue #3431 の PR 参照を記録する
+
+### Refactor
+
+- **frontend:** Bind renderers to model content types
+- **ui:** Render branch errors from shared state
+- **ui:** Runtime Health の描画をフレーム単位に集約
+- **feedback:** Name monitor fallback projection type
+- **ui:** Batch project manager settings by frame
+
+### Testing
+
+- **ui:** Align Reports layout fixture with split panes
+- **feedback:** Normalize isolated terminal queue identity
+- **feedback:** Seed known authors in queue cache fixture
+- **index:** Guard source polling against shared probe fixtures
+- **feedback:** Account for current-source admission checks
+- **runtime:** Drain physical spawn fixture output
+- **feedback:** Resolve source after legacy state loading
+
 ## [9.133.0] - 2026-10-21
 
 ### Bug Fixes
