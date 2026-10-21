@@ -14632,11 +14632,24 @@ impl IssueMonitorState {
         decision
     }
 
+    /// Eligibility precedes pane creation. Clear only that provisional phase;
+    /// resumed reviews retain a SHA, and physical implementations keep running.
+    fn clear_provisional_implementation(&mut self, issue_number: u64) {
+        if self.autonomous_record(issue_number).is_some_and(|record| {
+            record.phase == AutonomousPhase::Implementing && record.reviewed_sha.is_none()
+        }) && !self.has_monitor_pane_for_issue(issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+        {
+            self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        }
+    }
+
     /// Issue #3944 AC-4: project a readiness failure as `not_ready` with its
     /// reason — the same row state a gwt-spec Issue without plan/tasks gets —
     /// and drop the row from the launch queue. The next scan re-evaluates it,
     /// so fixing the Issue body or the repository settings is the whole remedy.
     fn mark_autonomous_not_ready(&mut self, issue_number: u64, reason: String) {
+        self.clear_provisional_implementation(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         revoke_uncommitted_claims_for_issue(
             &mut self.pending_effects,
@@ -16003,15 +16016,7 @@ impl IssueMonitorState {
             state,
             MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
         ) {
-            // Eligibility marks Implementing before a claim starts a pane.
-            // Retire only that provisional phase; resumed reviews retain a SHA.
-            if self.autonomous_record(issue_number).is_some_and(|record| {
-                record.phase == AutonomousPhase::Implementing && record.reviewed_sha.is_none()
-            }) && !self.has_monitor_pane_for_issue(issue_number)
-                && !self.process_held_issues.contains(&issue_number)
-            {
-                self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
-            }
+            self.clear_provisional_implementation(issue_number);
             revoke_uncommitted_claims_for_issue(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -41842,14 +41847,34 @@ mod tests {
             std::slice::from_ref(&issue),
             "2026-06-29T00:00:00Z",
         );
+        // A previous scan may already have prepared eligibility and a claim.
+        let verified = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let now = "2026-06-29T00:00:00Z";
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&issue, &verified, now),
+            EligibilityDecision::Eligible
+        );
+        monitor.record_attempt(50);
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![test_launch_profile("Codex")]);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            1
+        );
         let bp = gwt_git::branch_protection::BranchProtectionStatus::Absent;
         let decision = monitor.prepare_autonomous_candidate(&issue, &bp, "2026-06-29T00:00:00Z");
         assert!(matches!(decision, EligibilityDecision::NotReady(_)));
-        assert_ne!(
-            monitor.autonomous_record(50).map(|record| record.phase),
-            Some(AutonomousPhase::NeedsHuman),
-            "a readiness gap never parks the candidate",
+        assert_eq!(
+            monitor.autonomous_record(50).unwrap().phase,
+            AutonomousPhase::Idle,
+            "an unlaunched readiness gap must not remain in flight",
         );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.attempt_count(50), 1);
         assert_eq!(
             monitor.inbox_item(50).map(|item| item.state),
             Some(MonitorInboxState::NotReady)
@@ -41862,6 +41887,13 @@ mod tests {
             !monitor.queued_issue_numbers().contains(&50),
             "not launchable until the repository is ready"
         );
+        monitor.record_candidate(issue.clone());
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&issue, &verified, now),
+            EligibilityDecision::Eligible,
+            "fixing readiness is sufficient to resume on the next scan"
+        );
+        assert_eq!(monitor.attempt_count(50), 1);
     }
 
     #[test]
