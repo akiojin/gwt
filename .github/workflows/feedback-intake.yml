@@ -4,7 +4,7 @@ on:
   issues:
     types: [opened, edited, reopened]
   issue_comment:
-    types: [created, edited]
+    types: [created, edited, deleted]
 
 permissions:
   issues: write
@@ -31,7 +31,8 @@ jobs:
             const raw = feedback.test(issue.body || '') ||
               feedback.test(context.payload.changes?.body?.from || '') && !comment ||
               (issue.labels || []).some(label => label.name === 'gwt-feedback');
-            const evidence = comment && feedback.test(comment.body || '');
+            const evidence = comment && (feedback.test(comment.body || '') ||
+              feedback.test(context.payload.changes?.body?.from || ''));
             if (comment && !evidence) return; // Do not react to our own notifications.
             if (!raw && !evidence) return;
             // A feedback comment enriches an existing owner; it never marks
@@ -43,6 +44,20 @@ jobs:
               'gwt-feedback-evidence': ['BFD4F2', 'Additional feedback evidence on an existing Issue'],
             };
             const repository = {owner: 'akiojin', repo: 'gwt'};
+            const target = {...repository, issue_number: issue.number};
+            // Recompute from current retained payloads, not event deliveries.
+            // Complete all reads before publishing labels, counts or notices.
+            const current = (await github.rest.issues.get(target)).data;
+            const comments = await github.paginate(github.rest.issues.listComments, {...target, per_page: 100});
+            const leading = /^<!-- gwt-feedback:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) -->(?:\r?\n|$)/;
+            const reportIds = new Set();
+            for (const body of [current.body, ...comments.map(item => item.body)]) {
+              const id = leading.exec(body || '')?.[1];
+              if (id) reportIds.add(id);
+            }
+            const summaryMarker = `<!-- gwt-feedback-aggregation:${issue.number} -->`;
+            const summaryBody = `${summaryMarker}\nDistinct retained public feedback reports: ${reportIds.size}.\n\nThis counts distinct canonical leading report UUIDs currently retained in the Issue body and comments, not verified incidents or affected users. Same-UUID retries do not add reports; edited-away or deleted evidence can reduce this count. PM: compare the linked environment/version evidence when prioritizing. This summary grants no execution or adoption authority.`;
+            const summary = comments.find(item => item.user?.login === 'github-actions[bot]' && item.body?.startsWith(`${summaryMarker}\n`));
             for (const name of labels) {
               try {
                 await github.rest.issues.getLabel({...repository, name});
@@ -56,10 +71,13 @@ jobs:
                 }
               }
             }
-            const target = {...repository, issue_number: issue.number};
             await github.rest.issues.addLabels({...target, labels});
+            if (!summary) {
+              await github.rest.issues.createComment({...target, body: summaryBody});
+            } else if (summary.body !== summaryBody) {
+              await github.rest.issues.updateComment({...repository, comment_id: summary.id, body: summaryBody});
+            }
             const marker = `<!-- gwt-feedback-intake:${issue.number}:${comment?.id || 'issue'} -->`;
-            const comments = await github.paginate(github.rest.issues.listComments, {...target, per_page: 100});
             if (comments.some(item => item.user?.login === 'github-actions[bot]' && item.body?.includes(marker))) return;
             const disposition = raw
               ? 'Raw feedback stays evidence permanently. PM: compare existing requirements; reuse or create a separate trusted curated repair owner for a confirmed bug. Feature requests and ambiguity await actual akiojin adoption before SPEC planning or queueing.'

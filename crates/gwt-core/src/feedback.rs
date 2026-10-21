@@ -279,7 +279,9 @@ impl FeedbackStore {
             &input.reproduction,
             &input.workaround,
             &input.body,
+            &input.error_record_id,
             &input.labels,
+            &context,
         ))?));
         let index = self
             .root

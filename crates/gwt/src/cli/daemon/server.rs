@@ -18910,10 +18910,11 @@ exit 1
         let _effect_release =
             ScopedEnvVar::set("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE", &effect_release);
 
+        let project_root = scope.project_root.clone();
         runtime.block_on(async {
             let hub = BroadcastHub::new();
             let shutdown = Arc::new(DaemonShutdown::new());
-            let worker = spawn_issue_monitor_worker_with_config_and_timeout(
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                 scope,
                 hub,
                 shutdown,
@@ -18922,6 +18923,19 @@ exit 1
                     ..crate::IssueMonitorConfig::default()
                 },
                 Duration::from_secs(2),
+                super::IssueMonitorWorkerTestHooks {
+                    scan_override: Some(Arc::new(move |mut monitor| {
+                        // Source authority is transient after prefs restore.
+                        // Resolve the actual fixture origin without coupling
+                        // this abort boundary to a live GitHub listing/cache.
+                        crate::issue_monitor_worker::bind_issue_monitor_source_repository(
+                            &mut monitor,
+                            &project_root,
+                        );
+                        Ok(monitor)
+                    })),
+                    ..Default::default()
+                },
             );
             assert!(
                 wait_for_path(&effect_started).await,
