@@ -2402,6 +2402,63 @@ fn persisted_pm_resume_config_reinjects_project_state_scratch_dir() {
     );
 }
 
+/// SPEC #3431 FR-028 / T-090: the PM role restores its permission policy even
+/// when an older Session omitted skip_permissions (whose serde default is false).
+#[test]
+fn persisted_pm_config_restores_permission_policy() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+
+    for (agent, flag) in [
+        (
+            gwt_agent::AgentId::ClaudeCode,
+            "--dangerously-skip-permissions",
+        ),
+        (gwt_agent::AgentId::Codex, "--yolo"),
+    ] {
+        let mut session = gwt_agent::Session::new(&pm_worktree, "", agent);
+        assert!(
+            !session.skip_permissions,
+            "fixture must reproduce the legacy default"
+        );
+        for (resume, paused) in [(false, false), (true, false), (true, true)] {
+            session.agent_session_id = resume.then(|| "pm-conversation".to_string());
+            gwt::pm_registry::set_pm_paused(&repo, paused).expect("set Pause");
+            let config = super::super::launch_config_from_persisted_session(&session);
+            assert!(
+                config.skip_permissions,
+                "PM role must restore permission policy: {:?}",
+                config.args
+            );
+            assert_eq!(
+                config
+                    .args
+                    .iter()
+                    .filter(|arg| arg.as_str() == flag)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                config.session_mode,
+                if resume {
+                    gwt_agent::SessionMode::Resume
+                } else {
+                    gwt_agent::SessionMode::Normal
+                }
+            );
+            assert_eq!(config.args.iter().any(|arg| arg == "$gwt-pm"), !paused);
+        }
+    }
+}
+
 /// Issue #3965 AC-1 / AC-2 / AC-3: the restore counterpart of
 /// `pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_project`.
 /// A restored PM must start under the same PM contract as a fresh spawn, and a
@@ -2507,6 +2564,14 @@ fn persisted_non_pm_resume_config_gains_no_bootstrap_prompt() {
     let mut session =
         gwt_agent::Session::new(&worktree, "work/issue-1", gwt_agent::AgentId::ClaudeCode);
     session.agent_session_id = Some("work-conversation-1".to_string());
+    // A regular agent's saved permission choice remains authoritative.
+    let config = super::super::launch_config_from_persisted_session(&session);
+    assert!(!config.skip_permissions);
+    assert!(!config
+        .args
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions"));
+
     session.skip_permissions = true;
     session.launch_args = vec![
         "--dangerously-skip-permissions".to_string(),
@@ -2514,6 +2579,11 @@ fn persisted_non_pm_resume_config_gains_no_bootstrap_prompt() {
     ];
 
     let config = super::super::launch_config_from_persisted_session(&session);
+    assert!(config.skip_permissions);
+    assert!(config
+        .args
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions"));
 
     assert!(
         !config.args.iter().any(|arg| arg == "$gwt-pm"),

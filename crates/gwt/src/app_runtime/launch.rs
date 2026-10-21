@@ -3191,6 +3191,7 @@ pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
     let agent_id = session.agent_id.clone();
+    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
     builder = builder.working_dir(session.worktree_path.clone());
     if !session.branch.is_empty() {
@@ -3202,7 +3203,9 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(level) = session.reasoning_level.clone() {
         builder = builder.reasoning_level(level);
     }
-    if session.skip_permissions {
+    // FR-028 belongs to the PM role, including older Sessions whose saved
+    // skip_permissions field defaults to false.
+    if session.skip_permissions || pm_scratch.is_some() {
         builder = builder.skip_permissions(true);
     }
     if session.fast_mode_enabled() {
@@ -3230,7 +3233,6 @@ pub(super) fn launch_config_from_persisted_session(
     // from the same PM detection that already restores the scratch dir below —
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
-    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     if pm_scratch.is_some()
         && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
     {
