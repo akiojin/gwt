@@ -5,6 +5,9 @@ import { parseHTML } from "linkedom";
 import { createProjectPageMetadata } from "../project-page-metadata.js";
 
 function setup(project = true, permissions = null) {
+  const frames = [];
+  const scheduleFrame = callback => { frames.push(callback); return () => {}; };
+  const flush = () => { for (const callback of frames.splice(0)) callback(); };
   const { document, window: domWindow } = parseHTML('<html><head><title>gwt — Operator</title><link rel="icon" href="data:,"></head><body></body></html>');
   const window = {
     Event: domWindow.Event, MutationObserver: domWindow.MutationObserver,
@@ -17,23 +20,36 @@ function setup(project = true, permissions = null) {
   window.Notification = { permission: "default", requestPermission() { throw new Error("must not prompt"); } };
   document.hasFocus = () => false;
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-  return { document, window, sent, controller: createProjectPageMetadata({ document, window, project, send: (event) => sent.push(event) }) };
+  return { document, window, sent, frames, flush, controller: createProjectPageMetadata({ document, window, project, scheduleFrame, send: (event) => sent.push(event) }) };
 }
 test("server aggregate renders exact project counts, unread, and semantic favicon state", () => {
-  const { document, controller } = setup();
+  const { document, sent, controller, frames, flush } = setup();
   controller.setProjectName("Repo A");
+  const before = document.title;
+  document.hasFocus = () => true;
+  controller.resetConnection();
+  controller.update({ running_count: 1, block_count: 0, error_count: 0, unread: true, revision: 4 });
   controller.update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 });
-  assert.equal(document.title, "● Repo A — RUN 2 · BLOCK 1 — gwt");
+  assert.equal(document.title, before, "aggregate rendering waits for the shared frame");
+  assert.equal(frames.length, 1, "a burst reserves only one frame");
+  assert.deepEqual(sent.map(event => event.kind), ["project_client_attention", "project_aggregate_ack", "project_aggregate_ack"]);
+  assert.equal(sent.at(-1).revision, 5, "ACK reads the latest model before rendering");
   const icon = document.querySelector('link[rel="icon"]');
+  assert.equal(icon.dataset.state, "idle", "favicon also waits for the shared frame");
+  flush();
+  assert.equal(document.title, "● Repo A — RUN 2 · BLOCK 1 — gwt");
   assert.equal(icon.dataset.state, "error");
   assert.equal(icon.dataset.unread, "true");
   assert.match(decodeURIComponent(icon.href), /red/);
   controller.update({ running_count: 0, block_count: 1, error_count: 0, unread: false, revision: 6 });
+  flush();
   assert.equal(document.title, "Repo A — RUN 0 · BLOCK 1 — gwt");
   assert.equal(icon.dataset.state, "blocked");
   controller.update({ running_count: 1, block_count: 0, unread: false, revision: 7 });
+  flush();
   assert.equal(icon.dataset.state, "running");
   controller.update({ running_count: 0, block_count: 0, unread: false, revision: 8 });
+  flush();
   assert.equal(icon.dataset.state, "idle");
 });
 test("Hub metadata remains fixed despite aggregate and name input", () => {
@@ -52,8 +68,9 @@ test("metadata uses Operator tokens without literal palette colors", () => {
 });
 
 test("only visible focused clients acknowledge server unread, never clear it locally", () => {
-  const { document, window, sent, controller } = setup();
+  const { document, window, sent, controller, flush } = setup();
   controller.update({ running_count: 2, unread: true, revision: 9 });
+  flush();
   assert.deepEqual(sent, []);
   document.hasFocus = () => true;
   window.dispatchEvent(new window.Event("focus"));
@@ -61,6 +78,7 @@ test("only visible focused clients acknowledge server unread, never clear it loc
   assert.deepEqual(acknowledgements(), [{ kind: "project_aggregate_ack", revision: 9, visible: true, focused: true }]);
   assert.match(document.title, /^●/);
   controller.update({ running_count: 2, unread: false, revision: 10 });
+  flush();
   assert.equal(acknowledgements().length, 1, "server acknowledgement must not cause a feedback loop");
   assert.doesNotMatch(document.title, /^●/);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
@@ -71,16 +89,18 @@ test("only visible focused clients acknowledge server unread, never clear it loc
   assert.equal(acknowledgements().at(-1).revision, 11);
 });
 test("old aggregate cannot overwrite newer metadata", () => {
-  const { document, controller } = setup();
+  const { document, controller, flush } = setup();
   controller.update({ running_count: 2, unread: false, revision: 5 });
   controller.update({ running_count: 99, unread: true, revision: 4 });
+  flush();
   assert.equal(document.title, "Project — RUN 2 · BLOCK 0 — gwt");
   controller.resetConnection();
   controller.update({ running_count: 1, revision: 1 });
+  flush();
   assert.equal(document.title, "Project — RUN 1 · BLOCK 0 — gwt");
 });
 test("metadata owns the received snapshot across theme, name, and attention updates", () => {
-  const { document, window, sent, controller } = setup();
+  const { document, window, sent, controller, flush } = setup();
   const aggregate = { running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 };
   controller.update(aggregate);
   Object.assign(aggregate, { running_count: 99, error_count: 0, unread: false, revision: 99 });
@@ -97,14 +117,16 @@ test("metadata owns the received snapshot across theme, name, and attention upda
   window.dispatchEvent(new window.Event("focus"));
   assert.equal(acknowledgements().length, 1, "reconnect must not acknowledge an old connection's snapshot");
   controller.update({ running_count: 1, unread: false, revision: 1 });
+  flush();
   assert.equal(document.title, "Repo A — RUN 1 · BLOCK 0 — gwt");
   assert.equal(icon.dataset.state, "running");
 });
 test("unavailable favicon style API does not prevent title updates or acknowledgement", () => {
-  const { document, window, sent, controller } = setup();
+  const { document, window, sent, controller, flush } = setup();
   window.getComputedStyle = () => { throw new Error("unavailable"); };
   document.hasFocus = () => true;
   assert.doesNotThrow(() => controller.update({ running_count: 3, unread: true, revision: 9 }));
+  assert.doesNotThrow(flush);
   assert.equal(document.title, "● Project — RUN 3 · BLOCK 0 — gwt");
   assert.equal(sent.at(-1).revision, 9);
 });
