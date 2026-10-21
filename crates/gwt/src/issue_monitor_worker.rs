@@ -1762,13 +1762,37 @@ pub fn try_refresh_issue_monitor_candidate(
             ),
         )
     })?;
+    // The previous-result fallback scans this candidate again before claiming
+    // it. A fresh revision must carry fresh launch prerequisites as well:
+    // retaining old labels/readiness can bypass a newly added hold or missing
+    // plan/tasks, while an old body feeds stale acceptance to the gate.
+    let is_spec = entry
+        .snapshot
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    let readiness = if is_spec && !spec_cache_entry_has_no_sections(&entry) {
+        spec_cache_entry_readiness(&entry)
+    } else {
+        IssueMonitorReadiness::NotApplicable
+    };
+    let body = if is_spec {
+        acceptance_source_text(&entry.snapshot.body, &entry.spec_body)
+    } else {
+        entry.snapshot.body
+    };
     Ok(IssueMonitorIssue {
+        number: entry.snapshot.number.0,
+        title: entry.snapshot.title,
+        labels: entry.snapshot.labels,
         state: match entry.snapshot.state {
             IssueState::Open => IssueMonitorIssueState::Open,
             IssueState::Closed => IssueMonitorIssueState::Closed,
         },
+        body: (!body.is_empty()).then_some(body),
+        url: issue.url.clone(),
+        readiness,
         updated_at: Some(entry.snapshot.updated_at.0),
-        ..issue.clone()
     })
 }
 
@@ -6067,6 +6091,93 @@ mod tests {
         assert!(monitor.inbox_item(8).is_none());
         assert!(summary.errors.is_empty(), "{:?}", summary.errors);
         assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn targeted_refresh_rechecks_launch_prerequisites_before_fallback_scan() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[]);
+        let previous = IssueMonitorIssue {
+            labels: vec!["gwt-spec".into(), "gwt-queued".into()],
+            body: Some("old acceptance criteria".into()),
+            readiness: IssueMonitorReadiness::ReadyWithOpenTasks,
+            ..issue(42)
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "operator", "2026-10-16T00:00:00Z");
+        monitor.record_candidate(previous.clone());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+
+        let mut snapshot = structured_spec(42, "2026-10-16T00:00:01Z", "", "- [ ] T-1");
+        snapshot.labels.extend(["gwt-queued".into(), "hold".into()]);
+        let write_remote = |snapshot: &IssueSnapshot| {
+            std::fs::write(
+                temp.path().join("gh-view-42.json"),
+                serde_json::json!({
+                    "number": 42, "title": snapshot.title, "body": snapshot.body,
+                    "labels": snapshot.labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+                    "state": "OPEN", "updatedAt": snapshot.updated_at.0,
+                    "comments": snapshot.comments.iter().map(|comment| serde_json::json!({"databaseId": comment.id.0, "body": comment.body})).collect::<Vec<_>>()
+                }).to_string(),
+            ).unwrap();
+        };
+        write_remote(&snapshot);
+        let held = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &previous).unwrap();
+        // This is the same refresh -> scan boundary as the daemon's previous-result fallback.
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&held),
+            "2026-10-16T00:00:02Z",
+        );
+        let row = monitor.inbox_item(42).unwrap();
+        assert_eq!(row.state, MonitorInboxState::HoldExcluded);
+        assert!(row.exclusion_reason.as_deref().unwrap().contains("hold"));
+        assert_eq!(held.title, snapshot.title);
+        assert_eq!(held.body.as_deref(), Some(snapshot.body.as_str()));
+        assert_eq!(held.readiness, IssueMonitorReadiness::NotReady);
+        assert_eq!(
+            held.updated_at.as_deref(),
+            Some(snapshot.updated_at.0.as_str())
+        );
+
+        snapshot.labels.retain(|label| label != "hold");
+        write_remote(&snapshot);
+        let unready = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &held).unwrap();
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&unready),
+            "2026-10-16T00:00:03Z",
+        );
+        let row = monitor.inbox_item(42).unwrap();
+        assert_eq!(row.state, MonitorInboxState::NotReady);
+        assert!(row
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("plan/tasks"));
+        assert!(monitor.queued_issue_numbers().is_empty());
+
+        // Removing the SPEC label must match the ordinary plain-Issue loader,
+        // even when the old section index still refers to a SPEC comment.
+        snapshot = spec_with_storage(42, "## Acceptance Criteria\n- [ ] AC-1: work", true);
+        snapshot.labels = vec!["gwt-queued".into()];
+        snapshot.updated_at = UpdatedAt::new("2026-10-16T00:00:04Z");
+        write_remote(&snapshot);
+        let plain = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &unready).unwrap();
+        assert_eq!(plain.readiness, IssueMonitorReadiness::NotApplicable);
+        assert_eq!(plain.body.as_deref(), Some(snapshot.body.as_str()));
     }
 
     fn shrink_probe_repo(dir: &Path, states: &[(u64, &str)]) -> PathBuf {
