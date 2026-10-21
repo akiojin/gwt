@@ -297,7 +297,8 @@ To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 is one per OS-login user; a second `gwt` invocation prints the existing URL and
 exits instead of starting a second server.
 
-gwtd operations run through stdin JSON envelopes without opening a GUI window:
+gwtd operations run through stdin JSON envelopes without opening the main gwt window.
+Operations requiring consent can show a native OS dialog:
 
 ```bash
 gwtd <<'JSON'
@@ -961,6 +962,22 @@ entrypoints are:
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent-pane inspection and control
+- `gwt-feedback` — report a gwt problem from any project
+
+For a gwt bug or workflow problem, PM and implementation agents can use
+`gwt-feedback` to collect the affected operation, original refusal,
+reproduction steps, and workaround. The `feedback.create` JSON operation always
+targets `akiojin/gwt` and adds source-project and environment information.
+It saves a local receipt. Outside the actual gwt repository, intake returns
+immediately so project work can continue; sending requires the user's **Send
+feedback** action in a native dialog. Cancellation or an unavailable desktop
+keeps the report locally. The actual gwt repository sends synchronously without
+that prompt and returns the Issue number and URL.
+
+Use `feedback.status` with the returned request id to obtain the Issue number
+and URL; a similar existing Issue may receive a comment. `feedback.retry`
+accepts declined or failed receipts and asks for fresh external-project consent.
+An uncertain delivery is retained for inspection and is not automatically resent.
 
 SPECs and plain Issues share one search index. SPECs are indexed once as heading
 chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
