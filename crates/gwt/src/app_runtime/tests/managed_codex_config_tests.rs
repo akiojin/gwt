@@ -2456,6 +2456,118 @@ fn codex_hook_trust_launch_trusts_every_discovered_worktree_hook_file() {
     }
 }
 
+/// Issue #5270 AC-R3: a restarted GUI and a new window must preserve the
+/// shared hook identity already trusted before an installed binary changes.
+#[test]
+fn codex_shared_hook_trust_survives_update_restart_and_new_window() {
+    let home = tempdir().expect("initial home");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let codex_config = home.path().join(".codex/config.toml");
+    let fixture_root = tempdir().expect("fixture tempdir");
+    let (repo, worktree) = codex_hook_trust_linked_worktree_fixture(fixture_root.path());
+    // The fixture tracks both copies. This regression concerns an untracked
+    // shared root, which must stay portable independently of tracking policy.
+    for root in [&repo, &worktree] {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["rm", "--cached", "--", ".codex/hooks.json"])
+            .current_dir(root)
+            .status()
+            .expect("untrack fixture hook config");
+        assert!(status.success(), "untrack fixture hook config: {status}");
+    }
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(gwt_skills::CANONICAL_HOOK_BIN);
+        gwt_skills::generate_codex_hooks_for_mode(
+            &worktree,
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        )
+        .expect("generate initially portable hooks");
+    }
+    let initial = gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
+        &worktree,
+        &codex_config,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        Some(gwt_skills::CANONICAL_HOOK_BIN),
+    )
+    .expect("register initial trust");
+    assert!(initial.hooks_need_review_reason().is_none(), "{initial:?}");
+    let shared_paths = gwt_skills::codex_hooks_paths_for_codex_discovery(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    let shared_hooks = &shared_paths[0];
+    let shared_before = fs::read(shared_hooks).expect("read initial shared hooks");
+    let trust_before = fs::read(&codex_config).expect("read persisted initial trust");
+
+    let restarted_home = tempdir().expect("restarted GUI home");
+    let _restarted_home = ScopedGwtHome::set(restarted_home.path());
+    let updated_bin = fixture_root
+        .path()
+        .join("updated-install")
+        .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX));
+    write_executable_test_file(&updated_bin, "updated binary");
+    let updated_bin = updated_bin.to_string_lossy().into_owned();
+    let _updated_pin = gwt_skills::settings_local::ScopedHookBin::set(&updated_bin);
+    super::super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&updated_bin),
+    );
+    assert_eq!(
+        fs::read(shared_hooks).unwrap(),
+        shared_before,
+        "GUI startup must preserve the previously trusted shared hook identity"
+    );
+    let materialization = gwt::refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &gwt_agent::AgentId::Codex,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        false,
+    )
+    .expect("materialize a new window after restart");
+    assert_eq!(fs::read(shared_hooks).unwrap(), shared_before);
+    // Check persisted trust before launch can repair it. Re-registering first
+    // would hide the changed shared command that stopped another Codex window.
+    let inspected = gwt_skills::inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+        &worktree,
+        &codex_config,
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        Some(&updated_bin),
+    )
+    .expect("inspect persisted shared hook trust without registering");
+    assert!(
+        inspected.hooks_need_review_reason().is_none(),
+        "shared trust must survive before new-window registration: {inspected:?}"
+    );
+    assert_eq!(fs::read(&codex_config).unwrap(), trust_before);
+
+    let mut launch_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    launch_config.env_vars.insert(
+        "CODEX_HOME".to_string(),
+        codex_config.parent().unwrap().display().to_string(),
+    );
+    let report = super::super::maybe_register_codex_managed_hook_trust_for_launch(
+        &restarted_home.path().join(".gwt/config.toml"),
+        &worktree,
+        &launch_config,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        materialization.hook_bin.as_deref(),
+    )
+    .expect("new-window launch must not stop for Hooks need review")
+    .expect("Codex launch registers both hook copies");
+    assert!(report.hooks_need_review_reason().is_none(), "{report:?}");
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(&report.config_path).unwrap()).unwrap();
+    for path in gwt_skills::codex_hooks_paths_for_codex_discovery(
+        &worktree,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+    ) {
+        assert_every_codex_hook_is_trusted(&config, &path);
+    }
+}
+
 /// Issue #3967 AC-4: a pre-registration that cannot vouch for the gwt hooks
 /// must fail the launch with a concrete reason instead of handing the agent a
 /// human-only prompt that silently holds the Issue Monitor slot.
