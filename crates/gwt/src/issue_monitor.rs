@@ -321,6 +321,11 @@ pub enum IssueMonitorEffectPayload {
         pr_number: u64,
         reviewed_sha: String,
     },
+    /// A one-shot failed CI rerun; its submission reservation survives epochs.
+    RerunFailedCi {
+        issue_number: u64,
+        target: crate::issue_monitor_ci::CiRerunTarget,
+    },
     DisarmAutoMerge {
         issue_number: u64,
         pr_number: u64,
@@ -472,6 +477,7 @@ fn effect_matches_key(
 
 fn mark_effect_attempting(
     pending_effects: &mut [PendingIssueMonitorEffect],
+    consumed_ci_reruns: &mut BTreeSet<String>,
     key: &IssueMonitorEffectAttemptKey,
 ) -> bool {
     let Some(effect) = pending_effects
@@ -482,6 +488,11 @@ fn mark_effect_attempting(
     };
     if effect.state != IssueMonitorEffectState::Prepared {
         return false;
+    }
+    if let IssueMonitorEffectPayload::RerunFailedCi { target, .. } = &effect.payload {
+        if !consumed_ci_reruns.insert(target.effect_id()) {
+            return false;
+        }
     }
     effect.state = IssueMonitorEffectState::Attempting;
     true
@@ -598,6 +609,9 @@ fn revoke_uncommitted_effects_for_closed_issue(
             } | IssueMonitorEffectPayload::SettleMergedIssue {
                 issue_number: pending_issue,
                 ..
+            } | IssueMonitorEffectPayload::RerunFailedCi {
+                issue_number: pending_issue,
+                ..
             } if pending_issue == issue_number
         )
     });
@@ -626,7 +640,8 @@ fn revoke_uncommitted_effects_for_closed_issue(
             | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
-            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => {}
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+            | IssueMonitorEffectPayload::RerunFailedCi { .. } => {}
         }
     }
 }
@@ -739,6 +754,7 @@ fn advance_effect_authority(
                     | IssueMonitorEffectPayload::RenewClaim { .. }
                     | IssueMonitorEffectPayload::ArmAutoMerge { .. }
                     | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+                    | IssueMonitorEffectPayload::RerunFailedCi { .. }
             )
     });
 
@@ -800,7 +816,8 @@ fn advance_effect_authority(
             | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
-            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => continue,
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+            | IssueMonitorEffectPayload::RerunFailedCi { .. } => continue,
         };
         if !already_compensated {
             next_effects.push(PendingIssueMonitorEffect::prepared(
@@ -1184,6 +1201,9 @@ pub struct IssueMonitorPrefs {
     /// shape of existing prefs files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_effects: Vec<PendingIssueMonitorEffect>,
+    /// One-shot CI submission reservations, never cleared by a new generation.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub consumed_ci_reruns: BTreeSet<String>,
     /// Receipt for the most recently admitted daemon control. The control ID
     /// is generated per admission and reused only by that control's retry, so
     /// one slot is sufficient while the worker enforces a FIFO retry barrier.
@@ -1313,6 +1333,7 @@ impl Default for IssueMonitorPrefs {
             autonomous_records: Vec::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            consumed_ci_reruns: BTreeSet::new(),
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
             last_scan_at: None,
@@ -1444,7 +1465,7 @@ impl IssueMonitorPrefs {
 
     /// Commit the execution fence for an exact Prepared delivery tuple.
     pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
-        mark_effect_attempting(&mut self.pending_effects, key)
+        mark_effect_attempting(&mut self.pending_effects, &mut self.consumed_ci_reruns, key)
     }
 
     /// Remove an Attempting journal entry only when the completed delivery
@@ -4795,6 +4816,8 @@ pub struct IssueMonitorState {
     #[serde(default)]
     pending_effects: Vec<PendingIssueMonitorEffect>,
     #[serde(default)]
+    consumed_ci_reruns: BTreeSet<String>,
+    #[serde(default)]
     last_control_receipt: Option<IssueMonitorControlReceipt>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
@@ -7311,6 +7334,7 @@ impl IssueMonitorState {
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            consumed_ci_reruns: BTreeSet::new(),
             last_control_receipt: None,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
@@ -7490,6 +7514,7 @@ impl IssueMonitorState {
         }
         state.effect_authority_epoch = prefs.effect_authority_epoch;
         state.pending_effects = prefs.pending_effects;
+        state.consumed_ci_reruns = prefs.consumed_ci_reruns;
         state.last_control_receipt = prefs.last_control_receipt;
         state.autonomous_tuning = prefs.autonomous_tuning;
         for record in prefs.autonomous_records {
@@ -7614,6 +7639,7 @@ impl IssueMonitorState {
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
+            consumed_ci_reruns: self.consumed_ci_reruns.clone(),
             last_control_receipt: self.last_control_receipt.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
@@ -8045,6 +8071,7 @@ impl IssueMonitorState {
                         IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
                         | IssueMonitorEffectPayload::RenewClaim { issue_number, .. }
                         | IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+                        | IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. }
                         | IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
                             Some(*issue_number)
                         }
@@ -10563,6 +10590,8 @@ impl IssueMonitorState {
         }
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
+        self.consumed_ci_reruns
+            .extend(disk.consumed_ci_reruns.iter().cloned());
         // Claim mutations commit after rebase. An observer must retain the
         // exact durable identity rather than erase it with its older snapshot.
         self.claim_identities = disk
@@ -13911,6 +13940,10 @@ impl IssueMonitorState {
         &self.pending_effects
     }
 
+    pub fn ci_rerun_consumed(&self, effect_id: &str) -> bool {
+        self.consumed_ci_reruns.contains(effect_id)
+    }
+
     pub fn claim_heartbeat_interval_secs(&self) -> u64 {
         self.config.claim_heartbeat_interval_secs()
     }
@@ -14297,6 +14330,7 @@ impl IssueMonitorState {
                 IssueMonitorEffectPayload::RenewClaim { .. }
             ) && !self.claim_renewal_is_current(&effect.payload))
             || matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
+            || matches!(&effect.payload, IssueMonitorEffectPayload::RerunFailedCi { target, .. } if self.ci_rerun_consumed(&target.effect_id()))
             || self
                 .pending_effects
                 .iter()
@@ -14321,6 +14355,7 @@ impl IssueMonitorState {
             || (matches!(&payload, IssueMonitorEffectPayload::RenewClaim { .. })
                 && !self.claim_renewal_is_current(&payload))
             || matches!(&payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
+            || matches!(&payload, IssueMonitorEffectPayload::RerunFailedCi { target, .. } if self.ci_rerun_consumed(&target.effect_id()))
             || self
                 .pending_effects
                 .iter()
@@ -14336,7 +14371,7 @@ impl IssueMonitorState {
     }
 
     pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
-        mark_effect_attempting(&mut self.pending_effects, key)
+        mark_effect_attempting(&mut self.pending_effects, &mut self.consumed_ci_reruns, key)
     }
 
     pub fn complete_pending_effect(
@@ -35180,6 +35215,124 @@ mod tests {
         assert!(prefs.enabled);
         assert!(prefs.autonomous_mode);
         assert_eq!(prefs.priority_order, vec![7]);
+    }
+
+    #[test]
+    fn ci_rerun_consumption_survives_restart_and_stale_rebase() {
+        let effect: PendingIssueMonitorEffect = serde_json::from_value(serde_json::json!({
+            "effect_id": "ci-rerun:99:abc123:701",
+            "authority_epoch": 4,
+            "attempt": 0,
+            "state": "prepared",
+            "payload": {
+                "kind": "rerun_failed_ci", "issue_number": 42,
+                "target": {"pr_number": 99, "head_sha": "abc123", "run_id": 701}
+            }
+        }))
+        .expect("CI rerun effect decodes");
+        let mut current = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                effect_authority_epoch: 4,
+                ..Default::default()
+            },
+        );
+        assert!(current.prepare_effect(effect.clone()));
+        let mut stale = current.clone();
+        let mut wrong_key = effect.attempt_key();
+        wrong_key.attempt += 1;
+        assert!(!current.mark_pending_effect_attempting(&wrong_key));
+        assert!(current.mark_pending_effect_attempting(&effect.attempt_key()));
+        assert!(current
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+
+        let saved = serde_json::to_value(current.prefs()).expect("serialize consumed rerun");
+        assert_eq!(
+            saved["consumed_ci_reruns"],
+            serde_json::json!([effect.effect_id])
+        );
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).expect("reload consumed rerun"),
+        );
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(
+            !stale.prepare_effect(effect.clone()),
+            "stale scan cannot repropose a consumed rerun"
+        );
+        let mut observer = restored;
+        observer.rebase_gui_observer_prefs(&IssueMonitorPrefs::default());
+        assert!(
+            !observer.prepare_effect(PendingIssueMonitorEffect::prepared(
+                effect.effect_id,
+                observer.effect_authority_epoch(),
+                effect.payload,
+            )),
+            "an older disk snapshot cannot erase consumption"
+        );
+    }
+
+    #[test]
+    fn ci_rerun_authority_revocation_keeps_consumption_without_compensation() {
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 99,
+            head_sha: "abc123".into(),
+            run_id: 701,
+        };
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let key = monitor
+            .prepare_pending_effect(
+                target.effect_id(),
+                IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: target.clone(),
+                },
+            )
+            .expect("prepare rerun");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let unsubmitted = crate::issue_monitor_ci::CiRerunTarget {
+            run_id: 702,
+            ..target.clone()
+        };
+        assert!(monitor
+            .prepare_pending_effect(
+                unsubmitted.effect_id(),
+                IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: unsubmitted.clone()
+                }
+            )
+            .is_some());
+
+        monitor
+            .set_autonomous_mode_with_effect_revocation(false)
+            .expect("revoke autonomous mode");
+        assert_eq!(
+            monitor.pending_effects().len(),
+            1,
+            "only the historical Attempting entry remains"
+        );
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
+        assert!(!monitor.ci_rerun_consumed(&unsubmitted.effect_id()));
+        monitor.transition_issue_closure(
+            42,
+            IssueClosureState::Closed,
+            IssueClosureEvidence::ExplicitRevision,
+            Some("2026-10-21T00:00:00Z".into()),
+        );
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "close revokes reruns without compensation"
+        );
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
     }
 
     #[test]
