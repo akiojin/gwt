@@ -3024,8 +3024,9 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         gwt::IssueMonitorExecutionSettlement::Interrupted,
         "unfinished delivery must reach the existing Monitor fresh-launch recovery"
     );
-    let mut monitor = gwt::IssueMonitorState::new(Default::default());
+    let mut monitor = test_monitor(Default::default());
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: terminal_owner.number,
         title: "Interrupted update delivery".into(),
         labels: Vec::new(),

@@ -41,6 +41,7 @@ fn seed_spec(
 ) -> IssueSnapshot {
     let body = mk_body(spec, tasks);
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("SPEC {number}"),
         body,
@@ -64,6 +65,7 @@ fn write_section_refuses_body_with_unparseable_sections_index() {
     let cache = Cache::new(tmp.path().to_path_buf());
     let client = FakeIssueClient::new();
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(4388),
         title: "SPEC with a broken index".to_string(),
         body: "<!-- gwt-spec id=4388 version=1 -->\n<!-- sections: {} -->\n\nbody\n".to_string(),

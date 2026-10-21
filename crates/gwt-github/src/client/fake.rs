@@ -737,6 +737,7 @@ impl IssueClient for FakeIssueClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.record(&mut state, "create_issue", &number.to_string());
         let snapshot = IssueSnapshot {
+            author_login: None,
             number,
             title: title.to_string(),
             body: body.to_string(),

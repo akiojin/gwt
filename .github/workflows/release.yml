@@ -516,6 +516,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -531,3 +533,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release edit "${{ needs.create-tag.outputs.tag_name }}" --draft=false
+      - name: Record published results on feedback reports
+        if: github.repository == 'akiojin/gwt'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.create-tag.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          git rev-parse --verify "${TAG_NAME}^{commit}"
+          python3 scripts/release_issue_refs.py --range "$TAG_NAME" --repo akiojin/gwt \
+            --notify-feedback --version "$TAG_NAME" | tee -a "$GITHUB_STEP_SUMMARY"

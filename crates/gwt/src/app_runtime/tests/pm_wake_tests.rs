@@ -163,7 +163,7 @@ fn resumed_pm_reconciles_fatal_only_monitor_work_after_restart() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _) = pm_wake_fixture(&temp);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap(),
     );
@@ -1259,7 +1259,7 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
 
     // Standing supervision work: one launched issue in the durable prefs.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1411,7 +1411,7 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
     );
@@ -1482,7 +1482,7 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
     );
@@ -1639,7 +1639,7 @@ fn wake_prompts_ask_for_a_report_only_when_the_cycle_changed_something() {
 
     // Standing supervision work so the periodic wake is eligible on its own.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1699,7 +1699,7 @@ fn delta_and_periodic_wakes_do_not_double_fire_in_one_window() {
 
     // Standing work so the periodic wake would be eligible on its own.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,

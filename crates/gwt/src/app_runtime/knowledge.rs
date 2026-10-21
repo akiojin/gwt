@@ -569,6 +569,7 @@ mod monitor_snapshot_cache_tests {
     ) -> gwt::IssueMonitorInboxItem {
         gwt::IssueMonitorInboxItem {
             issue: gwt::IssueMonitorIssue {
+                author_login: None,
                 number,
                 title: format!("Issue {number}"),
                 labels: Vec::new(),

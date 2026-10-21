@@ -25,6 +25,15 @@ mod tests {
     use super::super::*;
     use super::*;
 
+    fn test_monitor_with_prefs(
+        config: crate::IssueMonitorConfig,
+        prefs: crate::IssueMonitorPrefs,
+    ) -> crate::IssueMonitorState {
+        let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor
+    }
+
     const LEGACY_REVERIFY_INTERVAL_SECS: i64 = 30 * 60;
 
     const RESET_AT: &str = "2026-09-21T08:41:00Z";
@@ -71,10 +80,11 @@ mod tests {
             ..IssueMonitorPrefs::default()
         };
         prefs.set_launch_profile_pool(agents.iter().map(|agent| profile(agent)).collect());
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         monitor.terminal_queue_push(&[42], "quota-test", FIRST_FAILURE_AT);
         monitor.record_candidate(IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Issue 42".to_string(),
             labels: Vec::new(),

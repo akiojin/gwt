@@ -234,7 +234,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         // Issue #4783 AC-R4: derive this delivery from a reopened owner,
         // rather than only seeding a fresh delivery over terminal history.
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-        let mut monitor = gwt::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             gwt::IssueMonitorConfig::default(),
             gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
         );
@@ -245,6 +245,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         gwt::scan_issue_monitor_candidates_with_provenance(
             &mut monitor,
             &[gwt::IssueMonitorIssue {
+                author_login: None,
                 number,
                 title: "SPEC: reopened Monitor owner".into(),
                 labels: vec!["gwt-spec".into()],
@@ -2015,8 +2016,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .pending_launch_deliveries
         .iter()
         .any(|delivery| delivery.delivery_id == delivery_id));
-    let restored =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
+    let restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
     assert_eq!(
         restored.launched_window_issue(&holder_window_id),
         None,
@@ -2039,8 +2039,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .pending_launch_deliveries
         .iter()
         .all(|delivery| delivery.delivery_id != delivery_id));
-    let monitor =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
+    let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
     assert_eq!(monitor.launched_window_issue(&holder_window_id), Some(3165));
     assert!(!fixture
         .runtime
@@ -4155,10 +4154,9 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
-    let saved_summary =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
-            .status_view()
-            .launch_profile_summary;
+    let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+        .status_view()
+        .launch_profile_summary;
     assert_eq!(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"

@@ -1615,8 +1615,7 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
         Some("2099-08-22T04:00:00Z")
     );
     assert!(!persisted.provider_quota_holds.contains_key("claude"));
-    let mut restored =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    let mut restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), persisted);
     assert_eq!(
         restored.status_view_at("2026-08-22T03:00:00Z").quota_hold,
         None,
@@ -1625,6 +1624,7 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
     restored.set_gui_connected(true);
     restored.terminal_queue_push(&[43], "operator", "2026-07-28T00:00:00Z");
     restored.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 43,
         title: "Healthy provider candidate".to_string(),
         labels: Vec::new(),

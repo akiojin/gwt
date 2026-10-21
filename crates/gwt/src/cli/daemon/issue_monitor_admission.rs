@@ -5,7 +5,7 @@ use crate::{IssueMonitorIssue, IssueMonitorPrefs, IssueMonitorState};
 
 pub(super) fn spawn(
     scope: gwt_core::daemon::RuntimeScope,
-    monitor: IssueMonitorState,
+    mut monitor: IssueMonitorState,
     gui_connected: bool,
     deadline: std::time::Instant,
     test_hooks: super::IssueMonitorWorkerTestHooks,
@@ -41,6 +41,7 @@ pub(super) fn spawn(
                         error.to_string(),
                     )
                 })?;
+        monitor.set_source_repository(Some((&owner, &repo)));
         prepare_with(
             monitor,
             &prefs,
@@ -137,8 +138,10 @@ mod tests {
                 ..IssueMonitorPrefs::default()
             },
         );
+        monitor.set_source_repository(Some(("example", "repo")));
         monitor.terminal_queue_push(&[42], "operator", "2026-10-16T00:00:00Z");
         monitor.record_candidate(IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "queued work".to_string(),
             labels: vec!["gwt-queued".to_string()],
@@ -221,6 +224,7 @@ mod tests {
             admission_override: Some(Arc::new(move |mut monitor| {
                 // Model an already observed queue row; remote refresh/probe are
                 // deterministic here, while control reception and commit are real.
+                monitor.set_source_repository(Some(("example", "repo")));
                 monitor.record_candidate(candidate.clone());
                 let prefs = monitor.prefs();
                 prepare_with(

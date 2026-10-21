@@ -880,12 +880,13 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     let delivery_id = "launch:effect-fresh-monitor-delivery";
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
 
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         ..gwt::IssueMonitorConfig::default()
     });
     monitor.terminal_queue_push(&[fixture.owner.number], "operator", "2026-07-28T00:00:00Z");
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: fixture.owner.number,
         title: "fresh linked-owner launch".to_string(),
         labels: vec!["bug".to_string()],
@@ -1029,6 +1030,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         let delivery_id = "launch:effect-fresh-monitor-failure";
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
         let candidate = gwt::IssueMonitorIssue {
+            author_login: None,
             number: fixture.owner.number,
             title: "fresh linked-owner launch".to_string(),
             labels: vec!["bug".to_string()],
@@ -1042,7 +1044,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             enabled: true,
             ..Default::default()
         };
-        let mut monitor = gwt::IssueMonitorState::new(config.clone());
+        let mut monitor = test_monitor(config.clone());
         monitor.set_gui_connected(true);
         monitor.set_autonomous_mode(true);
         monitor.terminal_queue_push(&[fixture.owner.number], "operator", "2026-07-28T00:00:00Z");
@@ -1321,7 +1323,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                 Some(message.as_str())
             );
         }
-        let mut restored = gwt::IssueMonitorState::with_prefs(config, prefs);
+        let mut restored = test_monitor_with_prefs(config, prefs);
         restored.set_gui_connected(true);
         if failure.starts_with("startup-timeout") {
             restored.record_candidate(candidate.clone());

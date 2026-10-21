@@ -432,7 +432,7 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
     let window_id = "tab-1::agent-42".to_string();
 
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut seeded = gwt::IssueMonitorState::with_prefs(
+    let mut seeded = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
             enabled: true,
