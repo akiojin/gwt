@@ -20875,12 +20875,19 @@ impl IssueMonitorState {
             record.review_dispatch_hold = None;
         }
         self.review_windows.remove(&issue_number);
+        // Releasing an old launch does not waive the current candidate gate,
+        // including when this fence is replayed after a prefs rebase.
+        let exclusion = self.inbox_item(issue_number).and_then(|item| {
+            issue_monitor_candidate_exclusion(&item.issue, self.source_repository)
+        });
         if let Some(item) = self
             .inbox
             .iter_mut()
             .find(|item| item.issue.number == issue_number)
         {
-            item.state = MonitorInboxState::Queued;
+            item.state = exclusion
+                .as_ref()
+                .map_or(MonitorInboxState::Queued, |(state, _)| *state);
             item.claim_id = None;
             item.launched_window_id = None;
             item.error_message = retry_record.and_then(|record| record.last_failure_message);
@@ -20888,9 +20895,11 @@ impl IssueMonitorState {
             item.blocked_by_claim_id = None;
             item.claim_expires_at = None;
             item.claim_block_issue_updated_at = None;
-            item.exclusion_reason = None;
+            item.exclusion_reason = exclusion.as_ref().map(|(_, reason)| reason.clone());
         }
-        if !self.queue.contains(&issue_number) {
+        if exclusion.is_some() {
+            self.queue.retain(|queued| *queued != issue_number);
+        } else if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
         }
         self.apply_priority_order_to_queue();
@@ -21912,6 +21921,26 @@ impl IssueMonitorState {
                 self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
                 self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
                 outcome.requeued.push(number);
+            } else if settlements[&number].settlement == IssueMonitorExecutionSettlement::Completed
+                && self.terminal_queue_contains(number)
+                && !self.issue_is_closed(number)
+                && !self.merged_issues.contains(&number)
+                && !self.failed_issues.contains_key(&number)
+                && self.inbox_item(number).is_some_and(|item| {
+                    item.issue.state == IssueMonitorIssueState::Open
+                        && has_gwt_spec_label(&item.issue.labels)
+                        && item.issue.readiness == IssueMonitorReadiness::NotReady
+                })
+            {
+                // A failed SPEC read is unknown, not evidence that this owner
+                // finished. Keep its selection while the existing gate waits
+                // for readback, and fence the released launch across rebase.
+                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(
+                    number,
+                    "completed SPEC slice; refresh required",
+                    now,
+                );
             } else {
                 self.terminal_queue_remove(&[number], now);
             }
@@ -44582,6 +44611,72 @@ mod tests {
                 .launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
         );
+    }
+
+    #[test]
+    fn issue_5876_completed_slice_keeps_queue_while_spec_readback_is_not_ready() {
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-09-07T03:00:00Z",
+        );
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.set_active_launch_id(42, Some("old-tab::slice".into()));
+        let attempts = monitor.attempt_count(42);
+        let mut unread = candidate.clone();
+        unread.readiness = IssueMonitorReadiness::NotReady;
+        unread.body = None;
+        monitor.record_candidate(unread.clone());
+        let stale = monitor.prefs();
+        let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
+        observed.get_mut(&42).unwrap().holder_host_dead = true;
+
+        let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+        assert_eq!(outcome.released, vec![42]);
+        assert!(monitor
+            .stored_local_terminal_queue_numbers()
+            .any(|n| n == 42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .active_launch_id
+            .is_none());
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "stale launch stays released");
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NotReady
+        );
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.config.enabled = true;
+        restored.set_gui_connected(true);
+        restored.record_candidate(unread);
+        assert_eq!(restored.active_count(), 0, "stale launch stays released");
+        assert!(restored.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(restored.attempt_count(42), attempts);
+        restored.record_candidate(candidate);
+        let next = restored
+            .next_launch_request(IDLE_NOW)
+            .expect("fresh readback resumes");
+        assert_eq!(next.issue_number, 42);
+        assert_eq!(
+            next.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(restored.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(restored.attempt_count(42), attempts);
     }
 
     #[test]
