@@ -1,5 +1,92 @@
 use super::*;
 
+/// Issue #5839: ordinary notification delivery and the authenticated PM route
+/// must report failure instead of feeding Codex's current Find surface.
+#[test]
+fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    runtime.register_pty_writer(&pm_window_id, None);
+    let target = "tab-1::other-window";
+    insert_test_pane_runtime(&mut runtime, target);
+    runtime.register_pty_writer(target, None);
+    let pane = Arc::clone(&runtime.runtimes[target].pane);
+    pane.lock()
+        .unwrap()
+        .process_bytes(b"\x1b[2J\x1b[H/ T R A N S C R I P T / / /\x1b[21;1HFind: ");
+    let events = runtime.pane_send_input_to_window_events(
+        "client".into(),
+        target,
+        "watchdog notification\r",
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::PaneSendResult { ok: false, error: Some(error), .. }
+                if error.contains("Transcript")
+        )),
+        "{events:?}"
+    );
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135765839";
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client".into(),
+        grant,
+        operation_id,
+        target,
+        "PM notification\r",
+        Some(responder),
+    );
+    assert!(matches!(
+        result.blocking_recv().expect("terminal PM result"),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("Transcript")
+    ));
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let receipt = gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+        .expect("receipt read")
+        .expect("durable refusal");
+    assert_eq!(
+        receipt.status,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Refused
+    );
+
+    assert!(
+        runtime.terminal_input_events(target, "\x1b").is_empty(),
+        "raw recovery keys remain available"
+    );
+    pane.lock()
+        .unwrap()
+        .process_bytes(b"\x1b[2J\x1b[Hcodex\r\n> ");
+    let events = runtime.pane_send_input_to_window_events(
+        "client".into(),
+        target,
+        "recovered notification\r",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })),
+        "{events:?}"
+    );
+}
+
 /// SPEC-3431 FR-111 (T-206): the server-side PM principal gate for pane
 /// message delivery — re-verified immediately before the injection. Ordinary
 /// sessions, stale registrations, and unknown windows are refused with a

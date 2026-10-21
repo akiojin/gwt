@@ -1996,6 +1996,7 @@ enum UserEvent {
         data: Vec<u8>,
         /// Pane stream position after this chunk was parsed (Issue #4095).
         seq: u64,
+        screen: Option<String>,
     },
     /// A submit-terminated choice or standalone Escape is about to be written
     /// through the WebSocket PTY fast path. The write bypasses AppRuntime, so
@@ -2181,6 +2182,7 @@ enum UserEvent {
         status: Box<gwt::IssueMonitorStatusView>,
     },
     IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
+    IssueMonitorMaxActivePrepared(Box<app_runtime::PreparedIssueMonitorMaxActive>),
     IssueMonitorProfilesSaved(Box<app_runtime::IssueMonitorProfilesSaveCompletion>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -4737,6 +4739,7 @@ mod tests {
             issue_monitor_fallback_commit_timeout:
                 crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
             issue_monitor_profile_saves: HashMap::new(),
+            issue_monitor_max_active_saves: HashMap::new(),
             runtime_hook_agent_failures_in_flight: HashMap::new(),
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
@@ -9457,6 +9460,10 @@ mod tests {
 
     #[test]
     fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
+        // Issue #5782: Git readers must serialize with process-wide PATH fixtures.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -11265,8 +11272,9 @@ fn main() -> std::io::Result<()> {
                 incarnation,
                 data,
                 seq,
+                screen,
             }) => {
-                let events = app.handle_runtime_output_event(id, incarnation, data, seq);
+                let events = app.handle_runtime_output_event(id, incarnation, data, seq, screen);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeApprovalResolutionStarted { id }) => {
@@ -11622,6 +11630,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorMaxActivePrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_max_active_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);

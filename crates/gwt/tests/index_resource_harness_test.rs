@@ -153,6 +153,35 @@ struct Harness {
 }
 
 impl Harness {
+    /// Match the native warm-query transport used by index_search.
+    fn search_resident(&self, worker_dir: &Path, query: &str) -> serde_json::Value {
+        use std::io::{BufRead, BufReader, Write};
+
+        let endpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(worker_dir.join("endpoint.json")).unwrap()).unwrap();
+        let port = u16::try_from(endpoint["port"].as_u64().unwrap()).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut request = serde_json::to_vec(&json!({
+            "token": endpoint["token"],
+            "args": {
+                "action": "search-multi", "repo_hash": self.repo_hash,
+                "project_root": self.project, "worktree_hash": self.worktree_hash,
+                "query": query, "scopes": "files", "file_index_protocol": "v2",
+            }
+        }))
+        .unwrap();
+        request.push(b'\n');
+        stream.write_all(&request).unwrap();
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        result
+    }
+
     fn spawn(&self, action: &str, extra: &[&str]) -> Child {
         gwt_core::process::hidden_command(&self.python)
             .arg(&self.runner)
@@ -708,6 +737,8 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
     let build_args: Vec<_> = "--scope files --mode full --file-index-protocol v2"
         .split_whitespace()
         .collect();
+    let worker_dir = harness.home.join("query-worker");
+    let worker_dir_arg = worker_dir.to_str().unwrap();
     let search_args = [
         "--scopes",
         "files",
@@ -716,6 +747,8 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
         "--file-index-protocol",
         "v2",
         "--no-auto-build",
+        "--worker-dir",
+        worker_dir_arg,
     ];
     let search_key = TargetKey::search(&harness.repo_hash, Some(&harness.worktree_hash));
     let baseline = request_owner(JobPriority::ManualRebuild);
@@ -790,8 +823,9 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
                 )
                 .unwrap();
             let lease_wait_ms = started.elapsed().as_millis();
-            let result = invoke("search-multi", &search_args);
+            let result = harness.search_resident(&worker_dir, "filesystem watcher debounce");
             let warm_search_ms = started.elapsed().as_millis();
+            println!("resident warm search timings: {}", result["timings_ms"]);
             drop(lease);
             assert_eq!(result["worker_pid"].as_u64(), Some(u64::from(worker_pid)));
             assert_eq!(result["model_load_ms"], 0, "{result}");

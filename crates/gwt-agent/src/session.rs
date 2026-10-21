@@ -706,6 +706,15 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
+    /// Apply hook status without reviving an explicitly stopped or closed Session.
+    /// Explicit launch enables restore before the new child's hooks run.
+    pub fn record_hook_status(&mut self, status: AgentStatus) {
+        if self.status == AgentStatus::Stopped && !self.restore_window_on_startup {
+            return;
+        }
+        self.update_status(status);
+    }
+
     /// Persist that a managed runtime hook was observed for this session.
     pub fn record_hook_event(&mut self, event: &str) {
         let now = Utc::now();
@@ -713,7 +722,7 @@ impl Session {
         self.last_hook_event_at = Some(now);
         self.updated_at = now;
         if let Some(status) = hook_event_status(event) {
-            self.update_status(status);
+            self.record_hook_status(status);
         }
     }
 
@@ -727,7 +736,7 @@ impl Session {
             self.last_hook_event = Some("Stop".to_string());
             self.last_hook_event_at = Some(now);
         }
-        self.update_status(AgentStatus::Idle);
+        self.record_hook_status(AgentStatus::Idle);
     }
 
     /// Record a process death without a completed Stop boundary.

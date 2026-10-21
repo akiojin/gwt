@@ -32,6 +32,7 @@ pub(crate) struct PendingRuntimeOutput {
     incarnation: Option<u64>,
     deadline: Instant,
     pub(super) data: Vec<u8>,
+    screen: Option<String>,
 }
 
 /// Issue #3274: how many trailing non-empty screen lines survive into the
@@ -515,7 +516,14 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        let mut events = self.handle_runtime_output_inner(id.clone(), data, true, None);
+        let screen = self.runtimes.get(&id).and_then(|runtime| {
+            runtime
+                .pane
+                .lock()
+                .ok()
+                .map(|pane| pane.screen().contents())
+        });
+        let mut events = self.handle_runtime_output_inner(id.clone(), data, true, None, screen);
         events.extend(self.flush_runtime_output_batch(&id));
         events
     }
@@ -529,11 +537,12 @@ impl AppRuntime {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        screen: Option<String>,
     ) -> Vec<OutboundEvent> {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output_inner(id, data, true, Some(seq))
+        self.handle_runtime_output_inner(id, data, true, Some(seq), screen)
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -557,7 +566,7 @@ impl AppRuntime {
         // Daemon publications describe another process; a local PTY
         // incarnation is neither
         // available nor authoritative for this path.
-        let mut events = self.handle_runtime_output_inner(id, data, false, None);
+        let mut events = self.handle_runtime_output_inner(id, data, false, None, None);
         events.extend(preview);
         events
     }
@@ -568,6 +577,7 @@ impl AppRuntime {
         data: Vec<u8>,
         publish_to_daemon: bool,
         stream_seq: Option<u64>,
+        screen: Option<String>,
     ) -> Vec<OutboundEvent> {
         let _project_scope = self.enter_window_log_scope(&id);
         if !self.window_lookup.contains_key(&id) {
@@ -586,6 +596,7 @@ impl AppRuntime {
         }
         // Raw bytes retain their original stream position and latency. Only
         // screen-derived work and the best-effort daemon relay are batched.
+        let mut flush = false;
         if publish_to_daemon {
             let incarnation = self.runtimes.get(&id).map(|runtime| runtime.incarnation);
             let pending = self
@@ -595,27 +606,35 @@ impl AppRuntime {
                     incarnation,
                     deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
                     data: Vec::new(),
+                    screen: None,
                 });
             if pending.incarnation != incarnation {
                 *pending = PendingRuntimeOutput {
                     incarnation,
                     deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
                     data: Vec::new(),
+                    screen: None,
                 };
             }
             pending.data.extend_from_slice(&data);
+            pending.screen = screen;
+            flush = pending.data.len() >= gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES;
         }
         let Some(project_key) = self.project_key_for_window(&id).cloned() else {
             return Vec::new();
         };
-        vec![OutboundEvent::project(
+        let mut events = vec![OutboundEvent::project(
             project_key,
             BackendEvent::TerminalOutput {
-                id,
+                id: id.clone(),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
             },
         )
-        .with_terminal_stream_seq(stream_seq)]
+        .with_terminal_stream_seq(stream_seq)];
+        if flush {
+            events.extend(self.flush_runtime_output_batch(&id));
+        }
+        events
     }
 
     pub(crate) fn next_runtime_output_deadline(&self) -> Option<Instant> {
@@ -652,20 +671,18 @@ impl AppRuntime {
         let Some(project_key) = self.project_key_for_window(id).cloned() else {
             return Vec::new();
         };
+        let batch_started = Instant::now();
         let _project_scope = self.enter_window_log_scope(id);
-        // Exactly one render supplies preview and every output-driven detector.
-        // No render or timer remains when this pane stops writing.
-        let screen = self.runtimes.get(id).and_then(|runtime| {
-            runtime
-                .pane
-                .lock()
-                .ok()
-                .map(|pane| pane.screen().contents())
-        });
+        let scope_elapsed = batch_started.elapsed();
+        // The parser worker captured this screen with the batch's stream
+        // position. Never wait for the Pane mutex or render on the GUI thread.
+        let screen = pending.screen;
         let preview = screen.as_deref().map(terminal_preview_text);
+        let preview_elapsed = batch_started.elapsed();
         if let Some(tab) = self.tab(&address.tab_id) {
             publish_runtime_output_change(&tab.project_root, id, &pending.data, preview.clone());
         }
+        let relay_elapsed = batch_started.elapsed();
         let mut events = Vec::new();
         if let Some(text) = preview {
             events.push(OutboundEvent::project(
@@ -685,15 +702,31 @@ impl AppRuntime {
             .and_then(|screen| gwt::window_state::approval_prompt_fingerprint(provider, screen));
         self.observe_permission_prompt_regression(id, prompt);
         events.extend(self.observe_runtime_approval_prompt(id, prompt));
+        let approval_elapsed = batch_started.elapsed();
         events.extend(self.observe_provider_quota_notice(
             id,
             screen.as_deref(),
             chrono::Utc::now(),
         ));
+        let quota_elapsed = batch_started.elapsed();
         let error_tail = screen
             .as_deref()
             .and_then(|screen| screen_tail_text(screen, API_ERROR_TAIL_LINES, "\n"));
         events.extend(self.observe_provider_api_error(id, error_tail.as_deref()));
+        // Flushes run at the start of any native callback, so the outer
+        // callback's label alone cannot establish this work's latency budget.
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            marker = "issue_5379_runtime_output_batch",
+            elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            scope_us = scope_elapsed.as_micros() as u64,
+            preview_us = (preview_elapsed - scope_elapsed).as_micros() as u64,
+            relay_us = (relay_elapsed - preview_elapsed).as_micros() as u64,
+            approval_us = (approval_elapsed - relay_elapsed).as_micros() as u64,
+            quota_us = (quota_elapsed - approval_elapsed).as_micros() as u64,
+            api_error_us = (batch_started.elapsed() - quota_elapsed).as_micros() as u64,
+            "GUI runtime output batch handled"
+        );
         events
     }
 
@@ -1563,9 +1596,9 @@ impl AppRuntime {
         }
         let notice = screen
             .and_then(|screen| {
-                gwt_core::usage::detect_provider_limit_notice(
+                gwt_core::usage::limit_notice::detect_provider_limit_notice_with_clock(
                     screen,
-                    &now.with_timezone(&chrono::Local),
+                    || now.with_timezone(&chrono::Local),
                 )
             })
             .filter(|notice| notice.provider == self.quota_provider_for_window(window_id));

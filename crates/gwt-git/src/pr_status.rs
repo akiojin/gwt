@@ -355,6 +355,9 @@ pub struct PrInventoryFields {
     /// ref (`work/issue-<owner>`) is exactly what the Issue Monitor refuses
     /// to fresh-launch over (unique commits), so it decides executability.
     pub head_ref_name: String,
+    /// Measured head identity; missing fields remain unknown on older reads.
+    pub head_sha: Option<String>,
+    pub is_cross_repository: Option<bool>,
     /// PR base branch (`baseRefName`). The ref a conflict or a behind-count is
     /// measured against (SPEC #3835 AC-4).
     pub base_ref_name: String,
@@ -443,6 +446,10 @@ pub struct PrInventoryItem {
     pub is_draft: bool,
     #[serde(default)]
     pub head_ref_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_cross_repository: Option<bool>,
     #[serde(default)]
     pub base_ref_name: String,
     pub updated_at: Option<DateTime<Utc>>,
@@ -688,6 +695,8 @@ impl PrInventoryItem {
             url: self.url.clone(),
             is_draft: self.is_draft,
             head_ref_name: self.head_ref_name.clone(),
+            head_sha: self.head_sha.clone(),
+            is_cross_repository: self.is_cross_repository,
             base_ref_name: self.base_ref_name.clone(),
             updated_at: self.updated_at,
             created_at: self.created_at,
@@ -901,9 +910,16 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         class == PrLifecycleClass::Behind && merge_queue_owns_base_sync(fields);
     let base_sync_not_required =
         class == PrLifecycleClass::Behind && fields.required_status_checks_strict == Some(false);
+    let external_merge_route_required = (class == PrLifecycleClass::MergeCandidate
+        || (base_sync_not_required && fields.ci_status.eq_ignore_ascii_case("SUCCESS")))
+        && !fields.is_draft
+        && fields.is_cross_repository == Some(true)
+        && !fields.auto_merge_enabled;
     let default_action = match (class, fields.is_draft) {
         (PrLifecycleClass::ReadyToPromote, _) => "mark ready".to_string(),
         (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
+        (_, _) if external_merge_route_required =>
+            "human merge required unless the owner delegates this reviewed external fork PR and exact SHA; repository automation may exclude external forks".to_string(),
         (PrLifecycleClass::MergeCandidate, false) => "propose merge".to_string(),
         (PrLifecycleClass::AutoMergeStalled, _) => {
             "rerun the Auto Merge PR workflow run for this head branch".to_string()
@@ -928,7 +944,9 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     // a blocker because the fresh-launch guard refused any ref with unique
     // commits. The guard now inherits that ref, so the relaunch is executable
     // and only a missing or closed owner still blocks it.
-    let blocker = if owner_issue_closed {
+    let blocker = if external_merge_route_required {
+        Some("external_fork_merge_route_required")
+    } else if owner_issue_closed {
         Some("owner_issue_closed")
     } else if class.relaunches_owner() && owner.is_none() {
         Some("owner_unknown")
@@ -941,9 +959,13 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         default_action_operation(class, fields.is_draft)
     };
-    let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
-    let fallback =
-        (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
+    let default_action_executable =
+        !external_merge_route_required && !(class.relaunches_owner() && blocker.is_some());
+    let fallback = if external_merge_route_required {
+        Some("After owner delegation and review, use pr.auto_merge.enable with number, reviewed_head_sha and scoped instruction_id or approval_id; otherwise human merge required. Report once and wait for delegation or changed PR state.".to_string())
+    } else {
+        (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string())
+    };
     PrLifecycleDecision {
         class,
         stale: false,
@@ -1033,6 +1055,8 @@ fn inventory_item_from_fields(
         url: fields.url,
         is_draft: fields.is_draft,
         head_ref_name: fields.head_ref_name,
+        head_sha: fields.head_sha,
+        is_cross_repository: fields.is_cross_repository,
         base_ref_name: fields.base_ref_name,
         updated_at: fields.updated_at,
         created_at: fields.created_at,
@@ -1113,6 +1137,14 @@ fn inventory_item_from_value(
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         head_ref_name: status.head_ref_name,
+        head_sha: value
+            .get("headRefOid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|sha| !sha.is_empty())
+            .map(str::to_owned),
+        is_cross_repository: value
+            .get("isCrossRepository")
+            .and_then(serde_json::Value::as_bool),
         base_ref_name: value
             .get("baseRefName")
             .and_then(serde_json::Value::as_str)
@@ -1199,9 +1231,9 @@ fn inventory_row_is_open(row: &serde_json::Value) -> bool {
 /// the same cycle is never reported, and the wait is at most one cycle.
 const AUTO_MERGE_STALLED_AFTER_CYCLES: u32 = 1;
 
-const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences";
+const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,state,isDraft,headRefName,headRefOid,isCrossRepository,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences";
 const INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING: &str =
-    "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
+    "number,title,url,state,isDraft,headRefName,headRefOid,isCrossRepository,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest";
 
 /// File under the machine-local project dir that remembers the previous
 /// `pr.list` observation per PR (Issue #3868 AC-6).
@@ -3557,10 +3589,47 @@ pub struct PrCompletionSnapshot {
 }
 
 pub fn fetch_pr_completion_snapshot(repo_path: &Path, number: u64) -> Result<PrCompletionSnapshot> {
-    fetch_pr_completion_snapshot_with(repo_path, number, run_gh_command)
+    fetch_pr_completion_snapshot_with(None, repo_path, number, run_gh_command)
+}
+
+/// Fresh evidence for a fully qualified `github.com/owner/repo`, independent
+/// of gh's default remote and ambient repository/host environment overrides.
+pub fn fetch_pr_completion_snapshot_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+) -> Result<PrCompletionSnapshot> {
+    fetch_pr_completion_snapshot_with(Some(repository), repo_path, number, run_gh_command)
+}
+
+fn pinned_pr_command_args(repository: Option<&str>, args: &[&str]) -> Vec<String> {
+    let is_api = args.first() == Some(&"api");
+    let mut args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    if let Some(repository) = repository {
+        if is_api {
+            let mut parts = repository.split('/');
+            let _host = parts.next();
+            let owner = parts.next().unwrap_or_default();
+            let repo = parts.next().unwrap_or_default();
+            // gh substitutes these exact fields from its default repository,
+            // even with --hostname set. Pin only the named field arguments.
+            for arg in &mut args {
+                if arg == "owner={owner}" {
+                    *arg = format!("owner={owner}");
+                } else if arg == "repo={repo}" {
+                    *arg = format!("repo={repo}");
+                }
+            }
+            args.extend(["--hostname".into(), "github.com".into()]);
+        } else {
+            args.extend(["--repo".into(), repository.into()]);
+        }
+    }
+    args
 }
 
 fn fetch_pr_completion_snapshot_with<F>(
+    repository: Option<&str>,
     repo_path: &Path,
     number: u64,
     run_gh: F,
@@ -3568,8 +3637,13 @@ fn fetch_pr_completion_snapshot_with<F>(
 where
     F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
+    let run_gh = |path: &Path, args: &[&str]| {
+        let args = pinned_pr_command_args(repository, args);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_gh(path, &args)
+    };
     let number_arg = number.to_string();
-    let fields = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,body";
+    let fields = "number,title,url,state,isDraft,headRefName,headRefOid,isCrossRepository,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,autoMergeRequest,body";
     let output = run_gh(repo_path, &["pr", "view", &number_arg, "--json", fields])?;
     if !output.success {
         return Err(GwtError::Git(format!(
@@ -3774,9 +3848,30 @@ pub fn fetch_pr_auto_merge_remote_state(
     repo_path: &Path,
     number: u64,
 ) -> Option<PrAutoMergeRemoteState> {
+    fetch_pr_auto_merge_remote_state_with(None, repo_path, number, run_gh_command)
+}
+
+/// Read reconciliation state from the same explicit repository as the grant.
+pub fn fetch_pr_auto_merge_remote_state_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+) -> Option<PrAutoMergeRemoteState> {
+    fetch_pr_auto_merge_remote_state_with(Some(repository), repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_auto_merge_remote_state_with<F>(
+    repository: Option<&str>,
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Option<PrAutoMergeRemoteState>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
     let number = number.to_string();
-    let output = run_gh_command(
-        repo_path,
+    let args = pinned_pr_command_args(
+        repository,
         &[
             "pr",
             "view",
@@ -3784,8 +3879,9 @@ pub fn fetch_pr_auto_merge_remote_state(
             "--json",
             "state,headRefOid,autoMergeRequest,mergeCommit",
         ],
-    )
-    .ok()?;
+    );
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run_gh(repo_path, &args).ok()?;
     if !output.success {
         return None;
     }
@@ -3829,6 +3925,25 @@ pub fn arm_pr_auto_merge(
     remote: &PrAutoMergeRemoteState,
 ) -> AutoMergeMutationOutcome {
     arm_pr_auto_merge_with(
+        None,
+        repo_path,
+        number,
+        reviewed_head_sha,
+        remote,
+        run_auto_merge_command,
+    )
+}
+
+/// Arm the reviewed head in a fully qualified `github.com/owner/repo`.
+pub fn arm_pr_auto_merge_in_repository(
+    repo_path: &Path,
+    repository: &str,
+    number: u64,
+    reviewed_head_sha: &str,
+    remote: &PrAutoMergeRemoteState,
+) -> AutoMergeMutationOutcome {
+    arm_pr_auto_merge_with(
+        Some(repository),
         repo_path,
         number,
         reviewed_head_sha,
@@ -3838,6 +3953,7 @@ pub fn arm_pr_auto_merge(
 }
 
 fn arm_pr_auto_merge_with<F>(
+    repository: Option<&str>,
     repo_path: &Path,
     number: u64,
     reviewed_head_sha: &str,
@@ -3878,8 +3994,8 @@ where
     }
 
     let number = number.to_string();
-    classify_auto_merge_command(run_gh(
-        repo_path,
+    let args = pinned_pr_command_args(
+        repository,
         &[
             "pr",
             "merge",
@@ -3889,7 +4005,9 @@ where
             "--match-head-commit",
             reviewed_head_sha,
         ],
-    ))
+    );
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    classify_auto_merge_command(run_gh(repo_path, &args))
 }
 
 fn merge_pr_auto_with<F>(
@@ -5163,10 +5281,48 @@ mod tests {
     }
 
     #[test]
+    fn auto_merge_remote_read_pins_the_authorized_repository() {
+        let state = fetch_pr_auto_merge_remote_state_with(
+            Some("github.com/o/r"),
+            Path::new("/repo"),
+            7,
+            |_, args| {
+                assert_eq!(
+                    args,
+                    [
+                        "pr",
+                        "view",
+                        "7",
+                        "--json",
+                        "state,headRefOid,autoMergeRequest,mergeCommit",
+                        "--repo",
+                        "github.com/o/r"
+                    ]
+                );
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: r#"{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null}"#
+                        .into(),
+                    stderr: String::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state,
+            PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".into(),
+                auto_merge_requested: false
+            }
+        );
+    }
+
+    #[test]
     fn arm_pr_auto_merge_preserves_confirmed_already_target_and_head_changed_outcomes() {
         let repo = Path::new("/tmp/repo");
         let mut calls = 0;
         let already_armed = arm_pr_auto_merge_with(
+            None,
             repo,
             7,
             "abc123",
@@ -5188,6 +5344,7 @@ mod tests {
         assert_eq!(calls, 0, "already-armed readback must not re-submit");
 
         let already_merged = arm_pr_auto_merge_with(
+            None,
             repo,
             7,
             "abc123",
@@ -5207,6 +5364,7 @@ mod tests {
         );
 
         let merged_head_changed = arm_pr_auto_merge_with(
+            None,
             repo,
             7,
             "abc123",
@@ -5229,6 +5387,7 @@ mod tests {
         assert_eq!(calls, 0, "changed merged HEAD must not re-submit");
 
         let head_changed = arm_pr_auto_merge_with(
+            None,
             repo,
             7,
             "abc123",
@@ -5256,6 +5415,7 @@ mod tests {
         assert_eq!(calls, 0, "changed HEAD must reject before mutation");
 
         let confirmed = arm_pr_auto_merge_with(
+            Some("github.com/o/r"),
             repo,
             7,
             "abc123",
@@ -5275,6 +5435,8 @@ mod tests {
                         "--squash",
                         "--match-head-commit",
                         "abc123",
+                        "--repo",
+                        "github.com/o/r",
                     ]
                 );
                 Ok(GhCliOutput {
@@ -5297,7 +5459,7 @@ mod tests {
             auto_merge_requested: false,
         };
 
-        let pre_submit = arm_pr_auto_merge_with(repo, 7, "abc123", &remote, |_p, _args| {
+        let pre_submit = arm_pr_auto_merge_with(None, repo, 7, "abc123", &remote, |_p, _args| {
             Err(AutoMergeCommandError::PreSubmit(
                 "gh executable unavailable".to_string(),
             ))
@@ -5307,7 +5469,7 @@ mod tests {
             AutoMergeMutationOutcome::PreSubmit("gh executable unavailable".to_string())
         );
 
-        let ambiguous = arm_pr_auto_merge_with(repo, 7, "abc123", &remote, |_p, _args| {
+        let ambiguous = arm_pr_auto_merge_with(None, repo, 7, "abc123", &remote, |_p, _args| {
             Err(AutoMergeCommandError::RemoteOutcomeUnknown(
                 "deadline expired after process start".to_string(),
             ))
@@ -5476,6 +5638,8 @@ mod tests {
             url: "https://github.com/o/r/pull/1".to_string(),
             is_draft: false,
             head_ref_name: "work/issue-10".to_string(),
+            head_sha: None,
+            is_cross_repository: None,
             base_ref_name: "develop".to_string(),
             updated_at: Some("2026-08-30T00:00:00Z".parse().expect("now")),
             created_at: Some("2026-08-30T00:00:00Z".parse().expect("created")),
@@ -5494,6 +5658,48 @@ mod tests {
             unresolved_review_threads: None,
             coderabbit_review_complete: None,
         }
+    }
+
+    #[test]
+    fn external_fork_inventory_explains_delegation_or_human_merge_fallback() {
+        let mut row = serde_json::json!({
+            "number":17,"title":"External contribution","state":"OPEN","isDraft":false,
+            "headRefName":"contribution","headRefOid":"a".repeat(40),
+            "isCrossRepository":true,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+            "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],
+            "reviewDecision":"APPROVED","autoMergeRequest":null,
+        });
+        let read = |row: &serde_json::Value| {
+            parse_pr_inventory_json(&serde_json::json!([row]).to_string(), Utc::now())
+                .unwrap()
+                .remove(0)
+        };
+        let external = read(&row);
+        assert_eq!(external.head_sha.as_deref(), row["headRefOid"].as_str());
+        assert_eq!(external.is_cross_repository, Some(true));
+        assert!(!external.default_action_executable);
+        assert!(external.default_action.contains("human merge required"));
+        assert!(external.default_action.contains("external fork"));
+        assert!(external
+            .fallback
+            .as_deref()
+            .unwrap()
+            .contains("pr.auto_merge.enable"));
+        row["autoMergeRequest"] = serde_json::json!({"enabledAt":"2026-10-21T00:00:00Z"});
+        assert!(!read(&row).default_action.contains("human merge required"));
+        row["isCrossRepository"] = false.into();
+        row["autoMergeRequest"] = serde_json::Value::Null;
+        assert_eq!(read(&row).default_action, "propose merge");
+        row.as_object_mut().unwrap().remove("isCrossRepository");
+        assert_eq!(
+            read(&row).default_action,
+            "propose merge",
+            "unread metadata stays unknown"
+        );
+        row["isCrossRepository"] = true.into();
+        row["mergeStateStatus"] = "BEHIND".into();
+        row[GWT_STRICT_STATUS_CHECKS_KEY] = false.into();
+        assert!(read(&row).default_action.contains("human merge required"));
     }
 
     /// A Draft PR whose promotion conditions are all met (SPEC #3835 AC-12).
@@ -5518,10 +5724,17 @@ mod tests {
     #[test]
     fn completion_snapshot_reads_current_pr_and_review_without_inventory_cache() {
         let calls = std::cell::RefCell::new(Vec::new());
-        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+        let snapshot = fetch_pr_completion_snapshot_with(Some("github.com/o/r"), Path::new("/repo"), 42, |_, args| {
             calls.borrow_mut().push(args.join(" "));
             let stdout = if args[0] == "pr" {
-                serde_json::json!({"number":42,"state":"OPEN","isDraft":false,"headRefName":"work/issue-5034","headRefOid":"verified-head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"}).to_string()
+                serde_json::json!({"number":42,"state":"OPEN","isDraft":false,"headRefName":"work/issue-5034","headRefOid":"verified-head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"}).to_string()
+            } else if args.iter().any(|arg| arg.contains("requiresStrictStatusChecks")) {
+                assert!(args.contains(&"owner=o"), "strict policy must use the authorized repository: {args:?}");
+                assert!(args.contains(&"repo=r"));
+                serde_json::json!({"data":{"repository":{"pr_42":{
+                    "baseRef":{"branchProtectionRule":{"requiresStrictStatusChecks":false}},
+                    "isMergeQueueEnabled":false
+                }}}}).to_string()
             } else {
                 serde_json::json!({"data":{"repository":{"pullRequest":{
                     "reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}},
@@ -5533,17 +5746,20 @@ mod tests {
         }).unwrap();
         assert_eq!(snapshot.head_sha, "verified-head");
         assert_eq!(snapshot.inventory.completion_blocker(), None);
-        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(calls.borrow().len(), 3);
         assert!(calls.borrow()[0].starts_with("pr view 42 --json"));
         assert!(calls.borrow()[1].starts_with("api graphql"));
         assert!(calls.borrow()[1].contains("pageInfo { hasNextPage }"));
+        assert!(calls.borrow()[0].ends_with("--repo github.com/o/r"));
+        assert!(calls.borrow()[1].ends_with("--hostname github.com"));
+        assert!(calls.borrow()[2].ends_with("--hostname github.com"));
     }
 
     #[test]
     fn completion_snapshot_refuses_unknown_draft_and_unread_review() {
         let payload = serde_json::json!({"number":42,"state":"OPEN","headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"});
         let read = |value: serde_json::Value| {
-            fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+            fetch_pr_completion_snapshot_with(None, Path::new("/repo"), 42, |_, args| {
                 Ok(GhCliOutput {
                     success: args[0] == "pr",
                     stdout: value.to_string(),
@@ -5563,7 +5779,7 @@ mod tests {
 
     #[test]
     fn completion_snapshot_refuses_truncated_review_threads() {
-        let snapshot = fetch_pr_completion_snapshot_with(Path::new("/repo"), 42, |_, args| {
+        let snapshot = fetch_pr_completion_snapshot_with(None, Path::new("/repo"), 42, |_, args| {
             let stdout = if args[0] == "pr" {
                 serde_json::json!({"number":42,"state":"OPEN","isDraft":true,"headRefName":"work/issue-5034","headRefOid":"head","url":"https://github.com/o/r/pull/42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"body":"Agent Visual Check: n/a (no UI surface)"})
             } else {

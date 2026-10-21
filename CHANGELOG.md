@@ -1,6 +1,104 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.132.0] - 2026-10-21
+
+### Bug Fixes
+
+- **perf:** Verify source fingerprints across line endings
+- **test:** Check live fixture before browser allocation
+- **issue-monitor:** Max_active の保存をバックグラウンド化
+- **monitor:** Release closed bindings and preserve scan retries
+- **monitor:** Reconcile closed bindings from daemon snapshots
+- **monitor:** Release bindings on successful owner termination
+- **actions:** Support gh versions without the escape flag
+- **runtime:** 明示 close 後の Session 復元を抑止
+- **runtime:** Direct preset の Session を close 用キャッシュへ登録
+- **git:** Retain recent metadata failure fences
+- **index:** Shorten background handover on Windows
+- **runtime:** Codex の履歴検索中への通知入力を拒否
+- **execution:** Select completion PR by verified head
+- **pm:** Expose missing goal metadata
+- **monitor:** Launch ACK と PM authority 復旧を修復
+- **git:** Coordinate launch ref reads with config writers
+- **issue-monitor:** Recover stopped holders before duplicate launch
+- **verify:** Diagnose self-held verification leases immediately
+- **github:** 外部 PR の委任配送と wrapper 検出を修正
+- **verify:** Refuse degraded launches without a compatible daemon
+- **verify:** Prevent git authentication from wedging test runners
+- **test:** Keep clone and monitor fixtures offline
+- **test:** Reject rewritten network origins in scan fixtures
+- **verify:** Preserve fixture identity and block inherited askpass
+- **deps:** Update TLS certificate validation crates
+
+### Documentation
+
+- **perf:** Preserve capped latency results for delivery
+
+### Features
+
+- **pm:** Retain recurring planning change evidence
+- **pm:** Issue trace に inbox の観測状態を表示する
+- **pm:** Monitor の容量観測を計画状況へ追加する
+- **pm:** Expose snapshot-relative launch activity
+- **pm:** Expose snapshot-relative claim block deadlines
+- **pm:** Report declared wait timing from monitor snapshots
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 5379 delivery continuation
+- **work:** Associate issue 5379 with delivery PR
+- **work:** Record monitor binding recovery PR
+- **work:** Link recurring planning audit to PR
+- **work:** Record issue 1921 dependency handoff
+- **work:** Resume remote branches delivery after restart
+- **work:** Link remote branches recovery to delivery PR
+- **work:** Issue #5495 の再開と配信状態を記録
+- **work:** Reconcile recovery acceptance after PM scope ruling
+- **work:** Link goal metadata diagnostics to PR
+- **work:** Record issue 5694 pull request delivery
+- **work:** Link monitor recovery delivery to PR
+- **work:** Link project open error delivery PR
+- **work:** Record project open error PR takeover
+- **work:** Reconcile delivered agent management task mirrors
+- **work:** Record Issue #4358 pull request association
+- **work:** Record Issue #4473 pull request
+- **work:** PR #5857 の参照を記録する
+- **work:** Attach issue 4426 pull request
+- **work:** Issue #3431 の PR 参照を記録する
+- **work:** Record Issue #3431 PR reference
+- **work:** Record merged Issue #3431 PR state
+- **work:** Record Issue #3431 PR reference
+- **work:** Record declared wait diagnostic pull request
+
+### Performance
+
+- **runtime:** Capture terminal screens outside the GUI loop
+- **runtime:** Defer quota clock lookup until a native notice
+
+### Refactor
+
+- **ui:** Render remote branches from shared state
+- **ui:** Render project open errors from shared state
+- **frontend:** Render work advisory from shared state
+
+### Testing
+
+- **runtime:** Verify output delivery independently of latency acceptance
+- **issue-monitor:** Max_active の live 検証を状態受信に同期
+- **monitor:** Slow ACK の検証から同期保存待ちを分離
+- **monitor:** Assert successor launch ledger survives reconciliation
+- **recovery:** Prove live Store to Board delivery
+- **recovery:** Reuse canonical temporary home guard
+- **board:** Isolate rollover fixture from elapsed time
+- **launch:** Serialize stale-base Git fixture with PATH changes
+- **ci:** Remove timing assumptions from coverage fixtures
+- **ui:** Clear the hub catalog in project error fixture
+- **ui:** Wait for project toolbar hydration before focus
+- **verify:** Distinguish independent admission sessions
+- **cli:** Preserve namespace fallback after fork delivery operation
+- **gui:** Verify offline issue fixtures through the current surface
+
 ## [9.131.0] - 2026-10-20
 
 ### Bug Fixes

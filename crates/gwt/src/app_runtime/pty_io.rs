@@ -238,15 +238,25 @@ fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
 /// written on its own after the TUI has settled (SPEC-3431 FR-108c), so the
 /// provider's UserPromptSubmit hook sees exactly one prompt. With the mode
 /// off, the body is written raw, exactly as before.
-fn pane_input_body_bytes(body: &str, bracketed_paste: bool) -> Vec<u8> {
+fn pane_input_body_bytes(body: &str, bracketed_paste: bool) -> Result<Vec<u8>, String> {
+    // Issue #5839: Windows Codex receives console key events even inside a
+    // bracketed paste. Ctrl+T / F3 (ESC O R) can therefore open Transcript/Find.
+    if let Some(byte) = body
+        .bytes()
+        .find(|byte| byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n'))
+    {
+        return Err(format!(
+            "prompt body contains terminal control byte 0x{byte:02x}; remove it before sending"
+        ));
+    }
     if !bracketed_paste {
-        return body.as_bytes().to_vec();
+        return Ok(body.as_bytes().to_vec());
     }
     let mut bytes = Vec::with_capacity(body.len() + 12);
     bytes.extend_from_slice(BRACKETED_PASTE_START);
     bytes.extend_from_slice(body.as_bytes());
     bytes.extend_from_slice(BRACKETED_PASTE_END);
-    bytes
+    Ok(bytes)
 }
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -272,7 +282,7 @@ pub(super) fn drive_verified_pane_submit(
 ) -> Result<VerifiedPaneSubmitOutcome, String> {
     let (body, submit) = split_pane_submit(text);
     if !body.is_empty() {
-        write(&pane_input_body_bytes(body, bracketed_paste))?;
+        write(&pane_input_body_bytes(body, bracketed_paste)?)?;
     }
     let Some(submit) = submit else {
         return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
@@ -329,7 +339,7 @@ pub(super) fn write_pane_input_then_submit(
             .write_input(&pane_input_body_bytes(
                 body,
                 reservation.bracketed_paste_enabled(),
-            ))
+            )?)
             .map_err(|error| error.to_string())?;
     }
     let submit = submit.to_string();
@@ -371,7 +381,7 @@ pub(super) fn write_pane_input_and_submit_blocking(
             .write_input(&pane_input_body_bytes(
                 body,
                 reservation.bracketed_paste_enabled(),
-            ))
+            )?)
             .map_err(|error| error.to_string())?;
     }
     thread::sleep(PANE_SUBMIT_SETTLE);
@@ -1700,11 +1710,13 @@ fn pane_runtime_user_event(event: gwt::pane_runtime::PaneRuntimeEvent) -> UserEv
             incarnation,
             data,
             seq,
+            screen,
         } => UserEvent::RuntimeOutput {
             id,
             incarnation,
             data,
             seq,
+            screen,
         },
         gwt::pane_runtime::PaneRuntimeEvent::Status {
             id,
@@ -1739,10 +1751,13 @@ mod submit_split_tests {
         let prompt = "/mnt/work/notes.md\n@agent-1 please review\r";
         let body = "/mnt/work/notes.md\n@agent-1 please review";
         assert_eq!(
-            pane_input_body_bytes(body, true),
+            pane_input_body_bytes(body, true).expect("safe pasted body"),
             [b"\x1b[200~".as_slice(), body.as_bytes(), b"\x1b[201~"].concat()
         );
-        assert_eq!(pane_input_body_bytes(body, false), body.as_bytes());
+        assert_eq!(
+            pane_input_body_bytes(body, false).expect("safe raw body"),
+            body.as_bytes()
+        );
 
         for bracketed_paste in [true, false] {
             let writes = std::cell::RefCell::new(Vec::<Vec<u8>>::new());
@@ -1772,6 +1787,30 @@ mod submit_split_tests {
                 vec![expected_body, b"\r".to_vec()],
                 "bracketed_paste={bracketed_paste}: body in one write, submit byte on its own"
             );
+        }
+    }
+
+    /// Issue #5839: Windows Codex interprets these as keys even inside a
+    /// bracketed paste. Refuse the entire body before staging any bytes.
+    #[test]
+    fn notification_control_keys_are_refused_before_any_write() {
+        for body in ["notice \x14suffix", "notice \x1bORsuffix"] {
+            for bracketed_paste in [false, true] {
+                let mut writes = Vec::new();
+                let result = drive_verified_pane_submit(
+                    &format!("{body}\r"),
+                    bracketed_paste,
+                    1,
+                    |bytes| {
+                        writes.push(bytes.to_vec());
+                        Ok(())
+                    },
+                    |_| {},
+                    || Ok(true),
+                );
+                assert!(result.is_err(), "control keys must not reach the TUI");
+                assert!(writes.is_empty(), "refuse before staging the body");
+            }
         }
     }
 

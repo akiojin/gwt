@@ -865,6 +865,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "release.metadata.set"
         | "pr.reopen"
         | "pr.review.submit"
+        | "pr.auto_merge.enable"
         | "update.settings.set"
         | "pm.approval.request"
         | "pm.approval.status"
@@ -1527,9 +1528,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
-        "build.complete" => {
-            skill_state(params, SkillActionKind::Complete).map(CliCommand::Build)?
-        }
+        "build.complete" => CliCommand::Build(SkillStateAction::Complete {
+            spec: required_u64(params, "spec")?,
+            pr: optional_u64(params, "pr")?,
+        }),
         "build.abort" => skill_state(params, SkillActionKind::Abort).map(CliCommand::Build)?,
         "plan.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Plan)?,
         "plan.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Plan)?,
@@ -2192,7 +2194,7 @@ fn skill_state(
             spec,
             label: required_string(params, "label")?,
         }),
-        SkillActionKind::Complete => Ok(SkillStateAction::Complete { spec }),
+        SkillActionKind::Complete => Ok(SkillStateAction::Complete { spec, pr: None }),
         SkillActionKind::Abort => Ok(SkillStateAction::Abort {
             spec,
             reason: optional_string(params, "reason")?,
@@ -3349,6 +3351,8 @@ mod tests {
                 url: "https://example.com/pr/4139".to_string(),
                 is_draft,
                 head_ref_name: "work/issue-4131".to_string(),
+                head_sha: None,
+                is_cross_repository: None,
                 updated_at: Some(now),
                 mergeable: mergeable.to_string(),
                 merge_state_status: merge_state_status.to_string(),
@@ -8160,6 +8164,29 @@ mod tests {
             ),
             CliCommand::Discuss(_)
         ));
+    }
+
+    #[test]
+    fn build_complete_pr_selector_is_optional_and_typed() {
+        assert!(matches!(
+            ok("build.complete", json!({"spec":5842,"pr":9001})),
+            CliCommand::Build(SkillStateAction::Complete {
+                spec: 5842,
+                pr: Some(9001)
+            })
+        ));
+        assert!(matches!(
+            ok("build.complete", json!({"spec":5842})),
+            CliCommand::Build(SkillStateAction::Complete {
+                spec: 5842,
+                pr: None
+            })
+        ));
+        assert!(parse(&envelope(
+            "build.complete",
+            json!({"spec":5842,"pr":"invalid"})
+        ))
+        .is_err());
     }
 
     #[test]

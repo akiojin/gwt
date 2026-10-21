@@ -149,6 +149,10 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Use a recorded scoped instruction_id or pm.approval.request for this PR and review event; GitHub reviewer and CI gates remain enforced",
     ),
     (
+        "pr.auto_merge.enable", r#"{}"#, CapabilityGapReason::Permission,
+        "Review the external fork PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; otherwise human merge required because repository automation may exclude external forks",
+    ),
+    (
         "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
         "Use a recorded scoped instruction_id or pm.approval.request to edit release metadata; publishing stays with the release workflow",
     ),
@@ -911,6 +915,30 @@ mod tests {
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
+        assert_eq!(
+            status["policy"]["capacity"].get("declared_waits"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["capacity"].get("claim_blocks"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["capacity"].get("launch_activity"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["capacity"]["implementation_launches"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            status["policy"]["capacity"]["observed_work_issues"],
+            serde_json::json!([])
+        );
+        assert!(status["policy"]["capacity"]["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("end_to_end_wip")));
         assert_eq!(status["revision"], 1);
         assert_eq!(status["goals"][0]["outcome"], "Ship safely");
         assert_eq!(status["policy"]["planning_revision"], 1);
@@ -962,6 +990,9 @@ mod tests {
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        for trace in status["policy"]["issue_traces"].as_array().unwrap() {
+            assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
+        }
         assert_eq!(
             status["policy"]["goals"][0]["issues"],
             serde_json::json!([7, 9])
@@ -972,7 +1003,14 @@ mod tests {
         );
         assert_eq!(
             status["policy"]["goals"][0]["missing_inputs"],
-            serde_json::json!(["metric_evidence"])
+            serde_json::json!([
+                "metric_evidence",
+                "metric",
+                "target",
+                "horizon",
+                "owner",
+                "status"
+            ])
         );
         assert_eq!(
             status["policy"]["milestones"][0]["observed_issue_states"],

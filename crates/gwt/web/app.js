@@ -5120,6 +5120,22 @@ import { createUiStateStore } from "/ui-state-store.js";
         },
       });
 
+      const projectOpenErrorModel = createUiStateStore(null);
+      projectOpenErrorModel.subscribe(error => error, error => {
+        if (!error) return;
+        applyProjectOpenReceiveEvent(error);
+        projectError = error.message;
+        frontendUnits.projectWorkspaceShell.renderProjectPicker();
+        frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
+          frontendUnits.projectWorkspaceShell.activeProjectTab(),
+        );
+      });
+
+      const workAdvisoryResultModel = createUiStateStore(null);
+      workAdvisoryResultModel.subscribe(event => event, event => {
+        if (event) applyWorkAdvisoryResultEvent(event);
+      });
+
       const projectNotificationModel = createUiStateStore(null);
       projectNotificationModel.subscribe(notice => notice, notice => {
         if (notice) agentCompletionNotifier.handleIntent(notice);
@@ -5303,6 +5319,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         recomputeOperatorTelemetry();
       }
       activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
+
+      const remoteStartWorkBranchesModel = createUiStateStore(null);
+      remoteStartWorkBranchesModel.subscribe(state => state, snapshot => {
+        if (snapshot) workspaceOverviewSurface.applyRemoteStartWorkBranches(snapshot);
+      });
 
       function receive(event) {
         if (routeProjectMissing) return;
@@ -5536,12 +5557,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyKnowledgeReceiveEvent(event);
             break;
           case "project_open_error":
-            applyProjectOpenReceiveEvent(event);
-            projectError = event.message;
-            frontendUnits.projectWorkspaceShell.renderProjectPicker();
-            frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
-              frontendUnits.projectWorkspaceShell.activeProjectTab(),
-            );
+            projectOpenErrorModel.update(() => ({
+              kind: event.kind, request_id: event.request_id, message: event.message,
+            }));
             break;
           case "project_opened":
             applyProjectOpenReceiveEvent(event);
@@ -5576,7 +5594,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
           case "remote_start_work_branches":
-            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
+            remoteStartWorkBranchesModel.update(() => ({ ...event }));
             break;
           case "continue_work_outcome":
             continueWorkOutcomeModel.update(() => ({ ...event }));
@@ -5594,7 +5612,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan
             // Agent work-registration prompt.
-            applyWorkAdvisoryResultEvent(event);
+            workAdvisoryResultModel.update(() => ({ ...event }));
             break;
           case "runtime_hook_event":
             runtimeHookModel.update(() => ({

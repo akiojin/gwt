@@ -323,6 +323,22 @@ impl Pane {
         // PTY handle, where prompt injection reads it without the pane lock.
         self.pty
             .set_bracketed_paste(self.parser.screen().bracketed_paste());
+        // Codex renders this header on the first visible row, including when
+        // --no-alt-screen is used. Read parsed cells so split/ANSI output and
+        // old scrollback cannot masquerade as the active input surface.
+        let screen = self.parser.screen();
+        let cols = screen.size().1;
+        const TRANSCRIPT_HEADER: &str = "/ T R A N S C R I P T";
+        // The minimum agent pane width is 20: Codex clips the final letter
+        // there. Trim padding because vt100 rows omit trailing blank cells.
+        let header = TRANSCRIPT_HEADER[..usize::from(cols).min(TRANSCRIPT_HEADER.len())].trim_end();
+        self.pty.set_transcript_overlay(
+            cols >= 20
+                && screen.rows(0, cols).next().is_some_and(|row| {
+                    row.strip_prefix(header)
+                        .is_some_and(|tail| tail.chars().all(|c| c == ' ' || c == '/'))
+                }),
+        );
         self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
         self.incomplete_escape_tail = if self.incomplete_escape_tail.is_empty() {
             incomplete_escape_suffix(data).to_vec()
@@ -768,6 +784,61 @@ mod tests {
 
         pane.process_bytes(b"\x1b[?2004h");
         assert!(pty.bracketed_paste_enabled());
+        let _ = pane.kill();
+    }
+
+    /// Issue #5839: prompt transactions must not feed Codex's Transcript/Find
+    /// surface, including a transaction reserved before the overlay appeared.
+    #[test]
+    fn transcript_overlay_refuses_prompt_input_and_allows_raw_key_recovery() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-transcript-input", sleep_command("60"));
+        let pty = pane.shared_pty();
+        pane.process_bytes(b"\x1b[2J\x1b[Hquoted / T R A N S C R I P T\r\nFind: in documentation");
+        let reservation = pty.reserve_input_transaction().expect("ordinary output");
+
+        // Codex --no-alt-screen also renders this header; DECSET 1049 is not
+        // required. The parser must join a header split across output chunks.
+        pane.process_bytes(b"\x1b[2J\x1b[H/ T R A N S C");
+        pane.process_bytes(b" R I P T / / / /\x1b[21;1HFind: ");
+        let error = reservation
+            .write_input(b"notification")
+            .expect_err("overlay blocks reserved input");
+        assert!(error.to_string().contains("Transcript"), "{error}");
+        let authorize_called = std::cell::Cell::new(false);
+        assert!(reservation
+            .write_input_authorized(b"notification", |_| {
+                authorize_called.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(
+            !authorize_called.get(),
+            "refusal must precede the physical commit"
+        );
+        drop(reservation);
+        assert!(
+            pty.reserve_input_transaction().is_err(),
+            "overlay blocks new delivery"
+        );
+
+        // Agent panes can shrink to twenty columns, clipping the final T.
+        pane.resize(20, 24).expect("narrow pane");
+        pane.process_bytes(b"\x1b[2J\x1b[H/ T R A N S C R I P \x1b[21;1HFind: ");
+        assert!(
+            pty.reserve_input_transaction().is_err(),
+            "clipped overlay still blocks delivery"
+        );
+
+        // Raw user keys can close the overlay. The next rendered composer
+        // clears the guard and allows notification delivery again.
+        pty.write_input(b"\x1b").expect("raw Esc remains available");
+        pane.process_bytes(b"\x1b[2J\x1b[Hcodex\r\n> ");
+        let reservation = pty.reserve_input_transaction().expect("composer recovered");
+        reservation
+            .write_input(b"notification")
+            .expect("normal input");
+        drop(reservation);
         let _ = pane.kill();
     }
 
