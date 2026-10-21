@@ -757,6 +757,16 @@ ID の区別に保持します。入力済みの値の意味は評価せず、as
 assumptions と `source_revision` は任意、レビュー日は既存の `policy.review_dates` に任せます。
 この診断は Monitor の取得を必要としません。情報が揃っていても、判断の品質・承認・
 操作の許可を示しません。
+`policy.forecasts` は保存済み予測を保存順で返し、ID・`source_revision`・`sample_size`・
+`reported_estimate`・`reported_confidence`・`reported_missing_inputs` を保持します。
+`revisions_since_source` は `planning_revision` との非負差分で、未来の参照値なら null です。
+参照 revision の 0 は有効です。`missing_inputs` は常に `forecast_evidence` を含み、続いて
+空白 ID の `id` または非空 ID の完全一致重複の `unique_forecast_id`、標本数 0 の
+`sample_history`、未来参照の `source_revision_ahead_of_planning` をこの順で示します。
+非空 ID の大小文字・前後空白は区別し、記入済み不足情報は原文のまま保持します。
+診断の `confidence` は `unknown` のままです。正の標本数・同値 revision・記入済み信頼度は、
+検証済み履歴・予測品質・承認・操作許可を証明しません。小標本の閾値や予測値を推測しません。
+Monitor の取得には依存せず、保存予測がなければ `[]` を返します。
 `policy.decision_revisions` は全保存意思決定の ID と `source_revision` を保存順で返します。
 `revisions_since_source` は現在の `planning_revision` との差分で、0を含む非負の数値です。
 参照 revision が未設定なら差分は null、`missing_inputs` は `source_revision`、

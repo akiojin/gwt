@@ -915,6 +915,7 @@ mod tests {
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
+        assert_eq!(status["policy"]["forecasts"], serde_json::json!([]));
         assert_eq!(
             status["policy"]["capacity"].get("idle_windows"),
             Some(&serde_json::Value::Null)
@@ -992,6 +993,14 @@ mod tests {
             2
         );
         crate::pm_planning::mutate_planning_state(&planning_path, 2, |state| {
+            state.latest_forecasts.push(crate::pm_planning::Forecast {
+                id: "release-forecast".into(),
+                source_revision: 1,
+                sample_size: 2,
+                estimate: Some("two days".into()),
+                confidence: Some("high".into()),
+                missing_inputs: vec!["cost".into()],
+            });
             state.roadmap_items.push(crate::pm_planning::RoadmapItem {
                 id: "goal-link".into(),
                 goal_id: Some("goal-1".into()),
@@ -1025,6 +1034,15 @@ mod tests {
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["forecasts"],
+            serde_json::json!([
+                {"id":"release-forecast", "source_revision":1, "sample_size":2,
+                 "reported_estimate":"two days", "reported_confidence":"high",
+                 "reported_missing_inputs":["cost"], "revisions_since_source":2,
+                 "confidence":"unknown", "missing_inputs":["forecast_evidence"]}
+            ])
+        );
         assert_eq!(
             status["policy"]["decision_revisions"],
             serde_json::json!([
