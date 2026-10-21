@@ -205,6 +205,7 @@ pub struct CapacityObservation {
     pub observed_work_issues: Vec<u64>,
     pub launch_activity: Option<Vec<LaunchActivityObservation>>,
     pub claim_blocks: Option<Vec<ClaimBlockObservation>>,
+    pub declared_waits: Option<Vec<DeclaredWaitObservation>>,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -215,6 +216,85 @@ pub struct LaunchActivityObservation {
     pub last_activity_at: Option<String>,
     pub inactivity_seconds_at_scan: Option<u64>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeclaredWaitObservation {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    pub in_force: bool,
+    pub since: Option<String>,
+    pub expires_at: Option<String>,
+    pub elapsed_seconds_at_scan: Option<u64>,
+    pub remaining_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Protection is Monitor-owned; timing only describes its supplied snapshot.
+fn observe_declared_waits(status: &IssueMonitorAgentStatus) -> Vec<DeclaredWaitObservation> {
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    status
+        .inbox
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.state,
+                MonitorInboxState::Launching | MonitorInboxState::Launched
+            )
+        })
+        .filter_map(|row| row.waiting.as_ref().map(|wait| (row, wait)))
+        .map(|(row, wait)| {
+            let since = chrono::DateTime::parse_from_rfc3339(&wait.since).ok();
+            let expiry = chrono::DateTime::parse_from_rfc3339(&wait.expires_at).ok();
+            let mut missing_inputs = Vec::new();
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            if since.is_none() {
+                missing_inputs.push("wait_since");
+            }
+            if expiry.is_none() {
+                missing_inputs.push("wait_expires_at");
+            }
+            let elapsed_seconds_at_scan = scan.zip(since).and_then(|(scan, since)| {
+                match scan.signed_duration_since(since).to_std() {
+                    Ok(duration) => Some(duration.as_secs()),
+                    Err(_) => {
+                        missing_inputs.push("wait_after_scan");
+                        None
+                    }
+                }
+            });
+            let invalid_interval = since
+                .zip(expiry)
+                .is_some_and(|(since, expiry)| expiry < since);
+            let remaining_seconds_at_scan = if invalid_interval {
+                missing_inputs.push("wait_interval");
+                None
+            } else {
+                scan.zip(expiry).map(|(scan, expiry)| {
+                    expiry
+                        .signed_duration_since(scan)
+                        .to_std()
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+            };
+            DeclaredWaitObservation {
+                issue_number: row.issue_number,
+                state: row.state,
+                in_force: wait.in_force,
+                since: since.map(|value| value.to_rfc3339()),
+                expires_at: expiry.map(|value| value.to_rfc3339()),
+                elapsed_seconds_at_scan,
+                remaining_seconds_at_scan,
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +455,7 @@ fn observe_capacity(
         observed_work_issues,
         launch_activity: monitor.map(observe_launch_activity),
         claim_blocks: monitor.map(observe_claim_blocks),
+        declared_waits: monitor.map(observe_declared_waits),
         missing_inputs,
     }
 }
@@ -1134,6 +1215,7 @@ mod tests {
                 "observed_work_issues":[1,3,8,9,10,11],
                 "launch_activity":[],
                 "claim_blocks":[],
+                "declared_waits":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1318,10 +1400,89 @@ mod tests {
     }
 
     #[test]
+    fn declared_waits_preserve_protection_and_measure_only_snapshot_time() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
+        let wait = |number, state, since, expires, in_force| {
+            json!({
+                "issue_number":number,"state":state,"attempts":0,
+                "waiting":{"reason":"private reason","resume_condition":"private resume",
+                    "since":since,"expires_at":expires,"in_force":in_force}
+            })
+        };
+        monitor.inbox = serde_json::from_value(json!([
+            wait(9,"launched","2026-10-21T09:00:00+09:00","2026-10-21T00:02:00Z",false),
+            wait(3,"launching","2026-10-21T00:00:59.100Z","2026-10-21T00:01:00.900Z",true),
+            wait(9,"launched","2026-10-21T00:00:00Z","2026-10-21T00:00:59.900Z",true),
+            wait(4,"launched","private invalid since","2026-10-21T00:02:00Z",false),
+            wait(5,"launched","2026-10-21T00:00:00Z","private invalid expiry",false),
+            wait(6,"launched","2026-10-21T00:01:00.100Z","2026-10-21T00:02:00Z",true),
+            wait(7,"launched","2026-10-21T00:00:00Z","2026-10-20T23:59:59Z",false),
+            wait(8,"queued","2026-10-21T00:00:00Z","2026-10-21T00:02:00Z",true),
+            {"issue_number":10,"state":"launched","attempts":0}
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["declared_waits"].as_array().unwrap();
+        let facts: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!([
+                    row["issue_number"],
+                    row["in_force"],
+                    row["elapsed_seconds_at_scan"],
+                    row["remaining_seconds_at_scan"],
+                    row["missing_inputs"]
+                ])
+            })
+            .collect();
+        assert_eq!(
+            json!(facts),
+            json!([
+                [9, false, 60, 60, []],
+                [3, true, 0, 0, []],
+                [9, true, 60, 0, []],
+                [4, false, null, 60, ["wait_since"]],
+                [5, false, 60, null, ["wait_expires_at"]],
+                [6, true, null, 60, ["wait_after_scan"]],
+                [7, false, 60, null, ["wait_interval"]]
+            ])
+        );
+        assert_eq!(rows[0]["since"], "2026-10-21T09:00:00+09:00");
+        assert_eq!(rows[3]["since"], Value::Null);
+        assert_eq!(rows[4]["expires_at"], Value::Null);
+        assert!(!report.to_string().contains("private"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["declared_waits"],
+            report["capacity"]["declared_waits"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid scan".into())] {
+            monitor.last_scan_at = scan;
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            let first = &untimed["capacity"]["declared_waits"][0];
+            assert_eq!(first["elapsed_seconds_at_scan"], Value::Null);
+            assert_eq!(first["remaining_seconds_at_scan"], Value::Null);
+            assert_eq!(first["missing_inputs"], json!(["monitor_scan_time"]));
+        }
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty["capacity"]["declared_waits"], json!([]));
+    }
+
+    #[test]
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         assert_eq!(absent["capacity"].get("claim_blocks"), Some(&Value::Null));
+        assert_eq!(absent["capacity"].get("declared_waits"), Some(&Value::Null));
         assert_eq!(row(&absent, 1)["observed_inbox_states"], json!([]));
         assert_eq!(absent["monitor"]["source"], Value::Null);
         assert_eq!(absent["monitor"]["active_launches_incomplete"], true);

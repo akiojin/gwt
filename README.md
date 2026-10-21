@@ -810,6 +810,14 @@ until its expiration at the supplied scan time. An elapsed deadline shows zero; 
 invalid timestamps leave the duration unknown. Blocked age remains unknown because the
 snapshot has no start time. These observations retain the scan's provenance and do not
 prove claim release or authorize requeue, launch or preemption.
+Declared-wait observations show elapsed and remaining whole seconds for Launching/Launched
+Issues with a wait declaration, at the supplied scan time. They preserve the Monitor's
+`in_force` value, even when a deadline appears elapsed; they never recalculate protection.
+Missing or invalid timestamps leave affected durations unknown; a start after the scan
+cannot establish elapsed time, nor can expiration before start establish remaining time.
+Unavailable Monitor data yields null, while no matching rows yields an empty list.
+These observations retain scan provenance, omit free-text reasons and resume conditions,
+and do not determine queue age, SLA, liveness or full WIP, or change waits and slots.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
