@@ -183,6 +183,7 @@ pub struct PlanningAssessment {
     pub goals: Vec<GoalDiagnostic>,
     pub milestones: Vec<MilestoneDiagnostic>,
     pub risks: Vec<RiskMetadataDiagnostic>,
+    pub decisions: Vec<DecisionMetadataDiagnostic>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
 }
@@ -190,6 +191,13 @@ pub struct PlanningAssessment {
 /// Authored metadata presence is not a risk assessment or action permission.
 #[derive(Debug, Serialize)]
 pub struct RiskMetadataDiagnostic {
+    pub id: String,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Authored metadata presence is not decision quality or approval.
+#[derive(Debug, Serialize)]
+pub struct DecisionMetadataDiagnostic {
     pub id: String,
     pub missing_inputs: Vec<&'static str>,
 }
@@ -1162,6 +1170,43 @@ pub fn assess_planning(
                 }
             })
             .collect(),
+        decisions: state
+            .decisions
+            .iter()
+            .map(|decision| {
+                let mut missing_inputs = Vec::new();
+                if decision.id.trim().is_empty() {
+                    missing_inputs.push("id");
+                } else if state
+                    .decisions
+                    .iter()
+                    .filter(|other| other.id == decision.id)
+                    .count()
+                    > 1
+                {
+                    missing_inputs.push("unique_decision_id");
+                }
+                if !decision
+                    .options
+                    .iter()
+                    .any(|value| !value.trim().is_empty())
+                {
+                    missing_inputs.push("options");
+                }
+                for (name, value) in [
+                    ("rationale", &decision.rationale),
+                    ("owner", &decision.owner),
+                ] {
+                    if value.trim().is_empty() {
+                        missing_inputs.push(name);
+                    }
+                }
+                DecisionMetadataDiagnostic {
+                    id: decision.id.clone(),
+                    missing_inputs,
+                }
+            })
+            .collect(),
         review_dates: observe_review_dates(
             state,
             monitor.and_then(|status| status.last_scan_at.as_deref()),
@@ -1343,6 +1388,67 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("missing_milestone")));
+    }
+
+    #[test]
+    fn decision_metadata_reports_missing_fields_without_approving_decisions() {
+        let complete = crate::pm_planning::Decision {
+            id: "same".into(),
+            options: vec!["".into(), "opaque".into()],
+            rationale: "unspecified".into(),
+            owner: "someone".into(),
+            ..Default::default()
+        };
+        let state = PmPlanningState {
+            decisions: vec![
+                crate::pm_planning::Decision {
+                    id: " \t".into(),
+                    options: vec![" \n".into()],
+                    rationale: " \t".into(),
+                    owner: " \n".into(),
+                    ..Default::default()
+                },
+                crate::pm_planning::Decision {
+                    options: vec![],
+                    ..complete.clone()
+                },
+                complete.clone(),
+                crate::pm_planning::Decision {
+                    id: " same ".into(),
+                    ..complete.clone()
+                },
+                crate::pm_planning::Decision {
+                    id: "Same".into(),
+                    ..complete
+                },
+            ],
+            ..Default::default()
+        };
+        let before = state.clone();
+        let report = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            report["decisions"],
+            json!([
+                {"id":" \t", "missing_inputs":["id", "options", "rationale", "owner"]},
+                {"id":"same", "missing_inputs":["unique_decision_id", "options"]},
+                {"id":"same", "missing_inputs":["unique_decision_id"]},
+                {"id":" same ", "missing_inputs":[]},
+                {"id":"Same", "missing_inputs":[]}
+            ])
+        );
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let monitor_before = serde_json::to_value(&monitor).unwrap();
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["decisions"], report["decisions"]);
+        assert_eq!(degraded["review_dates"], report["review_dates"]);
+        assert_eq!(state, before);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["decisions"],
+            json!([])
+        );
     }
 
     #[test]

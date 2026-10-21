@@ -743,6 +743,13 @@ health・完了を証明しません。
 ID の区別に保持します。入力済みの値の意味は評価せず、assumptions は任意です。
 この診断は Monitor の取得を必要とせず、既存のレビュー日観測を維持します。
 情報が揃っていても、リスク評価の妥当性や操作の許可を示しません。
+`policy.decisions` は保存順の意思決定 ID と、空または空白のみの `id`・`rationale`・
+`owner` を示す `missing_inputs` を返します。`options` に空白以外の候補が一つも
+なければ `options` を示します。非空 ID の完全一致重複には `unique_decision_id` を追加し、
+大文字小文字と前後の空白は ID の区別に保持します。入力済みの値の意味は評価せず、
+assumptions と `source_revision` は任意、レビュー日は既存の `policy.review_dates` に任せます。
+この診断は Monitor の取得を必要としません。情報が揃っていても、判断の品質・承認・
+操作の許可を示しません。
 `policy.recurring_runs` は保存済みの定期作業を、保存順・ID・記入済み `next_run` を
 保持して返します。`due_at_scan` は時差・秒未満の精度を含む RFC3339 の絶対時刻を比較し、
 スキャンが `next_run` と同時刻以降なら true、前なら false を返します。時刻が欠落・
