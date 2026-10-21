@@ -807,6 +807,16 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
 返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
 超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
+`policy.capacity.terminal_queue` は、urgent 順序付けとラベル除外後のホスト別 queue を、
+供給された順序・Issue の重複・元の `queued_at` を保持して返します。
+`age_seconds_at_scan` は queue に所属してから Monitor のスキャン時点までの秒数です。
+RFC3339 の時差を反映し、秒未満を切り捨てます。時刻の欠測・不正・未来は null と不足情報名で
+示し、小数秒が9桁を超える場合は黙って丸めず不明にします。Monitor または queue view が
+なければ null、供給された view に行がなければ [] です。取得元・スキャン時刻・観測範囲も
+併せて確認してください。古い・degraded な snapshot は当時の観測であり、[] はプロジェクト
+全体の queue が空である証明ではありません。旧 payload の queue リスト省略も [] となるため、
+ホスト内の空 queue も証明しません。所属滞留時間は実行待ち時間、SLA 違反、starvation、
+優先順位、preemption や起動許可の判定には使いません。
 idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
 pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
 現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。

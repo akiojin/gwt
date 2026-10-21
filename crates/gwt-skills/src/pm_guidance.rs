@@ -153,6 +153,18 @@ Read the enclosing Monitor source, scan time and coverage alongside these observ
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
 This projection never enforces WIP limits or changes admission, priority or launch decisions.
 
+`terminal_queue` preserves the supplied host queue projection order, repeated Issues and raw queued_at.
+It uses gui_status.terminal_queue, after host selection, urgent ordering and label filtering.
+`age_seconds_at_scan` measures queue membership until the supplied Monitor last_scan_at,
+respecting RFC3339 offsets and rounding nonnegative fractions down to whole seconds.
+Missing or invalid timestamps, including fractions beyond nine digits, yield null and named
+missing inputs; a queued_at after the scan yields null with queued_after_scan.
+No Monitor or no gui_status yields null; an available projection with no rows yields [].
+Read the enclosing Monitor source, scan time and coverage: a degraded or old scan is only
+an observation then. Legacy omitted queue lists also decode to []; neither proves the host queue is empty.
+Queue residency is not execution waiting time, full queue coverage or permission to act.
+Never derive SLA, starvation, priority, preemption or launch decisions from this duration alone.
+
 `idle_windows` preserves every supplied Monitor idle window in order, including repeats
 and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
 `pane_present`; it does not reproduce rebind or requeue proposals.
@@ -4007,6 +4019,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`policy.capacity` preserves implementation and review multiplicity",
             "`idle_windows` preserves every supplied Monitor idle window in order, including repeats",
             "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
+            "`terminal_queue` preserves the supplied host queue projection order, repeated Issues and raw queued_at",
+            "Queue residency is not execution waiting time, full queue coverage or permission to act",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",

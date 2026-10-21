@@ -237,21 +237,22 @@ pub struct RecurringRunObservation {
     pub missing_inputs: Vec<&'static str>,
 }
 
+fn parse_observed_instant(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    // Chrono silently discards fractional digits beyond nanoseconds.
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .filter(|_| {
+            value.split_once('.').is_none_or(|(_, fraction)| {
+                fraction.bytes().take_while(u8::is_ascii_digit).count() <= 9
+            })
+        })
+}
+
 fn observe_recurring_runs(
     state: &PmPlanningState,
     scan: Option<&str>,
 ) -> Vec<RecurringRunObservation> {
-    // Chrono silently discards fractional digits beyond nanoseconds.
-    let parse = |value: &str| {
-        chrono::DateTime::parse_from_rfc3339(value)
-            .ok()
-            .filter(|_| {
-                value.split_once('.').is_none_or(|(_, fraction)| {
-                    fraction.bytes().take_while(u8::is_ascii_digit).count() <= 9
-                })
-            })
-    };
-    let scan = scan.and_then(parse);
+    let scan = scan.and_then(parse_observed_instant);
     state
         .recurring_items
         .iter()
@@ -288,7 +289,7 @@ fn observe_recurring_runs(
             {
                 configuration_missing_inputs.push("unique_idempotency_key");
             }
-            let next_run = item.next_run.as_deref().and_then(parse);
+            let next_run = item.next_run.as_deref().and_then(parse_observed_instant);
             let mut missing_inputs = Vec::new();
             if next_run.is_none() {
                 missing_inputs.push("next_run");
@@ -332,7 +333,57 @@ pub struct CapacityObservation {
     pub retry_deadlines: Option<Vec<RetryDeadlineObservation>>,
     pub wip_limits: Vec<WipLimitObservation>,
     pub idle_windows: Option<Vec<IdleWindowObservation>>,
+    pub terminal_queue: Option<Vec<QueueResidencyObservation>>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+/// Host queue membership at a supplied scan, not execution waiting time.
+#[derive(Debug, Serialize)]
+pub struct QueueResidencyObservation {
+    pub issue_number: u64,
+    pub queued_at: String,
+    pub age_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+fn observe_terminal_queue(
+    status: &IssueMonitorAgentStatus,
+) -> Option<Vec<QueueResidencyObservation>> {
+    let view = status.gui_status.as_ref()?;
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(parse_observed_instant);
+    Some(
+        view.terminal_queue
+            .iter()
+            .map(|entry| {
+                let queued = parse_observed_instant(&entry.queued_at);
+                let mut missing_inputs = Vec::new();
+                if queued.is_none() {
+                    missing_inputs.push("queued_at");
+                }
+                if scan.is_none() {
+                    missing_inputs.push("monitor_scan_time");
+                }
+                let age_seconds_at_scan = scan.zip(queued).and_then(|(scan, queued)| {
+                    match scan.signed_duration_since(queued).to_std() {
+                        Ok(duration) => Some(duration.as_secs()),
+                        Err(_) => {
+                            missing_inputs.push("queued_after_scan");
+                            None
+                        }
+                    }
+                });
+                QueueResidencyObservation {
+                    issue_number: entry.number,
+                    queued_at: entry.queued_at.clone(),
+                    age_seconds_at_scan,
+                    missing_inputs,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Idle classification belongs to the Monitor; elapsed time grants no authority.
@@ -748,6 +799,7 @@ fn observe_capacity(
         retry_deadlines: monitor.map(observe_retry_deadlines),
         wip_limits,
         idle_windows: monitor.map(observe_idle_windows),
+        terminal_queue: monitor.and_then(observe_terminal_queue),
         missing_inputs,
     }
 }
@@ -1383,6 +1435,99 @@ mod tests {
     use super::*;
     use crate::pm_planning::PmPlanningState;
     use serde_json::{json, Value};
+
+    #[test]
+    fn terminal_queue_residency_preserves_supplied_rows_without_claiming_wait_time() {
+        let state = PmPlanningState::default();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-22T01:00:00.500Z".into());
+        let inputs = [
+            (9, "2026-10-22T01:59:00+01:00", Some(60), vec![]),
+            (3, "2026-10-22T01:00:00.500Z", Some(0), vec![]),
+            (
+                9,
+                "2026-10-22T01:00:00.500000001Z",
+                None,
+                vec!["queued_after_scan"],
+            ),
+            (4, "invalid", None, vec!["queued_at"]),
+            (5, "", None, vec!["queued_at"]),
+            (
+                6,
+                "2026-10-22T00:59:00.5000000001Z",
+                None,
+                vec!["queued_at"],
+            ),
+            (7, "2026-10-22T00:59:59.900Z", Some(0), vec![]),
+        ];
+        monitor.gui_status.as_mut().unwrap().terminal_queue = inputs
+            .iter()
+            .map(
+                |(number, queued_at, _, _)| crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: (*queued_at).into(),
+                    ..Default::default()
+                },
+            )
+            .collect();
+        let before = serde_json::to_value(&monitor).unwrap();
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["terminal_queue"]
+            .as_array()
+            .expect("queue observations");
+        assert_eq!(rows.len(), inputs.len());
+        for (row, (number, queued_at, seconds, missing)) in rows.iter().zip(&inputs) {
+            assert_eq!(
+                *row,
+                json!({"issue_number":number,"queued_at":queued_at,
+                "age_seconds_at_scan":seconds,"missing_inputs":missing})
+            );
+        }
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["terminal_queue"],
+            report["capacity"]["terminal_queue"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        monitor.source = IssueMonitorStatusSource::Daemon;
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before);
+        assert_eq!(state, PmPlanningState::default());
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2026-10-22T01:00:00.5000000001Z"),
+        ] {
+            monitor.last_scan_at = scan.map(str::to_owned);
+            let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            assert_eq!(
+                report["capacity"]["terminal_queue"][0]["age_seconds_at_scan"],
+                Value::Null
+            );
+            assert_eq!(
+                report["capacity"]["terminal_queue"][0]["missing_inputs"],
+                json!(["monitor_scan_time"])
+            );
+            assert_eq!(
+                report["capacity"]["terminal_queue"][3]["missing_inputs"],
+                json!(["queued_at", "monitor_scan_time"])
+            );
+        }
+        monitor.gui_status.as_mut().unwrap().terminal_queue.clear();
+        assert_eq!(
+            serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap()["capacity"]
+                ["terminal_queue"],
+            json!([])
+        );
+        monitor.gui_status = None;
+        for observation in [Some(&monitor), None] {
+            assert_eq!(
+                serde_json::to_value(assess_planning(&state, observation)).unwrap()["capacity"]
+                    .get("terminal_queue"),
+                Some(&Value::Null)
+            );
+        }
+    }
 
     fn fixture() -> PmPlanningState {
         serde_json::from_value(json!({
@@ -2303,6 +2448,7 @@ mod tests {
                 "retry_deadlines":[],
                 "wip_limits":[],
                 "idle_windows":[],
+                "terminal_queue":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
