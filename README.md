@@ -974,6 +974,12 @@ feedback** action in a native dialog. Cancellation or an unavailable desktop
 keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
+The local receipt keeps the complete original. Public reports automatically mask
+known credentials, environment assignment values, paths (including URLs), and
+Markdown code fragments; the native preview and submission use the same content.
+Unmasked refusal text is preserved without truncation. Masks are conservative
+and cannot detect every arbitrary secret; do not publish the raw receipt.
+
 Use `feedback.status` with the returned request id to obtain the Issue number
 and URL; a similar existing Issue may receive a comment. `feedback.retry`
 accepts declined or failed receipts and asks for fresh external-project consent.
