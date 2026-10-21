@@ -222,6 +222,69 @@ test("Agent Backend replies commit immutable per-agent catalogs for all Settings
   assert.match(body.querySelector('[data-settings-panel="agent-backends"]').textContent, /No Claude Code backend profiles/);
 });
 
+test("Update status batches snapshots while toggles and failed-save rollback remain synchronous", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document } = createSettingsHarness({ scheduleFrame(callback) {
+    frames.add(callback);
+    return () => frames.delete(callback);
+  } });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  second.dataset.settingsProjectRoot = "/projects/B";
+  const panels = [body, second].map(host => host.querySelector("[data-update-settings-status]"));
+  const toggles = [body, second].map(host => host.querySelector('[aria-label="Auto-apply updates"]'));
+  const renders = [0, 0];
+  panels.forEach((panel, index) => {
+    const replace = panel.replaceChildren.bind(panel);
+    panel.replaceChildren = (...nodes) => { renders[index]++; return replace(...nodes); };
+  });
+  const status = { auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null };
+  surface.applyGlobalUpdateSettings({ status, project_root: "/projects/A" });
+  for (const toggle of toggles) {
+    assert.equal(toggle.checked, true);
+    assert.equal(toggle.disabled, false);
+  }
+  assert.deepEqual(renders, [0, 0], "only status rendering waits for a frame");
+  flush();
+  assert.deepEqual(renders, [1, 1]);
+  renders.fill(0);
+  for (let index = 1; index <= 50; index++) {
+    surface.applyGlobalUpdateSettings({ project_root: "/projects/A", status: { ...status,
+      update_drain: { version: `fixture-${index}`, blocking: [] },
+    } });
+  }
+  assert.equal(frames.size, 1);
+  assert.deepEqual(renders, [0, 0]);
+  const detachedText = panels[1].textContent;
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "settings-late", title: "Settings" });
+  const latePanel = late.querySelector("[data-update-settings-status]");
+  assert.match(latePanel.textContent, /fixture-50/, "late mounts read the current snapshot synchronously");
+  const lateNode = latePanel.firstChild;
+  flush();
+  assert.deepEqual(renders, [1, 0], "another project's drain cannot redraw this status");
+  assert.match(panels[0].textContent, /fixture-50/);
+  assert.equal(latePanel.firstChild, lateNode, "pending frames do not redraw a hydrated mount");
+  assert.equal(panels[1].textContent, detachedText);
+  toggles[0].checked = false;
+  surface.applyGlobalUpdateSettings({ kind: "system_settings_error" });
+  assert.equal(toggles[0].checked, true, "a same-value error restores the authoritative toggle immediately");
+  flush();
+  assert.deepEqual(renders, [1, 0], "same-value rollback does not rebuild status");
+  second.remove();
+  surface.applyGlobalUpdateSettings({ project_root: "/projects/B", status: { ...status,
+    update_drain: { version: "detached", blocking: [] },
+  } });
+  flush();
+  assert.deepEqual(renders, [1, 0], "detached and unrelated mounts are not rendered");
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
+  assert.equal(frames.size, 0, "another Settings store does not schedule update status");
+});
+
 test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
   const { surface, body, document } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });

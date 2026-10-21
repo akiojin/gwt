@@ -976,7 +976,20 @@ export function createSettingsSurface({
       });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
-      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
+      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
+      const renderedUpdateStatuses = new WeakMap();
+      function renderUpdateStatus(body, state) {
+        const panel = body.querySelector('[data-update-settings-status]');
+        if (!panel || !state.loaded) return;
+        const root = body.dataset.settingsProjectRoot || "";
+        const previous = renderedUpdateStatuses.get(panel);
+        if (previous && previous.auto_apply_updates === state.auto_apply_updates
+          && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.drains[root] === state.drains[root]) return;
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderedUpdateStatuses.set(panel, state);
+      }
+      // Preserve synchronous control reconciliation, including same-value save errors.
       globalUpdateModel.subscribe(state => state, state => {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
@@ -985,11 +998,11 @@ export function createSettingsSurface({
             toggle.checked = state.auto_apply_updates_effective;
             toggle.disabled = !state.loaded;
           }
-          const panel = body.querySelector('[data-update-settings-status]');
-          if (panel && state.loaded) renderUpdateSettingsStatus(panel, {
-            ...state, update_drain: state.drains[body.dataset.settingsProjectRoot] || null,
-          });
         }
+      });
+      globalUpdateModel.subscribeFrame(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderUpdateStatus(body, state);
       });
       function applyGlobalUpdateSettings(event) {
         if (!event.status) {
@@ -1401,6 +1414,7 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+        renderUpdateStatus(body, globalUpdateModel.read());
         body.addEventListener("focusout", () => queueMicrotask(() => {
           if (body.dataset.issuesRenderDeferred === "true") {
             delete body.dataset.issuesRenderDeferred;

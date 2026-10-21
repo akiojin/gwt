@@ -18,6 +18,89 @@ test.describe("Autostart Settings (isolated live backend)", () => {
     });
   });
 
+  test("Update status batches bursts while toggles preserve immediate rollback", async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+      let transport: WebSocketRoute | undefined;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        transport = socket;
+        const server = socket.connectToServer();
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (!["get_update_settings", "set_auto_apply_updates"].includes(payload?.kind)) server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (!["update_settings", "issue_settings_status", "system_settings_error"].includes(payload?.kind)) socket.send(message);
+        });
+      });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true, suppressUpdateApplyStart: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.bringToFront();
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const panel = settings.locator("[data-update-settings-status]");
+      const toggle = settings.getByLabel("Auto-apply updates", { exact: true });
+      const status = { auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null };
+      transport!.send(JSON.stringify({ kind: "update_settings", project_root: PROJECT, status }));
+      await expect(panel).toContainText("Saved: On · Effective: On");
+      await expect(toggle).toBeChecked();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await toggle.focus();
+      await toggle.hover();
+      const burst = await panel.evaluate(async (panel, { status, root }) => {
+        const before = panel.innerHTML;
+        const focused = document.activeElement;
+        let renders = 0;
+        const observer = new MutationObserver(records => {
+          renders += records.filter(record => record.type === "childList" && record.removedNodes.length > 0).length;
+        });
+        observer.observe(panel, { childList: true });
+        try {
+          for (let index = 1; index <= 50; index++) {
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+              kind: "update_settings", project_root: root, status: { ...status,
+                update_drain: { version: `fixture-${index}`, blocking: [] },
+              },
+            } }));
+          }
+          const unchanged = panel.innerHTML === before;
+          (focused as HTMLInputElement).checked = false;
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "system_settings_error", message: "Fixture save denied",
+          } }));
+          const rollback = (focused as HTMLInputElement).checked;
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          return { unchanged, rollback, renders, text: panel.textContent,
+            focusPreserved: document.activeElement === focused, hoverPreserved: focused?.matches(":hover") };
+        } finally { observer.disconnect(); }
+      }, { status, root: PROJECT });
+      expect(burst).toMatchObject({ unchanged: true, rollback: true, renders: 1, focusPreserved: true, hoverPreserved: true });
+      expect(burst.text).toContain("fixture-50");
+      await info.attach("update-status-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+      await page.evaluate(({ status, root }) => {
+        (window as any).__updateStatusRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "update_settings", project_root: root, status: { ...status,
+            update_drain: { version: "fallback", blocking: [] },
+          },
+        } }));
+      }, { status, root: PROJECT });
+      try {
+        await expect(panel).toContainText("fallback", { timeout: 1000 });
+      } finally {
+        await page.evaluate(() => { window.requestAnimationFrame = (window as any).__updateStatusRaf; });
+      }
+      await info.attach(`update-status-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      expect(errors, "zero console/page errors through update status burst and rollback").toEqual([]);
+    });
+  });
+
   test("Agent Backend snapshots preserve per-agent lists, updates, errors and reopen", async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
