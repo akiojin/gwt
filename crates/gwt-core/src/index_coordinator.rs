@@ -562,6 +562,13 @@ struct JobState {
     updated_at_ms: u64,
 }
 
+impl JobState {
+    fn admission_deferred(&self) -> bool {
+        self.status == JobStatus::Failed
+            && self.message.as_deref() == Some("host admission deferred")
+    }
+}
+
 /// Whether a queued command needs one pool slot or excludes all pool slots.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2874,11 +2881,8 @@ fn matching_heavy_job_state(dir: &Path, registration: &Registration) -> Option<J
 }
 
 fn heavy_registration_finished(dir: &Path, registration: &Registration) -> bool {
-    matching_heavy_job_state(dir, registration).is_some_and(|state| {
-        state.status.is_terminal()
-            && !(state.status == JobStatus::Failed
-                && state.message.as_deref() == Some("host admission deferred"))
-    })
+    matching_heavy_job_state(dir, registration)
+        .is_some_and(|state| state.status.is_terminal() && !state.admission_deferred())
 }
 
 /// The caller owns queue-state.lock. The cancellation callback must not take
@@ -3044,6 +3048,24 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             });
             continue;
         };
+        let job = matching_heavy_job_state(dir, &registration);
+        // A returned deferred caller retains its FIFO arrival, but cannot use
+        // idle capacity until it comes back. Active and unproven reservations
+        // retain their existing grace; resident pollers always keep priority.
+        let bypass_reason =
+            if verification_pool && !live.locked && registration.has_live_reservation(now) {
+                if job.as_ref().is_some_and(JobState::admission_deferred) {
+                    Some("non-resident admission-deferred reservation")
+                } else if now.saturating_sub(registration.registered_at_ms)
+                    >= VERIFICATION_RESERVATION_GRACE.as_millis() as u64
+                {
+                    Some("non-resident reservation grace elapsed")
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
         let record = QueueRecord {
             target: registration.target.clone(),
             priority: registration.priority,
@@ -3053,13 +3075,8 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             waiting: live.locked || registration.has_live_reservation(now),
             present: live.locked,
             attempt_id: registration.attempt_id.clone(),
-            job_status: matching_heavy_job_state(dir, &registration).map(|state| state.status),
-            bypass_reason: (verification_pool
-                && !live.locked
-                && registration.has_live_reservation(now)
-                && now.saturating_sub(registration.registered_at_ms)
-                    >= VERIFICATION_RESERVATION_GRACE.as_millis() as u64)
-                .then_some("non-resident reservation grace elapsed"),
+            job_status: job.map(|state| state.status),
+            bypass_reason,
         };
         match record.target.clone() {
             // The same target can show up twice — its own attempt and the
@@ -4770,6 +4787,74 @@ mod tests {
             .expect("a completed project must not stall another project until TTL");
         drop(lease);
         next.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn deferred_verification_reservation_yields_immediately_and_rejoins_fifo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let early_key = TargetKey::verification("early-project", "worktree");
+        let early = own(&coordinator, &early_key, JobPriority::ManualRebuild);
+        coordinator
+            .reserve_heavy(
+                &early_key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+            )
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&early_key);
+        let saved = read_registration(&path).unwrap().unwrap();
+        early
+            .complete(JobOutcome::Failed {
+                message: "host admission deferred".into(),
+            })
+            .unwrap();
+
+        let later_key = TargetKey::verification("later-project", "worktree");
+        let later = own(&coordinator, &later_key, JobPriority::ManualRebuild);
+        later
+            .acquire_heavy(Duration::ZERO)
+            .expect("a returned deferred attempt cannot use an idle slot")
+            .release()
+            .unwrap();
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(queue[0].job_status, Some(JobStatus::Failed));
+        assert!(!queue[0].resident);
+        assert_eq!(
+            queue[0].bypass_reason.as_deref(),
+            Some("non-resident admission-deferred reservation")
+        );
+        let retained = read_registration(&path).unwrap().unwrap();
+        assert_eq!(retained.queued_at(), saved.queued_at());
+        assert_eq!(retained.queue_seq, saved.queue_seq);
+        assert_eq!(retained.reserved_until_ms, saved.reserved_until_ms);
+
+        let exclusive = later
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("exclusive work must also pass an absent deferred attempt");
+        let retry = own(&coordinator, &early_key, JobPriority::ManualRebuild);
+        let check = || Ok(false);
+        retry
+            .inherit_heavy_reservation_for_attempt(&HeavyAttempt {
+                id: "retry",
+                check_cancelled: &check,
+            })
+            .unwrap();
+        let returned = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(returned[0].queued_at_ms, saved.queued_at());
+        assert_eq!(returned[0].job_status, Some(JobStatus::Running));
+        assert!(returned[0].bypass_reason.is_none());
+        exclusive.release().unwrap();
+        assert!(matches!(
+            later.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        retry
+            .acquire_heavy(Duration::ZERO)
+            .unwrap()
+            .release()
+            .unwrap();
     }
 
     #[test]
