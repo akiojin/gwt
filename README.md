@@ -798,6 +798,15 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
+their order and duplicates. `observed_issue_states` and `unobserved_issues` use
+distinct Issue numbers in ascending order; typed states retain their supplied
+inbox order without duplicates. Empty or duplicate IDs and invalid traces keep
+separate rows. Membership never expands through a Goal, Milestone or another row.
+Queue/active membership alone supplies no inbox state. Without a Monitor snapshot,
+all direct Issues are unobserved; degraded observations retain their provenance.
+Empty membership yields empty arrays. These observations do not establish health,
+completion, priority or permission to launch work.
 Milestone `target_date_observation` compares an exact `YYYY-MM-DD` target with the
 recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or on
 the target date; missing or invalid dates leave it unknown with named missing inputs.
