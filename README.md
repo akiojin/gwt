@@ -572,7 +572,14 @@ change membership/order with `issue.monitor.queue.push`,
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
-`issue.monitor.priority.set` operations remain available. The
+`issue.monitor.priority.set` operations remain available. To prevent overwriting
+an intervening priority change, read the full `priority_order` from
+`issue.monitor.status` and pass that array as `expected_priority_order` to either
+priority operation. A mismatch rejects the update; read status again and reconsider
+the order, then confirm a successful update by reading it back. An explicit `[]`
+matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
+the existing behavior. The comparison protects the current order value, without
+tracking intervening history or other configuration changes. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. The registered PM for the repository
 can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI

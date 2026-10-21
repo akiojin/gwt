@@ -537,6 +537,12 @@ Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
+途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
+`priority_order` を読み、いずれの操作にも同じ配列を `expected_priority_order` として
+渡します。不一致なら更新を拒否するため、status を再読して順序を再判断し、成功後も
+読み戻して確認します。明示的な `[]` は保存順序が空の場合だけ一致し、`null` は拒否します。
+引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
+他の設定変更は検出しません。
 `issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
 `enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。

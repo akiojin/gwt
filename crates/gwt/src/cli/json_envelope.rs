@@ -794,6 +794,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 position: issue_monitor_priority_position(params)?,
@@ -889,6 +892,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
@@ -5693,6 +5699,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.priority.move", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
                 position: IssueMonitorPriorityPosition::Head,
@@ -5704,6 +5711,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 42, "position": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 42,
                 position: IssueMonitorPriorityPosition::Index(3),
@@ -5715,6 +5723,7 @@ mod tests {
                 json!({"issue_numbers": [9, 4, 7]})
             ),
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                expected_priority_order: None,
                 project_root: None,
                 issue_numbers: vec![9, 4, 7],
             })
@@ -5736,6 +5745,25 @@ mod tests {
                 update_drain: None,
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_priority_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            ("issue.monitor.priority-move", json!({"number":42})),
+            ("issue.monitor.priority-set", json!({"issue_numbers":[42]})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_priority_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            for invalid in [Value::Null, json!("1,2")] {
+                params["expected_priority_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
     }
 
     #[test]
