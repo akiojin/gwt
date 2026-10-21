@@ -1707,7 +1707,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     .cloned();
                 let effect = next_effect.and_then(|effect| {
                     if effect.state == crate::IssueMonitorEffectState::Attempting {
-                        Some(effect)
+                        Some((effect, false))
                     } else {
                         fence_next_issue_monitor_effect_with_permit(
                             &prefs_path,
@@ -1715,9 +1715,10 @@ fn spawn_issue_monitor_worker_with_lease(
                             &current_permit,
                             &selection_now,
                         )
+                        .map(|effect| (effect, true))
                     }
                 });
-                if let Some(effect) = effect {
+                if let Some((effect, allow_submit)) = effect {
                     let authority_current = effect.authority_epoch
                         == monitor.effect_authority_epoch()
                         && match &effect.payload {
@@ -1727,7 +1728,8 @@ fn spawn_issue_monitor_worker_with_lease(
                             crate::IssueMonitorEffectPayload::RenewClaim { .. } => {
                                 monitor.claim_renewal_is_current(&effect.payload)
                             }
-                            crate::IssueMonitorEffectPayload::ArmAutoMerge { .. } => {
+                            crate::IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                            | crate::IssueMonitorEffectPayload::RerunFailedCi { .. } => {
                                 monitor.config.enabled && monitor.autonomous_mode()
                             }
                             // Issue #3917: a close needs the auto-close authority;
@@ -1752,6 +1754,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         scope.clone(),
                         effect,
                         authority_current,
+                        allow_submit,
                         current_permit,
                         deadline,
                         #[cfg(test)]
@@ -4947,6 +4950,7 @@ enum IssueMonitorEffectOutcome {
     ),
     QueueLabelCleanup(gwt_github::client::OwnerMutationResult<bool>),
     AutoMerge(gwt_git::pr_status::AutoMergeMutationOutcome),
+    CiRerun(crate::issue_monitor_ci::CiRerunOutcome),
     /// Issue #3917: comment + optional verified close of a delivered Issue.
     MergedIssueSettlement(
         gwt_github::client::OwnerMutationResult<
@@ -5090,6 +5094,7 @@ fn spawn_issue_monitor_effect(
     scope: RuntimeScope,
     effect: crate::PendingIssueMonitorEffect,
     authority_current: bool,
+    allow_submit: bool,
     permit: IssueMonitorEffectPermitToken,
     deadline: Instant,
     #[cfg(test)] effect_override: Option<Arc<IssueMonitorEffectOverride>>,
@@ -5119,6 +5124,7 @@ fn spawn_issue_monitor_effect(
                 &scope,
                 &effect,
                 authority_current,
+                allow_submit,
                 &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
         };
@@ -5168,6 +5174,7 @@ fn execute_issue_monitor_effect(
     scope: &RuntimeScope,
     effect: &crate::PendingIssueMonitorEffect,
     authority_current: bool,
+    allow_submit: bool,
     execution_now: &str,
 ) -> IssueMonitorEffectOutcome {
     use gwt_github::client::OwnerMutationError;
@@ -5177,6 +5184,13 @@ fn execute_issue_monitor_effect(
     use gwt_github::IssueNumber;
 
     match &effect.payload {
+        crate::IssueMonitorEffectPayload::RerunFailedCi { target, .. } => {
+            IssueMonitorEffectOutcome::CiRerun(crate::issue_monitor_ci::execute_ci_rerun(
+                &scope.project_root,
+                target,
+                allow_submit && authority_current,
+            ))
+        }
         crate::IssueMonitorEffectPayload::RenewClaim { .. } => {
             IssueMonitorEffectOutcome::Renew(if authority_current {
                 match issue_monitor_http_client(scope) {
@@ -5556,6 +5570,26 @@ fn try_commit_issue_monitor_effect_result(
                 }
             }
             match (&completed.effect.payload, completed.outcome) {
+                (
+                    crate::IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. },
+                    IssueMonitorEffectOutcome::CiRerun(outcome),
+                ) => {
+                    let _ = candidate.complete_pending_effect(&key);
+                    if current_authority {
+                        if let crate::issue_monitor_ci::CiRerunOutcome::Refused(reason)
+                        | crate::issue_monitor_ci::CiRerunOutcome::Unknown(reason) = outcome
+                        {
+                            candidate.request_autonomous_steering(
+                                *issue_number,
+                                reason,
+                                &completed.completed_at,
+                            );
+                        }
+                    }
+                    // Consumption is permanent even if submission was interrupted:
+                    // GitHub's run_attempt readback can lag an accepted POST.
+                    settled = true;
+                }
                 (
                     crate::IssueMonitorEffectPayload::RenewClaim { .. },
                     IssueMonitorEffectOutcome::Renew(result),
@@ -18806,6 +18840,7 @@ exit 1
                 scope,
                 effect,
                 true,
+                true,
                 super::IssueMonitorEffectPermitToken::always_open(),
                 Instant::now() + Duration::from_secs(1),
                 None,
@@ -19002,6 +19037,7 @@ exit 1
             let mut queued = super::spawn_issue_monitor_effect(
                 scope,
                 effect,
+                true,
                 true,
                 permit.capture(),
                 Instant::now() + Duration::from_secs(2),
@@ -19926,6 +19962,104 @@ exit 1
         assert_eq!(fenced.state, crate::IssueMonitorEffectState::Attempting);
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         assert_eq!(persisted.pending_effects, vec![fenced]);
+    }
+
+    #[test]
+    fn ci_rerun_executor_fence_persists_consumption_before_dispatch() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let effect: crate::PendingIssueMonitorEffect = serde_json::from_value(serde_json::json!({
+            "effect_id": "ci-rerun:99:abc123:701", "authority_epoch": 4,
+            "attempt": 0, "state": "prepared",
+            "payload": {"kind": "rerun_failed_ci", "issue_number": 42,
+                "target": {"pr_number": 99, "head_sha": "abc123", "run_id": 701}}
+        }))
+        .expect("CI rerun effect decodes");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 4,
+            pending_effects: vec![effect.clone()],
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let fenced = super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor)
+            .expect("rerun receives a durable fence");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload fence");
+        assert_eq!(persisted.pending_effects, vec![fenced]);
+        let saved = serde_json::to_value(persisted).expect("serialize fence");
+        assert_eq!(
+            saved["consumed_ci_reruns"],
+            serde_json::json!([effect.effect_id])
+        );
+    }
+
+    #[test]
+    fn ci_rerun_unknown_submission_settles_once_and_requests_steering() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 99,
+            head_sha: "abc123".into(),
+            run_id: 701,
+        };
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor
+            .prepare_pending_effect(
+                target.effect_id(),
+                crate::IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: target.clone(),
+                },
+            )
+            .expect("prepare rerun");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+        let effect =
+            super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor).expect("fence rerun");
+        let completed = super::CompletedIssueMonitorEffect {
+            effect: effect.clone(),
+            outcome: super::IssueMonitorEffectOutcome::CiRerun(
+                crate::issue_monitor_ci::CiRerunOutcome::Unknown("submission response lost".into()),
+            ),
+            completed_at: "2026-10-21T00:00:00Z".into(),
+        };
+        assert!(commit_effect_result_for_test(
+            &prefs_path,
+            &mut monitor,
+            completed
+        ));
+        assert!(monitor.pending_effects().is_empty());
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .expect("owner record")
+                .steering
+                .as_ref()
+                .expect("steering requested")
+                .reason,
+            "submission response lost"
+        );
+        assert!(
+            !monitor.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                target.effect_id(),
+                monitor.effect_authority_epoch(),
+                effect.payload
+            ))
+        );
     }
 
     #[test]
@@ -21172,7 +21306,7 @@ exit 1
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let arm_outcome =
-            super::execute_issue_monitor_effect(&scope, &arm, true, "2026-07-27T00:00:00Z");
+            super::execute_issue_monitor_effect(&scope, &arm, true, true, "2026-07-27T00:00:00Z");
         assert!(matches!(
             arm_outcome,
             super::IssueMonitorEffectOutcome::AutoMerge(
@@ -21199,8 +21333,13 @@ exit 1
                 ..
             } if compensates_effect_id == &arm.effect_id
         ));
-        let disarm_outcome =
-            super::execute_issue_monitor_effect(&scope, &disarm, true, "2026-07-27T00:00:01Z");
+        let disarm_outcome = super::execute_issue_monitor_effect(
+            &scope,
+            &disarm,
+            true,
+            true,
+            "2026-07-27T00:00:01Z",
+        );
         assert!(
             disarm_marker.exists(),
             "compensation must disable auto-merge"

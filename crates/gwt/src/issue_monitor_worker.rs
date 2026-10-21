@@ -2508,6 +2508,62 @@ fn read_open_pr_inventory(
     }
 }
 
+// Returns true when the gate must wait for the one allowed CI retry.
+fn prepare_failed_ci_reruns(
+    monitor: &mut IssueMonitorState,
+    issue_number: u64,
+    targets: &[crate::issue_monitor_ci::CiRerunTarget],
+    now: &str,
+    mut retry_state: impl FnMut(
+        &crate::issue_monitor_ci::CiRerunTarget,
+        bool,
+    ) -> Result<crate::issue_monitor_ci::CiRetryState, String>,
+) -> bool {
+    use crate::issue_monitor_ci::CiRetryState;
+    let mut waiting = false;
+    for target in targets {
+        let id = target.effect_id();
+        if monitor
+            .pending_effects()
+            .iter()
+            .any(|effect| effect.effect_id == id)
+        {
+            waiting = true;
+            continue;
+        }
+        let consumed = monitor.ci_rerun_consumed(&id);
+        match retry_state(target, consumed) {
+            Ok(CiRetryState::Ready) if !consumed => {
+                waiting |= monitor.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                    id,
+                    monitor.effect_authority_epoch(),
+                    crate::IssueMonitorEffectPayload::RerunFailedCi {
+                        issue_number,
+                        target: target.clone(),
+                    },
+                ));
+            }
+            Ok(CiRetryState::Failed) => {}
+            Ok(CiRetryState::Pending) => waiting = true,
+            Ok(CiRetryState::Ready) | Err(_) if consumed => {
+                waiting = true;
+                monitor.request_autonomous_steering(issue_number,
+                    format!("CI run {} retry submission is consumed; awaiting GitHub readback, no duplicate will be sent", target.run_id), now);
+            }
+            Err(reason) => {
+                waiting = true;
+                monitor.request_autonomous_steering(
+                    issue_number,
+                    format!("CI retry readback unavailable: {reason}"),
+                    now,
+                );
+            }
+            Ok(CiRetryState::Ready) => unreachable!("unconsumed ready runs are handled above"),
+        }
+    }
+    waiting
+}
+
 /// Advance one in-flight autonomous issue by a single step. Every remote
 /// readback here runs under its own budget ([`run_budgeted_readback_stage`]), so
 /// a slow candidate cannot spend the budget the next candidate needs. The
@@ -2675,6 +2731,49 @@ fn advance_one_autonomous_issue(
             // environment fact about the launch, and Issue #3944 AC-1 reserves
             // the retry counter for the agent's own failures.
             let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            // Issue #5876 T-4a: a transient required CI failure gets one
+            // persisted failed-jobs retry before it can create a fix generation.
+            // Review/acceptance/head/mergeability failures retain their routing.
+            if matches!(routed, crate::issue_monitor_gate::GateAction::Remediate(_))
+                && matches!(inputs.ci, crate::issue_monitor_gate::CiOutcome::Failed)
+                && inputs.review == crate::issue_monitor_review::ReviewGateOutcome::Pass
+                && inputs.acceptance_unchanged
+                && !inputs.reviewed_sha.is_empty()
+                && inputs.reviewed_sha == inputs.head_sha
+                && crate::issue_monitor_gate::unmergeable_reason(inputs.mergeability).is_none()
+            {
+                if let gwt_git::branch_protection::BranchProtectionStatus::Verified {
+                    required_checks,
+                } = &inputs.branch_protection
+                {
+                    let targets = crate::issue_monitor_ci::failed_required_targets(
+                        &rollup,
+                        required_checks,
+                        repo_slug,
+                        pr,
+                        &head,
+                    );
+                    if prepare_failed_ci_reruns(
+                        monitor,
+                        issue_number,
+                        &targets,
+                        now,
+                        |target, consumed| {
+                            run_budgeted_readback_stage(
+                                IssueMonitorScanStage::StatusCheckReadback,
+                                || {
+                                    crate::issue_monitor_ci::retry_state(
+                                        repo_path, target, consumed,
+                                    )
+                                },
+                            )
+                            .map_err(|error| error.to_string())
+                        },
+                    ) {
+                        routed = crate::issue_monitor_gate::GateAction::WaitForCi;
+                    }
+                }
+            }
             if matches!(routed, crate::issue_monitor_gate::GateAction::Deliver) {
                 if let Some(reason) = crate::cli::permission_readiness::owner_settlement_refusal(
                     repo_path,
@@ -7189,5 +7288,220 @@ exit 0
             monitor.autonomous_record(42).map(|record| record.phase),
             Some(crate::AutonomousPhase::Reviewing)
         );
+    }
+    #[test]
+    fn ci_rerun_gate_waits_without_new_generation_and_proposes_once() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 7,
+            head_sha: "abc123".into(),
+            run_id: 90,
+        };
+        for _ in 0..2 {
+            assert!(prepare_failed_ci_reruns(
+                &mut monitor,
+                42,
+                std::slice::from_ref(&target),
+                "2026-10-21T09:00:00Z",
+                |_, consumed| {
+                    assert!(!consumed);
+                    Ok(crate::issue_monitor_ci::CiRetryState::Ready)
+                }
+            ));
+        }
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert_eq!(monitor.pending_effects()[0].effect_id, target.effect_id());
+        assert!(
+            monitor.autonomous_record(42).is_none(),
+            "waiting creates no retry generation"
+        );
+    }
+
+    #[test]
+    fn ci_rerun_gate_waits_for_running_workflow_and_preserves_terminal_failure() {
+        use crate::issue_monitor_ci::{CiRerunTarget, CiRetryState};
+        let target = CiRerunTarget {
+            pr_number: 7,
+            head_sha: "abc123".into(),
+            run_id: 90,
+        };
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        assert!(prepare_failed_ci_reruns(
+            &mut monitor,
+            42,
+            std::slice::from_ref(&target),
+            "2026-10-21T09:00:00Z",
+            |_, _| Ok(CiRetryState::Pending)
+        ));
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "do not consume a still-running workflow"
+        );
+        assert!(!prepare_failed_ci_reruns(
+            &mut monitor,
+            42,
+            &[target],
+            "2026-10-21T09:00:00Z",
+            |_, _| Ok(CiRetryState::Failed)
+        ));
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "a failed retry returns to normal remediation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_rerun_reviewing_route_waits_for_retry_then_resumes_remediation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        for args in [
+            vec!["init", "--bare"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("initialize repository");
+            assert!(output.status.success(), "git fixture: {output:?}");
+        }
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("create bin");
+        let fake_gh = bin.join("gh");
+        std::fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+case "$*" in
+  *repos/owner/repo/branches/develop/protection)
+    printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
+  'pr view 7 --json statusCheckRollup')
+    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}]}' ;;
+  'pr view 7 --json headRefOid')
+    printf '%s\n' '{"headRefOid":"abc123"}' ;;
+  'pr view 7 --json state,mergeable,mergeStateStatus')
+    printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
+  'api /repos/owner/repo/actions/runs/90')
+    cat "$GWT_TEST_CI_RERUN_FIXTURES/run.json" ;;
+  *) printf '%s\n' "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .expect("write fake gh");
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gh");
+        let mut paths = vec![bin];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let _fixtures =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_CI_RERUN_FIXTURES", temp.path());
+        let workflow = |attempt, status| {
+            std::fs::write(
+                temp.path().join("run.json"),
+                serde_json::json!({
+                    "id": 90, "repository": {"full_name": "owner/repo"},
+                    "head_sha": "abc123", "event": "pull_request",
+                    "run_attempt": attempt, "status": status, "conclusion": "failure"
+                })
+                .to_string(),
+            )
+            .expect("write workflow readback");
+        };
+        let body = "## Acceptance Criteria\n- [ ] AC-1: returns 200\n";
+        let issues = [IssueMonitorIssue {
+            labels: vec!["auto-merge".into()],
+            body: Some(body.into()),
+            ..issue(42)
+        }];
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(body).snapshot(),
+        );
+        monitor.begin_review(42, 7, "abc123");
+        monitor.record_review_verdict(42, true);
+        monitor.set_active_launch_id(42, Some("generation-1".into()));
+        let reviewing = monitor.autonomous_record(42).cloned();
+        let scan = |monitor: &mut IssueMonitorState| {
+            advance_one_autonomous_issue(
+                monitor,
+                &issues,
+                "owner/repo",
+                temp.path(),
+                "develop",
+                None,
+                b"secret",
+                42,
+                "2026-10-21T09:00:00Z",
+            )
+            .expect("reviewing scan");
+        };
+
+        workflow(1, "completed");
+        scan(&mut monitor);
+        assert_eq!(monitor.autonomous_record(42), reviewing.as_ref());
+        assert_eq!(monitor.pending_effects().len(), 1);
+        let effect = monitor.pending_effects()[0].clone();
+        assert_eq!(effect.effect_id, "ci-rerun:7:abc123:90");
+        assert!(matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::RerunFailedCi {
+                issue_number: 42,
+                ..
+            }
+        ));
+        let key = effect.attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        assert!(monitor.complete_pending_effect(&key).is_some());
+
+        workflow(2, "in_progress");
+        scan(&mut monitor);
+        assert_eq!(
+            monitor.autonomous_record(42),
+            reviewing.as_ref(),
+            "a pending retry retains the reviewed generation and attempt count"
+        );
+        assert!(monitor.pending_effects().is_empty());
+
+        workflow(2, "completed");
+        scan(&mut monitor);
+        let remediating = monitor.autonomous_record(42).expect("remediation record");
+        assert_eq!(remediating.phase, crate::AutonomousPhase::Idle);
+        assert_eq!(remediating.attempts, 1);
+        assert!(remediating.retry_not_before.is_some());
+        assert_eq!(
+            remediating.last_failure_message.as_deref(),
+            Some("CI failed or independent review rejected — remediate")
+        );
+        assert!(monitor.pending_effects().is_empty());
     }
 }
