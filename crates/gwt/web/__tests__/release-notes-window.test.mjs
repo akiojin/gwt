@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createReleaseNotesWindow } from "../release-notes-window.js";
 
-function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
+function makeFixture({ entries = sampleEntries(), focusVersion = null,
+  scheduleFrame = callback => { callback(); return () => {}; },
+} = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><button id="trigger">Version</button></body></html>',
   );
@@ -18,6 +20,7 @@ function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
     send,
     generateId: () => "rn-test-1",
     beginUpdateDownloading,
+    scheduleFrame,
   });
   return {
     document,
@@ -357,6 +360,56 @@ test("handlePayload with empty entries falls back to the empty state", () => {
   controller.handlePayload({ id: "rn-test-1", entries: [], focus_version: null });
   const empty = document.querySelector(".release-notes-empty");
   assert.ok(empty);
+});
+
+test("payload bursts keep synchronous lifecycle and render only the latest frame snapshot", () => {
+  const frames = [];
+  const { document, controller, entries, sent } = makeFixture({
+    scheduleFrame: callback => { frames.push(callback); return () => {}; },
+  });
+  controller.open();
+  assert.equal(sent[0].kind, "open_release_notes");
+  controller.handlePayload({ entries });
+  assert.equal(controller.isOpen(), true, "mount stays synchronous");
+  const content = document.querySelector(".release-notes-content");
+  assert.equal(content.childNodes.length, 0, "body waits for the frame");
+  let renders = 0;
+  const append = content.appendChild.bind(content);
+  content.appendChild = node => { renders++; return append(node); };
+  for (let index = 1; index <= 50; index++) {
+    controller.handlePayload({ entries: [{ version: `9.0.${index}`, sections: [] }] });
+  }
+  assert.equal(controller.selectedVersion(), "9.0.50", "model updates synchronously");
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(renders, 1);
+  assert.equal(content.querySelector("h2").textContent, "v9.0.50");
+  assert.equal(document.querySelector(".release-notes-sidebar-item.is-selected").dataset.version, "9.0.50");
+
+  controller.handleError("latest error");
+  assert.equal(renders, 1);
+  frames.shift()();
+  assert.match(content.textContent, /latest error/);
+  controller.handlePayload({ entries });
+  controller._select("9.37.0");
+  frames.shift()();
+  assert.equal(content.querySelector("h2").textContent, "v9.37.0");
+  assert.equal(content.querySelector(".release-notes-empty"), null);
+
+  controller.handleError("pending error");
+  controller.close();
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller._state.keydownHandler, null);
+  frames.shift()();
+  assert.equal(document.getElementById("release-notes-window"), null, "pending frame cannot reopen a closed window");
+  controller.handlePayload({ entries });
+  controller.close();
+  controller.handlePayload({ entries, focus_version: "9.36.0" });
+  assert.equal(controller.isOpen(), true);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(document.querySelector(".release-notes-content h2").textContent, "v9.36.0");
+  controller.close();
 });
 
 // SPEC #2780 v2 Amendment (FR-015): update action button states.
