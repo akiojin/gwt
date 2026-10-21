@@ -1719,7 +1719,10 @@ snapshot. Retain each unsubscribe function for views that can be removed. Keep
 DOM nodes and renderer functions outside the model. Notifications also run for
 unfocused windows, without a focus or animation-frame trigger. The shared
 `ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
-the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the content type. Assign `{ type: 'markdown', body, body_html }` to a record's
+`content` when accepting it into the model. Views pass that committed content
+to `renderUiContent`; they do not choose Markdown or accept an injected renderer.
+See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
 the migration inventory and acceptance criteria.
 
 ### Capacity for heavy verification

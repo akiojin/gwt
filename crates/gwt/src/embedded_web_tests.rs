@@ -2588,7 +2588,7 @@ fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
         "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
     );
     assert!(
-        html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+        html.contains("renderUiContent(document, entry.content, \"board-message-body\")"),
         "Board body must render via the shared Markdown renderer",
     );
     assert!(

@@ -153,17 +153,17 @@ test("Card click no longer opens the Drawer as the primary detail UI", () => {
 test("Drawer renders section bodies through sanitized Markdown helper", () => {
   assert.match(
     appSource,
-    /function\s+createKnowledgeMarkdownBody\(/,
+    /content: \{ type: "markdown"/,
     "expected a shared Markdown body helper for Knowledge detail sections",
   );
   assert.match(
     appSource,
-    /renderUiContent\(document, markdownContent\(section\), className\)/,
+    /renderUiContent\(document, section\.content/,
     "expected Drawer helper to delegate to the shared typed Markdown renderer",
   );
   assert.match(
     appSource,
-    /createKnowledgeMarkdownBody\(section,\s*"kanban-drawer-section-body"\)/,
+    /renderUiContent\(document, section\.content,\s*"kanban-drawer-section-body"\)/,
     "expected Drawer section bodies to flow through the Markdown helper",
   );
   assert.doesNotMatch(

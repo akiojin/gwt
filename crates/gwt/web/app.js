@@ -1,5 +1,4 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
-import { markdownContent, renderUiContent } from "/ui-content.js";
 import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
@@ -3917,7 +3916,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
         sendKnowledgeSemanticSearchNow,
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
         isKnowledgeWindowVisible: (id) => !document.hidden &&
@@ -4023,7 +4021,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
         },
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
@@ -4147,10 +4144,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (isStrongContinueWorkSuccess(exact)) {
           scheduleKnowledgeRelatedWorkRefresh(true);
         }
-      }
-
-      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
-        return renderUiContent(document, markdownContent(section), className);
       }
 
       // SPEC-2359 US-42 — Workspace Resume Picker controller. The
