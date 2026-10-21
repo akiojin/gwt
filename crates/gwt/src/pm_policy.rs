@@ -182,8 +182,16 @@ pub struct PlanningAssessment {
     pub roadmap_items: Vec<RoadmapDiagnostic>,
     pub goals: Vec<GoalDiagnostic>,
     pub milestones: Vec<MilestoneDiagnostic>,
+    pub risks: Vec<RiskMetadataDiagnostic>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
+}
+
+/// Authored metadata presence is not a risk assessment or action permission.
+#[derive(Debug, Serialize)]
+pub struct RiskMetadataDiagnostic {
+    pub id: String,
+    pub missing_inputs: Vec<&'static str>,
 }
 
 /// A saved next-run timestamp reaching the scan is not execution evidence.
@@ -1122,6 +1130,38 @@ pub fn assess_planning(
         roadmap_items,
         goals,
         milestones,
+        risks: state
+            .risks
+            .iter()
+            .map(|risk| {
+                let mut missing_inputs = Vec::new();
+                if risk.id.trim().is_empty() {
+                    missing_inputs.push("id");
+                } else if state
+                    .risks
+                    .iter()
+                    .filter(|other| other.id == risk.id)
+                    .count()
+                    > 1
+                {
+                    missing_inputs.push("unique_risk_id");
+                }
+                for (name, value) in [
+                    ("severity", &risk.severity),
+                    ("probability", &risk.probability),
+                    ("impact", &risk.impact),
+                    ("owner", &risk.owner),
+                ] {
+                    if value.trim().is_empty() {
+                        missing_inputs.push(name);
+                    }
+                }
+                RiskMetadataDiagnostic {
+                    id: risk.id.clone(),
+                    missing_inputs,
+                }
+            })
+            .collect(),
         review_dates: observe_review_dates(
             state,
             monitor.and_then(|status| status.last_scan_at.as_deref()),
@@ -1303,6 +1343,66 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("missing_milestone")));
+    }
+
+    #[test]
+    fn risk_metadata_reports_missing_fields_without_evaluating_risk() {
+        let complete = crate::pm_planning::Risk {
+            id: "same".into(),
+            severity: "opaque".into(),
+            probability: "unspecified".into(),
+            impact: "freeform".into(),
+            owner: "someone".into(),
+            ..Default::default()
+        };
+        let state = PmPlanningState {
+            risks: vec![
+                crate::pm_planning::Risk {
+                    id: " \t".into(),
+                    ..Default::default()
+                },
+                crate::pm_planning::Risk {
+                    probability: " \n".into(),
+                    ..complete.clone()
+                },
+                complete.clone(),
+                crate::pm_planning::Risk {
+                    id: " same ".into(),
+                    ..complete.clone()
+                },
+                crate::pm_planning::Risk {
+                    id: "Same".into(),
+                    ..complete
+                },
+            ],
+            ..Default::default()
+        };
+        let before = state.clone();
+        let report = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            report["risks"],
+            json!([
+                {"id":" \t", "missing_inputs":["id", "severity", "probability", "impact", "owner"]},
+                {"id":"same", "missing_inputs":["unique_risk_id", "probability"]},
+                {"id":"same", "missing_inputs":["unique_risk_id"]},
+                {"id":" same ", "missing_inputs":[]},
+                {"id":"Same", "missing_inputs":[]}
+            ])
+        );
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let monitor_before = serde_json::to_value(&monitor).unwrap();
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["risks"], report["risks"]);
+        assert_eq!(degraded["review_dates"], report["review_dates"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert_eq!(state, before);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["risks"],
+            json!([])
+        );
     }
 
     #[test]

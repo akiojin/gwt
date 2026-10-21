@@ -77,6 +77,12 @@ and name `review_date` or `monitor_scan_time`. The scan date remains visible ind
 it is zero before or on the review date. No current clock is used, and enclosing Monitor
 source, scan age and coverage limits still apply to old or degraded observations.
 Days past a review date do not prove whether a review occurred or authorize action.
+`policy.risks` lists saved risk IDs and metadata `missing_inputs` in saved order.
+It names blank or whitespace-only id, severity, probability, impact and owner fields;
+repeated nonblank exact IDs add unique_risk_id. Trimming only detects missing values,
+never merges IDs; case and surrounding whitespace remain significant for identity.
+Nonblank values remain opaque, and assumptions are optional. These diagnostics need no Monitor
+snapshot and leave review_dates unchanged. Risk metadata completeness does not establish semantic validity or authorize action.
 `recurring_runs` preserves saved recurring rows, their IDs and authored next_run values.
 `due_at_scan` compares RFC3339 instants using only the supplied scan; it is true at or
 after next_run and false before it, including explicit timezone offsets and fractional seconds.
@@ -3944,6 +3950,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`review_dates` lists saved risks, then decisions, in their saved order",
             "`days_past_review_at_scan` measures only UTC calendar passage at the supplied scan",
             "Days past a review date do not prove whether a review occurred or authorize action",
+            "`policy.risks` lists saved risk IDs and metadata `missing_inputs` in saved order",
+            "Risk metadata completeness does not establish semantic validity or authorize action",
             "`recurring_runs` preserves saved recurring rows, their IDs and authored next_run values",
             "`due_at_scan` compares RFC3339 instants using only the supplied scan",
             "Reject fractional seconds beyond nine digits instead of silently truncating precision",
