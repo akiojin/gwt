@@ -99,6 +99,54 @@ test.describe("Update modal", () => {
     await cta.click();
     await expect(progress).toHaveAttribute("aria-valuenow", "25");
     await expect(counter).toHaveText("1.0 MB / 4.0 MB");
+    const burst = await page.evaluate(async () => {
+      const progress = document.querySelector("[data-update-modal-progress]")!;
+      const counter = document.querySelector("[data-update-modal-byte-counter]")!;
+      const focused = document.activeElement;
+      let renders = 0;
+      const observer = new MutationObserver(records => { renders += records.length; });
+      observer.observe(progress, { attributes: true, attributeFilter: ["aria-valuenow"] });
+      try {
+        for (let index = 1; index <= 50; index++) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "update_progress", downloaded: index * 1024 * 1024, total: 100 * 1024 * 1024,
+          } }));
+        }
+        const deferred = progress.getAttribute("aria-valuenow") === "25";
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { deferred, renders, percent: progress.getAttribute("aria-valuenow"),
+          bytes: counter.textContent, focusPreserved: document.activeElement === focused };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ deferred: true, renders: 1, percent: "50",
+      bytes: "50.0 MB / 100.0 MB", focusPreserved: true });
+    await testInfo.attach("update-progress-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+
+    const fallback = await page.evaluate(async () => {
+      const originalRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      const started = performance.now();
+      try {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "update_progress", downloaded: 60 * 1024 * 1024, total: 100 * 1024 * 1024,
+        } }));
+        const progress = document.querySelector("[data-update-modal-progress]")!;
+        await new Promise<void>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            if (progress.getAttribute("aria-valuenow") === "60") {
+              observer.disconnect(); clearTimeout(deadline); resolve();
+            }
+          });
+          const deadline = setTimeout(() => { observer.disconnect(); reject(new Error("progress fallback exceeded 1 second")); }, 1000);
+          observer.observe(progress, { attributes: true, attributeFilter: ["aria-valuenow"] });
+        });
+        return { elapsed: performance.now() - started,
+          bytes: document.querySelector("[data-update-modal-byte-counter]")!.textContent };
+      } finally { window.requestAnimationFrame = originalRaf; }
+    });
+    expect(fallback.elapsed).toBeLessThan(1000);
+    expect(fallback.bytes).toBe("60.0 MB / 100.0 MB");
+    await testInfo.attach("update-progress-frame-fallback", { body: JSON.stringify(fallback), contentType: "application/json" });
     await inject({ kind: "update_progress", downloaded: 3 * 1024 * 1024, total: 4 * 1024 * 1024 });
     await expect(progress).toHaveAttribute("aria-valuenow", "75");
     await expect(counter).toHaveText("3.0 MB / 4.0 MB");
@@ -117,7 +165,13 @@ test.describe("Update modal", () => {
       / node.getBoundingClientRect().width * 100,
     ))).toBe(50);
     await page.screenshot({ path: testInfo.outputPath(`update-progress-${theme}.png`) });
-    await page.locator("[data-update-modal-cancel]").click();
+    await page.evaluate(async () => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+        kind: "update_progress", downloaded: 99, total: 100,
+      } }));
+      (document.querySelector("[data-update-modal-cancel]") as HTMLButtonElement).click();
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    });
     await expect(modal).toHaveCount(0);
     await cta.click();
     await expect(progress).toHaveAttribute("aria-valuenow", "0");
