@@ -11355,6 +11355,7 @@ impl IssueMonitorState {
             })
             .collect::<Vec<_>>();
         for issue_number in unlaunched {
+            self.clear_provisional_implementation(issue_number);
             revoke_uncommitted_claims_for_issue(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -40934,8 +40935,20 @@ mod tests {
 
     #[test]
     fn issue_4157_pr_hold_rejects_stale_acquire_claim_proposals() {
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.terminal_queue_push(&[42], "test", "2026-06-26T00:00:00Z");
+        let now = "2026-06-26T00:00:00Z";
+        let mut monitor = autonomous_state();
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(candidate.clone());
+        monitor.record_attempt(42);
+        let attempts = monitor.attempt_count(42);
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
         let payload = IssueMonitorEffectPayload::AcquireClaim {
             issue_number: 42,
             claim_id: "claim-42".into(),
@@ -40962,6 +40975,14 @@ mod tests {
             monitor.pending_effects().is_empty(),
             "the PR observation revokes the old prepared claim"
         );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle,
+            "a cancelled pre-spawn candidate must not review the existing PR"
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert!(monitor.terminal_queue_contains(42));
+        assert_eq!(monitor.attempt_count(42), attempts);
         monitor.rebase_daemon_driver_prefs(&stale_claim);
         assert!(
             monitor.pending_effects().is_empty(),
@@ -40977,6 +40998,56 @@ mod tests {
             None
         );
         assert!(monitor.pending_effects().is_empty());
+
+        // Startup and stale writers must enforce the same cancellation.
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.rebase_daemon_driver_prefs(&stale_claim);
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        assert_eq!(restored.attempt_count(42), attempts);
+        restored.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:02:00Z");
+        restored.record_candidate(candidate.clone());
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        restored.config.enabled = true;
+        restored.set_gui_connected(true);
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+    }
+
+    #[test]
+    fn issue_5876_pr_hold_preserves_running_implementation_and_resuming_review() {
+        let mut monitor = autonomous_state();
+        for number in [42, 43, 44] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.complete_active_launch(42, "tab::agent");
+        monitor.process_held_issues.insert(43);
+        monitor.autonomous_record_mut(44).reviewed_sha = Some("reviewed-head".into());
+        let holds = [42, 43, 44]
+            .into_iter()
+            .map(|number| {
+                (
+                    number,
+                    Some(IssueMonitorOpenPrHold {
+                        pr_number: number + 100,
+                        lifecycle: "IN-PROGRESS".into(),
+                    }),
+                )
+            })
+            .collect();
+        monitor.reconcile_open_pr_holds(&holds, "2026-06-26T00:01:00Z");
+        for number in [42, 43, 44] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "PR hold must preserve existing work for Issue #{number}"
+            );
+        }
     }
 
     #[test]
