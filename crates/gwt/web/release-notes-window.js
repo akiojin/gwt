@@ -28,6 +28,7 @@ export function createReleaseNotesWindow({
   // "applying"`). The host (app.js) wires this to
   // `updateCtaController.beginDownloadingFor`.
   beginUpdateDownloading = () => {},
+  scheduleFrame,
 } = {}) {
   if (!document) {
     throw new Error("createReleaseNotesWindow requires a document");
@@ -39,7 +40,7 @@ export function createReleaseNotesWindow({
     currentVersion: null,
     error: null,
     visible: false,
-  });
+  }, { scheduleFrame });
   const state = {
     root: null,
     sidebar: null,
@@ -452,9 +453,11 @@ export function createReleaseNotesWindow({
 
   // The controller lives for the app lifetime. Closed windows retain only data;
   // their DOM and key listener are released by close().
-  model.subscribe(snapshot => snapshot, snapshot => {
+  model.subscribe(snapshot => snapshot.visible, visible => {
+    if (visible) ensureWindow();
+  });
+  model.subscribeFrame(snapshot => snapshot, snapshot => {
     if (!snapshot.visible) return;
-    ensureWindow();
     applyWindowChrome();
     renderSidebar(snapshot);
     renderContent(snapshot);
