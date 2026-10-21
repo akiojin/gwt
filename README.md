@@ -575,7 +575,8 @@ queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
 an intervening priority change, read the full `priority_order` from
 `issue.monitor.status` and pass that array as `expected_priority_order` to either
-priority operation. A mismatch rejects the update; read status again and reconsider
+priority operation or `issue.monitor.launch_now`. A mismatch rejects the update
+before queue admission, hold clearing, or a scan request; read status again and reconsider
 the order, then confirm a successful update by reading it back. An explicit `[]`
 matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
 the existing behavior. The comparison protects the current order value, without
