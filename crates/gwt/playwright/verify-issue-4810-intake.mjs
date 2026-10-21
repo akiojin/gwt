@@ -156,7 +156,9 @@ try {
   await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
   await writeFile(join(preferences, "issue-monitor.json"), JSON.stringify({ enabled: false, autonomous_mode: false, launch_auto: false,
     max_active_agents: 1, allowed_labels: [], priority_order: [481003], terminal_queue_auto_refill: false, auto_apply_updates: false,
-    terminal_queues: { [hostname().toLowerCase()]: { entries: [{ number: 481003, queued_at: issues[2].updatedAt, queued_by: "fixture" }] } } }));
+    terminal_queues: { [hostname().trim().toLowerCase().replace(/(?:\.local)+$/, "") || "unknown-host"]: { entries: [{ number: 481003, queued_at: issues[2].updatedAt, queued_by: "fixture" }] } } }));
+  const seededQueue = await envelope("issue.monitor.queue.list");
+  if (!seededQueue.entries?.some(entry => entry.number === 481003)) throw new Error(`Trusted fixture missing from this terminal queue: ${JSON.stringify(seededQueue)}`);
   await writeFile(join(home, ".gwt/config.toml"), "auto_apply_updates = false\n");
   await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [{ id: "feedback-intake", title: "Feedback intake fixture", project_root: project, kind: "git" }], active_tab_id: "feedback-intake", recent_projects: [] }));
   await writeFile(join(project, ".codex/hooks.json"), "{}");
