@@ -42,7 +42,9 @@ fn context(path: &Path) -> FeedbackContext {
 
 #[test]
 fn approval_uses_local_repository_identity_despite_environment_overrides() {
-    let _guard = gwt_core::test_support::env_lock();
+    let _guard = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let global = dir.path().join("global.gitconfig");
     fs::write(
