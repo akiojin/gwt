@@ -206,7 +206,57 @@ pub struct CapacityObservation {
     pub launch_activity: Option<Vec<LaunchActivityObservation>>,
     pub claim_blocks: Option<Vec<ClaimBlockObservation>>,
     pub declared_waits: Option<Vec<DeclaredWaitObservation>>,
+    pub retry_deadlines: Option<Vec<RetryDeadlineObservation>>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RetryDeadlineObservation {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    pub retry_not_before: Option<String>,
+    pub remaining_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// A recorded retry deadline does not establish whether a hold is in force.
+fn observe_retry_deadlines(status: &IssueMonitorAgentStatus) -> Vec<RetryDeadlineObservation> {
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    status
+        .inbox
+        .iter()
+        .filter_map(|row| {
+            row.retry_not_before
+                .as_ref()
+                .map(|deadline| (row, deadline))
+        })
+        .map(|(row, deadline)| {
+            let expiry = chrono::DateTime::parse_from_rfc3339(deadline).ok();
+            let mut missing_inputs = vec!["retry_hold_started_at"];
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            if expiry.is_none() {
+                missing_inputs.push("retry_not_before");
+            }
+            RetryDeadlineObservation {
+                issue_number: row.issue_number,
+                state: row.state,
+                retry_not_before: expiry.map(|value| value.to_rfc3339()),
+                remaining_seconds_at_scan: scan.zip(expiry).map(|(scan, expiry)| {
+                    expiry
+                        .signed_duration_since(scan)
+                        .to_std()
+                        .unwrap_or_default()
+                        .as_secs()
+                }),
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +506,7 @@ fn observe_capacity(
         launch_activity: monitor.map(observe_launch_activity),
         claim_blocks: monitor.map(observe_claim_blocks),
         declared_waits: monitor.map(observe_declared_waits),
+        retry_deadlines: monitor.map(observe_retry_deadlines),
         missing_inputs,
     }
 }
@@ -1216,6 +1267,7 @@ mod tests {
                 "launch_activity":[],
                 "claim_blocks":[],
                 "declared_waits":[],
+                "retry_deadlines":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1478,11 +1530,95 @@ mod tests {
     }
 
     #[test]
+    fn retry_deadlines_describe_supplied_timing_without_evaluating_holds() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":9,"state":"queued","attempts":0,
+                "retry_not_before":"2026-10-21T09:02:00+09:00","retry_hold_reason":"private reason"},
+            {"issue_number":3,"state":"needs_human","attempts":0,
+                "retry_not_before":"2026-10-21T00:01:00.900Z"},
+            {"issue_number":9,"state":"launched","attempts":0,
+                "retry_not_before":"2026-10-21T00:00:59.900Z"},
+            {"issue_number":4,"state":"queued","attempts":0,"retry_not_before":"unknown"},
+            {"issue_number":5,"state":"queued","attempts":0,"retry_not_before":"private invalid time"},
+            {"issue_number":6,"state":"queued","attempts":0}
+        ])).unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["retry_deadlines"].as_array().unwrap();
+        let facts: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!([
+                    row["issue_number"],
+                    row["state"],
+                    row["remaining_seconds_at_scan"],
+                    row["missing_inputs"]
+                ])
+            })
+            .collect();
+        assert_eq!(
+            json!(facts),
+            json!([
+                [9, "queued", 60, ["retry_hold_started_at"]],
+                [3, "needs_human", 0, ["retry_hold_started_at"]],
+                [9, "launched", 0, ["retry_hold_started_at"]],
+                [
+                    4,
+                    "queued",
+                    null,
+                    ["retry_hold_started_at", "retry_not_before"]
+                ],
+                [
+                    5,
+                    "queued",
+                    null,
+                    ["retry_hold_started_at", "retry_not_before"]
+                ]
+            ])
+        );
+        assert_eq!(rows[0]["retry_not_before"], "2026-10-21T09:02:00+09:00");
+        assert_eq!(rows[3]["retry_not_before"], Value::Null);
+        assert!(!report.to_string().contains("private"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["retry_deadlines"],
+            report["capacity"]["retry_deadlines"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid scan".into())] {
+            monitor.last_scan_at = scan;
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            assert_eq!(
+                untimed["capacity"]["retry_deadlines"][0]["remaining_seconds_at_scan"],
+                Value::Null
+            );
+            assert_eq!(
+                untimed["capacity"]["retry_deadlines"][0]["missing_inputs"],
+                json!(["retry_hold_started_at", "monitor_scan_time"])
+            );
+        }
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty["capacity"]["retry_deadlines"], json!([]));
+    }
+
+    #[test]
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         assert_eq!(absent["capacity"].get("claim_blocks"), Some(&Value::Null));
         assert_eq!(absent["capacity"].get("declared_waits"), Some(&Value::Null));
+        assert_eq!(
+            absent["capacity"].get("retry_deadlines"),
+            Some(&Value::Null)
+        );
         assert_eq!(row(&absent, 1)["observed_inbox_states"], json!([]));
         assert_eq!(absent["monitor"]["source"], Value::Null);
         assert_eq!(absent["monitor"]["active_launches_incomplete"], true);

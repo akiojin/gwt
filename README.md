@@ -818,6 +818,14 @@ cannot establish elapsed time, nor can expiration before start establish remaini
 Unavailable Monitor data yields null, while no matching rows yields an empty list.
 These observations retain scan provenance, omit free-text reasons and resume conditions,
 and do not determine queue age, SLA, liveness or full WIP, or change waits and slots.
+Retry-deadline observations retain each inbox row with a recorded `retry_not_before`,
+including repeated Issues and their states. They show whole seconds remaining at the supplied
+scan time, respecting time-zone offsets and rounding down fractions; elapsed deadlines show zero.
+Missing or invalid times, including `unknown`, leave the duration unknown. Hold age remains
+unknown because the snapshot has no hold-start time. Unavailable Monitor yields null;
+no matching rows yields an empty list. These observations retain Monitor provenance, omit
+invalid timestamp text and free-text reasons, and do not prove an active hold or authorize
+launch, release or any change to retry gates, waits, slots or priority.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
