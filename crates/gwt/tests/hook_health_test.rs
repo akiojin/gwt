@@ -46,10 +46,7 @@ fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hoo
         .as_str()
         .unwrap()
         .contains("pr.create"));
-    assert!(audit["findings"][0]["file"]
-        .as_str()
-        .unwrap()
-        .ends_with("commands/ship.md"));
+    assert!(Path::new(audit["findings"][0]["file"].as_str().unwrap()).ends_with("commands/ship.md"));
     fs::write(plugin.join("ship.md"), "Run `gh pr view 17`.\n").unwrap();
     let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
     assert_eq!(
@@ -197,7 +194,7 @@ fn issue_3713_plugin_inventory_reads_only_enabled_effective_installation() {
         "ship@market": [{"scope":"project","projectPath":"/foreign","installPath":inactive.parent().unwrap()}, {"scope":"user","installPath":current.parent().unwrap()}],
         "inactive@market": [{"scope":"user","installPath":inactive.parent().unwrap()}]
     }})).unwrap()).unwrap();
-    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
     let report = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
         root.path(),
     )))

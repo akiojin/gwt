@@ -68,7 +68,7 @@ pub(crate) fn discovery_paths(worktree: &Path) -> Vec<PathBuf> {
         worktree.join(".claude/settings.json"),
         worktree.join(".claude/settings.local.json"),
     ];
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = gwt_config::home::gwt_home_override().or_else(dirs::home_dir) {
         paths.push(home.join(".claude/settings.json"));
         paths.push(home.join(".claude/plugins/installed_plugins.json"));
     }
@@ -134,7 +134,7 @@ fn discover_roots(worktree: &Path, report: &mut ConflictReport) -> Vec<ScanRoot>
     }
     // Only enabled plugins and their effective install locations are read.
     // Never sweep the cache, which contains old/inactive plugin versions.
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = gwt_config::home::gwt_home_override().or_else(dirs::home_dir) else {
         return Vec::new();
     };
     let mut enabled = BTreeMap::new();
