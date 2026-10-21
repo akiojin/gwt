@@ -519,7 +519,7 @@ fn event_hook(event: &str, shell: HookShell, bin: &str) -> Value {
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 
 /// The portable fallback every generated runtime selector uses when the
-/// hook config it is written into is shared through git.
+/// hook config is shared across worktrees or through git.
 ///
 /// #3567: a hook config that git tracks is byte-compared against a commit, so
 /// any absolute path baked into it — a worktree-local `target/debug/gwtd`, an
@@ -533,10 +533,9 @@ pub const CANONICAL_HOOK_BIN: &str = "gwtd";
 
 /// Which binary a generated hook config at `path` should fall back to.
 ///
-/// #3567: git-tracked configs get [`CANONICAL_HOOK_BIN`] so materialization
-/// converges on the committed bytes; untracked, machine-local configs keep the
-/// absolute pin resolved for this install (#3810), which is what makes hooks
-/// work for a Codex started outside gwt with no `gwtd` on `PATH`.
+/// Git-tracked configs and shared-root Codex configs get [`CANONICAL_HOOK_BIN`]
+/// so different writers converge on the same identity. Untracked worktree-local
+/// configs keep the absolute pin resolved for this install (#3810).
 pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
     sanitize_hook_bin_for_config_path(path, &gwt_hook_bin_path())
 }
@@ -549,7 +548,15 @@ pub fn managed_hook_bin_for_config_path(path: &Path) -> String {
 /// given the exact command hash for, and stops the launch on
 /// `Hooks need review`.
 pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
-    if managed_hook_config_is_git_tracked(path) {
+    // Issue #5270: the main checkout's Codex config is shared by linked
+    // worktrees even when untracked. An install-specific pin would change its
+    // trusted command hash whenever another HOME or updated GUI writes it.
+    let shared_codex_config = path.ends_with(CODEX_HOOKS_PATH)
+        && path.parent().and_then(Path::parent).is_some_and(|root| {
+            linked_worktree_codex_hooks_path(root).is_none()
+                && gwt_core::repo_hash::repository_common_dir(root).is_some()
+        });
+    if shared_codex_config || managed_hook_config_is_git_tracked(path) {
         return CANONICAL_HOOK_BIN.to_string();
     }
     // #3567 (PM ruling): a process-global `GWT_HOOK_BIN` is authority only for
@@ -659,8 +666,8 @@ fn path_is_inside(path: &Path, owner_root: &str) -> bool {
 }
 
 /// Whether git tracks `path`. A path outside a repository, or one git reports
-/// as untracked, answers `false` — those files are machine-local by definition,
-/// so pinning an absolute binary into them harms nobody.
+/// as untracked, answers `false`. Shared-root Codex configs require a canonical
+/// fallback independently of their tracking status.
 pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
@@ -2340,6 +2347,44 @@ mod tests {
                 .any(|command| command.contains("repo-owned-stop-check.sh")),
             "an unmanaged repo-owned Stop hook must be preserved: {stop_commands:?}"
         );
+    }
+
+    #[test]
+    fn shared_root_codex_hooks_keep_the_same_fallback_across_writer_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let git_dir = repo.join(".git/worktrees/linked");
+        let worktree = dir.path().join("linked");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let shared_config = repo.join(CODEX_HOOKS_PATH);
+        let local_config = worktree.join(CODEX_HOOKS_PATH);
+        let mut shared_bytes = None;
+        for bin in ["/installed/first/gwtd", "/installed/updated/gwtd"] {
+            let _pin = ScopedHookBin::set(bin);
+            generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
+            assert_eq!(
+                sanitize_hook_bin_for_config_path(&shared_config, bin),
+                CANONICAL_HOOK_BIN,
+                "shared-root identity must not depend on the writer's pin"
+            );
+            assert_eq!(sanitize_hook_bin_for_config_path(&local_config, bin), bin);
+            assert_eq!(
+                sanitize_hook_bin_for_config_path(&repo.join(CLAUDE_SETTINGS_PATH), bin),
+                bin,
+                "Claude's machine-local pin is unchanged"
+            );
+            let bytes = fs::read(&shared_config).unwrap();
+            if let Some(previous) = &shared_bytes {
+                assert_eq!(&bytes, previous);
+            }
+            shared_bytes = Some(bytes);
+        }
     }
 
     #[test]
