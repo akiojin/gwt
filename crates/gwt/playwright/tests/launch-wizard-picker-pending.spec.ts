@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
-test("live wizard open errors retain interaction deferral and local recovery", async ({ page }, testInfo) => {
+test("live wizard state and open errors retain interaction deferral and local recovery", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
   test.skip(!base, "isolated checkout backend required");
   const errors: string[] = [];
@@ -43,10 +43,27 @@ test("live wizard open errors retain interaction deferral and local recovery", a
   await model.evaluate(element => { (window as any).__wizardModel = element; });
   // Exercise the real delegated interaction guard without opening an OS menu.
   await model.dispatchEvent("pointerdown");
+  await page.evaluate(wizard => {
+    for (const title of ["Superseded state", "Updated Agent"]) {
+      const update = { ...wizard, title };
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "launch_wizard_state", wizard: update },
+      }));
+      update.title = "Mutated after receipt";
+    }
+  }, wizard);
+  await expect(modal.locator("#wizard-title")).toHaveText("Choose Agent");
+  await expect(model).toBeFocused();
+  expect(await model.evaluate(element => element === (window as any).__wizardModel)).toBe(true);
+  await model.dispatchEvent("change");
+  await expect(modal.locator("#wizard-title")).toHaveText("Updated Agent");
+  await model.focus();
+  await model.evaluate(element => { (window as any).__wizardModel = element; });
+  await model.dispatchEvent("pointerdown");
   await emit({ kind: "launch_wizard_open_error", title: "Superseded error", message: "Old failure" });
   const error = { kind: "launch_wizard_open_error", title: "Open failed", message: "<img src=x onerror=alert(1)>" };
   await emit(error);
-  await expect(modal.locator("#wizard-title")).toHaveText("Choose Agent");
+  await expect(modal.locator("#wizard-title")).toHaveText("Updated Agent");
   await expect(model).toBeFocused();
   expect(await model.evaluate(element => element === (window as any).__wizardModel)).toBe(true);
   await model.dispatchEvent("change");

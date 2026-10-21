@@ -4289,6 +4289,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestWorkAdvisory,
       });
 
+      const launchWizardStateModel = createUiStateStore(null);
+      launchWizardStateModel.subscribe(state => state, state => {
+        if (state) applyLaunchWizardStateEvent(state);
+      });
+
       const launchWizardOpenErrorModel = createUiStateStore(null);
       launchWizardOpenErrorModel.subscribe(error => error, error => {
         if (error) applyLaunchWizardOpenErrorEvent(error);
@@ -5626,7 +5631,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardStateEvent(event);
+            launchWizardStateModel.update(() => ({ wizard: event.wizard }));
             break;
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan

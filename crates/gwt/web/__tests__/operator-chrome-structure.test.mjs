@@ -3841,7 +3841,7 @@ test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with la
   );
   assert.match(
     appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardStateEvent\(event\);/,
+    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?launchWizardStateModel\.update\(/,
     "backend wizard state must clear Kanban placement targets now owned by the launch session",
   );
 });
