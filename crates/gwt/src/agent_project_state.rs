@@ -4318,6 +4318,15 @@ fn mutation_error(message: impl Into<String>) -> GwtError {
     GwtError::Other(message.into())
 }
 
+pub(crate) fn missing_session_ledger_message(session_id: &str) -> String {
+    format!(
+        "Session ledger is missing for Session {session_id}; durable identity cannot be recovered in this Session, and changing agent input or order cannot restore it. \
+         PM: for a monitored Issue, read issue.monitor.status and run issue.monitor.stop with its number, reason, current launch identity, and remove_from_queue:false. \
+         Confirm generation_release succeeded, close the returned stopped_window_id with pane.close, then run issue.monitor.requeue with number and reason to request a fresh Session. \
+         For other work, arrange a fresh Session with Start Work / Launch."
+    )
+}
+
 fn load_session_for_mutation(session_id: &str) -> Result<Session> {
     let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
     if !path.try_exists().map_err(|error| {
@@ -4327,7 +4336,8 @@ fn load_session_for_mutation(session_id: &str) -> Result<Session> {
         ))
     })? {
         return Err(mutation_error(format!(
-            "Session ledger is missing for Session {session_id} at {}",
+            "{} (ledger path: {})",
+            missing_session_ledger_message(session_id),
             path.display()
         )));
     }

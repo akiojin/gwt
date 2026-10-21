@@ -9172,6 +9172,79 @@ where
     })
 }
 
+/// Recover a receipt-backed Prepared successor while retaining any live
+/// candidate Session. Normal launch-failure rollback owns a separate path.
+#[allow(clippy::too_many_arguments)]
+pub fn abort_abandoned_successor_and_remove_exact_session<F>(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+    reason: &str,
+    sessions_dir: &Path,
+    expected_session: &gwt_agent::SessionExecutionIdentity,
+    after_abort: F,
+) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    validate_successor_request(request)?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "aborting a successor requires a non-empty reason",
+        ));
+    }
+    let mut live_candidate = false;
+    let result = with_generation_owner_lease(worktree, owner, |context| {
+        gwt_agent::remove_session_if_execution_identity_matches_or_missing_with(
+            sessions_dir,
+            &expected_session.session_id,
+            expected_session,
+            || {
+                let handshake = gwt_agent::read_session_active_launch_handshake_under_lease(
+                    sessions_dir,
+                    expected_session,
+                )?;
+                let launching_process_is_live = handshake.as_ref().is_some_and(|handshake| {
+                    let started_at = crate::process::host_process_start_time(handshake.host_pid);
+                    started_at == Some(handshake.host_started_at)
+                        || (started_at.is_none()
+                            && crate::process::is_host_process_alive(handshake.host_pid))
+                        || matches!(handshake.phase,
+                            gwt_agent::SessionActiveLaunchPhase::ChildSpawned { child_pid, child_started_at }
+                                if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at))
+                });
+                if launching_process_is_live
+                    || exact_session_runtime_fences_active_launch(sessions_dir, expected_session)?
+                {
+                    live_candidate = true;
+                    return Err(io::Error::new(
+                        ErrorKind::WouldBlock,
+                        "receipt-backed Prepared candidate still has live launch evidence",
+                    ));
+                }
+                abort_successor_in_context(context, request, reason)?;
+                after_abort()?;
+                if let Some(handshake) = handshake {
+                    if !gwt_agent::clear_session_active_launch_handshake_under_lease(
+                        sessions_dir,
+                        &handshake,
+                    )? {
+                        return Err(io::Error::other(
+                            "abandoned launch handshake changed during receipt cleanup",
+                        ));
+                    }
+                }
+                Ok(())
+            },
+        )
+    });
+    if live_candidate {
+        Ok(false)
+    } else {
+        result
+    }
+}
+
 /// Recover a Prepared launch without a receipt only with exact proof that
 /// its launching Host and child are gone. Keep the proof until a replacement
 /// recovery receipt is durable so interrupted cleanup remains discoverable.
@@ -22909,6 +22982,140 @@ mod tests {
                 ContinuationAttemptStatus::Aborted,
             );
         }
+    }
+
+    #[test]
+    fn receipt_backed_prepared_cleanup_preserves_live_launch_and_runtime() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut blocked = active_record("receipt-cleanup-predecessor");
+        blocked.owner_number = owner.number;
+        blocked.status = ExecutionControlStatus::Blocked;
+        blocked.blocked_reason = Some("terminal predecessor".to_string());
+        blocked.settled_at = Some(Utc::now());
+        save(dir.path(), &blocked).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        let request = successor_request(
+            "receipt-cleanup-live-candidate",
+            "gwt-host-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request).unwrap();
+        let binding = prepared_successor_execution_binding(dir.path(), owner, &request).unwrap();
+        persist_generation_session_binding(dir.path(), owner, &request.initial_session_id, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{}.toml", request.initial_session_id));
+        let session = gwt_agent::Session::load(&session_path).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let mut handshake =
+            claim_prepared_session_launch(dir.path(), owner, &sessions_dir, &session)
+                .unwrap()
+                .unwrap();
+        let handshake_path =
+            gwt_agent::active_launch_handshake_path(&sessions_dir, &identity.session_id);
+        let live_started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            i32::MAX as u32,
+            &identity.session_id,
+        );
+        let authority_before = generation_authority_bytes(dir.path(), owner);
+        let session_before = fs::read(&session_path).unwrap();
+
+        for live_evidence in ["Host", "child", "runtime"] {
+            match live_evidence {
+                "Host" => {}
+                "child" => {
+                    handshake.host_pid = i32::MAX as u32;
+                    handshake.host_started_at = 1;
+                    handshake.phase = gwt_agent::SessionActiveLaunchPhase::ChildSpawned {
+                        child_pid: std::process::id(),
+                        child_started_at: live_started_at,
+                    };
+                    fs::write(
+                        &handshake_path,
+                        serde_json::to_vec_pretty(&handshake).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "runtime" => {
+                    fs::remove_file(&handshake_path).unwrap();
+                    gwt_agent::SessionRuntimeState::for_execution_process(
+                        gwt_agent::AgentStatus::Running,
+                        &identity,
+                        31,
+                        1,
+                        std::process::id(),
+                        live_started_at,
+                    )
+                    .save(&runtime_path)
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let callback_ran = std::cell::Cell::new(false);
+            assert!(
+                !abort_abandoned_successor_and_remove_exact_session(
+                    dir.path(),
+                    owner,
+                    &request,
+                    "Host restarted before fresh launch activation",
+                    &sessions_dir,
+                    &identity,
+                    || {
+                        callback_ran.set(true);
+                        Ok(())
+                    },
+                )
+                .unwrap(),
+                "live {live_evidence} must retain the Prepared candidate",
+            );
+            assert!(!callback_ran.get());
+            assert_eq!(
+                generation_authority_bytes(dir.path(), owner),
+                authority_before
+            );
+            assert_eq!(fs::read(&session_path).unwrap(), session_before);
+        }
+
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &identity,
+            31,
+            1,
+            (i32::MAX - 1) as u32,
+            1,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        assert!(abort_abandoned_successor_and_remove_exact_session(
+            dir.path(),
+            owner,
+            &request,
+            "Host restarted before fresh launch activation",
+            &sessions_dir,
+            &identity,
+            || Ok(()),
+        )
+        .unwrap());
+        assert!(!session_path.exists());
+        assert_eq!(
+            continuation_attempt_for_operation(dir.path(), owner, &request.operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ContinuationAttemptStatus::Aborted,
+        );
     }
 
     #[test]

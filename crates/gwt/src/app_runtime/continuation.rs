@@ -4122,7 +4122,7 @@ impl AppRuntime {
         let cleanup = if candidate.attempt.status
             == gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
         {
-            gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+            gwt::cli::execution_state::abort_abandoned_successor_and_remove_exact_session(
                 &candidate.worktree_path,
                 candidate.owner,
                 &candidate.attempt.request,
@@ -4160,7 +4160,7 @@ impl AppRuntime {
                 true
             }
             Ok(false) => {
-                tracing::warn!(session_id = %candidate.binding.session_id, "retained Aborted fresh-launch cleanup evidence after binding mismatch");
+                tracing::warn!(session_id = %candidate.binding.session_id, "retained fresh-launch cleanup evidence while the exact Session is live or its binding changed");
                 false
             }
             Err(error) => {
