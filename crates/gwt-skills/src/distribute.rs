@@ -18,6 +18,23 @@ const TRACKED_ROOTS: &[&str] = &[
     ".gwt/hermes/skills",
 ];
 
+/// PM capabilities and the search/registration dependencies of discussion.
+/// Implementation worktrees continue to receive the complete bundled set.
+/// The generated gwt-pm skill is added by the caller after distribution.
+const PM_SHARED_SKILLS: &[&str] = &[
+    "gwt-agent",
+    "gwt-coordination",
+    "gwt-discussion",
+    "gwt-feedback",
+    "gwt-issue-search",
+    "gwt-plan-spec",
+    "gwt-project-search",
+    "gwt-register-issue",
+    "gwt-register-spec",
+    "gwt-search",
+    "gwt-spec-search",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ManagedAssetTarget {
     ClaudeCode,
@@ -177,15 +194,73 @@ pub fn plan_distribution_to_worktree_for_targets(
     targets: &[ManagedAssetTarget],
     policy: TrackedAssetWritePolicy,
 ) -> io::Result<DistributePlan> {
+    plan_distribution(worktree, targets, policy, &CLAUDE_SKILLS, &CLAUDE_COMMANDS)
+}
+
+/// Select the PM's bundled skills and their gwt-* command aliases before
+/// planning either writes or stale-asset removal. Preserve non-gwt commands
+/// and the same tracked-file protections as ordinary distribution.
+pub fn plan_pm_distribution_to_worktree_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
+) -> io::Result<DistributePlan> {
+    let skills: Vec<_> = CLAUDE_SKILLS
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| PM_SHARED_SKILLS.contains(&name))
+        })
+        .cloned()
+        .collect();
+    let commands: Vec<_> = CLAUDE_COMMANDS
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.starts_with("gwt-") || PM_SHARED_SKILLS.contains(&name))
+        })
+        .cloned()
+        .collect();
+    plan_distribution(
+        worktree,
+        targets,
+        policy,
+        &Dir::new("", &skills),
+        &Dir::new("", &commands),
+    )
+}
+
+fn plan_distribution(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
+    skills: &Dir<'_>,
+    commands: &Dir<'_>,
+) -> io::Result<DistributePlan> {
     let mut plan = DistributePlan::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
     let targets = normalize_targets(targets);
 
-    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut plan)?;
+    prune_managed_asset_roots_for_targets(
+        worktree,
+        &tracked_paths,
+        &targets,
+        skills,
+        commands,
+        &mut plan,
+    )?;
 
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".claude/skills"),
             &tracked_paths,
@@ -193,7 +268,7 @@ pub fn plan_distribution_to_worktree_for_targets(
             &mut plan,
         )?;
         write_dir_assets(
-            &CLAUDE_COMMANDS,
+            commands,
             worktree,
             &worktree.join(".claude/commands"),
             &tracked_paths,
@@ -204,7 +279,7 @@ pub fn plan_distribution_to_worktree_for_targets(
 
     if targets.contains(&ManagedAssetTarget::Codex) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".codex/skills"),
             &tracked_paths,
@@ -215,7 +290,7 @@ pub fn plan_distribution_to_worktree_for_targets(
 
     if targets.contains(&ManagedAssetTarget::Hermes) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".gwt/hermes/skills"),
             &tracked_paths,
@@ -240,7 +315,14 @@ pub fn prune_stale_gwt_assets_for_targets(
     let mut plan = DistributePlan::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
     let targets = normalize_targets(targets);
-    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut plan)?;
+    prune_managed_asset_roots_for_targets(
+        worktree,
+        &tracked_paths,
+        &targets,
+        &CLAUDE_SKILLS,
+        &CLAUDE_COMMANDS,
+        &mut plan,
+    )?;
     Ok(plan.apply()?.paths_removed)
 }
 
@@ -248,11 +330,13 @@ fn prune_managed_asset_roots_for_targets(
     worktree: &Path,
     tracked_paths: &HashSet<PathBuf>,
     targets: &[ManagedAssetTarget],
+    skills: &Dir<'_>,
+    commands: &Dir<'_>,
     plan: &mut DistributePlan,
 ) -> io::Result<()> {
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".claude/skills"),
             Some(RootEntryKind::Directories),
@@ -261,7 +345,7 @@ fn prune_managed_asset_roots_for_targets(
             plan,
         )?;
         prune_dir_against_source(
-            &CLAUDE_COMMANDS,
+            commands,
             worktree,
             &worktree.join(".claude/commands"),
             Some(RootEntryKind::Files),
@@ -274,7 +358,7 @@ fn prune_managed_asset_roots_for_targets(
 
     if targets.contains(&ManagedAssetTarget::Codex) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".codex/skills"),
             Some(RootEntryKind::Directories),
@@ -287,7 +371,7 @@ fn prune_managed_asset_roots_for_targets(
 
     if targets.contains(&ManagedAssetTarget::Hermes) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".gwt/hermes/skills"),
             Some(RootEntryKind::Directories),
