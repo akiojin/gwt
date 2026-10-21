@@ -1618,7 +1618,9 @@ workflow は `run_started_at` から `updated_at`、job は `started_at` から
 取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
 通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
 共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
-Markdown 描画を選びます。移行対象と受け入れ条件は
+Markdown 描画を選びます。モデルへの取り込み時に `{ type: 'markdown', body, body_html }`
+をレコードの `content` に設定します。各面は確定した content を `renderUiContent` に渡し、
+Markdown の選択や描画関数の注入を行いません。移行対象と受け入れ条件は
 [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
 
 ### 重量級検証の容量制御

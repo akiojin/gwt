@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {

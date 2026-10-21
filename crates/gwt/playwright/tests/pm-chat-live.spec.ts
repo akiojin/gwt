@@ -489,3 +489,153 @@ test.describe('PM reports', () => {
     });
   });
 });
+
+test('typed model content selects the renderer across surfaces', async ({ page }, info) => {
+  test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, 'requires an isolated checkout server');
+  test.setTimeout(60_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  const theme = info.project.name.includes('light') ? 'light' : 'dark';
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+  await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
+  const style = await page.addStyleTag({ content: `
+    body { height: auto !important; overflow: auto !important; }
+    body > :not(#typed-content-host):not(script) { display: none !important; }
+    #typed-content-host { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--color-canvas); color: var(--color-text); }
+    #typed-content-host > section { height: 820px; min-height: 0; border: 1px solid var(--color-border); background: var(--color-surface); overflow: auto; }
+    #typed-content-host > section > h2 { margin: var(--space-2); }
+    #typed-content-host [data-factory-root] { position: relative; contain: layout paint; height: 760px; }
+    #typed-content-host .window-body { position: relative; inset: auto; height: 100%; }
+    #typed-content-host .release-notes-window { position: relative; inset: auto; transform: none; width: 100%; height: 760px; max-width: none; max-height: none; }
+  ` });
+  try {
+    // Controlled factory acceptance against the checkout's hosted modules.
+    // No renderer is injected, and no natural backend traffic or load is claimed.
+    const evidence = await page.evaluate(async () => {
+      const load = (path: string) => import(new URL(path, location.href).href);
+      const [pmModule, boardModule, knowledgeModule, releaseModule] = await Promise.all([
+        load('/pm-chat.js'), load('/board-logs-surface.js'),
+        load('/knowledge-kanban-surface.js'), load('/release-notes-window.js'),
+      ]);
+      const host = document.createElement('main');
+      host.id = 'typed-content-host';
+      document.body.append(host);
+      const cleanup: Array<() => void> = [() => host.remove()];
+      (window as any).__typedContentCleanup = () => cleanup.reverse().forEach(dispose => dispose());
+      const createNode = (tag: string, className = '', text?: string) => {
+        const node = document.createElement(tag);
+        node.className = className;
+        if (text != null) node.textContent = String(text);
+        return node;
+      };
+      const mount = (surface: string, title: string) => {
+        const section = createNode('section');
+        section.dataset.surface = surface;
+        const root = createNode('div');
+        root.dataset.factoryRoot = '';
+        section.append(createNode('h2', '', title), root);
+        host.append(section);
+        return root;
+      };
+      const literal = '<script>window.__typedContentExecuted = true</script>';
+      const markdown = { body: '**Shared Markdown**', body_html: '<p><strong>Shared Markdown</strong></p>' };
+      const fallback = { body: literal };
+      const noop = () => {};
+
+      const reportsRoot = mount('reports', 'Reports');
+      const copied: string[] = [];
+      const pm = pmModule.createPmWindowModel();
+      const reports = pmModule.createPmChat({ document, root: reportsRoot, sessionId: 'typed-session',
+        onLogVisibility: noop, copyText: async (text: string) => { copied.push(text); } });
+      cleanup.push(() => reports.dispose(), () => pm.removePmWindowState('typed-pm'));
+      pm.bindPmWindowState('typed-pm', 'typed-session');
+      cleanup.push(pm.subscribePmWindowState((state: any) => state.windows['typed-pm'], (state: any) => reports.update(state)));
+      const reportRows = [markdown, fallback].map((body, index) => ({ ...body, id: `typed-report-${index}`,
+        kind: 'progress', created_at: '2026-10-21T00:00:00Z' }));
+      pm.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'typed-pm', session_id: 'typed-session', reports: reportRows });
+      const pmState = pm.readPmWindowState().windows['typed-pm'];
+      pm.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'typed-pm', session_id: 'stale-session', reports: [] });
+      (reportsRoot.querySelector('[aria-label="Copy report"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+
+      const boardRoot = mount('board', 'Board');
+      const boardBody = createNode('div', 'window-body');
+      boardRoot.append(boardBody);
+      const boardWindow = { id: 'typed-board', preset: 'board' };
+      const board = boardModule.createBoardLogsSurface({ send: noop, createNode,
+        windowMap: new Map([[boardWindow.id, boardRoot]]), focusWindowLocally: noop, sendWindowFocus: noop,
+        pushAlertToast: noop, focusOrSpawnPreset: noop, activeWorkspace: () => ({ windows: [boardWindow] }),
+        activeProjectTab: () => null, projectWindowContextById: () => null,
+        visibleBounds: () => ({ x: 0, y: 0, width: 1400, height: 420 }), getActiveWorkProjection: () => null });
+      cleanup.push(() => { board.boardStateMap.clear(); board.logStateMap.clear(); });
+      board.mountBoardWindow(boardWindow, boardBody);
+      for (const [kind, prefix, date] of [['board_entries', 'current', '21'], ['board_history_page', 'history', '20']]) {
+        board.applyBoardLogsReceiveEvent({ kind, id: boardWindow.id, has_more_before: false,
+          entries: [markdown, fallback].map((body, index) => ({ ...body, id: `${prefix}-${index}`,
+            author_kind: 'user', author: 'Fixture', created_at: `2026-10-${date}T00:00:00Z` })) });
+      }
+
+      const knowledgeRoot = mount('knowledge', 'Knowledge');
+      const knowledgeWindow = { id: 'typed-knowledge', preset: 'issue' };
+      const sent: any[] = [];
+      const knowledge = knowledgeModule.createKnowledgeKanbanSurface({ send: (message: any) => sent.push(message), createNode,
+        windowMap: new Map([[knowledgeWindow.id, knowledgeRoot]]),
+        workspaceWindowById: (id: string) => id === knowledgeWindow.id ? knowledgeWindow : null,
+        getWorkspaceWindows: () => [knowledgeWindow], pendingIndexOpenTargetsByPreset: new Map(),
+        knowledgeKindForPreset: () => 'issue', focusWindowLocally: noop, sendWindowFocus: noop,
+        focusOrSpawnPreset: noop, openIssueLaunchWizard: noop, launchPending: {},
+        visibleBounds: () => ({ x: 0, y: 0, width: 1400, height: 420 }), getActiveWorkProjection: () => null });
+      cleanup.push(() => knowledge.clearKnowledgeBridgeState(knowledgeWindow.id));
+      knowledge.mountKnowledgeWindow(knowledgeWindow, knowledgeRoot);
+      const loadRequest = sent.find(message => message.kind === 'load_knowledge_bridge');
+      knowledge.applyKnowledgeReceiveEvent({ kind: 'knowledge_entries', id: knowledgeWindow.id,
+        knowledge_kind: 'issue', request_id: loadRequest.request_id, selected_number: null, refresh_enabled: true,
+        entries: [{ number: 5016, title: 'Typed model content', state: 'open', labels: [], related_work_refs: [] }] });
+      knowledge.requestKnowledgeDetail(knowledgeWindow.id, 'issue', 5016);
+      const detailRequest = sent.findLast(message => message.kind === 'select_knowledge_bridge_entry');
+      if (!detailRequest) throw new Error('Knowledge did not request the selected detail');
+      knowledge.applyKnowledgeReceiveEvent({ kind: 'knowledge_detail', id: knowledgeWindow.id,
+        knowledge_kind: 'issue', request_id: detailRequest.request_id,
+        detail: { number: 5016, title: 'Typed model content', state: 'open', labels: [], related_works: [],
+          sections: [markdown, fallback].map((body, index) => ({ ...body, title: `Content ${index + 1}` })) } });
+
+      const releaseRoot = mount('release', 'Release Notes');
+      const release = releaseModule.createReleaseNotesWindow({ document, send: noop });
+      cleanup.push(() => release.close());
+      release.handlePayload({ entries: [{ version: '9.0.0', date: '2026-10-21', sections: [
+        { ...markdown, heading: 'Markdown' }, { heading: 'Legacy items', items: [literal] },
+      ] }] });
+      releaseRoot.append(release._state.root);
+      return { literal, copied, sessionFenced: pm.readPmWindowState().windows['typed-pm'] === pmState,
+        types: [pmState.reports.map((row: any) => row.content.type),
+          board.boardStateMap.get(boardWindow.id).entries.map((row: any) => row.content.type),
+          knowledge.knowledgeBridgeStateMap.get(knowledgeWindow.id).detail.sections.map((section: any) => section.content.type)] };
+    });
+    expect(evidence.types).toEqual([['markdown', 'markdown'], Array(4).fill('markdown'), ['markdown', 'markdown']]);
+    expect(evidence.sessionFenced).toBe(true);
+    expect(evidence.copied).toEqual(['**Shared Markdown**']);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    const host = page.locator('#typed-content-host');
+    await host.locator('[data-surface="knowledge"] .knowledge-section').last().locator('summary').click();
+    for (const surface of ['reports', 'board', 'knowledge', 'release']) {
+      const panel = host.locator(`:scope > [data-surface="${surface}"]`);
+      await expect(panel.locator('.knowledge-markdown-body strong')).toHaveCount(surface === 'board' ? 2 : 1);
+      await expect(panel.locator('.knowledge-markdown-body strong').first()).toBeVisible();
+      const plaintext = surface === 'release' ? panel.locator('.release-notes-section li') : panel.locator('.knowledge-markdown-body.is-plaintext');
+      await expect(plaintext).toHaveCount(surface === 'board' ? 2 : 1);
+      for (const body of await plaintext.all()) await expect(body).toHaveText(evidence.literal);
+      await expect(plaintext.first()).toBeVisible();
+      await expect(panel.locator('script')).toHaveCount(0);
+    }
+    expect(await page.evaluate(() => (window as any).__typedContentExecuted)).toBeUndefined();
+    const screenshot = info.outputPath(`typed-content-surfaces-${theme}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true, animations: 'disabled' });
+    await info.attach('Typed content controlled factory acceptance', { path: screenshot, contentType: 'image/png' });
+    expect(errors).toEqual([]);
+  } finally {
+    await page.evaluate(() => { (window as any).__typedContentCleanup?.(); delete (window as any).__typedContentCleanup; });
+    await style.evaluate(node => node.remove());
+  }
+});

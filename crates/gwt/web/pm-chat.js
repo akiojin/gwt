@@ -1,5 +1,5 @@
 import { createUiStateStore } from './ui-state-store.js';
-import { markdownContent, renderUiContent } from './ui-content.js';
+import { renderUiContent } from './ui-content.js';
 
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
@@ -35,7 +35,8 @@ export function createPmWindowModel() {
           && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
         next = { ...next, error: event.error || null, loaded: true,
           current: event.error ? previous.current : (event.current || null),
-          reports: event.error ? previous.reports : (event.reports || []) };
+          reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
+            content: { type: 'markdown', body: report.body || '', body_html: report.body_html || '' } })) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
@@ -225,7 +226,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         });
         header.append(element('span', '', qa ? 'Q&A' : report.kind), time, copy);
         row.append(header);
-        const content = renderUiContent(document, markdownContent(report), 'pm-chat__text');
+        const content = renderUiContent(document, report.content, 'pm-chat__text');
         if (qa) {
           const question = element('section', '');
           question.setAttribute('aria-label', 'Question');
