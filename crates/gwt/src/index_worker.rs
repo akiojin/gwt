@@ -4486,6 +4486,14 @@ mod tests {
 
     #[test]
     fn source_poll_detects_edits_in_each_registered_worktree() {
+        // Source polling uses the same Git probe and process-wide fixture
+        // overrides as the search fault-injection tests.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let broker =
