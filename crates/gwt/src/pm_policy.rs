@@ -639,7 +639,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .inbox
         .iter()
@@ -653,7 +653,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
             let activity = row
                 .last_activity_at
                 .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                .and_then(parse_observed_instant);
             let mut missing_inputs = Vec::new();
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -2735,6 +2735,8 @@ mod tests {
             {"issue_number":4,"state":"launched","attempts":0},
             {"issue_number":5,"state":"launched","attempts":0,"last_activity_at":"private invalid timestamp"},
             {"issue_number":6,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.100Z"},
+            {"issue_number":10,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.0000000001Z"},
+            {"issue_number":11,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.000000001Z"},
             {"issue_number":7,"state":"queued","attempts":0,"last_activity_at":"2026-10-21T00:00:00Z"},
             {"issue_number":8,"state":"needs_human","attempts":0,"error_message":"private reason"}
         ])).unwrap();
@@ -2760,11 +2762,14 @@ mod tests {
                 [9, "launched", 0, []],
                 [4, "launched", null, ["last_activity_at"]],
                 [5, "launched", null, ["last_activity_at"]],
-                [6, "launched", null, ["activity_after_scan"]]
+                [6, "launched", null, ["activity_after_scan"]],
+                [10, "launched", null, ["last_activity_at"]],
+                [11, "launched", null, ["activity_after_scan"]]
             ])
         );
         assert_eq!(rows[0]["last_activity_at"], "2026-10-21T09:00:00+09:00");
         assert_eq!(rows[4]["last_activity_at"], Value::Null);
+        assert_eq!(rows[6]["last_activity_at"], Value::Null);
         assert!(!report.to_string().contains("private"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2776,7 +2781,11 @@ mod tests {
             report["capacity"]["launch_activity"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid scan".into())] {
+        for scan in [
+            None,
+            Some("invalid scan".into()),
+            Some("2026-10-21T00:00:59.9999999999Z".into()),
+        ] {
             monitor.last_scan_at = scan;
             let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
             let row = &untimed["capacity"]["launch_activity"][0];
