@@ -823,6 +823,18 @@ surrounding whitespace remain significant for identity. Values remain opaque,
 assumptions and `source_revision` are optional, and review dates remain in
 `policy.review_dates`. These diagnostics need no Monitor snapshot. Complete metadata
 does not establish decision quality, approval or action permission.
+`policy.forecasts` preserves saved forecast rows in order, including their ID,
+`source_revision`, `sample_size`, `reported_estimate`, `reported_confidence` and
+`reported_missing_inputs`. `revisions_since_source` is the nonnegative difference
+from `planning_revision`; a future source leaves it null. Zero is a valid source.
+`missing_inputs` always includes `forecast_evidence`, followed by `id` for blank IDs
+or `unique_forecast_id` for repeated exact nonblank IDs, `sample_history` for zero
+samples and `source_revision_ahead_of_planning` for future sources, in that order.
+Case and surrounding whitespace distinguish nonblank IDs; reported missing inputs
+are preserved verbatim. Diagnostic `confidence` remains `unknown`: positive counts,
+equal revisions and authored confidence do not prove verified history, forecast
+quality, approval or action permission. No small-sample threshold or estimate is
+inferred. These diagnostics need no Monitor snapshot; no saved forecasts yields `[]`.
 `policy.decision_revisions` preserves every saved decision ID and `source_revision`
 in order. `revisions_since_source` is the nonnegative numeric difference from
 `planning_revision`, including zero. An absent source leaves the difference null

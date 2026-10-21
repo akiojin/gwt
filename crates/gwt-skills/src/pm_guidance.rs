@@ -89,6 +89,20 @@ the list has no nonblank entry. Repeated nonblank exact IDs add unique_decision_
 case and surrounding whitespace remain significant for identity. Values are opaque,
 assumptions and source_revision are optional, and review dates stay in review_dates.
 These diagnostics need no Monitor snapshot. Decision metadata completeness does not establish decision quality, approval or action permission.
+`policy.forecasts` preserves saved forecast rows and authored values in saved order.
+Read id, source_revision, sample_size, reported_estimate, reported_confidence and
+reported_missing_inputs without treating authored values as verified history.
+`revisions_since_source` is the checked nonnegative difference from planning_revision;
+a future source leaves it null. Zero is a valid source revision.
+`missing_inputs` always includes forecast_evidence, then id for blank IDs or
+unique_forecast_id for repeated exact nonblank IDs, sample_history for zero samples,
+and source_revision_ahead_of_planning for future sources, in that order.
+Case and surrounding whitespace distinguish nonblank IDs. Preserve reported missing inputs verbatim.
+Forecast diagnostics always report confidence as unknown; authored values are not verified forecast evidence.
+Positive sample counts, equal revisions and authored confidence do not establish forecast quality,
+approval or action permission. Do not infer small-sample thresholds or generate estimates.
+These diagnostics need no Monitor snapshot; no saved forecasts yields [].
+
 `policy.decision_revisions` preserves saved decision IDs and source_revision values in saved order.
 `revisions_since_source` is the nonnegative numeric difference from planning_revision,
 including zero. An absent source leaves it null with source_revision in missing_inputs;
@@ -3967,6 +3981,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`policy.decisions` lists saved decision IDs and metadata `missing_inputs` in saved order",
             "Decision metadata completeness does not establish decision quality, approval or action permission",
             "`policy.decision_revisions` preserves saved decision IDs and source_revision values in saved order",
+            "`policy.forecasts` preserves saved forecast rows and authored values in saved order",
+            "Forecast diagnostics always report confidence as unknown; authored values are not verified forecast evidence",
             "`revisions_since_source` is the nonnegative numeric difference from planning_revision",
             "A revision difference does not establish changed decision inputs, freshness, quality, approval or action permission",
             "`recurring_runs` preserves saved recurring rows, their IDs and authored next_run values",

@@ -185,6 +185,7 @@ pub struct PlanningAssessment {
     pub risks: Vec<RiskMetadataDiagnostic>,
     pub decisions: Vec<DecisionMetadataDiagnostic>,
     pub decision_revisions: Vec<DecisionRevisionObservation>,
+    pub forecasts: Vec<ForecastObservation>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
 }
@@ -209,6 +210,20 @@ pub struct DecisionRevisionObservation {
     pub id: String,
     pub source_revision: Option<u64>,
     pub revisions_since_source: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Saved forecast claims are not independently verified history or confidence.
+#[derive(Debug, Serialize)]
+pub struct ForecastObservation {
+    pub id: String,
+    pub source_revision: u64,
+    pub sample_size: u64,
+    pub reported_estimate: Option<String>,
+    pub reported_confidence: Option<String>,
+    pub reported_missing_inputs: Vec<String>,
+    pub revisions_since_source: Option<u64>,
+    pub confidence: &'static str,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -1239,6 +1254,42 @@ pub fn assess_planning(
                 }
             })
             .collect(),
+        forecasts: state
+            .latest_forecasts
+            .iter()
+            .map(|forecast| {
+                let revisions_since_source = state.revision.checked_sub(forecast.source_revision);
+                let mut missing_inputs = vec!["forecast_evidence"];
+                if forecast.id.trim().is_empty() {
+                    missing_inputs.push("id");
+                } else if state
+                    .latest_forecasts
+                    .iter()
+                    .filter(|other| other.id == forecast.id)
+                    .count()
+                    > 1
+                {
+                    missing_inputs.push("unique_forecast_id");
+                }
+                if forecast.sample_size == 0 {
+                    missing_inputs.push("sample_history");
+                }
+                if revisions_since_source.is_none() {
+                    missing_inputs.push("source_revision_ahead_of_planning");
+                }
+                ForecastObservation {
+                    id: forecast.id.clone(),
+                    source_revision: forecast.source_revision,
+                    sample_size: forecast.sample_size,
+                    reported_estimate: forecast.estimate.clone(),
+                    reported_confidence: forecast.confidence.clone(),
+                    reported_missing_inputs: forecast.missing_inputs.clone(),
+                    revisions_since_source,
+                    confidence: "unknown",
+                    missing_inputs,
+                }
+            })
+            .collect(),
         review_dates: observe_review_dates(
             state,
             monitor.and_then(|status| status.last_scan_at.as_deref()),
@@ -1420,6 +1471,76 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("missing_milestone")));
+    }
+
+    #[test]
+    fn forecasts_preserve_authored_values_without_certifying_evidence() {
+        let mut state: PmPlanningState = serde_json::from_value(json!({
+            "revision":5,
+            "latest_forecasts":[
+                {"id":"same", "source_revision":0, "sample_size":0,
+                 "estimate":"two days", "confidence":"high", "missing_inputs":["cost", "cost"]},
+                {"id":" \t", "source_revision":5, "sample_size":1},
+                {"id":"same", "source_revision":6, "sample_size":2},
+                {"id":"Same", "source_revision":3, "sample_size":u64::MAX},
+                {"id":" same ", "source_revision":u64::MAX, "sample_size":1}
+            ]
+        }))
+        .unwrap();
+        let before = state.clone();
+        let report = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        let rows = report["forecasts"]
+            .as_array()
+            .expect("forecast diagnostics");
+        assert_eq!(rows.len(), state.latest_forecasts.len());
+        for (row, saved) in rows.iter().zip(&state.latest_forecasts) {
+            assert_eq!(row["id"], saved.id);
+            assert_eq!(row["source_revision"], saved.source_revision);
+            assert_eq!(row["sample_size"], saved.sample_size);
+            assert_eq!(row["reported_estimate"], json!(saved.estimate));
+            assert_eq!(row["reported_confidence"], json!(saved.confidence));
+            assert_eq!(row["reported_missing_inputs"], json!(saved.missing_inputs));
+            assert_eq!(row["confidence"], "unknown");
+        }
+        assert_eq!(
+            rows.iter()
+                .map(|row| &row["revisions_since_source"])
+                .collect::<Vec<_>>(),
+            vec![&json!(5), &json!(0), &Value::Null, &json!(2), &Value::Null]
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| &row["missing_inputs"])
+                .collect::<Vec<_>>(),
+            vec![
+                &json!(["forecast_evidence", "unique_forecast_id", "sample_history"]),
+                &json!(["forecast_evidence", "id"]),
+                &json!([
+                    "forecast_evidence",
+                    "unique_forecast_id",
+                    "source_revision_ahead_of_planning"
+                ]),
+                &json!(["forecast_evidence"]),
+                &json!(["forecast_evidence", "source_revision_ahead_of_planning"])
+            ]
+        );
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let monitor_before = serde_json::to_value(&monitor).unwrap();
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["forecasts"], report["forecasts"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert_eq!(state, before);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
+        state.revision = u64::MAX;
+        let maximum = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(maximum["forecasts"][0]["revisions_since_source"], u64::MAX);
+        assert_eq!(maximum["forecasts"][4]["revisions_since_source"], 0);
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["forecasts"],
+            json!([])
+        );
     }
 
     #[test]
