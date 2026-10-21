@@ -2333,6 +2333,9 @@ enum UserEvent {
         client_id: ClientId,
         window_id: String,
         session_id: String,
+        request_id: u64,
+        version: Option<gwt::protocol::PmReportsVersion>,
+        snapshot: bool,
         reports: Vec<gwt::protocol::PmReportView>,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
@@ -11825,8 +11828,17 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, current, error }) => {
-                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, current, error));
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
+                    id: window_id,
+                    session_id: Some(session_id),
+                    request_id,
+                    version,
+                    snapshot,
+                    reports,
+                    current,
+                    error,
+                }));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 app.observe_notification_toasts(&events);

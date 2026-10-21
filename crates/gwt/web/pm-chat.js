@@ -4,54 +4,92 @@ import { renderUiContent } from './ui-content.js';
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
-  const model = createUiStateStore({ windows: {}, changedWindowId: null });
-  // chrono emits UTC timestamps with variable fractional precision. Keep the
-  // nanoseconds when comparing; JavaScript Date truncates them to milliseconds.
-  const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
-  const nativeCount = reports => reports.filter(report => !report.id.startsWith('pm-peer-')).length;
+  const model = createUiStateStore({ windows: {}, changedWindowId: null, resyncRequest: null });
+  let requestSequence = 0;
+  const requests = new Map();
+  const validVersion = version => version && typeof version.epoch === 'string' && version.epoch.length > 0
+    && Number.isSafeInteger(version.revision) && version.revision > 0;
+  function requestPmReports(windowId, resync = false) {
+    const state = model.read().windows[windowId];
+    if (!state?.sessionId) return null;
+    let request = requests.get(windowId);
+    if (!request) {
+      request = { applied: 0, issued: 0, force: null, needsSnapshot: true };
+      requests.set(windowId, request);
+    }
+    if (resync) { request.needsSnapshot = true; request.force = null; }
+    if (request.needsSnapshot && request.force !== null) {
+      return { kind: 'load_pm_reports', id: windowId, request_id: request.force, version: null };
+    }
+    const requestId = ++requestSequence;
+    request.issued = requestId;
+    if (request.needsSnapshot) request.force = requestId;
+    return { kind: 'load_pm_reports', id: windowId, request_id: requestId,
+      version: request.needsSnapshot ? null : state.reportsVersion };
+  }
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reports: [], current: null, error: null, loaded: false };
+      reportsVersion: null, reports: [], current: null, error: null, loaded: false };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
       const previous = state.windows[windowId];
       if (previous && previous.sessionId === sessionId) return state;
+      requests.delete(windowId);
       const next = previous?.sessionId == null ? { ...emptyWindow(windowId, sessionId), terminal: previous?.terminal || null }
         : emptyWindow(windowId, sessionId);
-      return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
+      return { ...state, windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
     });
   }
   function applyPmWindowReceiveEvent(event) {
+    let needsResync = false;
     model.update(state => {
       const previous = state.windows[event.id];
       let next = previous || emptyWindow(event.id);
       if (event.kind === 'pm_reports') {
         if (!previous || event.session_id !== previous.sessionId) return state;
-        // Native history only appends. Optional peer projections may be absent
-        // during a peer-store failure without freezing native reports/current.
-        if (!event.error && nativeCount(event.reports || []) < nativeCount(previous.reports)) return state;
-        if (!event.error && event.current?.observed_at && previous.current?.observed_at
-          && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
-        next = { ...next, error: event.error || null, loaded: true,
+        const request = requests.get(event.id);
+        if (!request || !Number.isSafeInteger(event.request_id) || event.request_id <= request.applied
+          || event.request_id > request.issued || !validVersion(event.version)) return state;
+        const version = previous.reportsVersion;
+        if (request.force !== null) {
+          if (event.request_id !== request.force || event.snapshot !== true) return state;
+          if (version?.epoch === event.version.epoch && event.version.revision < version.revision) return state;
+        } else {
+          if (event.snapshot !== false) return state;
+          if (version?.epoch === event.version.epoch && event.version.revision <= version.revision) return state;
+          if (!version || version.epoch !== event.version.epoch || event.version.revision !== version.revision + 1) {
+            request.needsSnapshot = true;
+            needsResync = true;
+            return { ...state, resyncRequest: { windowId: event.id,
+              expected: version, received: event.version } };
+          }
+        }
+        request.applied = event.request_id;
+        request.force = null;
+        request.needsSnapshot = false;
+        if (version?.epoch === event.version.epoch && version.revision === event.version.revision) return state;
+        next = { ...next, reportsVersion: event.version, error: event.error || null, loaded: true,
           current: event.error ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []).map(report => ({ ...report,
             content: { type: 'markdown', body: report.body || '', body_html: report.body_html || '' } })) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
-      return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+      return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
+    return needsResync;
   }
   function removePmWindowState(windowId) {
+    requests.delete(windowId);
     model.update(state => {
       const { [windowId]: removed, ...windows } = state.windows;
-      return removed ? { windows, changedWindowId: windowId } : state;
+      return removed ? { ...state, windows, changedWindowId: windowId } : state;
     });
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.

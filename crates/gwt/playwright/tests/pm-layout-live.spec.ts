@@ -78,7 +78,7 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     }
     await details.locator('summary').click();
     await expect(details).toHaveAttribute('open');
-    await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await expect(details).toHaveAttribute('open');
     await pane.locator('.pm-chat__message').last().scrollIntoViewIfNeeded();
     expect(await body.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
