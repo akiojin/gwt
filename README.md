@@ -808,6 +808,13 @@ remain significant for identity. Nonblank values remain opaque, and assumptions
 are optional. These diagnostics need no Monitor snapshot and leave review-date
 observations unchanged. Complete metadata does not establish a valid risk assessment
 or authorize action.
+`policy.decisions` lists saved decision IDs in order and names blank or whitespace-only
+`id`, `rationale` and `owner` in `missing_inputs`. It names `options` when the list
+has no nonblank entry. Repeated nonblank exact IDs add `unique_decision_id`; case and
+surrounding whitespace remain significant for identity. Values remain opaque,
+assumptions and `source_revision` are optional, and review dates remain in
+`policy.review_dates`. These diagnostics need no Monitor snapshot. Complete metadata
+does not establish decision quality, approval or action permission.
 `policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
 timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
 fractional seconds: it is true at or after `next_run` and false before it. Missing or

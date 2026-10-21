@@ -83,6 +83,12 @@ repeated nonblank exact IDs add unique_risk_id. Trimming only detects missing va
 never merges IDs; case and surrounding whitespace remain significant for identity.
 Nonblank values remain opaque, and assumptions are optional. These diagnostics need no Monitor
 snapshot and leave review_dates unchanged. Risk metadata completeness does not establish semantic validity or authorize action.
+`policy.decisions` lists saved decision IDs and metadata `missing_inputs` in saved order.
+It names blank or whitespace-only id, rationale and owner fields, and options when
+the list has no nonblank entry. Repeated nonblank exact IDs add unique_decision_id;
+case and surrounding whitespace remain significant for identity. Values are opaque,
+assumptions and source_revision are optional, and review dates stay in review_dates.
+These diagnostics need no Monitor snapshot. Decision metadata completeness does not establish decision quality, approval or action permission.
 `recurring_runs` preserves saved recurring rows, their IDs and authored next_run values.
 `due_at_scan` compares RFC3339 instants using only the supplied scan; it is true at or
 after next_run and false before it, including explicit timezone offsets and fractional seconds.
@@ -3952,6 +3958,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Days past a review date do not prove whether a review occurred or authorize action",
             "`policy.risks` lists saved risk IDs and metadata `missing_inputs` in saved order",
             "Risk metadata completeness does not establish semantic validity or authorize action",
+            "`policy.decisions` lists saved decision IDs and metadata `missing_inputs` in saved order",
+            "Decision metadata completeness does not establish decision quality, approval or action permission",
             "`recurring_runs` preserves saved recurring rows, their IDs and authored next_run values",
             "`due_at_scan` compares RFC3339 instants using only the supplied scan",
             "Reject fractional seconds beyond nine digits instead of silently truncating precision",

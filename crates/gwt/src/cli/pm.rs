@@ -953,6 +953,7 @@ mod tests {
             .contains(&serde_json::json!("end_to_end_wip")));
         assert_eq!(status["revision"], 1);
         assert_eq!(status["policy"]["risks"], serde_json::json!([]));
+        assert_eq!(status["policy"]["decisions"], serde_json::json!([]));
         assert_eq!(status["goals"][0]["outcome"], "Ship safely");
         assert_eq!(status["policy"]["planning_revision"], 1);
         assert_eq!(
@@ -1019,6 +1020,12 @@ mod tests {
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["decisions"],
+            serde_json::json!([
+                {"id":"release-decision", "missing_inputs":["options", "rationale", "owner"]}
+            ])
+        );
         assert_eq!(
             status["policy"]["risks"],
             serde_json::json!([
