@@ -401,6 +401,8 @@ fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contrac
 
     let mut restored: IssueMonitorState =
         serde_json::from_value(legacy_value).expect("legacy state must deserialize");
+    // Repository authority is transient and must be resolved again after loading.
+    restored.set_source_repository(Some(("example", "repo")));
     assert_eq!(restored.active_count(), 1);
     assert_eq!(restored.queue_len(), 1);
     assert_eq!(
