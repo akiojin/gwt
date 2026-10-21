@@ -19611,6 +19611,14 @@ impl IssueMonitorState {
     /// exact ReleaseClaim companions make that result harmless without
     /// invalidating unrelated effect authority.
     fn compensate_uncommitted_provider_claims(&mut self) {
+        let mut cancelled_issues = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(*issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let attempting_claims = self
             .pending_effects
             .iter()
@@ -19658,6 +19666,7 @@ impl IssueMonitorState {
         self.pending_launch_deliveries
             .retain(|delivery| delivery.materializer_id.is_some());
         for delivery in cancelled_deliveries {
+            cancelled_issues.insert(delivery.issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -19694,6 +19703,17 @@ impl IssueMonitorState {
             }
             if !self.queue.contains(&delivery.issue_number) {
                 self.queue.push_back(delivery.issue_number);
+            }
+        }
+        for issue_number in cancelled_issues {
+            // A materializer-owned delivery is already past this cancellation
+            // boundary; only unspawned eligibility may return to Idle.
+            if !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            {
+                self.clear_provisional_implementation(issue_number);
             }
         }
         self.apply_priority_order_to_queue();
@@ -28696,6 +28716,11 @@ mod tests {
         ));
         let epoch = monitor.effect_authority_epoch();
 
+        for number in [43, 44, 45] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+            monitor.record_attempt(number);
+        }
+
         assert_eq!(
             monitor.try_hold_provider_usage_limit(
                 42,
@@ -28750,6 +28775,46 @@ mod tests {
         assert!(monitor.queued_issue_numbers().contains(&45));
         assert!(!monitor.active_issue_numbers().contains(&45));
         assert_eq!(monitor.attempt_count(42), 0);
+        for number in [43, 44, 45] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle,
+                "cancelled pre-spawn work for Issue #{number} must not enter review"
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+            assert!(monitor.queued_issue_numbers().contains(&number));
+            assert!(!monitor.is_autonomous_in_flight(number));
+        }
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        for number in [43, 44, 45] {
+            assert_eq!(
+                restored.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle
+            );
+            assert_eq!(restored.attempt_count(number), 1);
+        }
+        restored.set_gui_connected(true);
+        restored.record_candidate(issue(43));
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                8,
+                |_| false
+            ),
+            0
+        );
+        restored.clear_provider_quota_hold("codex", "test release", "2026-08-22T02:03:00Z");
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T02:03:00Z",
+                8,
+                |_| false
+            ),
+            1,
+            "cancelled work re-enters ordinary admission after the hold clears"
+        );
     }
 
     #[test]
