@@ -938,7 +938,7 @@ fn split_workspace_state_external_commit_resolution(
     )
 }
 
-fn sanitize_handoff_value(value: &str) -> Option<String> {
+pub(super) fn sanitize_handoff_value(value: &str) -> Option<String> {
     static SECRET: OnceLock<Regex> = OnceLock::new();
     static URL: OnceLock<Regex> = OnceLock::new();
     static ABSOLUTE_PATH: OnceLock<Regex> = OnceLock::new();
