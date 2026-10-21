@@ -7218,6 +7218,7 @@ exit 1
                 ..IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -7236,7 +7237,7 @@ exit 1
 
         assert!(autonomous_eligibility_candidates(
             &monitor,
-            &[not_ready, held],
+            &[not_ready.clone(), held.clone()],
             "2026-08-05T10:00:01Z",
         )
         .is_empty());
@@ -7250,6 +7251,72 @@ exit 1
             monitor.inbox_item(51).map(|item| item.state),
             Some(MonitorInboxState::HoldExcluded)
         );
+
+        // Eligibility precedes claim acquisition. A fresh exclusion must also
+        // retire that provisional phase, without spending a retry attempt.
+        let now = "2026-08-05T10:00:02Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        monitor.terminal_queue_push(&[50, 51], "test", now);
+        for mut ready in [not_ready.clone(), held.clone()] {
+            ready.labels.retain(|label| label != "hold");
+            ready.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+            ready.body = Some("## Acceptance Criteria\n- [ ] AC-1: execute\n".to_string());
+            monitor.record_candidate(ready.clone());
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(&ready, &protection, now),
+                crate::EligibilityDecision::Eligible
+            );
+            monitor.record_attempt(ready.number);
+        }
+        let mut running = monitor.clone();
+        assert!(running.apply_confirmed_claim(50, "claim", "host:1", "effect", now));
+        running.complete_active_launch(50, "tab-1::agent-50");
+        let mut resuming_review = monitor.clone();
+        resuming_review.begin_review(50, 500, "reviewed-head");
+        assert_eq!(
+            resuming_review.resume_inflight_reviews_after_restart(now),
+            vec![50]
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 2, |_| false),
+            2
+        );
+        crate::scan_issue_monitor_candidates(&mut monitor, &[not_ready.clone(), held], now);
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        for number in [50, 51] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                crate::AutonomousPhase::Idle
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+            assert!(monitor
+                .inbox_item(number)
+                .unwrap()
+                .exclusion_reason
+                .is_some());
+        }
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+
+        crate::scan_issue_monitor_candidates(&mut resuming_review, &[not_ready.clone()], now);
+        assert_eq!(
+            resuming_review.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "restart recovery must retain its pending review"
+        );
+        crate::scan_issue_monitor_candidates(&mut running, &[not_ready], now);
+        assert_eq!(
+            running.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "fresh readiness does not revoke a running implementation"
+        );
+        assert_eq!(running.active_count(), 1);
     }
 
     #[test]
