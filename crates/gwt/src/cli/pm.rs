@@ -997,11 +997,31 @@ mod tests {
                 issues: vec![9, 7, 9],
                 ..Default::default()
             });
+            state.risks.push(crate::pm_planning::Risk {
+                id: "release-risk".into(),
+                review_date: Some("2024-03-01".into()),
+                ..Default::default()
+            });
+            state.decisions.push(crate::pm_planning::Decision {
+                id: "release-decision".into(),
+                ..Default::default()
+            });
             Ok(())
         })
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["review_dates"],
+            serde_json::json!([
+                {"kind":"risk", "id":"release-risk", "review_date":"2024-03-01",
+                 "scan_date_utc":null, "days_past_review_at_scan":null,
+                 "missing_inputs":["monitor_scan_time"]},
+                {"kind":"decision", "id":"release-decision", "review_date":null,
+                 "scan_date_utc":null, "days_past_review_at_scan":null,
+                 "missing_inputs":["review_date", "monitor_scan_time"]}
+            ])
+        );
         for trace in status["policy"]["issue_traces"].as_array().unwrap() {
             assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
         }

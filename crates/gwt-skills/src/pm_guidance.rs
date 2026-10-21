@@ -69,6 +69,14 @@ No current clock is used. Preserve saved row order, duplicate IDs and enclosing 
 an old or degraded scan describes that recorded date, not the current state.
 Days past a target do not prove unfinished or overdue work, health, confidence or completion.
 Do not change priority or launch decisions from this calendar observation alone.
+`review_dates` lists saved risks, then decisions, in their saved order, including duplicate IDs.
+Each row retains its kind, ID and authored review date. Only exact YYYY-MM-DD review dates and
+valid RFC3339 scan timestamps supply a day count; missing or invalid inputs leave it null
+and name `review_date` or `monitor_scan_time`. The scan date remains visible independently.
+`days_past_review_at_scan` measures only UTC calendar passage at the supplied scan;
+it is zero before or on the review date. No current clock is used, and enclosing Monitor
+source, scan age and coverage limits still apply to old or degraded observations.
+Days past a review date do not prove whether a review occurred or authorize action.
 Issue traces expose `observed_inbox_states` even for orphan or maintenance work.
 These are the exact supplied inbox states, deduplicated in observation order.
 Queue or active membership alone does not supply an inbox state; absent rows return an empty list.
@@ -3917,6 +3925,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Merged or Released does not prove milestone completion",
             "`target_date_observation` compares each saved milestone target with the scan's UTC calendar date",
             "Days past a target do not prove unfinished or overdue work",
+            "`review_dates` lists saved risks, then decisions, in their saved order",
+            "`days_past_review_at_scan` measures only UTC calendar passage at the supplied scan",
+            "Days past a review date do not prove whether a review occurred or authorize action",
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",

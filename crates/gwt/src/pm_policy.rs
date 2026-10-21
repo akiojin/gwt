@@ -182,6 +182,7 @@ pub struct PlanningAssessment {
     pub roadmap_items: Vec<RoadmapDiagnostic>,
     pub goals: Vec<GoalDiagnostic>,
     pub milestones: Vec<MilestoneDiagnostic>,
+    pub review_dates: Vec<ReviewDateObservation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -690,6 +691,36 @@ fn observe_milestone_target_date(
     target: Option<&str>,
     scan: Option<&str>,
 ) -> MilestoneTargetDateObservation {
+    let observation = observe_calendar_date(target, scan, "target_date");
+    MilestoneTargetDateObservation {
+        scan_date_utc: observation.scan_date_utc,
+        days_past_target_at_scan: observation.days_past_date_at_scan,
+        missing_inputs: observation.missing_inputs,
+    }
+}
+
+/// Calendar passage is not evidence that a review occurred or remains pending.
+#[derive(Debug, Serialize)]
+pub struct ReviewDateObservation {
+    pub kind: &'static str,
+    pub id: String,
+    pub review_date: Option<String>,
+    pub scan_date_utc: Option<String>,
+    pub days_past_review_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+struct CalendarDateObservation {
+    scan_date_utc: Option<String>,
+    days_past_date_at_scan: Option<u64>,
+    missing_inputs: Vec<&'static str>,
+}
+
+fn observe_calendar_date(
+    target: Option<&str>,
+    scan: Option<&str>,
+    date_input: &'static str,
+) -> CalendarDateObservation {
     let target = target.and_then(|value| {
         chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
             .ok()
@@ -700,18 +731,43 @@ fn observe_milestone_target_date(
         .map(|value| value.with_timezone(&chrono::Utc).date_naive());
     let mut missing_inputs = Vec::new();
     if target.is_none() {
-        missing_inputs.push("target_date");
+        missing_inputs.push(date_input);
     }
     if scan.is_none() {
         missing_inputs.push("monitor_scan_time");
     }
-    MilestoneTargetDateObservation {
+    CalendarDateObservation {
         scan_date_utc: scan.map(|date| date.to_string()),
-        days_past_target_at_scan: scan
+        days_past_date_at_scan: scan
             .zip(target)
             .map(|(scan, target)| scan.signed_duration_since(target).num_days().max(0) as u64),
         missing_inputs,
     }
+}
+
+fn observe_review_dates(state: &PmPlanningState, scan: Option<&str>) -> Vec<ReviewDateObservation> {
+    state
+        .risks
+        .iter()
+        .map(|risk| ("risk", &risk.id, &risk.review_date))
+        .chain(
+            state
+                .decisions
+                .iter()
+                .map(|decision| ("decision", &decision.id, &decision.review_date)),
+        )
+        .map(|(kind, id, review_date)| {
+            let observation = observe_calendar_date(review_date.as_deref(), scan, "review_date");
+            ReviewDateObservation {
+                kind,
+                id: id.clone(),
+                review_date: review_date.clone(),
+                scan_date_utc: observation.scan_date_utc,
+                days_past_review_at_scan: observation.days_past_date_at_scan,
+                missing_inputs: observation.missing_inputs,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -985,6 +1041,10 @@ pub fn assess_planning(
         roadmap_items,
         goals,
         milestones,
+        review_dates: observe_review_dates(
+            state,
+            monitor.and_then(|status| status.last_scan_at.as_deref()),
+        ),
     }
 }
 
@@ -1259,6 +1319,88 @@ mod tests {
                 "scan_date_utc":null, "days_past_target_at_scan":null,
                 "missing_inputs":["monitor_scan_time"]
             })
+        );
+    }
+
+    #[test]
+    fn review_dates_observe_saved_risks_and_decisions_without_review_verdicts() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "risks":[
+                {"id":"same","review_date":"2024-02-28"},
+                {"id":"same","review_date":"2024-03-01"},
+                {"id":"future","review_date":"2024-03-02"}
+            ],
+            "decisions":[
+                {"id":"same","review_date":"2024-02-29"},
+                {"id":"invalid","review_date":"2024-02-30"},
+                {"id":"short","review_date":"2024-2-28"},
+                {"id":"blank","review_date":" "},
+                {"id":""}
+            ]
+        }))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2024-02-29T20:30:00-04:00".into());
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["review_dates"]
+            .as_array()
+            .expect("review observations");
+        let saved = state
+            .risks
+            .iter()
+            .map(|r| ("risk", &r.id, &r.review_date))
+            .chain(
+                state
+                    .decisions
+                    .iter()
+                    .map(|d| ("decision", &d.id, &d.review_date)),
+            );
+        assert_eq!(rows.len(), 8);
+        for (index, (kind, id, date)) in saved.enumerate() {
+            assert_eq!(
+                rows[index],
+                json!({
+                    "kind":kind, "id":id, "review_date":date, "scan_date_utc":"2024-03-01",
+                    "days_past_review_at_scan":([Some(2),Some(0),Some(0),Some(1),None,None,None,None][index]),
+                    "missing_inputs":if index < 4 {json!([])} else {json!(["review_date"])}
+                })
+            );
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.last_scan_at = Some("2024-03-01T00:30:00Z".into());
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["review_dates"], report["review_dates"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid")] {
+            monitor.last_scan_at = scan.map(str::to_owned);
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            assert_eq!(untimed["review_dates"][0]["scan_date_utc"], Value::Null);
+            assert_eq!(
+                untimed["review_dates"][0]["days_past_review_at_scan"],
+                Value::Null
+            );
+            assert_eq!(
+                untimed["review_dates"][0]["missing_inputs"],
+                json!(["monitor_scan_time"])
+            );
+            assert_eq!(
+                untimed["review_dates"][7]["missing_inputs"],
+                json!(["review_date", "monitor_scan_time"])
+            );
+        }
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            absent["review_dates"],
+            serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap()["review_dates"]
+        );
+        assert_eq!(absent["review_dates"][0]["review_date"], "2024-02-28");
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["review_dates"],
+            json!([])
         );
     }
 
