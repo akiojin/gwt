@@ -891,6 +891,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
     monitor.recover_stuck_autonomous(now);
     let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
+    outcome.requeued.extend(terminal.requeued);
     outcome.idle_windows.extend(terminal.idle_windows);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(

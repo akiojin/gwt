@@ -21334,6 +21334,11 @@ impl IssueMonitorState {
             .filter(|(number, window)| {
                 settlements.get(number).is_some_and(|observation| {
                     observation.holder_host_dead
+                        // Inbox payloads are not persisted. At startup wait
+                        // for the candidate read before deciding whether this
+                        // Completed generation finished its owner or one slice.
+                        && (observation.settlement != IssueMonitorExecutionSettlement::Completed
+                            || self.inbox_item(**number).is_some())
                         && matches!(
                             observation.settlement,
                             IssueMonitorExecutionSettlement::Completed
@@ -21397,6 +21402,14 @@ impl IssueMonitorState {
         };
         for (issue_number, window_id) in &self.launched_windows {
             if classified.iter().any(|idle| idle.window_id == *window_id) {
+                continue;
+            }
+            if self.inbox_item(*issue_number).is_none()
+                && settlements.get(issue_number).is_some_and(|observation| {
+                    observation.holder_host_dead
+                        && observation.settlement == IssueMonitorExecutionSettlement::Completed
+                })
+            {
                 continue;
             }
             let owned_here =
@@ -21668,13 +21681,13 @@ impl IssueMonitorState {
             false,
             IdleReleaseScope::FinishedImplementations,
         );
-        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        self.prune_dead_terminal_launches(&mut outcome, settlements, now);
         outcome
     }
 
     fn prune_dead_terminal_launches(
         &mut self,
-        outcome: &IssueMonitorIdleReconciliation,
+        outcome: &mut IssueMonitorIdleReconciliation,
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) {
@@ -21698,9 +21711,37 @@ impl IssueMonitorState {
             }) else {
                 continue;
             };
-            // A settled generation must not return after the stranded-row
-            // grace or a restart. Explicit operator resubmission remains valid.
-            self.terminal_queue_remove(&[number], now);
+            // Completed ends a slice, not an unfinished SPEC. Preserve its
+            // admission and publish the existing rebase fence before queuing a
+            // fresh successor. Other terminal owners retain the retirement rule.
+            let next_slice = settlements[&number].settlement
+                == IssueMonitorExecutionSettlement::Completed
+                && self.terminal_queue_contains(number)
+                && !self.issue_is_closed(number)
+                && !self.merged_issues.contains(&number)
+                && !self.failed_issues.contains_key(&number)
+                && self.inbox_item(number).is_some_and(|item| {
+                    let issue = &item.issue;
+                    issue.state == IssueMonitorIssueState::Open
+                        && has_gwt_spec_label(&issue.labels)
+                        && Self::issue_completion_decision(issue)
+                            == IssueCompletionDecision::Incomplete
+                        && self.allows_issue_labels(issue)
+                        && issue_monitor_candidate_exclusion(issue).is_none()
+                        && {
+                            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                                issue.body.as_deref().unwrap_or(""),
+                            );
+                            criteria.machine_checkable && !criteria.unchecked.is_empty()
+                        }
+                });
+            if next_slice {
+                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
+                outcome.requeued.push(number);
+            } else {
+                self.terminal_queue_remove(&[number], now);
+            }
             if let Some(snapshot) = &mut self.window_snapshot {
                 for observed in &mut snapshot.windows {
                     if observed.issue_number == Some(number)
@@ -21920,7 +21961,7 @@ impl IssueMonitorState {
                 );
             }
         }
-        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        self.prune_dead_terminal_launches(&mut outcome, settlements, now);
         outcome
     }
 
@@ -22063,7 +22104,6 @@ impl IssueMonitorState {
     /// transition [`Self::expire_stale_unbound_launches`] makes for a launch
     /// that never bound a window, so the next scan can claim it again.
     fn requeue_released_launch(&mut self, issue_number: u64, reason: &str, now: &str) {
-        let attempts = self.attempt_count(issue_number);
         self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
         self.autonomous_record_mut(issue_number)
             .last_failure_message = Some(format!("binding_dead: {reason}"));
@@ -22074,8 +22114,24 @@ impl IssueMonitorState {
         {
             item.error_message = Some(format!("binding_dead: {reason}"));
         }
-        // The scan commits through a union rebase. Publish the existing retry
-        // fence so its stale disk launch cannot resurrect the phantom slot.
+        self.fence_automatic_relaunch(issue_number, reason, now);
+        // The mode-gated queue would drop this: the dead-binding recovery that
+        // reaches here runs precisely when autonomous mode is OFF, so an
+        // attended operator would never learn the Monitor requeued the Issue.
+        self.push_unconditional_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: requeued after its agent window died with unfinished execution; {reason}"
+            ),
+        );
+    }
+
+    /// Preserve the retry budget and fresh-session policy through scan rebase.
+    /// The monotonic release version also distinguishes successive slices whose
+    /// GitHub Issue revision did not change.
+    fn fence_automatic_relaunch(&mut self, issue_number: u64, reason: &str, now: &str) {
+        let attempts = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let release = IssueMonitorReleasedFailure {
             issue_number,
@@ -22090,16 +22146,6 @@ impl IssueMonitorState {
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number, true);
-        // The mode-gated queue would drop this: the dead-binding recovery that
-        // reaches here runs precisely when autonomous mode is OFF, so an
-        // attended operator would never learn the Monitor requeued the Issue.
-        self.push_unconditional_notice(
-            "info",
-            issue_number,
-            format!(
-                "Issue #{issue_number}: requeued after its agent window died with unfinished execution; {reason}"
-            ),
-        );
     }
 
     /// Free the slot held by `window_id` for `issue_number` without spending an
@@ -43956,6 +44002,98 @@ mod tests {
             );
             assert_eq!(monitor.launched_window_id(42), None);
         }
+    }
+
+    #[test]
+    fn issue_5876_completed_spec_slice_survives_dead_holder_cleanup_and_restart() {
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-09-07T03:00:00Z",
+        );
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
+        observed.get_mut(&42).unwrap().holder_host_dead = true;
+        let attempts = monitor.attempt_count(42);
+
+        // Startup reconciles dead holders before the first candidate read.
+        let mut restarted = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        assert!(restarted.inbox_item(42).is_none());
+        assert!(restarted
+            .reconcile_dead_terminal_launches(&observed, IDLE_NOW)
+            .released
+            .is_empty());
+        assert!(
+            restarted.terminal_queue_contains(42),
+            "unread owner is not retired"
+        );
+        restarted.record_candidate(candidate.clone());
+        monitor = restarted;
+
+        let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+        assert_eq!(outcome.released, vec![42]);
+        assert!(
+            monitor.terminal_queue_contains(42),
+            "unfinished owner keeps admission"
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(monitor.attempt_count(42), attempts);
+        let stale = launched_monitor_for_issue(candidate.clone(), "old-tab::slice").prefs();
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "stale launch cannot return");
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+
+        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.set_gui_connected(true);
+        restored.config.enabled = true;
+        for _ in 0..2 {
+            restored.record_candidate(candidate.clone());
+            assert!(restored
+                .reconcile_dead_terminal_launches(&observed, IDLE_NOW)
+                .released
+                .is_empty());
+            assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        }
+        let mut admission = restored.clone();
+        let launch = admission
+            .next_launch_request(IDLE_NOW)
+            .expect("automatic successor");
+        assert_eq!(launch.issue_number, 42);
+        assert_eq!(
+            launch.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(
+            admission.next_launch_request(IDLE_NOW).is_none(),
+            "one successor only"
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+
+        // A second slice can finish without changing the Issue revision.
+        // A real confirmed claim consumes the prior release before the ACK.
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "second-slice-claim",
+            "host/session",
+            "second-slice-effect",
+            IDLE_NOW,
+        ));
+        restored.complete_active_launch_at(42, "old-tab::slice-two", "2026-09-07T04:01:00Z");
+        let second_stale = restored.prefs();
+        let second = restored.reconcile_dead_terminal_launches(&observed, "2026-09-07T04:10:00Z");
+        assert_eq!(second.requeued, vec![42]);
+        restored.rebase_daemon_driver_prefs(&second_stale);
+        assert_eq!(restored.active_count(), 0);
+        assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        assert_eq!(restored.attempt_count(42), attempts);
+        assert_eq!(
+            restored
+                .next_launch_request("2026-09-07T04:10:00Z")
+                .unwrap()
+                .launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
     }
 
     #[test]
