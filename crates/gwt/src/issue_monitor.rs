@@ -10633,13 +10633,13 @@ impl IssueMonitorState {
         self.max_active_agents_mode = disk.max_active_agents_mode;
         self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
-        self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
         self.terminal_queues = disk.terminal_queues.clone();
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
             self.admit_observed_urgent(entry.number, &entry.queued_at);
@@ -16323,9 +16323,13 @@ impl IssueMonitorState {
     fn reconcile_terminal_queue(&mut self) {
         let members = self.local_terminal_queue_numbers();
         self.queue.retain(|number| members.contains(number));
+        // Missing membership alone may be an unobserved running Issue.
+        // Only explicit removals authorize clearing a provisional phase.
         let unqueued = self
-            .autonomous_records
-            .keys()
+            .terminal_queue_exclusions
+            .get(&crate::process::current_hostname())
+            .into_iter()
+            .flatten()
             .filter(|number| !members.contains(number) && !self.active_launches.contains(number))
             .copied()
             .collect::<Vec<_>>();
@@ -41705,6 +41709,17 @@ mod tests {
         assert_eq!(stale.auto_refill_terminal_queue(&[1, 2, 3], now), 1);
         stale.terminal_queue_push(&[1], "operator", now);
         assert!(stale.terminal_queue_contains(1));
+
+        let mut observer = stale.clone();
+        observer.terminal_queue_remove(&[1], now);
+        stale.set_allowed_labels(vec!["bug".into()]);
+        stale.set_autonomous_phase(1, AutonomousPhase::Implementing);
+        observer.rebase_gui_observer_prefs(&stale.prefs());
+        assert_eq!(
+            observer.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Implementing,
+            "new disk readmission must supersede the observer's old removal"
+        );
     }
 
     #[test]
