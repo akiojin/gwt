@@ -17508,6 +17508,7 @@ impl IssueMonitorState {
             .inbox_item(issue_number)
             .filter(|item| {
                 item.state == MonitorInboxState::Queued
+                    && !self.launch_admission_is_held_at(now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_observed_monitor_runtime(issue_number)
@@ -17516,6 +17517,7 @@ impl IssueMonitorState {
             })
             .map(|item| item.issue.clone())
         else {
+            self.clear_provisional_implementation(issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -27975,6 +27977,70 @@ mod tests {
             1,
             "clearing the drain resumes claim admission"
         );
+
+        // The drain can begin after GitHub submission but before success is
+        // committed. It must still prevent an unspawnable launch reservation.
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_attempt(42);
+        let effect = monitor.pending_effects()[0].clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected claim acquisition");
+        };
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.91.0", now);
+        assert!(monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert!(monitor.active_issue_numbers().is_empty());
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(&monitor.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
+                if released == claim_id && released_owner == owner));
+
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        restored.set_gui_connected(true);
+        assert!(restored.update_drain().is_some());
+        assert!(restored.terminal_queue_contains(42));
+        // Inbox/launch queue rows are rebuilt by the next candidate scan.
+        restored.record_candidate(issue(42));
+        assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        assert_eq!(restored.attempt_count(42), 1);
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(owner, now, 1, |_| false),
+            0
+        );
+        restored.clear_update_drain();
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(owner, now, 1, |_| false),
+            1
+        );
+        let new_effect = restored.pending_effects().last().unwrap().clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id: new_claim,
+            ..
+        } = &new_effect.payload
+        else {
+            panic!("expected fresh claim acquisition");
+        };
+        assert!(restored.mark_pending_effect_attempting(&new_effect.attempt_key()));
+        assert!(restored
+            .complete_pending_effect(&new_effect.attempt_key())
+            .is_some());
+        assert!(restored.apply_confirmed_claim(42, new_claim, owner, &new_effect.effect_id, now));
+        assert_eq!(restored.active_count(), 1);
+        assert_eq!(restored.take_pending_launch_requests().len(), 1);
     }
 
     /// Issue #4037 AC-6: the drain is one structured projection in both the
