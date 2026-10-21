@@ -1032,6 +1032,13 @@ mod tests {
             status["policy"]["milestones"][0]["unobserved_issues"],
             serde_json::json!([7, 9])
         );
+        assert_eq!(
+            status["policy"]["milestones"][0].get("target_date_observation"),
+            Some(&serde_json::json!({
+                "scan_date_utc":null, "days_past_target_at_scan":null,
+                "missing_inputs":["target_date", "monitor_scan_time"]
+            }))
+        );
         assert_eq!(fs::read(&planning_path).unwrap(), bytes);
     }
 

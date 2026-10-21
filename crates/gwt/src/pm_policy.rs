@@ -669,12 +669,49 @@ pub struct MilestoneDiagnostic {
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
     pub target_date: Option<String>,
+    pub target_date_observation: MilestoneTargetDateObservation,
     pub exit_criteria: Vec<String>,
     pub reported_health: Option<String>,
     pub reported_confidence: Option<String>,
     pub health: &'static str,
     pub confidence: &'static str,
     pub missing_inputs: Vec<&'static str>,
+}
+
+/// Calendar passage alone cannot establish unfinished work or milestone health.
+#[derive(Debug, Serialize)]
+pub struct MilestoneTargetDateObservation {
+    pub scan_date_utc: Option<String>,
+    pub days_past_target_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+fn observe_milestone_target_date(
+    target: Option<&str>,
+    scan: Option<&str>,
+) -> MilestoneTargetDateObservation {
+    let target = target.and_then(|value| {
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .filter(|date| value.len() == 10 && date.format("%Y-%m-%d").to_string() == value)
+    });
+    let scan = scan
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc).date_naive());
+    let mut missing_inputs = Vec::new();
+    if target.is_none() {
+        missing_inputs.push("target_date");
+    }
+    if scan.is_none() {
+        missing_inputs.push("monitor_scan_time");
+    }
+    MilestoneTargetDateObservation {
+        scan_date_utc: scan.map(|date| date.to_string()),
+        days_past_target_at_scan: scan
+            .zip(target)
+            .map(|(scan, target)| scan.signed_duration_since(target).num_days().max(0) as u64),
+        missing_inputs,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -919,6 +956,10 @@ pub fn assess_planning(
                 observed_issue_states,
                 unobserved_issues,
                 target_date: milestone.target_date.clone(),
+                target_date_observation: observe_milestone_target_date(
+                    milestone.target_date.as_deref(),
+                    monitor.and_then(|status| status.last_scan_at.as_deref()),
+                ),
                 exit_criteria: milestone.exit_criteria.clone(),
                 reported_health: milestone.health.clone(),
                 reported_confidence: milestone.confidence.clone(),
@@ -1141,6 +1182,84 @@ mod tests {
                 .unwrap()
                 .contains(&json!(key)));
         }
+    }
+
+    #[test]
+    fn milestone_target_dates_compare_utc_calendar_days_without_health_verdicts() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "milestones":[
+                {"id":"same","target_date":"2024-02-28","health":"green","confidence":"high"},
+                {"id":"same","target_date":"2024-03-01"},
+                {"id":"future","target_date":"2024-03-02"},
+                {"id":"invalid","target_date":"2024-02-30"},
+                {"id":"short","target_date":"2024-2-28"},
+                {"id":"blank","target_date":" "},
+                {"id":"absent"}
+            ]
+        }))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2024-02-29T20:30:00-04:00".into());
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["milestones"].as_array().unwrap();
+        assert_eq!(rows.len(), state.milestones.len());
+        assert_eq!(
+            rows[0]["target_date_observation"],
+            json!({
+                "scan_date_utc":"2024-03-01", "days_past_target_at_scan":2, "missing_inputs":[]
+            })
+        );
+        for row in &rows[1..3] {
+            assert_eq!(
+                row["target_date_observation"]["days_past_target_at_scan"],
+                0
+            );
+        }
+        for row in &rows[3..] {
+            assert_eq!(
+                row["target_date_observation"],
+                json!({
+                    "scan_date_utc":"2024-03-01", "days_past_target_at_scan":null,
+                    "missing_inputs":["target_date"]
+                })
+            );
+        }
+        assert_eq!(rows[0]["reported_health"], "green");
+        assert_eq!(rows[0]["reported_confidence"], "high");
+        for (row, saved) in rows.iter().zip(&state.milestones) {
+            assert_eq!(row["id"], saved.id);
+            assert_eq!(row["target_date"], json!(saved.target_date));
+            assert_eq!(row["health"], "unknown");
+            assert_eq!(row["confidence"], "unknown");
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.last_scan_at = Some("2024-03-01T00:30:00Z".into());
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["milestones"], report["milestones"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid")] {
+            monitor.last_scan_at = scan.map(str::to_owned);
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            assert_eq!(
+                untimed["milestones"][0]["target_date_observation"],
+                json!({
+                    "scan_date_utc":null, "days_past_target_at_scan":null,
+                    "missing_inputs":["monitor_scan_time"]
+                })
+            );
+        }
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent["milestones"][0]["target_date"], "2024-02-28");
+        assert_eq!(
+            absent["milestones"][0]["target_date_observation"],
+            json!({
+                "scan_date_utc":null, "days_past_target_at_scan":null,
+                "missing_inputs":["monitor_scan_time"]
+            })
+        );
     }
 
     #[test]

@@ -790,6 +790,11 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Milestone `target_date_observation` compares an exact `YYYY-MM-DD` target with the
+recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or on
+the target date; missing or invalid dates leave it unknown with named missing inputs.
+It uses no current clock. Read the scan's source and age alongside this observation:
+days past a target do not establish unfinished or overdue work, health or completion.
 Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
 work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,

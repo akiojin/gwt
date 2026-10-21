@@ -60,6 +60,15 @@ key. Link each queued/active Issue to one complete goal or an explicit
 maintenance/compliance category. Never justify priority from an orphan or invalid trace.
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
+`target_date_observation` compares each saved milestone target with the scan's UTC calendar date.
+Only exact YYYY-MM-DD targets and valid RFC3339 scan timestamps supply
+`days_past_target_at_scan`; it is zero before or on the target date.
+Missing or invalid inputs leave the day count null and name `target_date` or `monitor_scan_time`.
+`scan_date_utc` remains available whenever the supplied scan is valid, independently of the target.
+No current clock is used. Preserve saved row order, duplicate IDs and enclosing Monitor provenance;
+an old or degraded scan describes that recorded date, not the current state.
+Days past a target do not prove unfinished or overdue work, health, confidence or completion.
+Do not change priority or launch decisions from this calendar observation alone.
 Issue traces expose `observed_inbox_states` even for orphan or maintenance work.
 These are the exact supplied inbox states, deduplicated in observation order.
 Queue or active membership alone does not supply an inbox state; absent rows return an empty list.
@@ -3906,6 +3915,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",
             "Merged or Released does not prove milestone completion",
+            "`target_date_observation` compares each saved milestone target with the scan's UTC calendar date",
+            "Days past a target do not prove unfinished or overdue work",
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",
