@@ -795,6 +795,12 @@ recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or 
 the target date; missing or invalid dates leave it unknown with named missing inputs.
 It uses no current clock. Read the scan's source and age alongside this observation:
 days past a target do not establish unfinished or overdue work, health or completion.
+`policy.review_dates` lists saved risks followed by decisions, preserving their order,
+IDs and authored review dates. `days_past_review_at_scan` compares exact `YYYY-MM-DD`
+dates with the scan's UTC calendar date, returning zero before or on the review date.
+Missing or invalid inputs leave the count unknown with named missing inputs. It uses
+no current clock; source, scan age and coverage limits still apply. Days past a review
+date do not establish whether a review occurred or authorize action.
 Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
 work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,
