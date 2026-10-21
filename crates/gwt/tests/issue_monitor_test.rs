@@ -3056,6 +3056,8 @@ fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
     monitor.set_gui_connected(true);
 
     let loaded = LoadedIssueMonitorCandidates {
+        open_pr_observations: std::collections::BTreeMap::new(),
+        open_pr_observed_at: None,
         issues: vec![issue(4378, &["bug"]), issue(4388, &["gwt-spec"])],
         urgent_assignments: Default::default(),
         source: IssueMonitorCandidateSource::Live,
@@ -3109,6 +3111,8 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     monitor.set_gui_connected(true);
 
     let loaded = LoadedIssueMonitorCandidates {
+        open_pr_observations: std::collections::BTreeMap::new(),
+        open_pr_observed_at: None,
         issues: vec![issue(42, &["bug"]), issue(43, &["enhancement"])],
         urgent_assignments: Default::default(),
         source: IssueMonitorCandidateSource::Live,
