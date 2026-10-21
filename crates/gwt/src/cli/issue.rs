@@ -10651,7 +10651,8 @@ mod tests {
         // AC-4 for the host free-space block, measured at call time, and
         // Issue #4234 AC-5 for the gwt process memory block, and Issue #4386
         // AC-1 for the Spotlight indexing block, and Issue #4908 AC-5 for the
-        // provider usage block, read from the poller's host-local snapshot.
+        // provider usage block, read from the poller's host-local snapshot,
+        // and Issue #5876's time-dependent reliability observation.
         for attached in [
             "github_budget",
             "issue_cache",
@@ -10659,6 +10660,7 @@ mod tests {
             "memory_pressure",
             "spotlight",
             "provider_usage",
+            "reliability",
         ] {
             assert!(
                 status
