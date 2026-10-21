@@ -4761,6 +4761,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn permission_readiness_rechecks_the_profile_when_a_claim_succeeds() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        let crate::IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected claim acquisition");
+        };
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+        // config_set.launch_agent can change the selected provider while the
+        // GitHub request is in flight, without changing effect authority.
+        monitor.switch_launch_profile_agent("openclaw").unwrap();
+        assert!(monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        let item = monitor.inbox_item(42).unwrap();
+        assert_eq!(item.state, MonitorInboxState::NotReady);
+        let reason = item.exclusion_reason.as_deref().unwrap();
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(&monitor.pending_effects()[0].payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
+                if released == claim_id && released_owner == owner));
+
+        monitor.switch_launch_profile_agent("codex").unwrap();
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        assert!(monitor.apply_confirmed_claim(42, "new-claim", owner, "new-effect", now));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+    }
+
     /// A launch profile naming `agent_id`, with every other field at the value
     /// a freshly saved profile carries.
     fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
