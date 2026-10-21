@@ -744,6 +744,11 @@ health・完了を証明しません。
 記録されたスキャンだけを使い、取得元・古さ・観測範囲の制約を保持します。
 現在時計や cadence の解釈は使いません。時刻の到来は未実行の証明や、
 スケジュール・Issue 作成・起動の許可にはなりません。
+各行の `configuration_missing_inputs` は、空または空白のみの `id`・`cadence`・`owner`・
+`miss_policy`・`idempotency_key` を時刻診断とは別に示します。非空の ID や設定キーが重複する場合は、
+一致する全行に `unique_recurring_id`・`unique_idempotency_key` を示します。比較は保存文字列の
+完全一致で、空白の除去は不足判定だけに使います。Monitor の有無には依存せず、cadence の解釈・
+owner の解決・policy の意味検証は行いません。空配列でも実行許可や重複防止の保証にはなりません。
 各 Issue の trace は、未紐付けや maintenance の項目も `observed_inbox_states` を示し、
 claim 競合・保留・失敗の説明に使えます。状態は観測順で重複を除き、inbox の行が無ければ、
 queued / active でも空配列を返します。この観測で目標との整合判定を変えたり、

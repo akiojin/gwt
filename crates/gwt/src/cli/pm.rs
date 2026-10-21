@@ -1022,6 +1022,7 @@ mod tests {
             status["policy"]["recurring_runs"],
             serde_json::json!([
                 {"id":"maintenance", "next_run":"2024-03-01T00:30:00Z", "due_at_scan":null,
+                 "configuration_missing_inputs":["cadence", "owner", "miss_policy", "idempotency_key"],
                  "missing_inputs":["monitor_scan_time"]}
             ])
         );
