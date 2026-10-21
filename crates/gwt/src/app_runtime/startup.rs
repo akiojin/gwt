@@ -1307,7 +1307,7 @@ impl AppRuntime {
     /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
     /// restore protection set is snapshotted here, so the worker judges exactly
     /// the sessions this startup is about to restore. Issue Monitor launch
-    /// deliveries are held until the worker reports back.
+    /// deliveries wait for both its result and canvas-ready restore registration.
     pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
         let (protected_exact_sessions, protected_unknown_session_ids) =
             self.startup_reaper_protection();
@@ -1315,6 +1315,7 @@ impl AppRuntime {
         let worktrees = startup_worktrees.to_vec();
         let proxy = self.proxy.clone();
         self.deferred_issue_monitor_launches = Some(Vec::new());
+        self.startup_generation_reaper_pending = true;
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             reap_defunct_active_generations(
                 &sessions_dir,
@@ -1329,8 +1330,8 @@ impl AppRuntime {
                 %error,
                 "startup generation reaper could not be scheduled; running it inline"
             );
-            self.deferred_issue_monitor_launches = None;
             self.reap_startup_defunct_active_generations(startup_worktrees);
+            self.startup_generation_reaper_pending = false;
         }
     }
 
@@ -1627,6 +1628,7 @@ impl AppRuntime {
 
         // Issue #4375 AC-4: the drain's internals, not just its total.
         log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
+        events.extend(self.drain_startup_issue_monitor_launches());
         events
     }
 

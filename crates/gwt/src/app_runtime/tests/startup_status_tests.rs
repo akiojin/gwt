@@ -2187,6 +2187,8 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
     );
 }
 
+/// Issue #4804 AC-7: finishing the reaper first must not release Monitor
+/// deliveries before placeholder-less restores have registered their panes.
 #[test]
 fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     let _env_lock = env_test_lock()
@@ -2221,6 +2223,8 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         &[],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let mut session = gwt_agent::Session::new(
         &worktree,
         "work/queued-auto-resume",
@@ -2228,12 +2232,16 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     );
     session.id = "session-queued-auto".to_string();
     session.agent_session_id = Some("native-queued-auto".to_string());
+    session.linked_issue_number = Some(4804);
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
     session.restore_window_on_startup = true;
     session.record_hook_event("Stop");
     session.record_completed_stop();
+    session.update_status(gwt_agent::AgentStatus::Interrupted);
     session
         .save(&runtime.sessions_dir)
         .expect("save resumable session");
+    runtime.launch_wizard_cache.record_session(session.clone());
 
     runtime.bootstrap();
 
@@ -2246,6 +2254,46 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
             .all(|window| window.preset != WindowPreset::Agent),
         "bootstrap should wait for the frontend canvas bounds before placing restored windows"
     );
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+
+    let delivery_id = "launch:startup-canvas-gate";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            fresh_execution: None,
+            retryable: true,
+            message: "seeded so the replay settles without a launch".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+        },
+    );
+    runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &worktree,
+        4804,
+        gwt::LinkedIssueKind::Issue,
+        Some(delivery_id.to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    // Only queued bootstrap work is run here. The restore's initial worker
+    // uses sample_runtime's fixture runner, and no LaunchComplete is applied.
+    // Delivery preparation queued after canvas-ready remains unexecuted.
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    runtime.handle_startup_generation_reaper_completed();
+    assert_eq!(
+        runtime
+            .deferred_issue_monitor_launches
+            .as_ref()
+            .map(Vec::len),
+        Some(1),
+        "reaper completion alone must retain the delivery until restore panes are registered"
+    );
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
 
     runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -2263,6 +2311,26 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         .count();
     assert_eq!(agent_windows, 1);
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    assert!(runtime.deferred_issue_monitor_launches.is_none());
+    assert_eq!(
+        runtime.issue_monitor_launch_preparations.len(),
+        1,
+        "both startup conditions release the sentinel delivery exactly once"
+    );
+    assert!(runtime.runtimes.is_empty());
+    // LaunchComplete consumes this source map before AgentLaunchPrepared
+    // attaches the new Session; the automatic restore marker still owns it.
+    runtime.pending_auto_resume_sources.clear();
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab_cached("tab-auto", "2026-10-21T00:00:00Z")
+        .expect("restored canvas snapshot");
+    assert_eq!(snapshot.windows.len(), 1);
+    assert!(snapshot.windows[0].session_id.is_none());
+    assert_eq!(snapshot.windows[0].issue_number, Some(4804));
+    assert!(
+        snapshot.windows[0].monitor_owned,
+        "the restored autonomous pane must occupy a Monitor slot before its provider Session attaches"
+    );
 }
 
 /// Issue #3934: a closed agent window leaves its Session durably `Idle` with
@@ -3004,6 +3072,7 @@ fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
 /// startup path. It runs on the blocking worker and reports back with an
 /// event. Issue Monitor launch deliveries that arrive first wait for that
 /// event, so a launch never races a generation the reaper is about to reap.
+/// Issue #4804 AC-7: canvas-ready first must still wait for the reaper.
 #[test]
 fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
     let _env_lock = env_test_lock()
@@ -3091,6 +3160,18 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
+    runtime.startup_auto_resume_ready_events(canvas_bounds());
+    assert_eq!(
+        runtime
+            .deferred_issue_monitor_launches
+            .as_ref()
+            .map(Vec::len),
+        Some(1),
+        "canvas-ready alone must retain the delivery while the reaper is pending"
+    );
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
+    // Keep any canvas-ready blocking work queued; only the bootstrap reaper
+    // captured before the canvas event runs in this test.
     for task in queued {
         task();
     }
@@ -3111,6 +3192,7 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
     runtime.handle_startup_generation_reaper_completed();
     assert!(
         runtime.deferred_issue_monitor_launches.is_none(),
-        "the reaper completion releases the held deliveries"
+        "reaper completion releases deliveries after canvas registration"
     );
+    assert_eq!(runtime.issue_monitor_launch_preparations.len(), 1);
 }
