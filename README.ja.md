@@ -1002,6 +1002,22 @@ bare リポジトリを作り直し、各 worktree を新レイアウトに再�
 Tracking -> Cleanup -> Done) され、成功時はアプリを再起動せずに新しいブランチ
 worktree にプロジェクトタブが切り替わります。
 
+### 旧形式の Work event 衝突を復旧する
+
+未追跡の `.gwt/work/events/` shard が上書きされるとして Git merge が拒否された
+場合は、対象ブランチを fetch してから、プロジェクトディレクトリで次の JSON を
+`gwtd` の標準入力へ送ります。
+
+```json
+{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"origin/develop"}}
+```
+
+既定の dry run は、復旧可能な旧形式の successor tombstone 衝突を報告します。
+`"dry_run":false` を加えて再実行すると、双方の原文を報告された home 内の archive に
+保存し、内容ごとの ID で双方の event を公開します。その後 Git merge を再実行します。
+追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
+archive を上書きしません。
+
 ## GitHub Discussions でローカル Board の節目を共有する
 
 別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に scoped な

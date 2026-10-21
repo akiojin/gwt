@@ -3094,7 +3094,8 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // defer through `wizardInteractionGuard.defer(...)` before
     // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
     // mutation lives in the launch wizard surface appliers; the
-    // receive() case arms are thin delegates into them. A null
+    // receive() updates the open-error model, whose subscriber delegates to
+    // the same guarded surface applier. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
         r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*publishLaunchWizardVisibility\(\);\s*renderLaunchWizard\(\);"#,
@@ -3109,9 +3110,14 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let wizard_open_error_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenErrorModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
+    let wizard_open_error_subscription = js_braced_block_after(
+        html,
+        "launchWizardOpenErrorModel.subscribe(error => error, error => ",
+    )
+    .expect("shared launch wizard error subscription");
 
     assert!(
         html.contains("frontendUnits.socketTransport.connect();"),
@@ -3149,8 +3155,12 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected launch wizard state events to render through the wizard surface unit",
     );
     assert!(
-        wizard_open_error_event.is_match(html) && wizard_open_error_delegate.is_match(html),
-        "expected launch wizard open errors to render through the wizard surface unit",
+        wizard_open_error_event.is_match(html)
+            && wizard_open_error_delegate.is_match(html)
+            && html.contains("const launchWizardOpenErrorModel = createUiStateStore(null);")
+            && wizard_open_error_subscription
+                .contains("if (error) applyLaunchWizardOpenErrorEvent(error);"),
+        "expected launch wizard open errors to render through shared state and the wizard surface unit",
     );
 }
 

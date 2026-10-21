@@ -1083,6 +1083,22 @@ phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
 Cleanup -> Done). On success the project tab reloads onto the new branch
 worktree without restarting the app.
 
+### Recover a legacy Work event collision
+
+If Git refuses a merge because an untracked `.gwt/work/events/` shard would
+be overwritten, fetch the desired branch, then send this JSON to `gwtd` from
+the project directory:
+
+```json
+{"schema_version":1,"operation":"workspace.events_reconcile","params":{"reference":"origin/develop"}}
+```
+
+The default dry run reports eligible legacy successor tombstone collisions.
+Repeat with `"dry_run":false` to preserve both originals in the reported home
+archives and publish both events under content-specific identities. Then retry
+the Git merge. Tracked shards, ordinary events, and tombstones for different
+branches are refused; existing source or archive bytes are never overwritten.
+
 ## Share local Board milestones through GitHub Discussions
 
 To share `decision`, `blocked`, and `handoff` posts across machines, enable

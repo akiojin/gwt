@@ -299,7 +299,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|letdeadline=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|whileInstant::now()<deadline|1
 crates/gwt/src/app_runtime/tests/work_projection_tests.rs|file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure|wait_for_recorded_event(,&recorded_events,|events||1
-crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session|assert!(elapsed<Duration::from_secs(2),)|1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_expired_prompt_budget_is_silent_without_exact_pm_registration|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-std::time::Duration::from_secs(1),)|1

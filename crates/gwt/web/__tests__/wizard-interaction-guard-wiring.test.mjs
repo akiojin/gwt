@@ -632,8 +632,8 @@ test("launch_wizard_state applier defers via wizardInteractionGuard before mutat
 test("launch_wizard_open_error applier defers via wizardInteractionGuard", () => {
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;/,
-    "expected app.js launch_wizard_open_error case to delegate into the wizard surface",
+    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenErrorModel\.update\([\s\S]{0,120}?\);\s*break;/,
+    "expected app.js launch_wizard_open_error case to commit shared state",
   );
   assert.match(
     wizardSource,

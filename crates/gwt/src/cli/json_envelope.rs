@@ -510,6 +510,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
         "workspace.ensure" => workspace_ensure(params)?,
+        "workspace.events_reconcile" => {
+            reject_unknown_params(
+                params,
+                &["reference", "dry_run"],
+                "workspace.events_reconcile",
+            )?;
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile {
+                reference: required_string(params, "reference")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.projection_list" | "workspace.projection-list" => {
             CliCommand::Workspace(WorkspaceCommand::ProjectionList {
                 stale: optional_bool(params, "stale")?.unwrap_or(false),
@@ -4681,6 +4692,35 @@ mod tests {
         assert!(matches!(
             ok("workspace.work-prune", json!({"dry_run": false})),
             CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_events_reconcile_requires_reference_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::EventsReconcile { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.events_reconcile", json!({})),
+            CliParseError::MissingFlag("reference")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.events_reconcile",
+                json!({"reference":"origin/develop", "force":true})
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 

@@ -258,6 +258,56 @@ function visibleActions(row) {
     .map((button) => button.dataset.action);
 }
 
+test("Issue #4804 queue drops honor the current project's live window without Work", async t => {
+  const fixture = await makeFixture({ workspaceWindows: [agentWindow("live", 4804)] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(4804), knowledgeEntry(4805)]);
+  const queued = fixture.body.querySelector('[data-queue-column="queued"]');
+  const drop = number => {
+    const event = new fixture.window.Event("drop", { bubbles: true, cancelable: true });
+    event.dataTransfer = { getData: () => String(number) };
+    queued.dispatchEvent(event);
+  };
+  drop(4804);
+  assert.deepEqual(fixture.sent.filter(message => message.kind === "issue_monitor_queue_push"), [],
+    "an active Issue cannot be queued while its Work projection is absent");
+  drop(4805);
+  assert.deepEqual(fixture.sent.filter(message => message.kind === "issue_monitor_queue_push")
+    .map(message => message.issue_numbers), [[4805]], "an unrelated backlog Issue can still be queued");
+});
+
+test("Issue #4804 a retained canvas preserves live inline output and Focus until close", async t => {
+  const live = agentWindow("live", 4804);
+  const retained = agentWindow("retained", 4804, {
+    linked_issue_number: 4804, status: "stopped", placement: { kind: "canvas" },
+  });
+  const fixture = await makeFixture({ workspaceWindows: [live, retained] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entries = [knowledgeEntry(4804)];
+  applyEntries(fixture.surface, fixture.load, entries, 4804);
+  const row = fixture.body.querySelector('.knowledge-row[data-issue-number="4804"]');
+  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
+  assert.equal(fixture.body.querySelectorAll('[data-action="windowize-issue-preview"]').length, 0);
+  row.querySelector('[data-action="focus-canvas-window"]').click();
+  assert.deepEqual(fixture.calls.focusedLocally, ["retained"]);
+  row.querySelector('[data-action="stop-agent"]').click();
+  assert.deepEqual(fixture.sent.filter(message => message.kind === "stop_window")
+    .map(message => message.id), ["live"]);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", 4804);
+  fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+  assert.equal(fixture.body.querySelector(".issue-preview").dataset.windowId, "live");
+  assert.equal(fixture.body.querySelectorAll('[data-action="windowize-issue-preview"]').length, 0);
+  fixture.body.querySelector('[data-issue-view="split"]').click();
+  const pair = fixture.body.querySelector('.issue-split-pair[data-issue-number="4804"]');
+  assert.equal(pair.dataset.windowId, "live");
+  pair.querySelector('[data-action="focus-canvas-window"]').click();
+  assert.deepEqual(fixture.calls.focusedLocally, ["retained", "retained"]);
+  fixture.setWindows([live]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  fixture.body.querySelector('[data-action="windowize-issue-preview"]').click();
+  assert.deepEqual(fixture.calls.windowized, ["live"]);
+});
+
 test("Issue #5401 identical entries retain rows and one changed key replaces only that row", async t => {
   const fixture = await makeFixture();
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));

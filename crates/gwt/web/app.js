@@ -4289,6 +4289,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestWorkAdvisory,
       });
 
+      const launchWizardOpenErrorModel = createUiStateStore(null);
+      launchWizardOpenErrorModel.subscribe(error => error, error => {
+        if (error) applyLaunchWizardOpenErrorEvent(error);
+      });
+
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
       const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
@@ -5599,7 +5604,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardOpenErrorEvent(event);
+            launchWizardOpenErrorModel.update(() => ({ title: event.title, message: event.message }));
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
