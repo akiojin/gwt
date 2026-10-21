@@ -94,3 +94,27 @@ test("interrupted window renders Interrupted, never done, and recovers without a
   await expect(chip).toHaveClass(/\brunning\b/);
   await expect(chip).not.toHaveClass(/\binterrupted\b/);
 });
+
+test("capacity-ended turn renders Waiting with its reason and recovers", async ({ page }, testInfo) => {
+  const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
+  const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+  await expect(tile).toBeVisible();
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "terminal_status", id: "agent-1", status: "waiting",
+      detail: "Provider API error (codex): Selected model is at capacity — the turn ended and the pane is waiting for input; it resumes when told to continue.",
+    } }));
+  });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Waiting");
+  await expect(agentWindow.locator(".status-chip")).toHaveClass(/\bwaiting\b/);
+  await expect(agentWindow.locator(".status-chip")).toHaveAttribute("title", /Selected model is at capacity/);
+  await expect(agentWindow).not.toHaveAttribute("data-agent-state", "done");
+  await tile.screenshot({ path: testInfo.outputPath("capacity-waiting.png") });
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "terminal_status", id: "agent-1", status: "running", detail: null,
+    } }));
+  });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Running");
+  await expect(agentWindow.locator(".status-chip")).not.toHaveAttribute("title", /Selected model is at capacity/);
+});
