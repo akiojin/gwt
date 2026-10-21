@@ -1401,6 +1401,9 @@ pub(super) fn run<E: CliEnv>(
                 out,
             )
         }
+        WorkspaceCommand::EventsReconcile { reference, dry_run } => {
+            super::work_event_reconcile::run(env.repo_path(), &reference, dry_run, out)
+        }
         WorkspaceCommand::ProjectionPrune { dry_run, ids } => {
             let scan_root = gwt_projects_dir();
             run_projection_prune_with_scan_root(

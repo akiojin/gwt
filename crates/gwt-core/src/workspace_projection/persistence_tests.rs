@@ -14204,6 +14204,7 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     audit.id = format!("superseded-{occupied_id}");
     audit.related_work_item_id = Some(predecessor_id);
     audit.execution_container = start.execution_container.clone();
+    audit.bind_successor_supersession_identity().unwrap();
     start.work_item_id = successor_id.clone();
     start.id = format!("owner-successor-{successor_id}");
     start.owner = Some("Issue #4074".to_string());

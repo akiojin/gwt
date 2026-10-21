@@ -213,16 +213,34 @@ fn prepare_ingested_work_events(
         .iter()
         .filter_map(|item| {
             item.events_compacted_through()
-                .map(|through| (item.id.clone(), through))
+                .map(|through| (item.id.clone(), (through, item)))
         })
         .collect::<HashMap<_, _>>();
     if !compacted_through.is_empty() {
+        let detachments = snapshot.detachments()?;
         incoming.retain(|(event, _)| {
             let already_folded = !is_close_kind(event)
                 && !seen_event_ids.contains(&event.id)
                 && compacted_through
                     .get(&event.work_item_id)
-                    .is_some_and(|through| event.updated_at <= *through);
+                    .is_some_and(|(through, item)| {
+                        // A compacted timestamp proves folded state, but cannot
+                        // prove a different host's audit was ever observed.
+                        // Admit missing host provenance once; represented or
+                        // explicitly detached containers still converge.
+                        let unseen_host = event.is_successor_supersession()
+                            && event.execution_container.as_ref().is_some_and(|container| {
+                                !item.execution_containers.iter().any(|known| {
+                                    known.worktree_path == container.worktree_path
+                                        && workspace_execution_container_same(known, container)
+                                }) && !detachments.get(&item.id).is_some_and(|removed| {
+                                    removed.iter().any(|known| {
+                                        workspace_execution_container_same(known, container)
+                                    })
+                                })
+                            });
+                        event.updated_at <= *through && !unseen_host
+                    });
             if already_folded {
                 report.skipped_duplicate += 1;
             }
@@ -248,7 +266,8 @@ fn prepare_ingested_work_events(
     let replayable = incoming
         .into_iter()
         .filter(|(event, _)| {
-            seen_event_ids.contains(&event.id)
+            event.is_successor_supersession()
+                || seen_event_ids.contains(&event.id)
                 || previous
                     .work_items
                     .iter()
@@ -837,7 +856,10 @@ fn fold_work_events(
             .find(|item| item.id == event.work_item_id)
             .and_then(terminal_close_time);
         if let Some(closed_at) = terminal_cutoff {
-            if event.updated_at <= closed_at {
+            // Structural lineage audits from another host may share a close
+            // instant or arrive later with an earlier timestamp. They cannot
+            // reopen Work and must retain both hosts' immutable provenance.
+            if event.updated_at <= closed_at && !event.is_successor_supersession() {
                 report.skipped_terminal += 1;
                 report.skipped_duplicate += duplicate_count;
                 continue;
@@ -1497,6 +1519,80 @@ mod tests {
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
     use std::sync::Arc;
+
+    #[test]
+    fn late_cross_host_supersession_retains_both_audits_without_reopening() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("works.json");
+        let now = Utc.timestamp_opt(20_000, 0).unwrap();
+        let work_id = crate::workspace_projection::successor_work_id("cross-host-parent");
+        let make = |host: &str, at| {
+            let mut event = WorkEvent::new(WorkEventKind::Discard, &work_id, at);
+            event.id = format!("superseded-{work_id}");
+            event.related_work_item_id = Some("cross-host-parent".to_string());
+            event.execution_container = Some(WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-5867".to_string()),
+                worktree_path: Some(PathBuf::from(host)),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            });
+            event.bind_successor_supersession_identity().unwrap();
+            event
+        };
+        let local = make(r"E:\gwt\work\issue-5867", now);
+        let incoming = make(
+            "/Users/example/gwt/work/issue-5867",
+            now - chrono::Duration::minutes(31),
+        );
+        ingest_work_events_content(&path, &serde_json::to_string(&local).unwrap()).unwrap();
+        let mut compacted = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        for index in 0..crate::workspace_projection::MAX_INLINE_WORK_EVENTS + 1 {
+            compacted.apply_event(WorkEvent::new(
+                WorkEventKind::Update,
+                &work_id,
+                now + chrono::Duration::seconds(index as i64 + 1),
+            ));
+        }
+        let latest = compacted.work_items[0].updated_at;
+        compacted.compact_inline_events();
+        save_workspace_work_items_projection_to_path(&path, &compacted).unwrap();
+        ingest_work_events_content(&path, &serde_json::to_string(&incoming).unwrap()).unwrap();
+        let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+        let item = &projection.work_items[0];
+        assert!(item
+            .execution_containers
+            .contains(local.execution_container.as_ref().unwrap()));
+        assert!(item
+            .execution_containers
+            .contains(incoming.execution_container.as_ref().unwrap()));
+        assert!(item.is_terminal());
+        assert_eq!(
+            item.updated_at, latest,
+            "late arrival must not roll the current state back"
+        );
+        let before = std::fs::read(&path).unwrap();
+        ingest_work_events_content(&path, &serde_json::to_string(&incoming).unwrap()).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert!(
+            after == before,
+            "the newly imported host must not be reapplied after compaction"
+        );
+        let mut stale = WorkEvent::new(WorkEventKind::Update, &work_id, incoming.updated_at);
+        stale.status_category = Some(WorkspaceStatusCategory::Active);
+        let report =
+            ingest_work_events_content(&path, &serde_json::to_string(&stale).unwrap()).unwrap();
+        assert_eq!(
+            report.skipped_terminal + report.skipped_duplicate,
+            1,
+            "ordinary terminal cutoffs stay enforced"
+        );
+        assert!(load_workspace_work_items_from_path(&path)
+            .unwrap()
+            .unwrap()
+            .work_items[0]
+            .is_terminal());
+    }
 
     /// AC-3: benchmark an isolated copy, never resolve or mutate the live HOME.
     #[test]

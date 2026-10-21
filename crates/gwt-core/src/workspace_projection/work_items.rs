@@ -214,19 +214,46 @@ impl DuplicateWorkEventProvenance {
 
 impl WorkEvent {
     /// An authenticated repair may retire an invalid deterministic successor
-    /// without reopening it. Its reserved, idempotent event identity separates
+    /// without reopening it. Its reserved, content-bound event identity separates
     /// this structural lineage audit from ordinary machine-local closes.
     pub fn is_successor_supersession(&self) -> bool {
         self.kind == WorkEventKind::Discard
             && self.owner.is_none()
             && self.status_category.is_none()
-            && self.id == format!("superseded-{}", self.work_item_id)
+            && (self.id == format!("superseded-{}", self.work_item_id)
+                || self
+                    .successor_supersession_content_id()
+                    .is_ok_and(|id| self.id == id))
             && self.agent_session_id.is_none()
             && self.execution_container.is_some()
             && self
                 .related_work_item_id
                 .as_deref()
                 .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
+    }
+
+    /// Bind the shard identity to the whole payload. Two hosts may retire the
+    /// same invalid successor at different instants and from different paths;
+    /// those are distinct immutable events, while exact retries are idempotent.
+    /// Legacy identities remain readable and can be copied by reconciliation.
+    pub fn bind_successor_supersession_identity(&mut self) -> crate::error::Result<()> {
+        if !self.is_successor_supersession() {
+            return Err(crate::error::GwtError::Other(
+                "content identity requires a valid successor supersession event".to_string(),
+            ));
+        }
+        self.id = self.successor_supersession_content_id()?;
+        Ok(())
+    }
+
+    fn successor_supersession_content_id(&self) -> crate::error::Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut payload = self.clone();
+        payload.id = format!("superseded-{}", self.work_item_id);
+        let bytes = serde_json::to_vec(&payload).map_err(|error| {
+            crate::error::GwtError::Other(format!("successor supersession identity: {error}"))
+        })?;
+        Ok(format!("{}-{:x}", payload.id, Sha256::digest(bytes)))
     }
 
     pub fn is_successor_lineage_anchor(&self) -> bool {
