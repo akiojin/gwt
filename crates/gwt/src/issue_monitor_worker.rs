@@ -4646,6 +4646,33 @@ mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
 
+        // Immediate admission and full scans use the durable planner, not the
+        // synchronous claim API below. Both must reject before any effect.
+        let mut durable = monitor.clone();
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
+            0,
+            "an unsupported provider must produce no durable claim effect"
+        );
+        assert!(durable.pending_effects().is_empty());
+        assert!(durable.take_pending_launch_requests().is_empty());
+        assert_eq!(durable.active_count(), 0);
+        let blocked = durable.inbox_item(42).expect("excluded durable candidate");
+        assert_eq!(blocked.state, MonitorInboxState::NotReady);
+        let reason = blocked.exclusion_reason.as_deref().expect("gate reason");
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:20Z", 1, |_| false),
+            1,
+            "a corrected profile is re-evaluated on the next scan"
+        );
+
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
             "host:1",
@@ -4708,6 +4735,17 @@ mod tests {
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
+
+        assert_eq!(
+            monitor.clone().prepare_claim_effects_with_probe(
+                "host:1",
+                "2026-07-02T00:00:10Z",
+                1,
+                |_| false,
+            ),
+            1,
+            "a supported provider still prepares a durable claim"
+        );
 
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,

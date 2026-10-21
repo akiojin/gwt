@@ -16894,6 +16894,12 @@ impl IssueMonitorState {
                 }
                 _ => {}
             }
+            // Match synchronous admission before creating a durable claim:
+            // an unattended-incompatible profile must leave no effect or slot.
+            if let Some(record) = self.permission_readiness_block_for_launch(issue_number, now) {
+                self.record_permission_readiness_block(issue, &record);
+                continue;
+            }
             let kind = issue_monitor_linked_issue_kind(&issue);
             let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
             let proposal_id = uuid::Uuid::new_v4();
