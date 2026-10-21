@@ -157,7 +157,7 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], projection = null, kind = "issue" } = {}) {
+async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue" } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
@@ -187,7 +187,14 @@ async function makeFixture({ workspaceWindows = [], projection = null, kind = "i
     createKnowledgeMarkdownBody: () => document.createElement("div"),
     windowMap: new Map([[issueWindow.id, body]]),
     workspaceWindowById: (id) => windows.find((entry) => entry.id === id) || null,
-    getWorkspaceWindows: () => windows,
+    getWorkspaceWindows: () => [...windows, ...otherProjectWindows],
+    windowCatalogModel: {
+      read: () => ({ catalog: { appState: { tabs: [
+        { id: "project-1", workspace: { windows } },
+        { id: "project-2", workspace: { windows: otherProjectWindows } },
+      ] } } }),
+      subscribe: () => () => {},
+    },
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset: () => kind,
     focusWindowLocally: (id) => calls.focusedLocally.push(id),
@@ -531,6 +538,63 @@ test("issueCanvasAgentWindowsForIssue links canvas agent windows back to their I
     ["agent-3"],
     "a remembered id only counts while that window is on the canvas",
   );
+});
+
+test("Issue #4804 recognizes a linked canvas window before its Work projection arrives", async () => {
+  const { issueCanvasAgentWindowsForIssue } = await importSurfaceModule();
+  const canvas = agentWindow("agent-1", 3671, {
+    linked_issue_number: 3671, placement: { kind: "canvas" },
+  });
+  assert.deepEqual(
+    issueCanvasAgentWindowsForIssue([canvas], null, new Set(), 3671).map(window => window.id),
+    [canvas.id],
+  );
+});
+
+test("Issue #4804 focuses its existing window across repeated actions and permits windowizing after close", async t => {
+  const inline = agentWindow("inline", 3671, { linked_issue_number: 3671 });
+  const canvas = agentWindow("canvas", 3671, {
+    linked_issue_number: 3671, placement: { kind: "canvas" },
+  });
+  const fixture = await makeFixture({
+    workspaceWindows: [inline, canvas],
+    otherProjectWindows: [{ ...canvas, id: "foreign-canvas" }],
+  });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671, { monitor_state: "launched" })], 3671);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", 3671);
+  fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+
+  assert.ok(!fixture.body.querySelector('[data-action="windowize-issue-preview"]'),
+    "Kanban and the output preview offer focus while this project already has a window");
+  assert.match(fixture.body.querySelector(".issue-preview-empty").textContent, /Shown in Agents/);
+  const focus = fixture.body.querySelector('[data-action="focus-canvas-window"]');
+  focus.click();
+  focus.click();
+  assert.deepEqual(fixture.calls.focusedRemotely, [canvas.id, canvas.id]);
+  assert.deepEqual(fixture.calls.windowized, []);
+
+  fixture.body.querySelector('[data-issue-view="split"]').click();
+  const split = fixture.body.querySelector('.issue-split-pair[data-issue-number="3671"]');
+  assert.equal(split.dataset.windowId, canvas.id);
+  assert.ok(!split.querySelector('[data-action="windowize-issue-preview"]'));
+  assert.ok(split.querySelector('[data-action="focus-canvas-window"]'));
+  fixture.body.querySelector('[data-issue-view="list"]').click();
+
+  fixture.setWindows([inline]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  const windowize = fixture.body.querySelector('[data-action="windowize-issue-preview"]');
+  assert.ok(windowize, "closing this project's window restores Windowize despite the foreign Issue number match");
+  windowize.click();
+  windowize.click();
+  assert.deepEqual(fixture.calls.windowized, [inline.id, inline.id],
+    "consecutive requests address the same pane; backend undock is idempotent");
+
+  fixture.setWindows([{ ...inline, placement: { kind: "canvas" } }]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  assert.ok(!fixture.body.querySelector('[data-action="windowize-issue-preview"]'));
+  assert.ok(!fixture.body.querySelector('.issue-card-output[data-window-id="foreign-canvas"]'),
+    "another project does not appear in this Issue's output");
 });
 
 // AC-5 / T-006: the rendered row honours the model's limits in every state.

@@ -783,9 +783,11 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function agentKanbanBodyRenderKey(boardWindow) {
         const parts = [];
+        const windows = activeWorkspace().windows || [];
+        const linkedIssues = new Set();
         appendRenderKeyPart(parts, "board_id");
         appendRenderKeyPart(parts, boardWindow?.id || "");
-        for (const windowData of activeWorkspace().windows || []) {
+        for (const windowData of windows) {
           if (!isAgentKanbanPlacement(windowData)) {
             continue;
           }
@@ -797,6 +799,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, windowData.id || "");
           appendRenderKeyPart(parts, "preset");
           appendRenderKeyPart(parts, windowData.preset || "");
+          appendRenderKeyPart(parts, "linked_issue");
+          appendRenderKeyPart(parts, windowData.linked_issue_number ?? "");
+          const issueNumber = Number(windowData.linked_issue_number);
+          if (Number.isInteger(issueNumber) && issueNumber > 0) linkedIssues.add(issueNumber);
           appendRenderKeyPart(parts, "title");
           appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "role");
@@ -804,6 +810,14 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
           appendWindowPlacementRenderKey(parts, windowData);
+        }
+        for (const windowData of windows) {
+          const issueNumber = Number(windowData.linked_issue_number);
+          if (!isAgentWindowPreset(windowData.preset) || isOffCanvasPlacement(windowData)
+              || !linkedIssues.has(issueNumber)) continue;
+          appendRenderKeyPart(parts, "existing_issue_window");
+          appendRenderKeyPart(parts, windowData.id || "");
+          appendRenderKeyPart(parts, issueNumber);
         }
         return parts.join("");
       }
