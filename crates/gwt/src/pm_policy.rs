@@ -207,6 +207,18 @@ pub struct CapacityObservation {
     pub claim_blocks: Option<Vec<ClaimBlockObservation>>,
     pub declared_waits: Option<Vec<DeclaredWaitObservation>>,
     pub retry_deadlines: Option<Vec<RetryDeadlineObservation>>,
+    pub wip_limits: Vec<WipLimitObservation>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// A saved-policy comparison, never a canonical WIP or admission verdict.
+#[derive(Debug, Serialize)]
+pub struct WipLimitObservation {
+    pub id: String,
+    pub version: u64,
+    pub wip_limit: Option<u32>,
+    pub observed_issue_count: Option<usize>,
+    pub assessment: &'static str,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -445,6 +457,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
 }
 
 fn observe_capacity(
+    state: &PmPlanningState,
     monitor: Option<&IssueMonitorAgentStatus>,
     monitor_missing_inputs: &[&'static str],
 ) -> CapacityObservation {
@@ -473,7 +486,7 @@ fn observe_capacity(
             .into_iter()
             .collect::<Vec<_>>()
     });
-    let observed_work_issues = [
+    let observed_work_issues: Vec<_> = [
         &implementation_launches,
         &review_issues,
         &pending_claim_issues,
@@ -486,6 +499,55 @@ fn observe_capacity(
     .collect::<BTreeSet<_>>()
     .into_iter()
     .collect();
+    let scan_valid = monitor
+        .and_then(|status| status.last_scan_at.as_deref())
+        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
+    let wip_limits = state
+        .policies
+        .iter()
+        .map(|policy| {
+            let mut missing_inputs = vec!["verification_observation", "end_to_end_wip"];
+            missing_inputs.extend_from_slice(monitor_missing_inputs);
+            if !scan_valid && !missing_inputs.contains(&"monitor_scan_time") {
+                missing_inputs.push("monitor_scan_time");
+            }
+            let valid_id = !policy.id.trim().is_empty();
+            if !valid_id {
+                missing_inputs.push("policy_id");
+            }
+            let unique_id = state
+                .policies
+                .iter()
+                .filter(|other| other.id == policy.id)
+                .count()
+                == 1;
+            if !unique_id {
+                missing_inputs.push("unique_policy_id");
+            }
+            if policy.wip_limit.is_none() {
+                missing_inputs.push("wip_limit");
+            }
+            let observed_exceeded = valid_id
+                && unique_id
+                && scan_valid
+                && monitor_missing_inputs.is_empty()
+                && policy
+                    .wip_limit
+                    .is_some_and(|limit| observed_work_issues.len() > limit as usize);
+            WipLimitObservation {
+                id: policy.id.clone(),
+                version: policy.version,
+                wip_limit: policy.wip_limit,
+                observed_issue_count: monitor.map(|_| observed_work_issues.len()),
+                assessment: if observed_exceeded {
+                    "observed_exceeded"
+                } else {
+                    "unknown"
+                },
+                missing_inputs,
+            }
+        })
+        .collect();
     let occupied_slot_count = monitor.and_then(|status| status.occupied_slot_count);
     let mut missing_inputs = monitor_missing_inputs.to_vec();
     missing_inputs.extend(["verification_observation", "end_to_end_wip"]);
@@ -507,6 +569,7 @@ fn observe_capacity(
         claim_blocks: monitor.map(observe_claim_blocks),
         declared_waits: monitor.map(observe_declared_waits),
         retry_deadlines: monitor.map(observe_retry_deadlines),
+        wip_limits,
         missing_inputs,
     }
 }
@@ -812,7 +875,7 @@ pub fn assess_planning(
         .collect();
     PlanningAssessment {
         planning_revision: state.revision,
-        capacity: observe_capacity(monitor, &missing_inputs),
+        capacity: observe_capacity(state, monitor, &missing_inputs),
         monitor: MonitorEvidence {
             source: monitor.map(|status| status.source),
             last_scan_at: monitor.and_then(|status| status.last_scan_at.clone()),
@@ -1268,6 +1331,7 @@ mod tests {
                 "claim_blocks":[],
                 "declared_waits":[],
                 "retry_deadlines":[],
+                "wip_limits":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1318,6 +1382,113 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("monitor_scan_time")));
+    }
+
+    #[test]
+    fn wip_limits_compare_observed_owners_without_certifying_full_wip() {
+        let mut state = fixture();
+        state.policies = serde_json::from_value(json!([
+            {"id":"small","version":3,"wip_limit":1},
+            {"id":"equal","wip_limit":2}, {"id":"large","wip_limit":3},
+            {"id":"unset"}, {"id":"zero","wip_limit":0},
+            {"id":" ","wip_limit":0},
+            {"id":"dup","version":1,"wip_limit":0},
+            {"id":"dup","version":2,"wip_limit":0}
+        ]))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.active_launches = vec![8, 2, 8];
+        monitor.queue = vec![9];
+        monitor.occupied_slot_count = Some(17);
+        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.inbox_coverage = Some(serde_json::from_value(json!({
+            "github_target_count":0,"inbox_row_count":0,"missing_issue_numbers":[],"source":"live"
+        })).unwrap());
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let evaluate = |monitor: Option<&IssueMonitorAgentStatus>| {
+            serde_json::to_value(assess_planning(&state, monitor)).unwrap()
+        };
+        let report = evaluate(Some(&monitor));
+        let rows = report["capacity"]["wip_limits"].as_array().unwrap();
+        assert_eq!(
+            rows[0],
+            json!({"id":"small","version":3,"wip_limit":1,
+            "observed_issue_count":2,"assessment":"observed_exceeded",
+            "missing_inputs":["verification_observation","end_to_end_wip"]})
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["assessment"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "observed_exceeded",
+                "unknown",
+                "unknown",
+                "unknown",
+                "observed_exceeded",
+                "unknown",
+                "unknown",
+                "unknown"
+            ]
+        );
+        for (index, diagnostic) in [
+            (3, "wip_limit"),
+            (5, "policy_id"),
+            (6, "unique_policy_id"),
+            (7, "unique_policy_id"),
+        ] {
+            assert!(rows[index]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(diagnostic)));
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        let absent = evaluate(None);
+        assert_eq!(
+            absent["capacity"]["wip_limits"].as_array().unwrap().len(),
+            8
+        );
+        assert_eq!(
+            absent["capacity"]["wip_limits"][0]["observed_issue_count"],
+            Value::Null
+        );
+        assert_eq!(absent["capacity"]["wip_limits"][0]["assessment"], "unknown");
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = evaluate(Some(&monitor));
+        assert_eq!(
+            degraded["capacity"]["wip_limits"][0]["assessment"],
+            "unknown"
+        );
+        assert!(degraded["capacity"]["wip_limits"][0]["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("complete_monitor_coverage")));
+        monitor.source = IssueMonitorStatusSource::Daemon;
+        monitor.active_launches_incomplete = true;
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["wip_limits"][0]["assessment"],
+            "unknown"
+        );
+        monitor.active_launches_incomplete = false;
+        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+            monitor.last_scan_at = scan;
+            let untimed = evaluate(Some(&monitor));
+            assert_eq!(
+                untimed["capacity"]["wip_limits"][0]["assessment"],
+                "unknown"
+            );
+            assert!(untimed["capacity"]["wip_limits"][0]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("monitor_scan_time")));
+        }
+        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.active_launches.clear();
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["wip_limits"][4]["assessment"],
+            "unknown"
+        );
     }
 
     #[test]
