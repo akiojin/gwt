@@ -11,6 +11,131 @@
 
 use serde::Deserialize;
 
+/// Check CI immediately before the ordinary verdict producer publishes. This
+/// does not judge the verdict or change Monitor state: unavailable evidence is
+/// a temporary wait, while a completed CI failure remains a real failure.
+pub(crate) fn review_submission_ci_ready(
+    repo_path: &std::path::Path,
+    repository: &str,
+    pr_number: u64,
+    reviewed_sha: &str,
+) -> Result<(), String> {
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = gwt_core::operation_deadline::current().map_or(limit, |outer| outer.min(limit));
+    let read = |args: &[&str]| -> Result<serde_json::Value, String> {
+        let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Gh,
+            "gh",
+            args,
+            gwt_core::process_console::SpawnOptions::new("review verdict CI readiness")
+                .current_dir(repo_path)
+                .forward_output(false),
+            deadline,
+        )
+        .map_err(|error| error.to_string())?;
+        if !output.success() {
+            return Err(format!("CI readback unavailable: {}", output.stderr.trim()));
+        }
+        serde_json::from_str(&output.stdout)
+            .map_err(|error| format!("CI readback invalid: {error}"))
+    };
+    // Pin both reads to the canonical repository, independently of gh's
+    // ambient repository/host settings. Identity and rollup share one snapshot.
+    let snapshot = read(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--repo",
+        &format!("github.com/{repository}"),
+        "--json",
+        "number,state,headRefOid,baseRefName,statusCheckRollup",
+    ])?;
+    if snapshot["number"].as_u64() != Some(pr_number)
+        || snapshot["headRefOid"].as_str().is_none_or(str::is_empty)
+        || !matches!(
+            snapshot["state"].as_str(),
+            Some("OPEN" | "MERGED" | "CLOSED")
+        )
+    {
+        return Err("reviewed PR identity is unavailable".into());
+    }
+    if snapshot["headRefOid"].as_str() != Some(reviewed_sha)
+        || snapshot["state"].as_str() == Some("CLOSED")
+    {
+        // Let the original SHA-bound verdict reach the existing daemon gate.
+        // With no verdict that gate cannot route head drift/closure to recovery.
+        // This never authorizes the new head or rewrites the original verdict.
+        return Ok(());
+    }
+    let base = snapshot["baseRefName"]
+        .as_str()
+        .filter(|base| !base.is_empty())
+        .ok_or("PR base branch is unavailable")?;
+    let encoded_base: String = base
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    let protection = read(&[
+        "api",
+        &format!("repos/{repository}/branches/{encoded_base}/protection"),
+        "--hostname",
+        "github.com",
+    ])?;
+    let gwt_git::branch_protection::BranchProtectionStatus::Verified { required_checks } =
+        gwt_git::branch_protection::parse_branch_protection(&protection.to_string())
+    else {
+        return Err("required CI policy is unavailable".into());
+    };
+    let rollup = snapshot["statusCheckRollup"]
+        .as_array()
+        .ok_or("required CI evidence is unavailable")?;
+    for required in required_checks {
+        let mut checks = rollup
+            .iter()
+            .filter(|check| {
+                check["name"].as_str().or_else(|| check["context"].as_str()) == Some(&required)
+            })
+            .peekable();
+        if checks.peek().is_none() {
+            return Err(format!("required CI {required} has not reported"));
+        }
+        // Same-name CheckRuns and legacy StatusContexts can both be required.
+        for check in checks {
+            let terminal = if let Some(state) = check["state"].as_str() {
+                matches!(state, "SUCCESS" | "FAILURE" | "ERROR")
+            } else {
+                check["status"].as_str() == Some("COMPLETED")
+                    && matches!(
+                        check["conclusion"].as_str(),
+                        Some(
+                            "SUCCESS"
+                                | "NEUTRAL"
+                                | "SKIPPED"
+                                | "FAILURE"
+                                | "ERROR"
+                                | "TIMED_OUT"
+                                | "CANCELLED"
+                                | "ACTION_REQUIRED"
+                                | "STARTUP_FAILURE"
+                                | "STALE"
+                        )
+                    )
+            };
+            if !terminal {
+                return Err(format!("required CI {required} is pending or unknown"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Stable schema identifier the independent review agent MUST emit. A verdict
 /// carrying any other `schema` value is rejected.
 pub const REVIEW_VERDICT_SCHEMA: &str = "gwt-autonomous-review/v1";

@@ -993,13 +993,32 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         &dispatch.diff,
     );
     format!(
-        "{base}\n\nAfter producing the verdict JSON, report it to the Issue Monitor \
+        "{base}\n\nReview completion order for PR #{pr}: inspect the diff now, but before \
+         finalizing or publishing a verdict, wait for all required CI checks to finish \
+         using `gh pr checks {pr} --required --watch`. Pending, missing, or unreadable \
+         CI evidence is a wait, never by itself a FAIL verdict. A completed CI failure \
+         is evidence to evaluate; do not ignore it or turn it into PASS. Keep this \
+         review pane active while waiting. After the wait, re-read PR #{pr}'s head SHA \
+         and CI evidence, and re-evaluate every \
+         acceptance criterion against the completed evidence. A merged PR with the \
+         same head still needs its acceptance review. If the head changed or the PR \
+         closed without merging, do not wait for the old head to return: report your \
+         verdict for the originally reviewed SHA {sha} so the daemon's existing \
+         head/closure gate can route recovery. Never review or approve the new head \
+         under the old SHA.\n\n\
+         After producing the refreshed verdict JSON, report it to the Issue Monitor \
          daemon by running the gwtd JSON operation `issue.monitor.review_verdict` \
          with params {{\"issue_number\": {issue}, \"reviewed_sha\": \"{sha}\", \
          \"verdict_raw\": <the verdict JSON as a string>}}. The daemon re-judges the \
          verdict against the launch-time criteria; a verdict for any other SHA is \
-         rejected.",
+         rejected. If the operation returns status `deferred`, no verdict was published: \
+         keep this same pane active, wait for the stated condition, re-read head/CI, \
+         re-evaluate the criteria, and retry with a refreshed verdict. Do not end the \
+         review or escalate merely because CI is still pending. Status `obsolete` \
+         means the review binding was superseded: stop this old review without \
+         retrying or changing the current review.",
         issue = dispatch.issue_number,
+        pr = dispatch.pr_number,
         sha = dispatch.reviewed_sha,
     )
 }
@@ -7862,6 +7881,19 @@ mod review_dispatch_tests {
             "instructs verdict report-back via the gwtd op"
         );
         assert!(prompt.contains("42"), "names the issue");
+        assert!(prompt.contains("PR #99"), "names the reviewed PR");
+        assert!(
+            prompt.contains("--required --watch"),
+            "waits for required CI"
+        );
+        assert!(
+            prompt.contains("deferred"),
+            "handles nonterminal publication"
+        );
+        assert!(
+            prompt.contains("re-evaluate"),
+            "refreshes the verdict after CI"
+        );
     }
 }
 
