@@ -819,7 +819,12 @@ body cannot hold `plan` / `tasks` sections.
   Your ordering decision takes precedence over a GUI reorder: the GUI
   is an observation and emergency surface, and the user's ordering
   intent reaches you through conversation. Re-read status before every
-  write so you never clobber an order you have not seen.
+  write and pass its full saved `priority_order` as `expected_priority_order`.
+  Never reconstruct that array from the active snapshot or queue. The
+  comparison and write share the prefs lock; on conflict, re-read status and reconsider
+  the order instead of blindly retrying. Read back status after a successful write.
+  Omitting the guard retains legacy behavior; value equality does not detect ABA
+  history or guard other configuration changes.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
@@ -4170,6 +4175,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`expected_priority_order`",
+            "full saved `priority_order`",
+            "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",

@@ -239,13 +239,28 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::MonitorPriorityMove {
             project_root,
+            expected_priority_order,
             number,
             position,
-        } => run_monitor_priority_move(env, project_root.as_deref(), number, position, out)?,
+        } => run_monitor_priority_move(
+            env,
+            project_root.as_deref(),
+            expected_priority_order.as_deref(),
+            number,
+            position,
+            out,
+        )?,
         IssueCommand::MonitorPrioritySet {
             project_root,
+            expected_priority_order,
             issue_numbers,
-        } => run_monitor_priority_set(env, project_root.as_deref(), &issue_numbers, out)?,
+        } => run_monitor_priority_set(
+            env,
+            project_root.as_deref(),
+            expected_priority_order.as_deref(),
+            &issue_numbers,
+            out,
+        )?,
         IssueCommand::MonitorQueueList {
             project_root,
             terminal,
@@ -825,6 +840,7 @@ fn run_monitor_status<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    output["priority_order"] = serde_json::json!(prefs.priority_order);
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
     // Keep released, unsettled launches observable without reading every queued
     // owner's ledger or changing Monitor/ECR state during a status read.
@@ -1387,9 +1403,21 @@ fn run_monitor_question_answer<E: CliEnv>(
     Ok(0)
 }
 
+/// Compare under the prefs writer lock, before changing either stored order.
+fn check_expected_priority_order(current: &[u64], expected: Option<&[u64]>) -> io::Result<()> {
+    if expected.is_some_and(|expected| expected != current) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "priority_order changed since observation; re-read issue.monitor.status and reconsider the full order before retrying",
+        ));
+    }
+    Ok(())
+}
+
 fn run_monitor_priority_move<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_priority_order: Option<&[u64]>,
     number: u64,
     position: IssueMonitorPriorityPosition,
     out: &mut String,
@@ -1397,6 +1425,7 @@ fn run_monitor_priority_move<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
         prefs.priority_order.retain(|existing| *existing != number);
         let index = match position {
             IssueMonitorPriorityPosition::Head => 0,
@@ -1481,12 +1510,14 @@ fn monitor_priority_reply(
 fn run_monitor_priority_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_priority_order: Option<&[u64]>,
     issue_numbers: &[u64],
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
         prefs.priority_order = issue_numbers.to_vec();
         reorder_local_terminal_queue_by_priority(prefs);
         Ok(())
@@ -11134,7 +11165,7 @@ mod tests {
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 enabled: true,
                 max_active_agents: 3,
-                priority_order: vec![2, 1],
+                priority_order: vec![2, 1, 777, 2],
                 launching_issues: vec![crate::IssueMonitorLaunchingIssue {
                     issue_number: 9,
                     claimed_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -11188,6 +11219,11 @@ mod tests {
         );
         let mut status =
             serde_json::from_str::<serde_json::Value>(out.trim()).expect("status json");
+        assert_eq!(
+            status.as_object_mut().unwrap().remove("priority_order"),
+            Some(serde_json::json!([2, 1, 777, 2])),
+            "the CAS token must include the full saved order, not just the queue"
+        );
         // Issue #3928 AC-4: the GitHub budget block is read from the live
         // ledger at call time and has its own test; the queue projection is
         // compared without it. Issue #4087 AC-1: the same goes for the Issue
@@ -11921,6 +11957,7 @@ mod tests {
         for (command, expected) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
                 },
@@ -11928,6 +11965,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
                     position: crate::cli::IssueMonitorPriorityPosition::Head,
@@ -12005,6 +12043,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![3, 1],
             },
@@ -12017,6 +12056,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 4,
                 position: crate::cli::IssueMonitorPriorityPosition::Index(1),
@@ -12051,6 +12091,7 @@ mod tests {
         for (command, expected_head) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![3, 1],
                 },
@@ -12058,6 +12099,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
                     position: crate::cli::IssueMonitorPriorityPosition::Head,
@@ -12099,6 +12141,96 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_priority_compare_and_set_preserves_unseen_updates() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                priority_order: vec![1, 2, 3],
+                ..Default::default()
+            },
+        );
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-08-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let super::super::CliCommand::Issue(command) =
+                super::super::json_envelope::parse_operation(operation, &params).unwrap()
+            else {
+                panic!("expected Issue command")
+            };
+            let mut out = String::new();
+            run(&mut env, command, &mut out).map(|_| out)
+        };
+        let before = std::fs::read(&path).unwrap();
+        for (operation, params) in [
+            (
+                "issue.monitor.priority.set",
+                serde_json::json!({"issue_numbers":[3, 1], "expected_priority_order":[1, 2]}),
+            ),
+            (
+                "issue.monitor.priority.move",
+                serde_json::json!({"number":3, "expected_priority_order":[3, 2, 1]}),
+            ),
+            (
+                "issue.monitor.priority.set",
+                serde_json::json!({"issue_numbers":[3], "expected_priority_order":[]}),
+            ),
+        ] {
+            let error = invoke(operation, params)
+                .expect_err("stale order must be refused")
+                .to_string();
+            assert!(error.contains("priority_order changed"), "{error}");
+            assert!(error.contains("issue.monitor.status"), "{error}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "prefs and terminal queue must remain unchanged"
+            );
+        }
+        let changed = invoke(
+            "issue.monitor.priority.set",
+            serde_json::json!({"issue_numbers":[3, 2, 1], "expected_priority_order":[1, 2, 3]}),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&changed).unwrap()["priority_order"],
+            serde_json::json!([3, 2, 1])
+        );
+        invoke(
+            "issue.monitor.priority.move",
+            serde_json::json!({"number":2, "expected_priority_order":[3, 2, 1]}),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .priority_order,
+            vec![2, 3, 1]
+        );
+        invoke(
+            "issue.monitor.priority.set",
+            serde_json::json!({"issue_numbers":[]}),
+        )
+        .unwrap();
+        invoke(
+            "issue.monitor.priority.set",
+            serde_json::json!({"issue_numbers":[7], "expected_priority_order":[]}),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .priority_order,
+            vec![7]
+        );
+    }
+
+    #[test]
     fn issue_monitor_priority_operations_roundtrip_and_reject_out_of_range() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -12120,6 +12252,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 1,
                     position: crate::cli::IssueMonitorPriorityPosition::Index(2),
@@ -12138,6 +12271,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![1, 2, 3],
             },
@@ -12150,6 +12284,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
                     position: crate::cli::IssueMonitorPriorityPosition::Head,
@@ -12171,6 +12306,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
                 },
@@ -12191,6 +12327,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
                     position: crate::cli::IssueMonitorPriorityPosition::Index(1),
@@ -12212,6 +12349,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 13,
                 position: crate::cli::IssueMonitorPriorityPosition::Index(4),
@@ -12226,6 +12364,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    expected_priority_order: None,
                     project_root: Some(repo),
                     issue_numbers: Vec::new(),
                 },
@@ -12243,6 +12382,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                expected_priority_order: None,
                 project_root: Some(tmp.path().join("missing-project")),
                 issue_numbers: vec![99],
             },
