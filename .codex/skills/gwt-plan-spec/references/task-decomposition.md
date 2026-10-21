@@ -50,9 +50,9 @@ Test tasks reference the acceptance scenario they verify.
 
 ### Surface-aware test selection
 
-Test tasks should match the test execution system that `gwt-verify` will
-pick at Phase 3 of `gwt-build-spec` for the surface being changed. See
-`gwt-verify`'s `references/test-matrix.md` for the canonical mapping.
+Plan test tasks from the project's verification instructions and the changed
+surface. The implementation agent selects and runs the exact verification
+matrix through `gwt-verify`; planning does not require loading that skill.
 Practical guidance:
 
 - Rust crate change → Rust test task (`#[cfg(test)] mod tests` or

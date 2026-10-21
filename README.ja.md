@@ -1389,6 +1389,11 @@ hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが�
 読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は
 自動移行せず、次回の PM セッション起動時から分離されたディレクトリを使います。
 
+PM には coordination、agent 観測、検索、要望受付、計画の skill と、それらが使う
+検索・登録 helper を配布します。実装・検証・PR ワークフローの skill は実装 agent が
+使用します。managed asset の再生成時に、PM runtime に残った実装用 skill と
+`gwt-*` command alias を除去します。実装 agent の skill 一式は従来どおりです。
+
 project 固有の規約を明示的に渡すには、
 `~/.gwt/projects/<project-hash>/project-state/pm.json` の他のフィールドを保持したまま、
 `settings.project_policy_files` を設定してください。

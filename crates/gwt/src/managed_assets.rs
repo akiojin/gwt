@@ -13,11 +13,10 @@ use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME}
 use gwt_agent::AgentId;
 use gwt_skills::pm_guidance::{generate_pm_guidance_for_claude, generate_pm_guidance_for_codex};
 use gwt_skills::{
-    distribute_to_worktree_for_targets_with_policy, generate_codex_hooks_for_mode,
-    generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
-    generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
-    generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
-    CodexHookDiscoveryMode, ManagedAssetTarget,
+    generate_codex_hooks_for_mode, generate_coordination_guidance_for_claude,
+    generate_coordination_guidance_for_codex, generate_hermes_hooks, generate_openclaw_hooks,
+    generate_opencode_hooks, generate_settings_local, update_git_exclude,
+    update_git_exclude_for_targets, CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
 /// Which `.codex/hooks.json` copies a non-launch (re-)materialization owns.
@@ -942,7 +941,7 @@ fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
 }
 
 fn pm_managed_asset_targets(worktree: &Path) -> io::Result<Vec<PathBuf>> {
-    let plan = gwt_skills::distribute::plan_distribution_to_worktree_for_targets(
+    let plan = managed_asset_distribution_plan(
         worktree,
         &ManagedAssetTarget::ALL,
         gwt_skills::TrackedAssetWritePolicy::PreserveTracked,
@@ -1647,6 +1646,23 @@ fn worktree_is_ephemeral(worktree: &Path) -> bool {
     crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
+/// Share the same role selection between the writer and rollback snapshot.
+fn managed_asset_distribution_plan(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: gwt_skills::TrackedAssetWritePolicy,
+) -> io::Result<gwt_skills::distribute::DistributePlan> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree)
+        || crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some()
+    {
+        gwt_skills::distribute::plan_pm_distribution_to_worktree_for_targets(
+            worktree, targets, policy,
+        )
+    } else {
+        gwt_skills::distribute::plan_distribution_to_worktree_for_targets(worktree, targets, policy)
+    }
+}
+
 /// Materialize managed assets, returning the fallback binary the regenerated
 /// hook commands were pinned to (`None` when no hook config was generated).
 fn materialize_managed_gwt_assets_for_targets(
@@ -1688,9 +1704,11 @@ fn materialize_managed_gwt_assets_for_targets(
     } else {
         gwt_skills::TrackedAssetWritePolicy::PreserveTracked
     };
-    distribute_to_worktree_for_targets_with_policy(worktree, targets, policy).map_err(|error| {
-        io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
-    })?;
+    managed_asset_distribution_plan(worktree, targets, policy)
+        .and_then(|plan| plan.apply())
+        .map_err(|error| {
+            io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
+        })?;
     if targets.is_empty() {
         return Ok(None);
     }
@@ -2177,7 +2195,15 @@ mod tests {
             r#"{"settings":{"project_policy_files":["policy-dir"]}}"#,
         )
         .unwrap();
+        let stale_skill = runtime.join(".claude/skills/gwt-execute/legacy.txt");
+        std::fs::create_dir_all(stale_skill.parent().unwrap()).unwrap();
+        std::fs::write(&stale_skill, "previous implementation skill").unwrap();
         assert!(super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).is_err());
+        assert_eq!(
+            std::fs::read_to_string(stale_skill).unwrap(),
+            "previous implementation skill",
+            "failed refresh restores the entire pruned implementation subtree"
+        );
         assert_eq!(
             std::fs::read(&skill).unwrap(),
             before,

@@ -1509,6 +1509,12 @@ not loaded as PM configuration. Implementation agents keep their normal
 project configuration. Existing PM conversations are not migrated automatically;
 the isolated directory is used on the next PM session launch.
 
+The PM receives skills for coordination, agent observation, search, request
+intake, and planning, plus their search and registration helpers. Implementation,
+verification, and PR workflow skills remain with implementation agents. Managed
+asset refresh removes old implementation skills and their `gwt-*` command aliases
+from the PM runtime; implementation agents keep the full skill set.
+
 To explicitly supply project policy, add `settings.project_policy_files` to
 `~/.gwt/projects/<project-hash>/project-state/pm.json`, preserving its other
 fields. For example, `"project_policy_files": ["docs/pm-policy.md"]` selects a
