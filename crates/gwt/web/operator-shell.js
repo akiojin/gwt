@@ -514,7 +514,7 @@ const RUNTIME_HEALTH_CPU_UNITS =
 let runtimeHealthHideTimer = null;
 
 export function subscribeRuntimeHealth(doc, model, options = {}) {
-  return model.subscribe(snapshot => snapshot, snapshot => {
+  return model.subscribeFrame(snapshot => snapshot, snapshot => {
     if (snapshot) applyRuntimeHealth(doc, snapshot, options);
   });
 }

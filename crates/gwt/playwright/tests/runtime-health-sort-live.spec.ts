@@ -132,6 +132,34 @@ test.describe("Runtime health sort controls", () => {
     await expect(detail.locator(".op-runtime-health-detail__process-more")).toContainText("sorted by Mem");
     await perfCell.focus();
     await expect(detail).toBeVisible();
+    const burst = await page.evaluate(async () => {
+      const value = document.getElementById("op-strip-runtime-health-value")!;
+      const before = value.textContent;
+      let renders = 0;
+      const observer = new MutationObserver(records => { renders += records.length; });
+      observer.observe(value, { childList: true });
+      try {
+        // Exercise synchronous post-dispatch model updates from the served
+        // checkout so transport coalescing cannot hide repeated rendering.
+        for (let cpu = 1; cpu <= 50; cpu++) {
+          (window as any).__operatorShell.applyRuntimeHealth({
+            state: "hot", cpu_percent: cpu, memory_bytes: 1024 ** 3,
+            processes: [{ pid: 705, role: "gwt", name: `burst-${cpu}`, cpu_percent: cpu, memory_bytes: 1024 ** 3 }],
+          });
+        }
+        const immediate = value.textContent;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { before, immediate, renders, latest: value.textContent };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ before: "OK 5% 1.0G", immediate: "OK 5% 1.0G", renders: 1, latest: "HOT 50% 1.0G" });
+    await expect(detail).toContainText("burst-50");
+    await expect(detail).not.toContainText("latest-snapshot");
+    await expect(detail.locator(".op-runtime-health-detail__process-more")).toContainText("sorted by Mem");
+    await perfCell.focus();
+    await expect(detail).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await info.attach("runtime-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
     const screenshot = await page.screenshot({ fullPage: true });
     await info.attach("runtime-shared-state", { body: screenshot, contentType: "image/png" });
     if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
