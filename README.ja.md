@@ -1676,7 +1676,12 @@ workflow は `run_started_at` から `updated_at`、job は `started_at` から
 移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
 受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
 取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
-通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+通知は非フォーカスの窓でも動き、focus を更新条件にしません。`subscribe` は
+terminal packet を含む各更新を同期で消費します。描画用の `subscribeFrame` は初回の
+選択値を即時描画し、以後は変更された selector をストアごとに 1 回の callback へ
+まとめ、最新 snapshot を描画します。animation frame が停止しても 100 ms timer で
+進み、購読解除や dispose 時は予約を取り消します。Usage のステータス表示・popover・
+設定・Workspace 表示がこの経路を使用します。
 共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
 Markdown 描画を選びます。モデルへの取り込み時に `{ type: 'markdown', body, body_html }`
 をレコードの `content` に設定します。各面は確定した content を `renderUiContent` に渡し、

@@ -1809,7 +1809,13 @@ Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Rec
 handlers update the model; views subscribe to selectors and render the committed
 snapshot. Retain each unsubscribe function for views that can be removed. Keep
 DOM nodes and renderer functions outside the model. Notifications also run for
-unfocused windows, without a focus or animation-frame trigger. The shared
+unfocused windows, without a focus trigger. `subscribe` consumes every update
+synchronously, including terminal packets. For views, `subscribeFrame` renders
+the initial selection immediately, then batches changed selectors into one
+callback per store using the latest snapshot. A 100 ms timer keeps rendering
+when animation frames stop; unsubscribe or dispose cancels pending work. Usage
+uses this path for its status summary, popover, settings, and Workspace view.
+The shared
 `ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
 the content type. Assign `{ type: 'markdown', body, body_html }` to a record's
 `content` when accepting it into the model. Views pass that committed content
