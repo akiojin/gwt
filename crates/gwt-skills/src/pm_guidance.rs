@@ -60,6 +60,54 @@ key. Link each queued/active Issue to one complete goal or an explicit
 maintenance/compliance category. Never justify priority from an orphan or invalid trace.
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
+Issue traces expose `observed_inbox_states` even for orphan or maintenance work.
+These are the exact supplied inbox states, deduplicated in observation order.
+Queue or active membership alone does not supply an inbox state; absent rows return an empty list.
+Use the states to explain claim contention, holds or failures, retaining Monitor provenance.
+They do not change structural alignment or prove priority, readiness, health or completion.
+
+`policy.capacity` preserves implementation and review multiplicity, optional pending
+claim owners, and the supplied `occupied_slot_count` and `max_active` values.
+Occupied slots are admission accounting, including panes with unknown Issue numbers;
+they are not a process census and need not equal the listed windows.
+Never recompute occupied slots or available capacity from Issue lists.
+NeedsHuman owners combine the supplied list and matching inbox states.
+`observed_work_issues` is a lower-bound owner set, not an active count or full WIP:
+it deduplicates implementation, review, pending and human-wait owners, excluding queue-only work.
+Absent Monitor lists and missing legacy optional fields stay unknown rather than zero.
+Read the enclosing Monitor source, scan time and coverage alongside these observations;
+`verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
+This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
+
+`launch_activity` reports only Launching/Launched inbox rows in supplied order,
+including repeated owners; it is not a complete process census.
+`inactivity_seconds_at_scan` uses the supplied scan time minus valid RFC3339 activity time,
+with offsets respected and nonnegative fractions rounded down to whole seconds.
+It never uses the current clock. Missing or invalid timestamps and activity after the scan
+produce unknown duration and named missing inputs; invalid activity strings are not copied.
+Absent Monitor yields null, while an observed snapshot with no matching rows yields [].
+Keep the enclosing Monitor provenance: an old or degraded scan is not fresh activity evidence.
+Activity timing does not establish queue age, SLA breaches or liveness, and authorizes no action.
+
+`claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
+`remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
+respecting offsets, clamping elapsed deadlines to zero and rounding down whole seconds.
+It never uses the current clock. Missing or invalid scan/expiration leaves the duration unknown;
+invalid expiration text is not copied. Absent Monitor yields null; no matching rows yields [].
+Keep Monitor provenance and `claim_block_started_at` in missing inputs: blocked age is unknown.
+An elapsed claim deadline does not prove release or authorize requeue, launch or preemption.
+
+`declared_waits` reports only Launching/Launched inbox rows with a wait declaration,
+retaining supplied order and repeated owners. Copy canonical `in_force`; never infer protection from a deadline.
+`elapsed_seconds_at_scan` and `remaining_seconds_at_scan` use valid RFC3339 `since`,
+`expires_at` and the supplied scan time, with offsets respected and fractions floored.
+Expired deadlines yield zero remaining seconds without authorizing any action.
+Missing/invalid scan or declaration timestamps leave affected durations unknown and name missing inputs;
+a start after the scan leaves elapsed time unknown, and expiration before start leaves remaining time unknown.
+Invalid timestamp text, free-text reason and resume condition are not copied.
+Absent Monitor yields null; no matching rows yields []. Keep Monitor provenance:
+wait timing does not establish queue/claim-block age, SLA, liveness or full WIP,
+and never changes protection, invalidates a wait, releases a slot or triggers execution.
 
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
@@ -77,7 +125,13 @@ in the same receipt, including decision source revision and policy version/budge
 These records have no direct Issue mapping:
 `direct_issue_mapping` is missing; an empty Issue set does not mean no impact.
 Use the recorded values and reason when explaining a revised decision or policy;
-they do not prove downstream propagation or notification. Recurring changes remain outside this evidence.
+they do not prove downstream propagation or notification.
+Recurring changes retain redacted before/after settings in the same receipt.
+`changes.idempotency_key_digest` hashes the recurring setting key; the receipt's
+top-level key digest identifies the apply request. Neither raw key is copied into audit.
+Recurring records also lack direct Issue mapping. Use the recorded cadence, owner,
+next run and miss policy when explaining a schedule edit.
+Change evidence does not schedule work or prove duplicate prevention or notification.
 
 The policy groups Now/Next/Later and explains missing milestone inputs;
 authored health and confidence are not verified evidence. Effective health
@@ -95,6 +149,10 @@ empty or duplicate Goal IDs resolve no links and name the missing identity input
 The Goal's `observed_issue_states` and `unobserved_issues` use the same inbox boundary.
 Goal observations do not prove outcome achievement or metric evidence;
 `metric_evidence` stays missing until a canonical source is connected.
+Each Goal names its blank or whitespace-only metadata in `missing_inputs`:
+outcome, metric, target, horizon, owner and status, including Goals with no roadmap links.
+Fill the named metadata through `pm.plan.apply`; complete metadata still does not
+prove metric evidence or outcome achievement.
 Monitor source, last scan time and incomplete coverage are separate from the
 planning revision: no observation, an old scan or a cache projection cannot
 prove full fleet alignment. This read-only assessment never launches work
@@ -250,6 +308,15 @@ Supported direct scoped operations:
   COMMENT and REQUEST_CHANGES require a non-empty body. GitHub reviewer,
   self-review and CI gates still apply; this does not create an internal
   reviewer verdict or override merge automation.
+- `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
+  for a reviewed external fork PR. The owner must authorize that exact PR and
+  full head SHA through a recorded scoped instruction or native approval.
+  Remembered approval also stays bound to that PR and SHA. The runtime reads
+  current fork identity, Ready state, passing CI, approval and resolved review
+  threads before arming auto-merge with the reviewed head fixed. It records
+  the PR, SHA and permission source in the audit. A changed head requires
+  another review and authorization; it never bypasses GitHub's merge gates.
+  Same-repository PRs retain the ordinary verification and delivery path.
 - `release.metadata.set {tag, name?, body?, prerelease?}` changes an existing
   release's display name, notes or prerelease flag. Publishing, assets and
   latest selection remain with the existing gated release workflow.
@@ -1339,7 +1406,8 @@ quota:
     and a queued or failed run of it leaves the PR exactly here. Find
     that run and rerun it with `actions.rerun`; waiting does not land it
     (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
-    nudge — Draft cancels auto-merge and no operation re-enables it.
+    nudge — Draft cancels auto-merge. External forks have the scoped operation
+    described above; ordinary PRs retain repository merge automation.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
   - `BEHIND`: follow `default_action`; non-strict protection needs no sync
   - `CI-RED`: relaunch the owner to fix CI
@@ -1362,6 +1430,12 @@ quota:
   `updated_at`, never from the class of the moment.
   `stale` is also true for an unverified inventory snapshot; that hold
   does not advance `unchanged_cycles` or trigger `escalation_due`.
+- An external fork with auto-merge disabled may be excluded by the repository's
+  merge automation. Follow its `default_action` and `fallback`: use
+  `pr.auto_merge.enable` only after reviewing and obtaining exact PR/SHA
+  authority; otherwise a human merge is required. Unknown automation eligibility
+  is not proof of exclusion. Report that reason once and wait for delegation
+  or a changed PR state instead of repeating a merge proposal every cycle.
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
   `owner_issue_source` says whether the owner was declared by the PR
@@ -3095,7 +3169,7 @@ mod tests {
     /// than treating settings as owner chores or inventing write paths.
     #[test]
     fn contract_names_bounded_configuration_operations() {
-        let body = body();
+        let body = unwrapped(&render_contract());
         for phrase in [
             "`discussion.create {title, body, category, sync_board?, board_provider?}`",
             "`board.config.set {github_discussion, provider?}`",
@@ -3110,6 +3184,10 @@ mod tests {
             "`update.settings.set {auto_apply_updates}`",
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
+            "`pr.auto_merge.enable {number, reviewed_head_sha}`",
+            "Remembered approval also stays bound to that PR and SHA",
+            "a human merge is required",
+            "instead of repeating a merge proposal every cycle",
             "`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`",
             "COMMENT and REQUEST_CHANGES require a non-empty body",
             "`release.metadata.set {tag, name?, body?, prerelease?}`",
@@ -3724,14 +3802,31 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`observed_issue_states` and `unobserved_issues`",
             "Merged or Released does not prove milestone completion",
             "Never justify priority from an orphan or invalid trace",
+            "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
+            "`policy.capacity` preserves implementation and review multiplicity",
+            "`launch_activity` reports only Launching/Launched inbox rows",
+            "`inactivity_seconds_at_scan` uses the supplied scan time",
+            "`claim_blocks` reports only BlockedByClaim inbox rows",
+            "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
+            "Copy canonical `in_force`; never infer protection from a deadline",
+            "An elapsed claim deadline does not prove release or authorize requeue",
+            "Activity timing does not establish queue age, SLA breaches or liveness",
+            "Never recompute occupied slots or available capacity from Issue lists",
+            "`observed_work_issues` is a lower-bound owner set, not an active count or full WIP",
+            "`verification_observation` and `end_to_end_wip` remain missing",
+            "Queue or active membership alone does not supply an inbox state",
             "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`change_impact`",
             "`directly_affected_issues`",
             "Goal changes use only roadmap links explicitly naming the goal",
             "Risk, Decision and Policy changes retain redacted before/after values",
+            "Recurring changes retain redacted before/after settings",
+            "`changes.idempotency_key_digest` hashes the recurring setting key",
+            "Change evidence does not schedule work or prove duplicate prevention",
             "`direct_issue_mapping` is missing; an empty Issue set does not mean no impact",
             "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
             "Goal observations do not prove outcome achievement or metric evidence",
+            "Each Goal names its blank or whitespace-only metadata in `missing_inputs`",
             "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",

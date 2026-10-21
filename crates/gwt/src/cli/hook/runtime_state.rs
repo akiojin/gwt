@@ -16,8 +16,8 @@ use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
-    persist_session_hook_metadata_with_wait, persist_session_status, AgentStatus,
-    PendingDiscussionResume, Session, SessionRuntimeState,
+    persist_session_hook_metadata_with_wait, AgentStatus, PendingDiscussionResume, Session,
+    SessionRuntimeState,
 };
 use serde::Serialize;
 
@@ -485,9 +485,14 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     if session.is_some() {
-        if let Err(error) =
-            persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)
-        {
+        if let Err(error) = gwt_agent::update_session_if_changed(
+            &sessions_dir,
+            gwt_session_id.as_str(),
+            |session| {
+                session.record_hook_status(AgentStatus::Running);
+                Ok(())
+            },
+        ) {
             log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
         }
     }
@@ -1263,5 +1268,45 @@ mod tests {
         assert!(loaded.last_completed_stop_at.is_some());
         assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
         assert!(!loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn late_hooks_preserve_explicit_close_until_relaunch() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/closed", AgentId::ClaudeCode);
+        session.record_terminal_stop();
+        session.save(&sessions_dir).unwrap();
+        let path = sessions_dir.join(format!("{}.toml", session.id));
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        for event in ["PostToolUse", "Stop"] {
+            handle_with_input(event, "{}").unwrap();
+            let loaded = Session::load(&path).unwrap();
+            assert_eq!(loaded.status, AgentStatus::Stopped, "late {event}");
+            assert_eq!(loaded.last_hook_event.as_deref(), Some(event));
+        }
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Stopped);
+        record_blocked_stop_from_env().unwrap();
+        let closed = Session::load(&path).unwrap();
+        assert_eq!(closed.status, AgentStatus::Stopped);
+        assert!(!closed.restore_window_on_startup);
+
+        // Explicit launch enables restore before the new child's hooks run.
+        session.restore_window_on_startup = true;
+        session.save(&sessions_dir).unwrap();
+        record_blocked_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Running);
+        handle_with_input("Stop", "{}").unwrap();
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Idle);
     }
 }

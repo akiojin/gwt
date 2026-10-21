@@ -7288,7 +7288,8 @@ mod tests {
         file.write_all(&pending[..split]).unwrap();
         file.flush().unwrap();
         let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + Duration::from_millis(200),
+            // test-hygiene: allow-wall-clock-deadline HANG_GUARD only bounds a wedged rollover fixture.
+            std::time::Instant::now() + crate::deadline_budget::HANG_GUARD,
         );
         let load = || {
             LocalProvider.load_prompt_reminder_for_repo_hash(

@@ -825,7 +825,7 @@ pub fn reconcile_verified_live_launch_bindings(
 ) -> Vec<u64> {
     let (live_launch_owners, observed_at) =
         read_verified_live_launch_owners(monitor, project_root, now);
-    monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at)
+    monitor.reconcile_observed_launch_bindings(&live_launch_owners, &observed_at, now)
 }
 
 /// Read producing-owner proof once, retaining the exact canvas ordering fence.
@@ -883,7 +883,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
             .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
             .collect(),
     );
-    monitor.readopt_live_launch_bindings(live_launch_owners, observed_at);
+    monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
     monitor.recover_stuck_autonomous(now);
     let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
@@ -2551,7 +2551,7 @@ fn advance_one_autonomous_issue(
                 }
                 crate::issue_monitor_gate::GateAction::WaitForCi => {}
                 crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                    monitor.record_autonomous_failure(issue_number, reason, now);
+                    monitor.remediate_autonomous_gate(issue_number, reason, &body, now);
                 }
                 // Issue #3944 AC-1: an environment hold is not a human
                 // decision — keep the PR in flight, ask the PM to steer,
@@ -2913,6 +2913,53 @@ mod linked_pr_batch_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_5783_daemon_reconciles_ten_closed_bindings_before_id_reuse() {
+        let repo = tempfile::tempdir().unwrap();
+        let now = "2026-10-20T00:00:00Z";
+        let mut bindings = (0..10)
+            .map(|index| (format!("tab-1::agent-{index}"), 100 + index))
+            .collect::<BTreeMap<_, _>>();
+        bindings.insert("foreign-tab::agent-0".into(), 500);
+        bindings.insert("legacy-agent".into(), 501);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launch_bindings: bindings,
+                ..Default::default()
+            },
+        );
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.into(),
+            windows: Vec::new(),
+        });
+        let stale = monitor.prefs();
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 2);
+        // The daemon's commit imports disk state before repeating reconciliation.
+        monitor.rebase_daemon_driver_prefs(&stale);
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 2);
+        monitor.record_candidate(issue(5783));
+        monitor.complete_active_launch_at(5783, "tab-1::agent-0", now);
+        // The captured empty canvas predates this ACK and cannot revoke it.
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-0"), Some(5783));
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("tab-1::agent-0"),
+            Some(&5783)
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("foreign-tab::agent-0"),
+            Some(&500)
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("legacy-agent"),
+            Some(&501)
+        );
+    }
     use crate::{IssueMonitorConfig, MonitorInboxState};
     use gwt_github::{
         Cache, CommentId, CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState,

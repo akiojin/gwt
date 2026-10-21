@@ -1,5 +1,83 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
+
+test("live work advisory results preserve the prompt and ignore stale responses", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+  test.skip(!base, "isolated checkout backend required");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  // Keep the real transport and receiver; isolate only the advisory query and
+  // prompt acknowledgement so backend timing cannot replace the injected view.
+  await page.addInitScript(() => {
+    (window as any).__advisoryRequests = [];
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (typeof data === "string") {
+        const message = JSON.parse(data);
+        if (message.kind === "request_work_advisory") {
+          (window as any).__advisoryRequests.push(message);
+          return;
+        }
+        if (message.kind === "launch_wizard_action") return;
+      }
+      return send.call(this, data);
+    };
+  });
+  await gotoLiveGwt(page, base, { enableTestBridge: true });
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator("#window-list-button")).toBeEnabled();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+    detail: { kind: "launch_wizard_state", wizard: {
+      title: "Register work", show_branch_controls: false,
+      show_manual_setup: false, show_runtime_confirmation: false,
+      show_confirm: false, show_start_methods: false,
+      runtime_context_resolved: true, launch_summary: [], progress_steps: [],
+    } },
+  })));
+  const modal = page.locator("#wizard-modal");
+  await expect(modal).toBeVisible();
+  const prompt = modal.locator("textarea.launch-intake-input");
+  await prompt.fill("Investigate shared state rendering");
+  await prompt.evaluate((element: HTMLTextAreaElement) => {
+    element.setSelectionRange(4, 11);
+    (window as any).__advisoryPrompt = element;
+  });
+  const panel = modal.locator("#wizard-work-advisory");
+  await expect(panel).toContainText("Searching related work");
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__advisoryRequests.at(-1)?.request_id ?? 0,
+  )).toBeGreaterThan(0);
+  const reply = async (requestId: number, results: unknown[]) => page.evaluate(({ requestId, results }) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "work_advisory_result", request_id: requestId, results },
+    }));
+  }, { requestId, results });
+  await reply(10, [{ scope: "specs", title: "<img src=x onerror=alert(1)>", subtitle: "Shared state" }]);
+  await expect(panel).toContainText("<img src=x onerror=alert(1)>");
+  await expect(panel.locator("img")).toHaveCount(0);
+  await expect(panel).not.toContainText("Searching related work");
+  await reply(11, [{ scope: "issues", title: "Latest related work" }]);
+  await expect(panel).toContainText("Latest related work");
+  // The debounced query has advanced the real request fence beyond request 0.
+  await reply(0, [{ title: "Stale response" }]);
+  await expect(panel).toContainText("Latest related work");
+  await expect(panel).not.toContainText("Stale response");
+  await expect(prompt).toBeFocused();
+  await expect(prompt).toHaveValue("Investigate shared state rendering");
+  expect(await prompt.evaluate((element: HTMLTextAreaElement) => [
+    element === (window as any).__advisoryPrompt, element.selectionStart, element.selectionEnd,
+  ])).toEqual([true, 4, 11]);
+  await testInfo.attach("work-advisory-results", { body: await modal.screenshot(), contentType: "image/png" });
+  await reply(12, []);
+  await expect(panel).toBeHidden();
+  await expect(prompt).toBeFocused();
+  expect(errors, "console and page errors").toEqual([]);
+});
 
 test.describe("Launch Wizard states", () => {
   test.use({ viewport: { width: 1440, height: 900 } });

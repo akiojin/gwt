@@ -543,27 +543,23 @@ gwtd_mutation_p95_ms = 350.0
             resolve_config_home_dir(
                 Some("home-env".into()),
                 Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
+                || Some(PathBuf::from("dirs-home")),
             ),
             Some(PathBuf::from("home-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
-            ),
+            resolve_config_home_dir(Some("".into()), Some("userprofile-env".into()), || Some(
+                PathBuf::from("dirs-home")
+            ),),
             Some(PathBuf::from("userprofile-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("".into()),
-                Some(PathBuf::from("dirs-home"))
-            ),
+            resolve_config_home_dir(Some("".into()), Some("".into()), || Some(PathBuf::from(
+                "dirs-home"
+            ))),
             Some(PathBuf::from("dirs-home"))
         );
-        assert_eq!(resolve_config_home_dir(None, None, None), None);
+        assert_eq!(resolve_config_home_dir(None, None, || None), None);
     }
 
     #[test]

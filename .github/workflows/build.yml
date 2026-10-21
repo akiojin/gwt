@@ -177,6 +177,9 @@ jobs:
         continue-on-error: true
       - name: Check macOS compilation
         run: cargo check -p gwt-core -p gwt
+      - name: Test short socket fixtures with a long native TMPDIR
+        run: bash scripts/test-short-socket-fixtures.sh
+        timeout-minutes: 15
 
   report-post-merge-failure:
     needs: [build, check-windows, check-macos]

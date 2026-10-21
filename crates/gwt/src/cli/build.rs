@@ -63,7 +63,7 @@ fn run_action<E: CliEnv>(
     }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
-    if let SkillStateAction::Complete { spec } = &action {
+    if let SkillStateAction::Complete { spec, pr } = &action {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
         let owning_active_build = gwt_core::skill_state::load(&worktree, SKILL_NAME)
@@ -78,7 +78,7 @@ fn run_action<E: CliEnv>(
                     && state.owner_spec.is_none_or(|owner| owner == *spec)
             });
         match if owning_active_build {
-            super::completion_pr::admit(env, session_id.trim(), Some(*spec), out)
+            super::completion_pr::admit(env, session_id.trim(), Some(*spec), *pr, out)
         } else {
             Ok(None)
         } {
@@ -118,7 +118,7 @@ fn run_action<E: CliEnv>(
                 return Ok(2);
             };
             let expected_owner = match &action {
-                SkillStateAction::Complete { spec } => Some(*spec),
+                SkillStateAction::Complete { spec, .. } => Some(*spec),
                 _ => None,
             };
             let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -188,7 +188,7 @@ fn run_action<E: CliEnv>(
                 return Ok(Ok(2));
             }
             let expected_owner = match &action {
-                SkillStateAction::Complete { spec } => Some(*spec),
+                SkillStateAction::Complete { spec, .. } => Some(*spec),
                 _ => None,
             };
             let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -588,7 +588,7 @@ fn run_after_quarantine_precheck<E: CliEnv>(
     // finalize" exit 0 must not settle the execution — and only when the
     // record names the same owner. Aborting a build never settles.
     let completed_spec = match &action {
-        SkillStateAction::Complete { spec } => {
+        SkillStateAction::Complete { spec, .. } => {
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let had_active_matching_state = gwt_core::skill_state::load(&worktree, SKILL_NAME)
                 .ok()
@@ -962,7 +962,7 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
     held_trusted_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let (spec, close_kind, abort_reason) = match action {
-        SkillStateAction::Complete { spec } => (*spec, WorkTerminalKind::Done, None),
+        SkillStateAction::Complete { spec, .. } => (*spec, WorkTerminalKind::Done, None),
         SkillStateAction::Abort { spec, reason } => {
             (*spec, WorkTerminalKind::Discarded, reason.as_deref())
         }
@@ -2169,7 +2169,10 @@ mod tests {
         let mut output = String::new();
         let code = run(
             &mut env,
-            SkillStateAction::Complete { spec: 3327 },
+            SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            },
             &mut output,
         )
         .expect("run build.complete");
@@ -2239,7 +2242,10 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            SkillStateAction::Complete { spec: 3248 },
+            SkillStateAction::Complete {
+                spec: 3248,
+                pr: None,
+            },
             &mut out,
         )
         .unwrap();
@@ -2329,6 +2335,7 @@ format_version: Some(1),
                 driver: None,
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
                     admission: None,
+                    measurement: None,
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,
@@ -2408,7 +2415,10 @@ format_version: Some(1),
         assert_eq!(
             run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3248 },
+                SkillStateAction::Complete {
+                    spec: 3248,
+                    pr: None
+                },
                 &mut out,
             )
             .unwrap(),
@@ -2451,7 +2461,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -2529,7 +2542,10 @@ format_version: Some(1),
             let mut output = String::new();
             let code = run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 &mut output,
             )
             .unwrap();
@@ -2555,7 +2571,10 @@ format_version: Some(1),
             let mut output = String::new();
             let code = run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 &mut output,
             )
             .unwrap();
@@ -2596,7 +2615,10 @@ format_version: Some(1),
             with_terminal_bridge_env_for(&fixture.worktree, &fixture.session.id, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
 
@@ -2872,7 +2894,10 @@ format_version: Some(1),
                 let mut output = String::new();
                 let code = run(
                     &mut env,
-                    SkillStateAction::Complete { spec: 3327 },
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                     &mut output,
                 )
                 .expect("run build.complete after execution.blocked");
@@ -3222,7 +3247,10 @@ format_version: Some(1),
             let result = with_terminal_bridge_env(&fixture, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
 
@@ -3281,7 +3309,10 @@ format_version: Some(1),
         let error = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         })
         .expect_err("Host Emitted without canonical readback must fail closed");
@@ -3410,7 +3441,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3464,7 +3498,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3512,7 +3549,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3559,7 +3599,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3777,7 +3820,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3805,7 +3851,10 @@ format_version: Some(1),
                 terminal_receipt(crate::AgentWorkTerminalizationOutcome::Emitted),
             );
             let (code, output, fixture) = run_active_action(
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 Some(&server.forward_url),
                 Some("terminal-secret"),
                 managed,
@@ -3838,8 +3887,15 @@ format_version: Some(1),
             ("token-only", None, Some("terminal-secret")),
             ("managed-missing", None, None),
         ] {
-            let (code, output, fixture) =
-                run_active_action(SkillStateAction::Complete { spec: 3327 }, url, token, true);
+            let (code, output, fixture) = run_active_action(
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
+                url,
+                token,
+                true,
+            );
             assert_eq!(code, 1, "{label}: {output}");
             assert_build_still_active(&fixture);
         }
@@ -3872,7 +3928,10 @@ format_version: Some(1),
             let result = with_terminal_bridge_env(&fixture, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
             let output = result.expect_err("invalid Host result must fail closed");
@@ -3904,7 +3963,10 @@ format_version: Some(1),
         let env = crate::cli::TestEnv::new(fixture.git.repo.clone());
         let output = record_current_work_terminal_before_finalize(
             &env,
-            &SkillStateAction::Complete { spec: 3327 },
+            &SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            },
         )
         .expect_err("transport failure must fail closed");
         assert!(
@@ -4065,7 +4127,10 @@ format_version: Some(1),
             assert_eq!(
                 skill_state_runtime::run(
                     &mut env,
-                    SkillStateAction::Complete { spec: 3327 },
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
                     SKILL_NAME,
                     SKILL_DISPLAY,
                     VERB,
@@ -5060,7 +5125,10 @@ format_version: Some(1),
                 spec: 3403,
                 reason: Some("stale lifecycle owner".to_string()),
             },
-            SkillStateAction::Complete { spec: 3403 },
+            SkillStateAction::Complete {
+                spec: 3403,
+                pr: None,
+            },
         ] {
             let fixture = BoundTerminalFixture::new();
             let mut state = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)

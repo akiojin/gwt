@@ -596,6 +596,9 @@ pub struct PtyHandle {
     /// read by prompt injection off any thread that holds the handle, so a
     /// delivery worker never needs the pane lock to know how to write a body.
     bracketed_paste: AtomicBool,
+    /// Issue #5839: published by the parsed active screen. Protected prompt
+    /// injection must not feed Codex's Transcript/Find input surface.
+    transcript_overlay: AtomicBool,
     #[cfg(target_os = "macos")]
     reap_requested: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -859,6 +862,7 @@ impl PtyHandle {
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
             bracketed_paste: AtomicBool::new(false),
+            transcript_overlay: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -876,6 +880,20 @@ impl PtyHandle {
     /// parser last saw it.
     pub fn set_bracketed_paste(&self, enabled: bool) {
         self.bracketed_paste.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn set_transcript_overlay(&self, visible: bool) {
+        self.transcript_overlay.store(visible, Ordering::Release);
+    }
+
+    fn ensure_prompt_input_ready(&self) -> Result<(), TerminalError> {
+        if self.transcript_overlay.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "Codex Transcript overlay is open; close it before sending a prompt"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     // Only the unix reaping tests inject a spawn failure; gating on `test`
@@ -942,6 +960,7 @@ impl PtyHandle {
     pub fn reserve_input_transaction(
         self: &Arc<Self>,
     ) -> Result<PtyInputReservation, TerminalError> {
+        self.ensure_prompt_input_ready()?;
         let mut state = self
             .input_state
             .lock()
@@ -1154,19 +1173,19 @@ impl PtyHandle {
             })
     }
 
-    /// Issue #4405 AC-2: lift this tree's CPU cap while it contains the
-    /// host-wide verification lease holder, and restore it afterwards.
+    /// Lift this tree's CPU cap while it contains any canonical verification
+    /// lease holder, and restore it afterwards (Issues #4405 / #5816).
     /// Returns whether the cap changed.
-    pub fn relieve_cap_for_lease_holder(
+    pub fn relieve_cap_for_lease_holders(
         &self,
-        holder_pid: Option<u32>,
+        holder_pids: &[u32],
     ) -> Result<bool, TerminalError> {
         let mut group = match self.process_group.lock() {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
         };
         group
-            .relieve_cap_for_lease_holder(holder_pid)
+            .relieve_cap_for_lease_holders(holder_pids)
             .map_err(|details| TerminalError::PtyIoError { details })
     }
 
@@ -1624,6 +1643,7 @@ impl PtyInputReservation {
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         if !self.handle.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
@@ -1644,6 +1664,7 @@ impl PtyInputReservation {
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
             details: RELEASED_DESCRIPTORS.to_string(),
         })?;
+        self.handle.ensure_prompt_input_ready()?;
         PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
     }
 
@@ -1657,6 +1678,7 @@ impl PtyInputReservation {
             &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
         ) -> Result<(), TerminalError>,
     ) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         let mut writer = self
             .handle
             .writer
@@ -1669,6 +1691,7 @@ impl PtyInputReservation {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        self.handle.ensure_prompt_input_ready()?;
         let mut commit = |mark_attempted: &mut dyn FnMut()| {
             if !self.handle.generation_active.load(Ordering::Acquire) {
                 return Err(TerminalError::PtyIoError {
@@ -1678,6 +1701,7 @@ impl PtyInputReservation {
             let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
                 details: RELEASED_DESCRIPTORS.to_string(),
             })?;
+            self.handle.ensure_prompt_input_ready()?;
             mark_attempted();
             PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
         };

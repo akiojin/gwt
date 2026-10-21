@@ -789,6 +789,35 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
+work, so the PM can explain claim contention, holds or failures. States retain
+observation order without duplicates; missing inbox rows return an empty list,
+even for queued or active Issues. These observations do not change goal alignment
+or determine priority, readiness, health or completion.
+Capacity observations distinguish implementation launches, review windows, pending
+claims and Issues waiting for a human. They retain the Monitor's reported slot
+occupancy and limit, which cannot be recalculated from Issue counts. The combined
+Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
+observations stay unknown. Verification and full WIP remain unobserved, and reading
+these diagnostics does not change admission or enforce WIP limits.
+Activity observations show elapsed whole seconds since the last activity of Launching/Launched
+Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
+Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable
+Monitor returns null rather than an observed empty list. Keep the scan's source and age in mind:
+these values do not establish queue age, SLA breaches or liveness, or trigger any action.
+Claim-block observations list Issues held by another claim and the whole seconds remaining
+until its expiration at the supplied scan time. An elapsed deadline shows zero; missing or
+invalid timestamps leave the duration unknown. Blocked age remains unknown because the
+snapshot has no start time. These observations retain the scan's provenance and do not
+prove claim release or authorize requeue, launch or preemption.
+Declared-wait observations show elapsed and remaining whole seconds for Launching/Launched
+Issues with a wait declaration, at the supplied scan time. They preserve the Monitor's
+`in_force` value, even when a deadline appears elapsed; they never recalculate protection.
+Missing or invalid timestamps leave affected durations unknown; a start after the scan
+cannot establish elapsed time, nor can expiration before start establish remaining time.
+Unavailable Monitor data yields null, while no matching rows yields an empty list.
+These observations retain scan provenance, omit free-text reasons and resume conditions,
+and do not determine queue age, SLA, liveness or full WIP, or change waits and slots.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
@@ -800,6 +829,9 @@ Invalid links remain reference facts; milestone-only or category-only links do
 not expand membership, and empty or duplicate goal IDs resolve no links.
 Goal observations do not prove outcome achievement or metric evidence;
 `metric_evidence` remains missing until a supporting source is connected.
+Each Goal's `missing_inputs` also names blank or whitespace-only outcome, metric,
+target, horizon, owner and status, including Goals without roadmap links.
+Ask the PM to fill those fields; complete metadata does not prove outcome achievement.
 Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
@@ -807,7 +839,9 @@ not confirm that dependent work or its agents have been notified.
 Risk, decision and policy edits also retain their redacted changed values in these
 receipts. They have no direct Issue mapping, which is explicitly marked as missing;
 an empty affected-Issue set does not mean the change has no impact. Recurring edits
-remain outside this change evidence.
+also retain changed schedule settings, with the setting's idempotency key stored
+as a digest rather than copied into the audit. They likewise lack direct Issue
+mapping. These records do not schedule work or prove duplicate prevention or notification.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
@@ -851,6 +885,15 @@ existing release name/notes/prerelease, and `repository.settings.set` for
 supported reversible metadata, features, merge preferences and archive status.
 Topic replacements use `topics` alone. Existing review and CI checks remain in
 force; release publishing, assets and latest selection use the gated workflow.
+
+For an external fork PR excluded by repository merge automation, the owner can
+delegate the reviewed PR and its exact head SHA to the PM through the same scoped
+permission route. `pr.auto_merge.enable` takes `number` and `reviewed_head_sha`,
+then enables GitHub auto-merge only for that reviewed head after checking the
+current PR, CI and review state. The audit records the PR, SHA and permission
+source. A changed head requires a new review and authorization. If this route is
+unavailable or the owner has not delegated it, a human must merge the PR;
+`pr.list` explains the external-fork fallback instead of repeating a merge proposal.
 
 For an explicitly authorized PR close, build-cache cleanup, or provider approval
 response, the PM uses `pm.operation.execute` with the existing `pr.close`,
@@ -1830,6 +1873,29 @@ Lease transitions are recorded in
 has its own coordinator lane: semantic search and index builds keep excluding
 each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
+
+### Performance verification environment
+
+Canonical headed E2E commands also record their measurement environment. For a
+non-browser performance command, add the command-local assignment
+`GWT_VERIFY_PERFORMANCE=1` to its entry in `verify.plan` and `verify.run`.
+If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
+(comma-separated PIDs for multiple targets).
+
+On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
+clear before measuring. All canonical slots and the legacy verification lane
+participate; configured caps return after their holders leave. Process priority
+and pane-close cleanup remain in effect. Restart gwt with the updated runtime
+if an older GUI's Job ancestry cannot be inspected.
+
+The command's `measurement` evidence records target PIDs and start times,
+observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief
+wait. The waits are admission/preflight durations, not an estimate of OS thread
+scheduling delay. The runner and nominated GUI have `required_uncapped: true`;
+other descendants provide CPU context and retain their ordinary resource policy.
+A remaining cap or unreadable environment for a required target produces
+`ENVIRONMENT_INCOMPATIBLE`; it cannot authorize completion or a Ready PR.
+Correct the reported environment and rerun the same registered matrix.
 
 ### PR head verification
 

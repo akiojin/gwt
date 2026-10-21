@@ -246,6 +246,42 @@ fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
     captured_events
 }
 
+#[test]
+fn issue_5596_gui_phase_logging_waits_for_worker_dispatch() {
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let inline = capture_tracing_events(|| {
+        let mut phases = super::wizard::IssueMonitorGuiPhases::new(spawner);
+        phases.record("monitor_gui_context", 5596, Some("delivery-5596"), None);
+        phases.record(
+            "monitor_gui_freshness",
+            5596,
+            Some("delivery-5596"),
+            Some(0.125),
+        );
+    });
+    assert!(
+        inline.is_empty(),
+        "GUI phase recording invoked the subscriber inline"
+    );
+    let queued = std::mem::take(&mut *tasks.lock().unwrap());
+    assert_eq!(queued.len(), 1, "one worker batch for both phases");
+    let emitted = capture_tracing_events(|| queued.into_iter().for_each(|task| task()));
+    assert_eq!(emitted.len(), 2);
+    for event in &emitted {
+        assert_eq!(event.target, "gwt.launch.timing");
+        assert_eq!(event.fields["issue_number"], "5596");
+        assert_eq!(event.fields["delivery_id"], "delivery-5596");
+        assert_eq!(event.fields["thread"], "gui");
+        assert_eq!(event.fields["emitter"], "worker");
+        assert!(event.fields["elapsed_ms"].parse::<f64>().unwrap() >= 0.0);
+        let observed = chrono::DateTime::parse_from_rfc3339(&event.fields["captured_at"]).unwrap();
+        assert_eq!(observed.offset().local_minus_utc(), 0);
+    }
+    assert_eq!(emitted[0].fields["phase"], "monitor_gui_context");
+    assert_eq!(emitted[1].fields["phase"], "monitor_gui_freshness");
+    assert_eq!(emitted[1].fields["prefs_stamp_elapsed_ms"], "0.125");
+}
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<OsString>,
@@ -327,6 +363,7 @@ fn sample_issue_snapshot(
 }
 
 fn init_repo(repo_path: &Path) {
+    // Monitor fixtures need GitHub identity, but must never reach the network.
     let remote = format!(
         "https://github.com/example/repo-{:x}.git",
         remote_suffix(repo_path)
@@ -334,6 +371,10 @@ fn init_repo(repo_path: &Path) {
     for args in [
         ["init", "-q"].as_slice(),
         ["remote", "add", "origin", remote.as_str()].as_slice(),
+        ["config", "--local", "protocol.allow", "never"].as_slice(),
+        ["config", "--local", "protocol.https.allow", "never"].as_slice(),
+        // A few fixtures replace origin with a real local bare repository.
+        ["config", "--local", "protocol.file.allow", "always"].as_slice(),
     ] {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
@@ -354,6 +395,53 @@ fn init_repo_with_initial_commit(repo_path: &Path) {
     run_git(repo_path, &["config", "user.name", "Test User"]);
     run_git(repo_path, &["config", "user.email", "test@example.com"]);
     run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
+#[test]
+fn init_repo_fixture_preserves_github_identity_without_network_transport() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    assert_eq!(
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&repo).unwrap(),
+        (
+            "example".to_string(),
+            format!("repo-{:x}", remote_suffix(&repo))
+        )
+    );
+    // Inspect the policy before attempting transport, so a broken fixture
+    // fails without accidentally contacting GitHub.
+    let policy = gwt_core::process::hidden_command("git")
+        .args(["config", "--local", "--get", "protocol.https.allow"])
+        .current_dir(&repo)
+        .output()
+        .expect("read fixture transport policy");
+    assert_eq!(String::from_utf8_lossy(&policy.stdout).trim(), "never");
+    let output = gwt_core::process::hidden_command("git")
+        .args(["fetch", "origin", "--prune"])
+        .env_remove("GIT_ALLOW_PROTOCOL")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(&repo)
+        .output()
+        .expect("fetch fixture origin");
+    assert!(
+        !output.status.success(),
+        "fixture fetch must fail before networking: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("transport 'https' not allowed"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn init_repo_without_origin(repo_path: &Path) {
@@ -1009,7 +1097,7 @@ fn project_event_isolation_inactive_runtime_events_keep_the_window_owner() {
     insert_test_pane_runtime(&mut runtime, &id);
     let incarnation = runtime.runtimes[&id].incarnation;
     let mut events =
-        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1);
+        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1, None);
     events.extend(runtime.handle_runtime_status(
         id.clone(),
         WindowProcessStatus::Error,
@@ -1570,10 +1658,13 @@ fn sample_runtime_with_events(
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
+        issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting
         // the GUI-thread one; tests that assert that budget set it explicitly.
         issue_monitor_fallback_commit_timeout: super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+        issue_monitor_profile_saves: HashMap::new(),
+        issue_monitor_max_active_saves: HashMap::new(),
         runtime_hook_agent_failures_in_flight: HashMap::new(),
         // Issue #3676 AC-2: tests default to fail-open so ambient developer /
         // CI credential state never decides a launch; auth-preflight tests
@@ -1606,6 +1697,7 @@ fn sample_runtime_with_events(
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
         work_merge_status_cache: Default::default(),
+        work_merge_scan_queue: Default::default(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
@@ -1678,6 +1770,7 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
             incarnation,
             b"pending".to_vec(),
             1,
+            None,
         );
         assert!(runtime.pending_runtime_outputs.contains_key(window_id));
     }
@@ -3017,8 +3110,50 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     assert_eq!(measured.machine_budget, Some(2));
     assert_eq!(measured.recommended_worker_limit, 1, "reserve one own PM");
 
+    let prepared = runtime
+        .capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43")
+        .prepare()
+        .expect("prepare fresh shared capacity");
+    let mut exhausted_snapshot = snapshot.clone();
+    exhausted_snapshot["available_ram_bytes"] = serde_json::json!(0);
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&exhausted_snapshot).expect("serialize exhausted capacity"),
+    )
+    .expect("lower shared capacity after preparation");
+    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+        "tab-1",
+        config.clone(),
+        canvas_bounds(),
+        None,
+        feedback.clone(),
+        prepared,
+    );
+    assert!(
+        rejected
+            .is_err_and(|reason| { reason == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE }),
+        "a changed shared capacity must invalidate prepared admission"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&snapshot).expect("serialize restored capacity"),
+    )
+    .expect("restore positive shared capacity");
+    let prepared = runtime
+        .capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43")
+        .prepare()
+        .expect("prepare current shared capacity again");
     runtime
-        .spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback)
+        .spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            feedback,
+            prepared,
+        )
         .expect("fresh shared capacity admits the proposed Monitor pane");
     assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
     let completion = take_monitor_launch_complete("post-admission fixture failure", &events);
@@ -3338,6 +3473,23 @@ fn take_project_navigation_completion(
     match events.remove(index) {
         UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
         _ => unreachable!("matched project navigation completion"),
+    }
+}
+
+/// Run known telemetry jobs without advancing the business work under test.
+fn run_queued_monitor_gui_diagnostics(tasks: &BlockingTestTaskQueue, indices: &[usize]) {
+    for &index in indices {
+        let task = tasks.lock().expect("queued diagnostic").remove(index);
+        let events = capture_tracing_events(task);
+        assert!(!events.is_empty(), "selected task must emit diagnostics");
+        assert!(
+            events.iter().all(|event| {
+                event.target == "gwt.launch.timing"
+                    && event.fields.get("thread").map(String::as_str) == Some("gui")
+                    && event.fields.get("emitter").map(String::as_str) == Some("worker")
+            }),
+            "selected task must contain only GUI phase diagnostics",
+        );
     }
 }
 
@@ -6682,12 +6834,30 @@ fn prepare_monitor_relaunch(
             strategy,
         );
     drain_queued_blocking_tasks(&queued);
+    let mut events =
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    // Answer delivery prepares another completion, just as the real GUI dispatches it.
+    loop {
+        drain_queued_blocking_tasks(&queued);
+        let has_prepared = {
+            let recorded = fixture.recorded_events.lock().expect("recorded events");
+            recorded
+                .iter()
+                .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
+        };
+        if !has_prepared {
+            break;
+        }
+        events.extend(fixture.runtime.handle_issue_monitor_launch_prepared(
+            take_issue4803_monitor_preparation(&fixture.recorded_events),
+        ));
+    }
     fixture.runtime.blocking_tasks = previous_spawner;
-    fixture
-        .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ))
+    events
 }
 
 fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {

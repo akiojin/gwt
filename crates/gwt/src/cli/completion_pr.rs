@@ -4,6 +4,15 @@ use super::{execution_state as execution, verification_record as verification};
 use crate::cli::{CliEnv, PrCommand};
 use gwt_git::pr_status::PrState;
 
+/// Repository-filtered discovery data; readiness is read fresh after selection.
+#[derive(Debug, Clone)]
+pub struct CompletionPrCandidate {
+    pub number: u64,
+    pub url: String,
+    pub head_ref_name: String,
+    pub head_sha: String,
+}
+
 /// Admit the autonomous owner's completion before any terminal state is
 /// written, and pin the verification snapshot through the subsequent commit.
 /// Manual and unrelated lifecycle operations retain their existing contracts.
@@ -11,6 +20,7 @@ pub(super) fn admit<E: CliEnv>(
     env: &mut E,
     session_id: &str,
     expected_owner: Option<u64>,
+    explicit_pr: Option<u64>,
     out: &mut String,
 ) -> Result<Option<String>, String> {
     if execution::session_launch_route(Some(session_id)) != Some(gwt_agent::LaunchRoute::Autonomous)
@@ -46,8 +56,51 @@ pub(super) fn admit<E: CliEnv>(
         .and_then(|repo| repo.current_branch())
         .map_err(|error| error.to_string())?
         .ok_or("PR completion requires the owning branch")?;
-    let pr = env.fetch_current_pr().map_err(|error| format!("owner PR read failed: {error}"))?
-        .ok_or_else(|| format!("owner branch {branch} has no PR. Create its Ready PR through pr.create, finish CI and review repair, then retry completion."))?;
+    let candidates = env
+        .fetch_completion_pr_candidates(explicit_pr)
+        .map_err(|error| {
+            format!("owner PR read failed: {error}. Restore the read and retry completion.")
+        })?;
+    let candidates: Vec<_> = candidates
+        .iter()
+        .filter(|pr| {
+            pr.head_ref_name == branch && explicit_pr.is_none_or(|number| pr.number == number)
+        })
+        .collect();
+    let selector = format!(
+        "build.complete with params.spec:{} and params.pr:<number>",
+        owner.owner_number
+    );
+    let pr = if let Some(number) = explicit_pr {
+        candidates.first().copied().ok_or_else(|| format!("explicit PR #{number} does not belong to the execution branch/repository. Check the target and retry completion."))?
+    } else {
+        if candidates.is_empty() {
+            return Err(format!("owner branch {branch} has no PR. Create its Ready PR through pr.create, finish CI and review repair, then retry completion."));
+        }
+        let mut matching: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|pr| pr.head_sha == verified_head)
+            .collect();
+        if matching.is_empty() {
+            matching = candidates
+                .iter()
+                .copied()
+                .filter(|pr| {
+                    verification::preserves_verified_head(&worktree, verified_head, &pr.head_sha)
+                })
+                .collect();
+        }
+        if matching.len() != 1 {
+            let numbers = candidates
+                .iter()
+                .map(|pr| format!("PR #{}", pr.number))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("cannot uniquely select a completion PR for verified HEAD {verified_head}. Candidates: {numbers}. Repair an unmatched head or specify {selector}, then retry completion."));
+        }
+        matching[0]
+    };
     let snapshot = env.fetch_completion_pr(pr.number).map_err(|error| {
         format!(
             "PR #{} completion read failed: {error}. Restore the read and retry completion.",
@@ -58,6 +111,9 @@ pub(super) fn admit<E: CliEnv>(
     let refuse = |reason: &str| {
         format!("PR #{} completion refused: {reason}. The owning implementation agent must repair the PR, rerun verification when needed, and retry completion.", pr.number)
     };
+    if snapshot.head_sha != pr.head_sha {
+        return Err(refuse("PR head changed after candidate selection"));
+    }
     let validate = |snapshot: &gwt_git::pr_status::PrCompletionSnapshot| -> Result<(), String> {
         let fields = &snapshot.inventory;
         if fields.number != pr.number || fields.url != pr.url || fields.head_ref_name != branch {
@@ -239,6 +295,109 @@ mod tests {
                 inventory,
             },
         );
+    }
+
+    #[test]
+    fn autonomous_completion_selects_verified_merged_pr_before_later_open_slice() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "completion-pr-slices");
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), "completion-pr-slices");
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, gwt_git::pr_status::PrState::Merged);
+        let mut later = env.completion_prs[&9001].clone();
+        later.inventory.number = 9002;
+        later.inventory.url = "https://github.com/o/r/pull/9002".into();
+        later.head_sha = "later-unverified-slice".into();
+        later.state = gwt_git::pr_status::PrState::Open;
+        let mut pr = env.fetch_current_pr().unwrap().unwrap();
+        pr.number = 9002;
+        pr.url = later.inventory.url.clone();
+        pr.state = later.state;
+        env.seed_current_pr(Some(pr.clone()));
+        env.seed_pr(9002, pr);
+        env.completion_prs.insert(9002, later);
+        let mut out = String::new();
+        assert_eq!(
+            execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+        assert_eq!(env.completion_pr_call_log, vec![9001]);
+        assert!(env.pr_ready_call_log.is_empty());
+    }
+
+    #[test]
+    fn autonomous_completion_requires_explicit_pr_for_ambiguous_verified_head() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "completion-pr-ambiguous");
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), "completion-pr-ambiguous");
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, gwt_git::pr_status::PrState::Merged);
+        let mut duplicate = env.completion_prs[&9001].clone();
+        duplicate.inventory.number = 9002;
+        duplicate.inventory.url = "https://github.com/o/r/pull/9002".into();
+        env.completion_prs.insert(9002, duplicate);
+        let mut out = String::new();
+        let error = super::admit(
+            &mut env,
+            "completion-pr-ambiguous",
+            Some(5034),
+            None,
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("PR #9001") && error.contains("PR #9002") && error.contains("params.pr"),
+            "{error}"
+        );
+        assert!(super::admit(
+            &mut env,
+            "completion-pr-ambiguous",
+            Some(5034),
+            Some(9001),
+            &mut out
+        )
+        .unwrap()
+        .is_some());
+        env.completion_prs.get_mut(&9002).unwrap().head_sha = "unverified-head".into();
+        let error = super::admit(
+            &mut env,
+            "completion-pr-ambiguous",
+            Some(5034),
+            Some(9002),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(error.contains("PR head differs"), "{error}");
+        env.completion_prs
+            .get_mut(&9002)
+            .unwrap()
+            .inventory
+            .head_ref_name = "other-branch".into();
+        let error = super::admit(
+            &mut env,
+            "completion-pr-ambiguous",
+            Some(5034),
+            Some(9002),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(error.contains("does not belong"), "{error}");
+        assert_eq!(
+            execution::load(repo.path()).unwrap().unwrap().status,
+            execution::ExecutionControlStatus::Active
+        );
+        assert!(env.pr_ready_call_log.is_empty());
     }
 
     #[test]
@@ -425,7 +584,10 @@ mod tests {
         assert_eq!(
             super::super::build::run(
                 &mut env,
-                SkillStateAction::Complete { spec: 5034 },
+                SkillStateAction::Complete {
+                    spec: 5034,
+                    pr: None
+                },
                 &mut out
             )
             .unwrap(),
@@ -532,7 +694,10 @@ mod tests {
         let mut out = String::new();
         let code = super::super::build::run(
             &mut env,
-            SkillStateAction::Complete { spec: 5034 },
+            SkillStateAction::Complete {
+                spec: 5034,
+                pr: None,
+            },
             &mut out,
         )
         .unwrap();

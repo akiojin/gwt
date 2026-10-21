@@ -4111,6 +4111,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         alertsToasts.push(alert);
       }
 
+      const continueWorkOutcomeModel = createUiStateStore(null);
+      continueWorkOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleContinueWorkOutcome(outcome);
+      });
+
       function handleContinueWorkOutcome(event) {
         const exact = continueWorkDispatcher.handleOutcome(event);
         if (!exact) {
@@ -4147,6 +4152,39 @@ import { createUiStateStore } from "/ui-state-store.js";
         getResumeBounds: () => visibleBounds(),
         launchPending,
       });
+
+      const workspaceResumeOutcomeModel = createUiStateStore(null);
+      workspaceResumeOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleWorkspaceResumeAgentOutcome(outcome);
+      });
+
+      function handleWorkspaceResumeAgentOutcome(event) {
+        switch (event.kind) {
+          case "workspace_resume_agent_error":
+            workspaceResumePicker.handleError(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh(true);
+              }
+            }
+            break;
+          // Backend accepted the request: settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            workspaceResumePicker.handleStarted(event);
+            launchPending.settleAck(event);
+            scheduleKnowledgeRelatedWorkRefresh(true);
+            break;
+        }
+      }
 
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface
       // (branch list state map, branch rows/list rendering, cleanup modal
@@ -5082,10 +5120,43 @@ import { createUiStateStore } from "/ui-state-store.js";
         },
       });
 
+      const projectOpenErrorModel = createUiStateStore(null);
+      projectOpenErrorModel.subscribe(error => error, error => {
+        if (!error) return;
+        applyProjectOpenReceiveEvent(error);
+        projectError = error.message;
+        frontendUnits.projectWorkspaceShell.renderProjectPicker();
+        frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
+          frontendUnits.projectWorkspaceShell.activeProjectTab(),
+        );
+      });
+
+      const workAdvisoryResultModel = createUiStateStore(null);
+      workAdvisoryResultModel.subscribe(event => event, event => {
+        if (event) applyWorkAdvisoryResultEvent(event);
+      });
+
       const projectNotificationModel = createUiStateStore(null);
       projectNotificationModel.subscribe(notice => notice, notice => {
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
+
+      const workspaceProjectionPruneModel = createUiStateStore(null);
+      function renderWorkspaceProjectionPruneFeedback(feedback) {
+        if (!feedback) return;
+        if (feedback.kind === "workspace_projection_prune_error") {
+          window.alert(`Work Projection Prune error: ${feedback.message}`);
+          return;
+        }
+        const modeLabel = feedback.mode === "dry_run" ? "dry-run" : "applied";
+        window.alert(
+          `Work Projection Prune (${modeLabel})\n` +
+            `  archived: ${feedback.archived}\n` +
+            `  deleted: ${feedback.deleted}\n` +
+            `  skipped: ${feedback.skipped}`,
+        );
+      }
+      workspaceProjectionPruneModel.subscribe(feedback => feedback, renderWorkspaceProjectionPruneFeedback);
 
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
@@ -5249,6 +5320,11 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
       activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
 
+      const remoteStartWorkBranchesModel = createUiStateStore(null);
+      remoteStartWorkBranchesModel.subscribe(state => state, snapshot => {
+        if (snapshot) workspaceOverviewSurface.applyRemoteStartWorkBranches(snapshot);
+      });
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5293,23 +5369,14 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "workspace_projection_prune_result": {
-            // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
-            // A richer Drawer surface lands in a follow-up; for now an alert
-            // keeps the loop closed so users see the count summary.
-            const modeLabel =
-              event.mode === "dry_run" ? "dry-run" : "applied";
-            window.alert(
-              `Work Projection Prune (${modeLabel})\n` +
-                `  archived: ${event.archived}\n` +
-                `  deleted: ${event.deleted}\n` +
-                `  skipped: ${event.skipped}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({
+              kind: event.kind, mode: event.mode, archived: event.archived,
+              deleted: event.deleted, skipped: event.skipped,
+            }));
             break;
           }
           case "workspace_projection_prune_error":
-            window.alert(
-              `Work Projection Prune error: ${event.message}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({ kind: event.kind, message: event.message }));
             break;
           case "ui_trace_saved":
           case "ui_trace_error":
@@ -5490,12 +5557,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyKnowledgeReceiveEvent(event);
             break;
           case "project_open_error":
-            applyProjectOpenReceiveEvent(event);
-            projectError = event.message;
-            frontendUnits.projectWorkspaceShell.renderProjectPicker();
-            frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
-              frontendUnits.projectWorkspaceShell.activeProjectTab(),
-            );
+            projectOpenErrorModel.update(() => ({
+              kind: event.kind, request_id: event.request_id, message: event.message,
+            }));
             break;
           case "project_opened":
             applyProjectOpenReceiveEvent(event);
@@ -5530,34 +5594,14 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
           case "remote_start_work_branches":
-            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
+            remoteStartWorkBranchesModel.update(() => ({ ...event }));
             break;
           case "continue_work_outcome":
-            handleContinueWorkOutcome(event);
+            continueWorkOutcomeModel.update(() => ({ ...event }));
             break;
           case "workspace_resume_agent_error":
-            workspaceResumePicker.handleError(event);
-            {
-              const settled = launchPending.settleAck(event);
-              if (settled) {
-                alertsToasts.push({
-                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
-                  level: "error",
-                  title: "Resume failed",
-                  message: event?.message || "Failed to resume the selected session.",
-                  dismissible: true,
-                  timeoutMs: 0,
-                });
-                scheduleKnowledgeRelatedWorkRefresh(true);
-              }
-            }
-            break;
-          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
-          // accepted — settle pending UI and dismiss the picker.
           case "workspace_resume_agent_started":
-            workspaceResumePicker.handleStarted(event);
-            launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh(true);
+            workspaceResumeOutcomeModel.update(() => ({ ...event }));
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -5568,7 +5612,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan
             // Agent work-registration prompt.
-            applyWorkAdvisoryResultEvent(event);
+            workAdvisoryResultModel.update(() => ({ ...event }));
             break;
           case "runtime_hook_event":
             runtimeHookModel.update(() => ({

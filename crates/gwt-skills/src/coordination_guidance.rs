@@ -29,10 +29,21 @@ pub const SKILL_NAME: &str = "gwt-coordination";
 /// gwt-managed worktree, independent of project documentation.
 pub const SKILL_DESCRIPTION: &str = "Use at the start of a gwt-managed session and when coordinating Board or Work updates, regardless of project AGENTS.md / CLAUDE.md content.";
 
+// Keep the first operation shared by the startup command and identity gate.
+macro_rules! pane_name_first_action_operation {
+    () => {
+        "pane.name"
+    };
+}
+
+/// Startup operation admitted before an Agent has set its Workspace identity.
+pub const PANE_NAME_FIRST_ACTION_OPERATION: &str = pane_name_first_action_operation!();
+
 // Expand the same literal into the generated skill and the hook reminder.
 macro_rules! pane_name_first_action_guidance {
     () => {
-        r#"## Agent name — first action
+        concat!(
+            r#"## Agent name — first action
 
 For every new non-PM Agent, your first action must read your own window's name
 before responding to the user or starting normal work.
@@ -40,7 +51,9 @@ gwt assigns a random, project-unique name in the project's output language
 when the window starts. Do not invent or submit an AI-generated candidate.
 
     gwtd <<'JSON'
-    {"schema_version":1,"operation":"pane.name","params":{}}
+    {"schema_version":1,"operation":""#,
+            pane_name_first_action_operation!(),
+            r#"","params":{}}
     JSON
 
 Use the exact assigned name returned by `pane.name` in reports and handoffs,
@@ -49,6 +62,7 @@ retrying returns that existing name without renaming it.
 
 The PM is exempt: do not call `pane.name` from the PM window.
 "#
+        )
     };
 }
 

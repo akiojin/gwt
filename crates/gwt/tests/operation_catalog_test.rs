@@ -39,9 +39,9 @@ fn suggestions_resolve_a_plain_typo() {
 /// does have.
 #[test]
 fn an_invented_name_falls_back_to_the_namespace_listing() {
-    let message = operation_catalog::unknown_subcommand_message("pr.merge");
+    let message = operation_catalog::unknown_subcommand_message("pr.nonexistent_operation");
     assert!(
-        message.starts_with("unknown subcommand: pr.merge"),
+        message.starts_with("unknown subcommand: pr.nonexistent_operation"),
         "the existing wording must open the message: {message}"
     );
     assert!(
@@ -49,7 +49,7 @@ fn an_invented_name_falls_back_to_the_namespace_listing() {
         "the message must list the pr. namespace: {message}"
     );
     assert!(
-        !message.contains("`pr.merge`"),
+        !message.contains("`pr.nonexistent_operation`"),
         "the unknown name must not be offered back as an option: {message}"
     );
 }

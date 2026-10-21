@@ -38,6 +38,7 @@ fn explicit_update_handoff_overtakes_eight_panes_output_backlog() {
                 incarnation: 1,
                 data: b"redraw".to_vec(),
                 seq: 1,
+                screen: None,
             })
             .unwrap();
     }

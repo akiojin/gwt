@@ -56,7 +56,9 @@ pub mod cancellation;
 pub mod continuation;
 pub mod driver;
 pub mod headed_e2e;
+pub(crate) mod interactive_process;
 pub mod interruption;
+pub mod measurement;
 pub mod nextest;
 pub mod wire;
 
@@ -107,6 +109,9 @@ pub struct VerificationCommandResult {
     pub terminated_by_signal: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<CommandAdmission>,
+    /// Native Job/CPU observations for performance commands (#5816).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<measurement::Evidence>,
 }
 
 /// The signal that ended a process, when one did (Issue #4528).
@@ -129,13 +134,20 @@ pub(crate) struct RunOutcomeCounts {
     pub passed: usize,
     pub failed: usize,
     pub interrupted: usize,
+    pub environment_incompatible: usize,
 }
 
 impl RunOutcomeCounts {
     pub(crate) fn of(commands: &[VerificationCommandResult]) -> Self {
         let mut counts = Self::default();
         for command in commands {
-            if command.terminated_by_signal.is_some() {
+            if command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                counts.environment_incompatible += 1;
+            } else if command.terminated_by_signal.is_some() {
                 counts.interrupted += 1;
             } else if command.exit_code == 0 {
                 counts.passed += 1;
@@ -147,10 +159,17 @@ impl RunOutcomeCounts {
     }
 
     pub(crate) fn summary(&self) -> String {
-        format!(
+        let mut summary = format!(
             "verify: outcome — {} passed, {} failed, {} interrupted by external signal\n",
             self.passed, self.failed, self.interrupted
-        )
+        );
+        if self.environment_incompatible > 0 {
+            summary.push_str(&format!(
+                "verify: {} environment incompatible\n",
+                self.environment_incompatible
+            ));
+        }
+        summary
     }
 }
 
@@ -163,7 +182,9 @@ pub(crate) fn run_status_label(
     commands: &[VerificationCommandResult],
 ) -> &'static str {
     let counts = RunOutcomeCounts::of(commands);
-    if all_passed {
+    if counts.environment_incompatible > 0 && counts.failed == 0 {
+        "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed {
         "PASS"
     } else if quarantined {
         "QUARANTINED"
@@ -3250,23 +3271,21 @@ const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 /// reproduce: a command that passes in the terminal but fails under
 /// `verify.run` reads as a real RED and sends its owner after a bug that is
 /// not there.
-fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
-    vec![
+fn child_environment_contract() -> Vec<(String, Option<String>)> {
+    let mut environment = vec![
         // Live GitHub opt-in must never cross the child boundary (SPEC #4093
         // FR-008, Issue #3850): a `cargo test` child that inherits it spends
         // the real budget from every fixture-free test.
-        (LIVE_GITHUB_OPT_IN_ENV, None),
-        // A test that fetches an unreachable remote makes Windows'
-        // `git-credential-manager` ask for input, and a child with no console
-        // waits on that prompt forever — taking the host-wide verification
-        // lease down with it (#4182 AC-7). GitHub's runners set this for
-        // every step, which is precisely why CI never sees the hang.
-        ("GIT_TERMINAL_PROMPT", Some("0")),
-        // Git's terminal flag does not disable GCM's GUI authentication.
-        // GCM detects required interaction and returns an error with this
-        // setting instead of keeping verification's lease indefinitely (#4425).
-        ("GCM_INTERACTIVE", Some("false")),
-    ]
+        (LIVE_GITHUB_OPT_IN_ENV.to_string(), None),
+    ];
+    // Share the test defaults with both inherited and daemon-hosted children.
+    // Terminal suppression alone does not disable credential helpers or GCM.
+    environment.extend(
+        gwt_core::process::noninteractive_git_environment()
+            .into_iter()
+            .map(|(key, value)| (key, Some(value))),
+    );
+    environment
 }
 
 fn apply_child_environment_contract(process: &mut std::process::Command) {
@@ -3292,10 +3311,10 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
     for (key, value) in child_environment_contract() {
         match value {
             Some(value) => {
-                env.insert(key.to_string(), value.to_string());
+                env.insert(key, value);
             }
             None => {
-                env.remove(key);
+                env.remove(&key);
             }
         }
     }
@@ -3782,34 +3801,35 @@ fn execute_inherited_command_cancellable(
             .stderr(fs::File::create(&stderr)?);
         let stdout_reader = fs::File::open(stdout)?;
         let stderr_reader = fs::File::open(stderr)?;
-        let mut spawned =
-            InheritedVerificationChild::spawn(process, timeout.is_some() || check.is_some())?;
+        let mut spawned = InheritedVerificationChild::spawn(process)?;
         let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
-        let (status, timed_out) = spawned.wait_cancellable(timeout, &mut now, check)?;
+        let (status, stopped) = spawned.wait_cancellable(timeout, &mut now, check)?;
         let output = std::process::Output {
             status,
             stdout: captured_output_snapshot(&stdout_reader),
             stderr: captured_output_snapshot(&stderr_reader),
         };
-        Ok((output, spawned.spawned.priority.clone(), timed_out))
+        Ok((output, spawned.spawned.priority.clone(), stopped))
     })();
     let output = match output {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::Interrupted => return Err(err.to_string()),
         Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
     };
-    let (output, priority, timed_out) = output;
-    let (exit_code, signal, mut tail) = if timed_out {
-        command_timeout_result(
+    let (output, priority, stopped) = output;
+    let (exit_code, signal, mut tail) = match stopped {
+        Some(InheritedCommandStop::TimedOut) => command_timeout_result(
             command,
             timeout.expect("a timed-out command has a deadline"),
-        )
-    } else {
-        (
+        ),
+        Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)) => {
+            interactive_authentication_result(&diagnostic)
+        }
+        None => (
             output.status.code().unwrap_or(-1),
             terminating_signal(output.status),
             String::new(),
-        )
+        ),
     };
     if !priority.restored {
         tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
@@ -3822,57 +3842,54 @@ fn execute_inherited_command_cancellable(
     Ok((exit_code, signal, tail, output_streams))
 }
 
-/// A bounded child owns its group/Job before any descendants can run.
+/// Every verification child owns its group/Job before descendants can run.
 struct InheritedVerificationChild {
     spawned: gwt_core::process_tree::NormalPriorityChild,
-    bounded: bool,
     reaped: bool,
     #[cfg(windows)]
     job: Option<gwt_core::process_tree::WindowsJobObject>,
 }
 
+enum InheritedCommandStop {
+    TimedOut,
+    InteractiveAuthentication(String),
+}
+
 impl InheritedVerificationChild {
-    fn spawn(process: &mut std::process::Command, bounded: bool) -> io::Result<Self> {
+    fn spawn(process: &mut std::process::Command) -> io::Result<Self> {
         #[cfg(unix)]
-        if bounded {
+        {
             use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
         #[cfg(windows)]
-        let mut job = if bounded {
+        let (spawned, job) = {
             use std::os::windows::process::CommandExt;
-            let job = gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
+            let mut job =
+                gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
             process.creation_flags(
                 gwt_core::process_tree::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS
                     | gwt_core::process_tree::WINDOWS_NORMAL_PRIORITY_CLASS,
             );
-            Some(job)
-        } else {
-            None
-        };
-        #[cfg(windows)]
-        let spawned = if let Some(job) = &mut job {
             let mut child = process.spawn()?;
             if let Err(error) = job.assign_and_resume(child.id()) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(io::Error::other(error));
             }
-            gwt_core::process_tree::NormalPriorityChild {
+            let spawned = gwt_core::process_tree::NormalPriorityChild {
                 child,
                 priority: gwt_core::process_tree::ChildPriorityReport {
                     restored: true,
                     detail: "normal priority class".to_string(),
                 },
-            }
-        } else {
-            gwt_core::process_tree::spawn_at_normal_priority(process)?
+            };
+            (spawned, Some(job))
         };
         #[cfg(not(windows))]
         let spawned = gwt_core::process_tree::spawn_at_normal_priority(process)?;
         Ok(Self {
             spawned,
-            bounded,
             reaped: false,
             #[cfg(windows)]
             job,
@@ -3884,12 +3901,18 @@ impl InheritedVerificationChild {
         timeout: Option<std::time::Duration>,
         now: &mut impl FnMut() -> std::time::Instant,
         check: Option<&CancellationCheck<'_>>,
-    ) -> io::Result<(std::process::ExitStatus, bool)> {
-        if timeout.is_none() && check.is_none() {
-            let status = self.spawned.child.wait()?;
-            self.reaped = true;
-            return Ok((status, false));
-        }
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
+        let mut detector = interactive_process::InteractiveProcessDetector::default();
+        self.wait_cancellable_with_detector(timeout, now, check, &mut |pid| detector.detect(pid))
+    }
+
+    fn wait_cancellable_with_detector(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
+        detect: &mut impl FnMut(u32) -> Option<String>,
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
         let deadline = timeout.map(|timeout| now() + timeout);
         loop {
             if let Err(error) = check_cancellation(check) {
@@ -3897,6 +3920,15 @@ impl InheritedVerificationChild {
                 let _ = self.spawned.child.wait();
                 self.reaped = true;
                 return Err(io::Error::new(io::ErrorKind::Interrupted, error));
+            }
+            if let Some(diagnostic) = detect(self.spawned.child.id()) {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((
+                    status,
+                    Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)),
+                ));
             }
             #[cfg(unix)]
             let completed = if self.exited_without_reaping()? {
@@ -3911,13 +3943,13 @@ impl InheritedVerificationChild {
             let completed = self.spawned.child.try_wait()?;
             if let Some(status) = completed {
                 self.reaped = true;
-                return Ok((status, false));
+                return Ok((status, None));
             }
             if deadline.is_some_and(|deadline| now() >= deadline) {
                 self.reclaim();
                 let status = self.spawned.child.wait()?;
                 self.reaped = true;
-                return Ok((status, true));
+                return Ok((status, Some(InheritedCommandStop::TimedOut)));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -3967,7 +3999,7 @@ impl InheritedVerificationChild {
 
 impl Drop for InheritedVerificationChild {
     fn drop(&mut self) {
-        if self.bounded && !self.reaped {
+        if !self.reaped {
             self.reclaim();
             let _ = self.spawned.child.wait();
         }
@@ -3987,6 +4019,14 @@ fn command_timeout_result(
         .as_bytes(),
     );
     (124, None, format!("--- timeout ---\n{diagnostic}\n"))
+}
+
+fn interactive_authentication_result(diagnostic: &str) -> (i32, Option<i32>, String) {
+    (
+        1,
+        None,
+        format!("--- interactive authentication ---\n{diagnostic}\n"),
+    )
 }
 
 fn captured_output_snapshot(file: &fs::File) -> Vec<u8> {
@@ -4089,6 +4129,10 @@ fn execute_command_on_daemon(
             (exit_code, signal, tail, Vec::new())
         }
         // Keep partial output on errors too; never retry in the caller's tree.
+        Err(DelegatedRunError::InteractiveAuthentication(diagnostic)) => {
+            let (exit_code, signal, tail) = interactive_authentication_result(&diagnostic);
+            (exit_code, signal, tail, Vec::new())
+        }
         Err(DelegatedRunError::Failed(error)) => {
             spawn_failure_result(output_worktree, command, &error)?
         }
@@ -4887,26 +4931,69 @@ where
                 .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
                 .unwrap_or(Ok(false))
         };
-        let executed = execute_command_cancellable(
-            worktree,
-            &execution_command,
-            false,
-            capture.as_ref(),
-            &options.host,
-            admission
+        // Only canonical headed commands imply performance verification;
+        // low-level reporter fixtures have no authoritative caller. Explicit
+        // performance assignments also work for non-browser commands.
+        let measurement_capture = measurement::Capture::prepare(
+            command,
+            capture.is_some() && authority.is_some(),
+            command_admission
                 .as_ref()
-                .map(|granted| granted.command_progress())
-                .or(options.command_progress),
-            options
-                .attempt
-                .map(|_| &check_cancelled as &CancellationCheck<'_>),
+                .map_or(0, |admission| admission.queue_wait_ms),
         );
+        let measurement_ready = measurement_capture
+            .as_ref()
+            .is_none_or(|capture| capture.ready());
+        let executed = if measurement_ready {
+            execute_command_cancellable(
+                worktree,
+                &execution_command,
+                false,
+                capture.as_ref(),
+                &options.host,
+                admission
+                    .as_ref()
+                    .map(|granted| granted.command_progress())
+                    .or(options.command_progress),
+                options
+                    .attempt
+                    .map(|_| &check_cancelled as &CancellationCheck<'_>),
+            )
+        } else {
+            Ok((
+                125,
+                None,
+                measurement_capture
+                    .as_ref()
+                    .expect("incompatible environment")
+                    .diagnostic(),
+                Vec::new(),
+            ))
+        };
         if let Some(granted) = &admission {
             granted.publish_progress(1, 1, command_started.elapsed());
         }
-        // Release before processing evidence or admitting the next command.
+        let (mut exit_code, terminated_by_signal, mut tail, mut output_streams) = executed?;
+        let measurement = measurement_capture
+            .map(|capture| capture.finish(measurement_ready.then_some(exit_code)));
+        // The observer's last native readback precedes release/restoration.
         drop(admission);
-        let (mut exit_code, terminated_by_signal, mut tail, output_streams) = executed?;
+        if let Some(evidence) = &measurement {
+            let json = serde_json::to_vec_pretty(evidence).map_err(|error| error.to_string())?;
+            let (diagnostic, streams) = render_streams(Some(worktree), &[("measurement", &json)])?;
+            tail.push_str(&diagnostic);
+            output_streams.extend(streams);
+            if evidence.incompatible() {
+                tail.push_str(&format!(
+                    "\nENVIRONMENT_INCOMPATIBLE: {}\n",
+                    evidence
+                        .reason
+                        .as_deref()
+                        .unwrap_or("measurement environment is unreadable")
+                ));
+                exit_code = 125;
+            }
+        }
         let nextest = nextest_capture
             .as_ref()
             .and_then(|capture| match capture.evidence() {
@@ -4957,8 +5044,12 @@ where
             )),
             None => transcript.push_str(&format!("exit: {exit_code}\n")),
         }
+        let environment_incompatible = measurement
+            .as_ref()
+            .is_some_and(measurement::Evidence::incompatible);
         results.push(VerificationCommandResult {
             admission: command_admission,
+            measurement,
             command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
@@ -4969,7 +5060,8 @@ where
         });
         // A failure a plan-bound quarantine may still waive keeps the matrix
         // going; its verdict is decided after every command has run.
-        let quarantine_candidate = terminated_by_signal.is_none()
+        let quarantine_candidate = !environment_incompatible
+            && terminated_by_signal.is_none()
             && prepared_quarantines.iter().any(|prepared| {
                 prepared.request.failed_command == *command
                     && plan_snapshot
@@ -5030,6 +5122,14 @@ where
         let merge_base_sha = crate::cli::verify_derivation::integration_merge_base(worktree)
             .ok_or_else(|| "integration merge-base is unavailable".to_string());
         for result in results.iter().filter(|result| result.exit_code != 0) {
+            if result
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                transcript.push_str("quarantine: measurement environment is incompatible; repair the environment and rerun instead\n");
+                continue;
+            }
             // Issue #4528: a killed run's output is cut short, so it cannot
             // be read as a verdict about one test.
             if let Some(signal) = result.terminated_by_signal {
@@ -5860,7 +5960,14 @@ fn evaluate_evidence_snapshot_inner(
     }
     // Issue #5094: commands skipped after a raw FAIL never ran, so neither
     // quarantine nor Board adjudication can turn the run into evidence.
-    if !record.skipped_after_failure.is_empty() {
+    if !record.skipped_after_failure.is_empty()
+        || record.commands.iter().any(|command| {
+            command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+        })
+    {
         return EvidenceStatus::Failing;
     }
     let has_typed_quarantine = if record.all_passed {
@@ -7251,6 +7358,7 @@ pub(crate) mod tests {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,
@@ -8156,6 +8264,65 @@ pub(crate) mod tests {
                 Some(Duration::from_secs(60))
             );
         }
+    }
+
+    #[test]
+    fn inherited_interactive_authentication_reclaims_only_its_command_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = InheritedVerificationChild::spawn(&mut process).unwrap();
+        let child_pid = child.spawned.child.id();
+        let mut detected_pid = None;
+        let (_, stopped) = child
+            .wait_cancellable_with_detector(None, &mut Instant::now, None, &mut |pid| {
+                if !root.join("ready").exists() {
+                    return None;
+                }
+                detected_pid = Some(pid);
+                Some("interactive authentication fixture".to_string())
+            })
+            .unwrap();
+        let unrelated_survived = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild_pid = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline OS process reclamation has no completion event available to this fixture.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline Observe actual process death; this does not decide the command timeout.
+        while crate::process::is_process_alive(grandchild_pid) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(detected_pid, Some(child_pid));
+        assert!(
+            matches!(stopped, Some(InheritedCommandStop::InteractiveAuthentication(message))
+            if message == "interactive authentication fixture")
+        );
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(
+            unrelated_survived,
+            "only the owned command tree may be reclaimed"
+        );
     }
 
     #[test]
@@ -9116,8 +9283,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             fs::write(directory.join("released"), "done").unwrap();
             return;
         }
-        // The fixture intentionally exits first; the parent test releases
-        // the grandchild after it observes the verification result.
+        // Exit while the grandchild holds output. The runner owns its tree;
+        // the parent test also has a release fallback for a broken runner.
         #[allow(clippy::zombie_processes)]
         let _grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
             .args([
@@ -9162,15 +9329,8 @@ fn default_integration_test_builds_a_guarded_binary() {
         let result = receiver.recv_timeout(std::time::Duration::from_secs(45));
         fs::write(directory.path().join("release"), "release").unwrap();
         runner.join().unwrap();
-        // Keep the release file alive until the grandchild has observed it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !directory.path().join("released").exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "grandchild did not release"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        // Successful completion reclaims the grandchild, so it need not
+        // survive long enough to acknowledge the fallback release file.
         let (record, transcript) = result
             .expect("verification must finish without waiting for grandchild output EOF")
             .unwrap();
@@ -9261,6 +9421,7 @@ fn default_integration_test_builds_a_guarded_binary() {
     fn run_status_separates_interruption_from_failure() {
         let result = |exit_code, terminated_by_signal| VerificationCommandResult {
             admission: None,
+            measurement: None,
             command: "cmd".to_string(),
             exit_code,
             output_tail: String::new(),
@@ -9280,6 +9441,52 @@ fn default_integration_test_builds_a_guarded_binary() {
             RunOutcomeCounts::of(&mixed).summary(),
             "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
         );
+    }
+
+    #[test]
+    fn performance_environment_is_not_reported_as_a_product_failure() {
+        let result: VerificationCommandResult = serde_json::from_value(serde_json::json!({
+            "command": "GWT_VERIFY_PERFORMANCE=1 git --version",
+            "exit_code": 125,
+            "measurement": {
+                "status": "environment_incompatible",
+                "reason": "ancestor Job remains capped at 8%",
+                "admission_wait_ms": 100,
+                "cap_relief_wait_ms": 15000,
+                "raw_exit_code": null,
+                "targets": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            run_status_label(false, false, std::slice::from_ref(&result)),
+            "ENVIRONMENT_INCOMPATIBLE"
+        );
+        assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
+    }
+
+    #[test]
+    fn performance_commands_persist_pid_and_environment_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let command = "GWT_VERIFY_PERFORMANCE=1 git --version".to_string();
+        let (record, _) = run_verification(dir.path(), "sess-measurement", &[command]).unwrap();
+        let value = serde_json::to_value(&record.commands[0]).unwrap();
+        let measurement = &value["measurement"];
+        assert!(measurement.is_object(), "{value}");
+        assert!(measurement["cap_relief_wait_ms"].is_u64());
+        assert!(measurement["admission_wait_ms"].is_u64());
+        assert_eq!(measurement["targets"][0]["pid"], std::process::id());
+        assert!(measurement["targets"][0]["cpu_time_ms"].is_u64());
+        assert!(measurement["targets"][0]["job_caps"].is_array());
+        #[cfg(not(windows))]
+        assert!(
+            record.all_passed,
+            "an uncapped performance command must remain valid"
+        );
+        let saved = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&saved));
+        assert_eq!(serde_json::to_value(&saved.commands[0]).unwrap(), value);
     }
 
     /// Issue #4528 AC-1/AC-3: the lease a heavy run was admitted under is part
@@ -9358,6 +9565,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,
@@ -9404,7 +9612,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
-            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("false"));
+            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("never"));
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9442,12 +9650,21 @@ fn default_integration_test_builds_a_guarded_binary() {
     // hangs on it again.
     #[test]
     fn verify_run_child_environment_contract_is_declared_in_one_place() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
         assert_eq!(
-            child_environment_contract(),
+            child_environment_contract()
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_deref()))
+                .collect::<Vec<_>>(),
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
-                ("GCM_INTERACTIVE", Some("false")),
+                ("GIT_ASKPASS", Some("")),
+                ("GCM_INTERACTIVE", Some("never")),
+                ("GIT_CONFIG_PARAMETERS", Some("'credential.helper='")),
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
@@ -9476,11 +9693,120 @@ fn default_integration_test_builds_a_guarded_binary() {
                 .get_envs()
                 .find(|(key, _)| *key == std::ffi::OsStr::new("GCM_INTERACTIVE"))
                 .map(|(_, value)| value),
-            Some(Some(std::ffi::OsStr::new("false"))),
+            Some(Some(std::ffi::OsStr::new("never"))),
             "credential manager must fail instead of opening a GUI or TTY prompt"
         );
         assert!(resolved_child_environment(false)
-            .contains(&("GCM_INTERACTIVE".to_string(), "false".to_string())));
+            .contains(&("GCM_INTERACTIVE".to_string(), "never".to_string())));
+    }
+
+    #[test]
+    fn verify_run_fake_remote_fetch_fails_without_invoking_credentials() {
+        use std::io::{Read, Write};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-invoked");
+        let askpass_marker = dir.path().join("askpass-invoked");
+        let askpass = dir.path().join("fixture-askpass");
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho invoked > '{}'\n",
+                askpass_marker.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _askpass = ScopedEnvVar::set("GIT_ASKPASS", &askpass);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(gwt_core::deadline_budget::HANG_GUARD))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        // A helper that records its invocation without risking a real prompt.
+        let helper = format!(
+            "!echo invoked > '{}'",
+            marker.to_string_lossy().replace('\\', "/")
+        );
+        // Git -c settings inherited through hooks outrank GIT_CONFIG_COUNT.
+        let _parameters = ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            format!(
+                "'credential.helper={}'",
+                helper.replace('\\', "\\\\").replace('\'', "'\\''")
+            ),
+        );
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["config", "credential.helper", &helper])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let command = format!("git -c http.proxy= fetch http://{address}/missing.git");
+        let mut process = gwt_core::process::hidden_command("git");
+        apply_child_environment_contract(&mut process);
+        process
+            .args([
+                "-c",
+                "http.proxy=",
+                "fetch",
+                &format!("http://{address}/missing.git"),
+            ])
+            .current_dir(dir.path());
+        let result = execute_inherited_command(
+            &mut process,
+            dir.path(),
+            &command,
+            Some(std::time::Duration::from_secs(30)),
+            None,
+            None,
+            std::time::Instant::now,
+        );
+        // Wake accept if Git failed before connecting; the request assertion
+        // then reports that failure instead of leaving the fixture waiting.
+        let _ = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1));
+        server.join().unwrap();
+        let (exit_code, signal, transcript, _) = result.unwrap();
+        assert_ne!(exit_code, 0, "{transcript}");
+        assert_eq!(signal, None, "{transcript}");
+        assert!(
+            transcript.contains("terminal prompts disabled"),
+            "{transcript}"
+        );
+        assert!(!transcript.contains("timed out"), "{transcript}");
+        assert!(
+            !marker.exists(),
+            "credential helper was invoked: {transcript}"
+        );
+        assert!(
+            !askpass_marker.exists(),
+            "inherited askpass was invoked: {transcript}"
+        );
     }
 
     // record is written even when a command fails.

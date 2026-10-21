@@ -16722,7 +16722,7 @@ fn run_impl<E: CliEnv>(
                     .map(|record| record.owner_number),
             );
             let mut expected_verification_hash =
-                match super::completion_pr::admit(env, &session_id, None, out) {
+                match super::completion_pr::admit(env, &session_id, None, None, out) {
                     Ok(hash) => hash,
                     Err(reason) => {
                         out.push_str(&format!("execution: completion refused — {reason}\n"));
@@ -33734,7 +33734,7 @@ exit 1
                 let mut env = TestEnv::new(repo.to_path_buf());
                 run_collect(
                     &mut env,
-                    CliCommand::Build(crate::cli::SkillStateAction::Complete { spec }),
+                    CliCommand::Build(crate::cli::SkillStateAction::Complete { spec, pr: None }),
                 )
                 .unwrap()
             };
