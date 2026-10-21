@@ -801,6 +801,13 @@ dates with the scan's UTC calendar date, returning zero before or on the review 
 Missing or invalid inputs leave the count unknown with named missing inputs. It uses
 no current clock; source, scan age and coverage limits still apply. Days past a review
 date do not establish whether a review occurred or authorize action.
+`policy.risks` lists saved risk IDs in order and names blank or whitespace-only
+`id`, `severity`, `probability`, `impact` and `owner` in `missing_inputs`.
+Repeated nonblank exact IDs add `unique_risk_id`; case and surrounding whitespace
+remain significant for identity. Nonblank values remain opaque, and assumptions
+are optional. These diagnostics need no Monitor snapshot and leave review-date
+observations unchanged. Complete metadata does not establish a valid risk assessment
+or authorize action.
 `policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
 timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
 fractional seconds: it is true at or after `next_run` and false before it. Missing or
