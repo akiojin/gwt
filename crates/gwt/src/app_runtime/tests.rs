@@ -1729,6 +1729,7 @@ fn sample_runtime_with_events(
         provider_quota_holds: HashMap::new(),
         provider_quota_candidates: HashMap::new(),
         provider_api_error_holds: HashMap::new(),
+        provider_capacity_resumes: HashMap::new(),
         released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),

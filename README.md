@@ -609,6 +609,14 @@ All operations accept an optional
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
 
+If an autonomous Monitor-launched Codex session ends a turn with “Selected model
+is at capacity”, gwt waits at least 60 seconds, then submits one continuation
+prompt to the same active session. Each session gets at most one automatic
+attempt while the gwt instance remains running. Recovery, manual input,
+approval or quota waits, and a replaced or
+settled session prevent the send. The existing PM notification remains available
+if the attempt fails; manually launched sessions are left for their operator.
+
 Automatic profile selection is opt-in with `issue.monitor.tiers.set` and
 `{"auto":true}`. It supplies three tiers without requiring a profile pool:
 Codex Luna / Claude Haiku, Codex Sol / Claude Sonnet, then Codex Astra / Claude
@@ -808,6 +816,20 @@ remain significant for identity. Nonblank values remain opaque, and assumptions
 are optional. These diagnostics need no Monitor snapshot and leave review-date
 observations unchanged. Complete metadata does not establish a valid risk assessment
 or authorize action.
+`policy.decisions` lists saved decision IDs in order and names blank or whitespace-only
+`id`, `rationale` and `owner` in `missing_inputs`. It names `options` when the list
+has no nonblank entry. Repeated nonblank exact IDs add `unique_decision_id`; case and
+surrounding whitespace remain significant for identity. Values remain opaque,
+assumptions and `source_revision` are optional, and review dates remain in
+`policy.review_dates`. These diagnostics need no Monitor snapshot. Complete metadata
+does not establish decision quality, approval or action permission.
+`policy.decision_revisions` preserves every saved decision ID and `source_revision`
+in order. `revisions_since_source` is the nonnegative numeric difference from
+`planning_revision`, including zero. An absent source leaves the difference null
+with `source_revision` in `missing_inputs`; a source ahead of planning leaves it
+null with `source_revision_ahead_of_planning`. This observation needs no Monitor
+snapshot and keeps `source_revision` optional. A revision difference does not prove
+changed decision inputs, freshness, quality, approval or action permission.
 `policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
 timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
 fractional seconds: it is true at or after `next_run` and false before it. Missing or
