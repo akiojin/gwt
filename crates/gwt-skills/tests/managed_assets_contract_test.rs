@@ -285,7 +285,21 @@ fn feedback_skill_distributes_valid_requests_to_both_agents() {
         .expect("feedback command must be distributed");
     assert!(command.contains(".claude/skills/gwt-feedback/SKILL.md"));
 
-    let examples: Vec<serde_json::Value> = embedded
+    let workflow = gwt_skills::assets::CLAUDE_SKILLS
+        .get_file("gwt-feedback/references/reporting.md")
+        .expect("feedback reporting reference must be bundled")
+        .contents_utf8()
+        .unwrap();
+    for provider in [".claude", ".codex"] {
+        assert_eq!(
+            fs::read_to_string(dir.path().join(format!(
+                "{provider}/skills/gwt-feedback/references/reporting.md"
+            )))
+            .unwrap(),
+            workflow
+        );
+    }
+    let examples: Vec<serde_json::Value> = workflow
         .split("```json\n")
         .skip(1)
         .map(|block| serde_json::from_str(block.split("```").next().unwrap()).unwrap())
@@ -338,7 +352,15 @@ fn feedback_guidance_is_generated_without_the_pm_only_route() {
     for provider in [".claude", ".codex"] {
         let relative = format!("{provider}/skills/gwt-coordination/SKILL.md");
         let generated = fs::read_to_string(dir.path().join(&relative)).unwrap();
-        assert_eq!(generated, render_skill_md());
+        assert_eq!(
+            generated,
+            render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode)
+        );
+        let board = fs::read_to_string(dir.path().join(format!(
+            "{provider}/skills/gwt-coordination/references/board.md"
+        )))
+        .unwrap();
+        assert!(board.contains("`feedback.create`") && board.contains("`gwt-feedback`"));
         generated_copies.push(generated);
     }
     assert_eq!(generated_copies[0], generated_copies[1]);

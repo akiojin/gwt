@@ -268,11 +268,50 @@ pub(super) fn send_to_upstream(
     )
 }
 
+fn acquire_upstream_lock(
+    deadline: &ResolutionDeadline,
+) -> Result<std::fs::File, OwnerMutationError> {
+    use gwt_github::client::ApiError;
+
+    let failure = |error: io::Error| {
+        OwnerMutationError::PreSubmit(ApiError::Unexpected(format!(
+            "feedback upstream lock failed: {error}"
+        )))
+    };
+    let dir = gwt_core::paths::gwt_home();
+    std::fs::create_dir_all(&dir).map_err(failure)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("feedback-upstream.lock"))
+        .map_err(failure)?;
+    loop {
+        let remaining = deadline
+            .remaining("acquire feedback upstream lock")
+            .map_err(OwnerMutationError::PreSubmit)?;
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(lock),
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+            Err(error) => return Err(failure(error)),
+        }
+    }
+}
+
 pub(super) fn send_to_upstream_with_deadline(
     client: &impl OwnerRepositoryClient,
     record: &FeedbackRecord,
     deadline: &ResolutionDeadline,
 ) -> Result<u64, OwnerMutationError> {
+    // Consent is already complete. Serialize lookup and mutation across every
+    // source project so concurrent reports cannot both create the same Issue.
+    let _upstream_lock = acquire_upstream_lock(deadline)?;
     let repository = RepositoryIdentity::gwt_upstream();
     let issues = client
         .list_issues(&repository, deadline)
@@ -699,5 +738,49 @@ mod tests {
         .unwrap();
         assert_eq!(client.owner_mutation_count(), 1);
         assert_eq!(store.read(&record.id).unwrap().input, record.input);
+    }
+
+    #[test]
+    fn upstream_dedupe_waits_for_the_host_lock_before_reading_issues() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (_first_dir, _first_store, first) = report("https://github.com/acme/first.git");
+        let (_second_dir, _second_store, second) = report("https://github.com/acme/second.git");
+        let lock_dir = gwt_core::paths::gwt_home();
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_dir.join("feedback-upstream.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let client = FakeIssueClient::new();
+        let result = send_to_upstream_with_deadline(
+            &client,
+            &first,
+            &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_millis(100)),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(OwnerMutationError::PreSubmit(ApiError::Timeout { .. }))
+            ),
+            "a concurrent sender must finish before duplicate lookup: {result:?}"
+        );
+        assert!(client.owner_call_log().is_empty());
+        drop(lock);
+
+        let number = send_to_upstream(&client, &first).unwrap();
+        assert_eq!(send_to_upstream(&client, &second).unwrap(), number);
+        assert_eq!(
+            client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::CreateIssue)
+                .count(),
+            1
+        );
     }
 }
