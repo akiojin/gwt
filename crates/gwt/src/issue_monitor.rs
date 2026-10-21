@@ -11518,6 +11518,17 @@ impl IssueMonitorState {
             AutonomousRecordRebasePolicy::DiskAuthoritative => {
                 let protected_local_records = rejected_terminal_companions
                     .iter()
+                    // A local continuation can be newer than this GUI commit's
+                    // disk snapshot. Its release, not that old record, owns the
+                    // phase until disk has observed the release watermark.
+                    .chain(
+                        self.released_failures
+                            .iter()
+                            .filter_map(|(issue, release)| {
+                                (release.release_version > disk.failure_release_version)
+                                    .then_some(issue)
+                            }),
+                    )
                     .filter_map(|issue_number| {
                         if self.merged_issues.contains(issue_number) {
                             return None;
@@ -15850,6 +15861,11 @@ impl IssueMonitorState {
             );
             if criteria.machine_checkable && !criteria.unchecked.is_empty() {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(
+                    issue_number,
+                    "settled delivery; remaining acceptance criteria",
+                    &format_rfc3339_utc(chrono::Utc::now()),
+                );
                 existing = self.inbox_item(issue_number).cloned();
             }
         }
@@ -20851,13 +20867,16 @@ impl IssueMonitorState {
         // would reproduce the failure the recovery is undoing.
         self.require_fresh_launch_session(issue_number);
         if let Some(record) = retry_record.as_ref() {
-            // A failure increments attempts before publishing this fence.
-            // Restore only a predecessor: preparation of this same retry may
-            // already have refreshed its acceptance snapshot and phase.
+            // Continuation preserves attempts. A newly adopted release still
+            // supersedes that predecessor, but repeated enforcement must keep
+            // this retry's freshly prepared acceptance snapshot and phase.
             if self
                 .autonomous_records
                 .get(&issue_number)
-                .is_none_or(|current| current.attempts < record.attempts)
+                .is_none_or(|current| {
+                    current.attempts < record.attempts
+                        || (revoke_claims && current.attempts == record.attempts)
+                })
             {
                 self.autonomous_records.insert(issue_number, record.clone());
             }
@@ -40796,8 +40815,10 @@ mod tests {
         let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-42".into()));
         monitor.record_autonomous_heartbeat(42, "2026-06-26T00:00:00Z");
         let attempts = monitor.attempt_count(42);
+        let stale = monitor.prefs();
         let target = stop_target(&monitor, 42);
 
         assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
@@ -40820,6 +40841,64 @@ mod tests {
             monitor.prefs().queued_launch_session_strategies.get(&42),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
         );
+
+        // A companion can still hold the pre-settlement launch. Neither
+        // direction of convergence may resurrect that completed slice.
+        let continued = monitor.prefs();
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "old launch stays released");
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        let mut gui = monitor.clone();
+        gui.rebase_gui_observer_prefs(&stale);
+        assert_eq!(
+            gui.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(gui
+            .autonomous_record(42)
+            .unwrap()
+            .active_launch_id
+            .is_none());
+        let mut observer = test_monitor_with_prefs(monitor.config.clone(), stale.clone());
+        observer.rebase_daemon_driver_prefs(&continued);
+        let record = observer.autonomous_record(42).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::Idle);
+        assert!(record.active_launch_id.is_none());
+        assert_eq!(observer.active_count(), 0);
+        assert_eq!(observer.attempt_count(42), attempts);
+
+        // Replaying that same release must retain the next claim's preparation.
+        let mut prepared = observer.clone();
+        prepared.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        prepared.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [ ] AC-2: refreshed next slice\n",
+            )
+            .snapshot(),
+        );
+        let expected = prepared.autonomous_record(42).cloned();
+        prepared.rebase_daemon_driver_prefs(&continued);
+        assert_eq!(prepared.autonomous_record(42), expected.as_ref());
+        prepared.rebase_gui_observer_prefs(&stale);
+        assert_eq!(prepared.autonomous_record(42), expected.as_ref());
+
+        let mut restarted = test_monitor_with_prefs(monitor.config.clone(), gui.prefs());
+        restarted.set_gui_connected(true);
+        restarted.config.enabled = true;
+        restarted.record_candidate(monitor.inbox_item(42).unwrap().issue.clone());
+        let launch = restarted
+            .next_launch_request("2026-06-26T00:02:00Z")
+            .expect("fresh successor after restart");
+        assert_eq!(launch.issue_number, 42);
+        assert_eq!(
+            launch.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(restarted
+            .next_launch_request("2026-06-26T00:02:00Z")
+            .is_none());
+        assert_eq!(restarted.attempt_count(42), attempts);
     }
 
     #[test]
