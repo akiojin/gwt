@@ -17509,6 +17509,21 @@ impl IssueMonitorState {
             );
             return false;
         };
+        // The selected provider can change while the remote claim is in
+        // flight. Refuse before consuming a slot or recovery context, and
+        // compensate the claim that GitHub has already accepted.
+        if let Some(record) = self.permission_readiness_block_for_launch(issue_number, now) {
+            self.record_permission_readiness_block(issue, &record);
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        }
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
