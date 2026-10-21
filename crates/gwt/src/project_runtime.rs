@@ -263,18 +263,30 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn physical_spawn_completes_without_gui_runtime() {
+        use std::io::Read;
+
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cwd = tempfile::tempdir().expect("isolated child directory");
         let config = gwt_terminal::pty::SpawnConfig {
             command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exit 0".to_string()],
+            args: vec!["-c".to_string(), "printf '%65536s' ''; exit 0".to_string()],
             cols: 80,
             rows: 24,
             env: Default::default(),
             remove_env: Vec::new(),
-            cwd: None,
+            cwd: Some(cwd.path().to_path_buf()),
         };
         let mut pane = super::spawn_unbound_pane("shared-spawn", config, None, 1, None)
             .expect("spawn without AppRuntime or event loop");
         assert!(pane.pty().process_id().is_some());
+        // Match the production reader: undrained PTY output can prevent exit.
+        let mut reader = pane.reader().expect("child output reader");
+        let output = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while reader.read(&mut buffer).is_ok_and(|read| read > 0) {}
+        });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if *pane.check_status().expect("check child status")
@@ -289,5 +301,6 @@ mod tests {
             pane.last_exit().is_some(),
             "spawn retains the process exit receipt"
         );
+        output.join().expect("output reader completes");
     }
 }
