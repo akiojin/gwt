@@ -6,6 +6,10 @@ proposal or PM registration is not a prerequisite.
 
 ## Collect the report
 
+Collect the observed output and diagnostics yourself; do not ask the reporter
+to retype them. Use `unconfirmed` for missing reproduction details. Do not dump
+the environment or read unrelated private source files to enrich the report.
+
 - `title`: a concrete symptom; `kind`: `bug`, `request`, or `friction`.
 - `operation`: the affected gwtd operation or precise UI action.
 - `refusal`: the complete observed rejection/output, copied verbatim. Preserve
@@ -24,6 +28,22 @@ proposal or PM registration is not a prerequisite.
 
 gwtd adds the source project hash, gwt/gwtd versions, OS, and active agent
 count. Do not supply a destination, project identity, or environment override.
+
+The durable local receipt retains the complete original, including sensitive
+values. Do not publish that receipt. Before public submission, gwtd masks known
+credentials, environment assignment values, path-shaped text (conservatively
+including URLs), and Markdown inline/fenced/indented code. This applies to the
+title and all report text, including requested labels and optional fields.
+Assignment values are conservatively masked through the physical line end;
+quoted values and escaped line continuations can span multiple lines.
+Unmasked refusal bytes and original line endings are retained without truncation.
+
+The native dialog shows the masked public snapshot; that same snapshot becomes
+the GitHub Issue or comment. Only the original stays in the local receipt.
+Automatic masks cannot identify every arbitrary secret or unmarked code fragment;
+never promise complete detection or approve the preview for the user. The
+reporter's only required interaction is the existing native consent action.
+The actual gwt repository uses the same masks with its existing consent exemption.
 
 ## Submit and continue working
 

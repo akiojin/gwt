@@ -918,6 +918,11 @@ dialog でユーザーが **Send feedback** を選ぶ必要があります。取
 不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
 Issue 番号と URL を返します。
 
+ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
+環境変数の代入値、URL を含むパス形式、Markdown のコード片を自動で伏せ、
+native preview と送信に同じ内容を使います。伏せ字以外の拒否文は切り詰めません。
+判定は保守的ですが任意の秘密をすべて検出する保証はなく、原文 receipt は公開しないでください。
+
 返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
 URL を確認できます。類似する既存 Issue があればコメントを追記します。
 `feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト

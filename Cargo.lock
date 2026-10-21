@@ -1418,6 +1418,7 @@ dependencies = [
  "libc",
  "notify",
  "notify-debouncer-mini",
+ "pulldown-cmark",
  "regex",
  "reqwest",
  "semver",

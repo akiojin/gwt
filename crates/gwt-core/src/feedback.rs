@@ -4,6 +4,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -74,6 +75,29 @@ impl FeedbackRecord {
         format!("<!-- gwt-feedback:{} -->", self.id)
     }
 
+    /// Derive the immutable public preview/send payload. The stored receipt
+    /// remains the complete original, including evidence hidden by these masks.
+    pub fn public_snapshot(&self) -> Self {
+        let mut public = self.clone();
+        let root = self.context.project_root.to_string_lossy();
+        for text in [
+            &mut public.input.title,
+            &mut public.input.operation,
+            &mut public.input.refusal,
+            &mut public.input.reproduction,
+            &mut public.input.body,
+        ]
+        .into_iter()
+        .chain(public.input.workaround.iter_mut())
+        .chain(public.input.error_record_id.iter_mut())
+        .chain(public.input.labels.iter_mut())
+        {
+            *text = public_text(text, &root);
+        }
+        public.context.project_root = PathBuf::from("[REDACTED PATH]");
+        public
+    }
+
     pub fn render_issue(&self) -> String {
         let kind = match self.input.kind {
             FeedbackKind::Bug => "bug",
@@ -99,9 +123,78 @@ impl FeedbackRecord {
             "requested_labels": self.input.labels,
         }))
         .expect("feedback metadata serializes");
-        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n{}\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim)\n\n{}text\n{}\n{}\n",
+        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n{}\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim except privacy masks)\n\n{}text\n{}\n{}\n",
             self.marker(), self.input.body, details, fence, self.input.refusal, fence)
     }
+}
+
+fn public_text(text: &str, project_root: &str) -> String {
+    use pulldown_cmark::{Event, Parser, Tag};
+    use regex::Regex;
+
+    // Offset ranges retain the authored bytes; event text normalizes Markdown.
+    let mut masked = String::new();
+    let mut copied = 0;
+    for (event, range) in Parser::new(text).into_offset_iter() {
+        if matches!(event, Event::Start(Tag::CodeBlock(_)) | Event::Code(_))
+            && range.start >= copied
+        {
+            masked.push_str(&text[copied..range.start]);
+            masked.push_str("[REDACTED CODE]");
+            masked.extend(
+                text[range.clone()]
+                    .chars()
+                    .filter(|c| matches!(c, '\r' | '\n')),
+            );
+            copied = range.end;
+        }
+    }
+    masked.push_str(&text[copied..]);
+    if !project_root.is_empty() {
+        masked = masked.replace(project_root, "[REDACTED PATH]");
+    }
+
+    static ENVIRONMENT: OnceLock<Regex> = OnceLock::new();
+    let environment = ENVIRONMENT.get_or_init(|| {
+        Regex::new(r#"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*|["'][A-Z_][A-Z0-9_]*["'][ \t]*:\s*)(?P<value>(?:"(?:\\[\s\S]|[^"\\])*"?|'[^']*'?|(?:\\(?:\r\n|[\s\S])?|[^"'\\\r\n])+)+)"#)
+            .expect("feedback environment value pattern")
+    });
+    // Quoted assignments can span physical lines. Mask their complete source
+    // value before the line-scoped credential pass, retaining all line endings.
+    // Treat the rest of an assignment line, including unquoted continuations,
+    // conservatively as part of its value.
+    let masked = environment.replace_all(&masked, |captures: &regex::Captures<'_>| {
+        let mut value = format!("{}[REDACTED]", &captures["key"]);
+        value.extend(
+            captures["value"]
+                .chars()
+                .filter(|c| matches!(c, '\r' | '\n')),
+        );
+        value
+    });
+    static BEARER: OnceLock<Regex> = OnceLock::new();
+    let bearer = BEARER.get_or_init(|| {
+        Regex::new(r"(?i)\bBearer[ \t]+[^\s]+").expect("feedback bearer value pattern")
+    });
+    static PATHS: OnceLock<Regex> = OnceLock::new();
+    let paths = PATHS.get_or_init(|| {
+        // Conservatively hide path-shaped strings, including URLs, because
+        // their public/private visibility cannot be established locally.
+        Regex::new(r#"(?x)["'](?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^"'\r\n]*["']|[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'`]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^\s<>"'`]*"#)
+            .expect("feedback private path pattern")
+    });
+    let mut public = String::new();
+    // Credential patterns can consume whitespace: never let them cross the
+    // original physical line boundaries, including bare CR and CRLF.
+    for line in masked.split_inclusive(['\r', '\n']) {
+        let content_len = line.trim_end_matches(['\r', '\n']).len();
+        let (content, ending) = line.split_at(content_len);
+        let content = bearer.replace_all(content, "[REDACTED]");
+        let content = crate::error_ledger::redact_credentials(&content);
+        public.push_str(&paths.replace_all(&content, "[REDACTED PATH]"));
+        public.push_str(ending);
+    }
+    public
 }
 
 /// Unknown identities also require approval. Global/user configuration never
