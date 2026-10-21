@@ -184,6 +184,7 @@ pub struct PlanningAssessment {
     pub milestones: Vec<MilestoneDiagnostic>,
     pub risks: Vec<RiskMetadataDiagnostic>,
     pub decisions: Vec<DecisionMetadataDiagnostic>,
+    pub decision_revisions: Vec<DecisionRevisionObservation>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
 }
@@ -199,6 +200,15 @@ pub struct RiskMetadataDiagnostic {
 #[derive(Debug, Serialize)]
 pub struct DecisionMetadataDiagnostic {
     pub id: String,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Numeric revision distance is not evidence of decision freshness or approval.
+#[derive(Debug, Serialize)]
+pub struct DecisionRevisionObservation {
+    pub id: String,
+    pub source_revision: Option<u64>,
+    pub revisions_since_source: Option<u64>,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -1207,6 +1217,28 @@ pub fn assess_planning(
                 }
             })
             .collect(),
+        decision_revisions: state
+            .decisions
+            .iter()
+            .map(|decision| {
+                let revisions_since_source = decision
+                    .source_revision
+                    .and_then(|source| state.revision.checked_sub(source));
+                let missing_inputs = match decision.source_revision {
+                    None => vec!["source_revision"],
+                    Some(_) if revisions_since_source.is_none() => {
+                        vec!["source_revision_ahead_of_planning"]
+                    }
+                    Some(_) => vec![],
+                };
+                DecisionRevisionObservation {
+                    id: decision.id.clone(),
+                    source_revision: decision.source_revision,
+                    revisions_since_source,
+                    missing_inputs,
+                }
+            })
+            .collect(),
         review_dates: observe_review_dates(
             state,
             monitor.and_then(|status| status.last_scan_at.as_deref()),
@@ -1388,6 +1420,63 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("missing_milestone")));
+    }
+
+    #[test]
+    fn decision_revisions_compare_saved_numbers_without_claiming_freshness() {
+        let state = PmPlanningState {
+            revision: 5,
+            decisions: [
+                ("same", Some(0)),
+                ("", None),
+                ("same", Some(5)),
+                ("future", Some(6)),
+                ("past", Some(3)),
+                ("maximum", Some(u64::MAX)),
+            ]
+            .into_iter()
+            .map(|(id, source_revision)| crate::pm_planning::Decision {
+                id: id.into(),
+                source_revision,
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        };
+        let before = state.clone();
+        let report = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            report["decision_revisions"],
+            json!([
+                {"id":"same", "source_revision":0, "revisions_since_source":5, "missing_inputs":[]},
+                {"id":"", "source_revision":null, "revisions_since_source":null, "missing_inputs":["source_revision"]},
+                {"id":"same", "source_revision":5, "revisions_since_source":0, "missing_inputs":[]},
+                {"id":"future", "source_revision":6, "revisions_since_source":null, "missing_inputs":["source_revision_ahead_of_planning"]},
+                {"id":"past", "source_revision":3, "revisions_since_source":2, "missing_inputs":[]},
+                {"id":"maximum", "source_revision":u64::MAX, "revisions_since_source":null, "missing_inputs":["source_revision_ahead_of_planning"]}
+            ])
+        );
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let monitor_before = serde_json::to_value(&monitor).unwrap();
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["decision_revisions"], report["decision_revisions"]);
+        assert_eq!(degraded["decisions"], report["decisions"]);
+        assert_eq!(degraded["review_dates"], report["review_dates"]);
+        assert_eq!(state, before);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
+        let mut maximum = state;
+        maximum.revision = u64::MAX;
+        let report = serde_json::to_value(assess_planning(&maximum, None)).unwrap();
+        assert_eq!(
+            report["decision_revisions"][0]["revisions_since_source"],
+            u64::MAX
+        );
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["decision_revisions"],
+            json!([])
+        );
     }
 
     #[test]

@@ -815,6 +815,13 @@ surrounding whitespace remain significant for identity. Values remain opaque,
 assumptions and `source_revision` are optional, and review dates remain in
 `policy.review_dates`. These diagnostics need no Monitor snapshot. Complete metadata
 does not establish decision quality, approval or action permission.
+`policy.decision_revisions` preserves every saved decision ID and `source_revision`
+in order. `revisions_since_source` is the nonnegative numeric difference from
+`planning_revision`, including zero. An absent source leaves the difference null
+with `source_revision` in `missing_inputs`; a source ahead of planning leaves it
+null with `source_revision_ahead_of_planning`. This observation needs no Monitor
+snapshot and keeps `source_revision` optional. A revision difference does not prove
+changed decision inputs, freshness, quality, approval or action permission.
 `policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
 timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
 fractional seconds: it is true at or after `next_run` and false before it. Missing or
