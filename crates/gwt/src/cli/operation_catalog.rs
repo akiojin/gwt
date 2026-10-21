@@ -384,6 +384,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.monitor.recovery.record",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.review_verdict",
         aliases: &["issue.monitor.review-verdict"],
     },

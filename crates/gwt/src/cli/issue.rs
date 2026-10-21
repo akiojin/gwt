@@ -820,6 +820,7 @@ fn run_monitor_status<E: CliEnv>(
         output["needs_human_authority"] = needs_human_authority;
     }
     output["project_root"] = serde_json::json!(project_root);
+    output["reliability"] = super::reliability::load_report(&project_root, chrono::Utc::now());
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
     ))
@@ -9626,6 +9627,17 @@ mod tests {
             serde_json::json!([2338]),
             "an agent blocked on #2338 must be findable without reading its pane: {out}"
         );
+        assert_eq!(status["reliability"]["available"], true);
+        assert_eq!(
+            status["reliability"]["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|day| day["blocked_total"].as_u64().unwrap())
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(status["reliability"]["ac_10"], "not_evaluated");
     }
 
     /// Issue #4248 AC-1 / AC-3: an unresolved Board request may coexist
@@ -10713,7 +10725,8 @@ mod tests {
         // AC-4 for the host free-space block, measured at call time, and
         // Issue #4234 AC-5 for the gwt process memory block, and Issue #4386
         // AC-1 for the Spotlight indexing block, and Issue #4908 AC-5 for the
-        // provider usage block, read from the poller's host-local snapshot.
+        // provider usage block, read from the poller's host-local snapshot,
+        // and Issue #5876's time-dependent reliability observation.
         for attached in [
             "github_budget",
             "issue_cache",
@@ -10721,6 +10734,7 @@ mod tests {
             "memory_pressure",
             "spotlight",
             "provider_usage",
+            "reliability",
         ] {
             assert!(
                 status

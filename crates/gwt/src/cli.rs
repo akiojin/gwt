@@ -48,6 +48,7 @@ mod pr;
 mod provider_reset;
 pub(crate) mod register;
 mod release;
+mod reliability;
 pub(crate) mod search;
 mod skill_state_runtime;
 pub(crate) mod spec_artifact_lint;

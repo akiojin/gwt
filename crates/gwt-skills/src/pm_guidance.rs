@@ -1122,6 +1122,31 @@ act.
 
 ## Recovering a row with no live launch
 
+After a successful manual recovery, record the intervention with
+`issue.monitor.recovery.record`: pass `number`, a stable `recovery_id` for
+the incident, `recovered_at` (the actual intervention's RFC3339 timestamp),
+and `body` describing the observed failure and the recovery
+actions actually performed. Use one incident ID for the whole close/stop/
+requeue/launch sequence, reuse it when retrying the same record, and use a
+new ID for a separate intervention even when its reason is identical.
+Check that the reply's `state` is `acknowledged`; pending/refused is not a
+saved measurement. The record uses exact Board delivery and retains the
+actual author's identity. Do not count normal scheduling, no-ops, refusals
+or unattended recovery as manual intervention.
+
+Keep `recovered_at` unchanged on retries, including after PM replacement:
+posting or retrying an old record must not create a new day's recovery.
+
+`issue.monitor.status` includes `reliability`: seven completed UTC days
+and today's partial day, blocked declaration counts by cause, and manual
+recovery records with their source entry IDs. Classification uses only the
+cause line; ambiguous or unknown causes remain `Other`. The manual coverage
+is `explicit_records_only`, so missing records or empty days cannot prove
+that no intervention occurred. AC-10 remains `not_evaluated` until the
+seven-day observation is independently reconciled; never close its owner
+merely because this instrumentation merged. The capped/compressed requeue
+audit is not the measurement source.
+
 `agent_failed` and `launch_failed` rows have already lost their launch.
 That is why `issue.monitor.stop` and `issue.monitor.failover` refuse
 them: both resolve an exact live launch first, and there is none left to
@@ -2214,6 +2239,8 @@ mod tests {
                 contract, SKILL_BODY_EN,
                 "every responsibility must survive, in order"
             );
+            assert!(contract.contains("issue.monitor.recovery.record"));
+            assert!(contract.contains("explicit_records_only"));
         }
     }
 

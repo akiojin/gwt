@@ -721,6 +721,51 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.recovery.record" => {
+            let number = required_u64(params, "number")?;
+            let recovery_id = required_string(params, "recovery_id")?;
+            let body = required_string(params, "body")?;
+            let recovered_at = required_string(params, "recovered_at")?;
+            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+                .map_err(|_| {
+                    CliParseError::InvalidJson(
+                        "recovered_at must be an RFC3339 timestamp of the actual intervention"
+                            .into(),
+                    )
+                })?
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339();
+            if number == 0
+                || body.trim().is_empty()
+                || recovery_id.is_empty()
+                || recovery_id.len() > 128
+                || !recovery_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err(CliParseError::InvalidJson(
+                    "recovery.record requires a positive Issue number, a nonempty body and a stable ASCII recovery_id (1–128 letters, digits, -, _, . or :)".into(),
+                ));
+            }
+            let key = format!("{number}:{recovery_id}");
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                intent_id: format!("manual-recovery:{key}"),
+                command: Box::new(BoardPostCommand {
+                    kind: "decision".into(),
+                    body: Some(body),
+                    topics: vec![
+                        format!("{}{key}", super::reliability::MANUAL_RECOVERY_TOPIC),
+                        format!(
+                            "{}{recovered_at}",
+                            super::reliability::MANUAL_RECOVERY_AT_TOPIC
+                        ),
+                    ],
+                    owners: vec![number.to_string()],
+                    broadcast: true,
+                    ..Default::default()
+                }),
+            })
+        }
         "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -5565,6 +5610,35 @@ mod tests {
             ),
             CliParseError::MissingFlag(_)
         ));
+    }
+
+    #[test]
+    fn manual_recovery_record_uses_the_exact_board_delivery_path() {
+        let command = ok(
+            "issue.monitor.recovery.record",
+            json!({
+                "number":5876, "recovery_id":"incident-a", "body":"停止窓を再投入した",
+                "recovered_at":"2026-10-20T10:00:00+09:00"
+            }),
+        );
+        assert!(matches!(command,
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            if intent_id == "manual-recovery:5876:incident-a"
+                && command.kind == "decision"
+                && command.owners == ["5876"]
+                && command.topics == ["gwt-manual-recovery:5876:incident-a", "gwt-manual-recovery-at:2026-10-20T01:00:00+00:00"]
+                && command.body.as_deref() == Some("停止窓を再投入した")
+        ));
+        for mut params in [
+            json!({"number":5876,"body":"recovered"}),
+            json!({"number":5876,"recovery_id":" ","body":"recovered"}),
+            json!({"number":0,"recovery_id":"incident","body":"recovered"}),
+            json!({"number":5876,"recovery_id":"incident","body":" "}),
+            json!({"number":5876,"recovery_id":"incident","body":"recovered","session_id":"fake"}),
+        ] {
+            params["recovered_at"] = json!("2026-10-20T01:00:00Z");
+            let _ = err("issue.monitor.recovery.record", params);
+        }
     }
 
     #[test]
