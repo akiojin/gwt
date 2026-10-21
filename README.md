@@ -800,6 +800,14 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+Saved WIP policies are compared independently, in saved order, with the distinct
+observed Issue count. `observed_exceeded` means only that this snapshot's count
+strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
+limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
+missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+data the count is null; without policies the list is empty. This comparison does not
+establish canonical WIP, a current breach or permission to act, and does not select
+or combine policies. Verification and full WIP remain missing.
 Activity observations show elapsed whole seconds since the last activity of Launching/Launched
 Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
 Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable

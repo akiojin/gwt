@@ -77,7 +77,19 @@ it deduplicates implementation, review, pending and human-wait owners, excluding
 Absent Monitor lists and missing legacy optional fields stay unknown rather than zero.
 Read the enclosing Monitor source, scan time and coverage alongside these observations;
 `verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
-This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
+This projection never enforces WIP limits or changes admission, priority or launch decisions.
+
+`wip_limits` compares each saved policy independently in saved order, retaining its ID,
+version and optional limit alongside `observed_issue_count` and an assessment.
+`observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
+it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
+coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
+there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
+Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
+they do not establish a mathematical lower bound on canonical WIP or a current breach.
+Verification and full WIP remain missing. Never select or combine an active policy implicitly,
+recompute slot occupancy from Issue counts, or treat the comparison as permission to act.
 
 `launch_activity` reports only Launching/Launched inbox rows in supplied order,
 including repeated owners; it is not a complete process census.
@@ -3863,6 +3875,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
             "`retry_deadlines` reports every inbox row with `retry_not_before`",
+            "`wip_limits` compares each saved policy independently in saved order",
+            "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
             "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",
             "An elapsed claim deadline does not prove release or authorize requeue",
