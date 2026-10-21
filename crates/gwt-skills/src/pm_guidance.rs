@@ -85,6 +85,14 @@ Missing or invalid timestamps leave it null and name `next_run` or `monitor_scan
 No current clock or cadence interpretation is used. Enclosing Monitor source, scan age and
 coverage limits still apply; an old or degraded scan describes only its recorded instant.
 A due timestamp does not prove missed work or authorize scheduling, Issue creation or launch.
+`configuration_missing_inputs` names blank recurring settings and ambiguous identities.
+It reports id, cadence, owner, miss_policy and idempotency_key when empty or whitespace-only.
+Repeated nonblank IDs and setting keys add unique_recurring_id and unique_idempotency_key
+to every matching row, independently of timestamp diagnostics and Monitor availability.
+Duplicate checks use exact nonblank saved strings; trimming only detects missing values.
+It does not interpret cadence, resolve owners or validate miss policy semantics.
+An empty configuration diagnostic does not establish semantic validity or execution permission.
+It does not enforce deduplication.
 Issue traces expose `observed_inbox_states` even for orphan or maintenance work.
 These are the exact supplied inbox states, deduplicated in observation order.
 Queue or active membership alone does not supply an inbox state; absent rows return an empty list.
@@ -3940,6 +3948,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`due_at_scan` compares RFC3339 instants using only the supplied scan",
             "Reject fractional seconds beyond nine digits instead of silently truncating precision",
             "A due timestamp does not prove missed work or authorize scheduling, Issue creation or launch",
+            "`configuration_missing_inputs` names blank recurring settings and ambiguous identities",
+            "Duplicate checks use exact nonblank saved strings; trimming only detects missing values",
+            "An empty configuration diagnostic does not establish semantic validity or execution permission",
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
             "`policy.capacity` preserves implementation and review multiplicity",

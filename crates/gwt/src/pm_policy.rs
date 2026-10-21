@@ -192,6 +192,7 @@ pub struct RecurringRunObservation {
     pub id: String,
     pub next_run: Option<String>,
     pub due_at_scan: Option<bool>,
+    pub configuration_missing_inputs: Vec<&'static str>,
     pub missing_inputs: Vec<&'static str>,
 }
 
@@ -214,6 +215,38 @@ fn observe_recurring_runs(
         .recurring_items
         .iter()
         .map(|item| {
+            let mut configuration_missing_inputs = Vec::new();
+            if item.id.trim().is_empty() {
+                configuration_missing_inputs.push("id");
+            } else if state
+                .recurring_items
+                .iter()
+                .filter(|other| other.id == item.id)
+                .count()
+                > 1
+            {
+                configuration_missing_inputs.push("unique_recurring_id");
+            }
+            for (name, value) in [
+                ("cadence", &item.cadence),
+                ("owner", &item.owner),
+                ("miss_policy", &item.miss_policy),
+                ("idempotency_key", &item.idempotency_key),
+            ] {
+                if value.trim().is_empty() {
+                    configuration_missing_inputs.push(name);
+                }
+            }
+            if !item.idempotency_key.trim().is_empty()
+                && state
+                    .recurring_items
+                    .iter()
+                    .filter(|other| other.idempotency_key == item.idempotency_key)
+                    .count()
+                    > 1
+            {
+                configuration_missing_inputs.push("unique_idempotency_key");
+            }
             let next_run = item.next_run.as_deref().and_then(parse);
             let mut missing_inputs = Vec::new();
             if next_run.is_none() {
@@ -226,6 +259,7 @@ fn observe_recurring_runs(
                 id: item.id.clone(),
                 next_run: item.next_run.clone(),
                 due_at_scan: scan.zip(next_run).map(|(scan, next_run)| scan >= next_run),
+                configuration_missing_inputs,
                 missing_inputs,
             }
         })
@@ -1376,13 +1410,18 @@ mod tests {
     #[test]
     fn recurring_runs_compare_saved_instants_without_scheduling_work() {
         let state: PmPlanningState = serde_json::from_value(json!({"recurring_items":[
-            {"id":"same", "next_run":"2024-03-01T00:30:00Z"},
-            {"id":"same", "next_run":"2024-02-29T20:30:00.000000001-04:00"},
-            {"id":"", "next_run":"2024-03-01T00:30:00.000000002Z"},
-            {"id":"precision", "next_run":"2024-03-01T00:30:00.0000000011Z"},
-            {"id":"invalid", "next_run":"2024-03-01T00:30:00"},
-            {"id":"blank", "next_run":""},
-            {"id":"missing"}
+            {"id":"same", "next_run":"2024-03-01T00:30:00Z",
+             "cadence":"daily", "owner":"team", "miss_policy":"skip", "idempotency_key":"tick"},
+            {"id":"same", "next_run":"2024-02-29T20:30:00.000000001-04:00",
+             "cadence":"\t ", "owner":" ", "idempotency_key":"other"},
+            {"id":"", "next_run":"2024-03-01T00:30:00.000000002Z",
+             "cadence":"opaque cadence", "owner":"pm", "miss_policy":"manual choice", "idempotency_key":" tick "},
+            {"id":" \t ", "next_run":"2024-03-01T00:30:00.0000000011Z", "idempotency_key":" \n "},
+            {"id":"invalid", "next_run":"2024-03-01T00:30:00",
+             "cadence":"weekly", "owner":"team", "miss_policy":"skip", "idempotency_key":"tick"},
+            {"id":"same ", "next_run":""},
+            {"id":""},
+            {"id":"unique", "cadence":"opaque cadence", "owner":"pm", "miss_policy":"manual choice", "idempotency_key":"unique"}
         ]}))
         .unwrap();
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
@@ -1392,13 +1431,24 @@ mod tests {
         let rows = report["recurring_runs"]
             .as_array()
             .expect("recurring observations");
+        let configuration_missing_inputs = [
+            json!(["unique_recurring_id", "unique_idempotency_key"]),
+            json!(["unique_recurring_id", "cadence", "owner", "miss_policy"]),
+            json!(["id"]),
+            json!(["id", "cadence", "owner", "miss_policy", "idempotency_key"]),
+            json!(["unique_idempotency_key"]),
+            json!(["cadence", "owner", "miss_policy", "idempotency_key"]),
+            json!(["id", "cadence", "owner", "miss_policy", "idempotency_key"]),
+            json!([]),
+        ];
         assert_eq!(rows.len(), state.recurring_items.len());
         for (index, item) in state.recurring_items.iter().enumerate() {
             assert_eq!(
                 rows[index],
                 json!({
                     "id":item.id, "next_run":item.next_run,
-                    "due_at_scan":([Some(true), Some(true), Some(false), None, None, None, None][index]),
+                    "configuration_missing_inputs":configuration_missing_inputs[index],
+                    "due_at_scan":([Some(true), Some(true), Some(false), None, None, None, None, None][index]),
                     "missing_inputs":(if index < 3 {json!([])} else {json!(["next_run"])})
                 })
             );
@@ -1421,6 +1471,7 @@ mod tests {
                     untimed["recurring_runs"][index],
                     json!({
                         "id":item.id, "next_run":item.next_run, "due_at_scan":null,
+                        "configuration_missing_inputs":configuration_missing_inputs[index],
                         "missing_inputs":(if index < 3 {json!(["monitor_scan_time"])}
                             else {json!(["next_run", "monitor_scan_time"])})
                     })

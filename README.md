@@ -809,6 +809,12 @@ with `next_run` or `monitor_scan_time` named.
 It uses only the recorded scan, retaining its source, age and coverage limits;
 it does not read the current clock or interpret cadence. A due timestamp does not
 prove missed work or authorize scheduling, Issue creation or launch.
+Each row's `configuration_missing_inputs` separately names empty or whitespace-only
+`id`, `cadence`, `owner`, `miss_policy` and `idempotency_key` settings. Repeated nonblank
+IDs or setting keys add `unique_recurring_id` or `unique_idempotency_key` to every matching
+row. Matches use exact saved strings; trimming only detects missing values. These checks
+do not depend on Monitor availability, interpret cadence, resolve owners or validate policy
+semantics. An empty list does not establish execution permission or enforce deduplication.
 Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
 work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,
