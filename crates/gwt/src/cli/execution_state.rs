@@ -17981,7 +17981,7 @@ mod tests {
             .split_once("fn reconcile_durable_genesis_launch")
             .unwrap()
             .0;
-        assert!(fresh.contains("abort_successor_and_remove_exact_session"));
+        assert!(fresh.contains("abort_abandoned_successor_and_remove_exact_session"));
         assert!(fresh.contains("abort_successor_if_session_missing_with"));
         assert!(fresh.contains("commit_if_session_missing_with_owner_lease"));
         assert!(!fresh.contains("execution_state::abort_successor("));

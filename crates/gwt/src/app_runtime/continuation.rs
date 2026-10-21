@@ -3753,7 +3753,7 @@ impl AppRuntime {
             gwt::cli::execution_state::ContinuationAttemptStatus::Prepared => {
                 if let Some(expected_session_identity) = receipt.expected_session_identity.as_ref()
                 {
-                    gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                    gwt::cli::execution_state::abort_abandoned_successor_and_remove_exact_session(
                         &receipt.worktree_path,
                         owner,
                         &attempt.request,
