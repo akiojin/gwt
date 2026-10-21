@@ -5283,6 +5283,22 @@ mod tests {
             )
             .unwrap();
             super::record_update_available(&mut runtime, state.clone());
+            if !autonomous_mode || auto_apply_updates == Some(false) {
+                let log = fs::read_to_string(gwt_core::update::update_log_path())
+                    .expect("automatic download refusal must be observable");
+                let last: serde_json::Value =
+                    serde_json::from_str(log.lines().last().unwrap()).unwrap();
+                assert_eq!(last["stage"], "auto_apply_skipped");
+                assert_eq!(last["version"], "9.106.0");
+                assert_eq!(
+                    last["reason"],
+                    if !autonomous_mode {
+                        "no_autonomous_project"
+                    } else {
+                        "automatic_updates_disabled"
+                    }
+                );
+            }
             assert!(
                 runtime.update_download_in_flight.is_none(),
                 "queuing discovery must leave admission to the shared event-loop worker gate"
@@ -5357,6 +5373,13 @@ mod tests {
         assert!(requests.iter().any(|event| matches!(
             event, UserEvent::ApplyUpdateStart { state: discovered, .. } if discovered == &newer
         )));
+
+        fs::write(gwt_core::paths::gwt_config_path(), "[invalid").unwrap();
+        super::record_update_available(&mut runtime, newer);
+        assert!(user_events.lock().unwrap().is_empty());
+        let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap();
+        let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(last["reason"], "settings_unavailable");
     }
 
     #[test]
