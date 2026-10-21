@@ -884,6 +884,16 @@ missing or degraded inputs yield `unknown`, never a within-limit PASS. Without M
 data the count is null; without policies the list is empty. This comparison does not
 establish canonical WIP, a current breach or permission to act, and does not select
 or combine policies. Verification and full WIP remain missing.
+`policy.capacity.terminal_queue` preserves the supplied host queue projection order,
+repeated Issues and raw `queued_at`, after urgent ordering and label filtering.
+`age_seconds_at_scan` measures queue membership until the supplied Monitor scan,
+respecting RFC3339 offsets and rounding down to whole seconds. Missing, invalid or
+future timestamps leave the duration null with named missing inputs; fractions beyond
+nine digits are rejected rather than truncated. No Monitor or no queue view yields
+null; a supplied view without rows yields []. Keep its source, scan time and coverage:
+an old or degraded snapshot is only an observation then. Legacy omitted queue lists
+also decode to []; neither proves the host or whole project queue is empty. Queue residency is not execution waiting time, an SLA
+or starvation verdict, priority, preemption or permission to launch.
 Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
 idle classification and binding/pane facts. They show elapsed whole seconds from idle start
 to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
