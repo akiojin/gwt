@@ -89,6 +89,10 @@ pub struct IssueMonitorDaemonPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedIssueMonitorCandidates {
     pub issues: Vec<IssueMonitorIssue>,
+    /// Issue #4157: read once before the scan transaction; replaying this input
+    /// at commit time must neither do network I/O nor refresh its acquisition time.
+    pub open_pr_observations: BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
+    pub open_pr_observed_at: Option<String>,
     pub urgent_assignments: BTreeMap<u64, LabelAssignment>,
     pub source: IssueMonitorCandidateSource,
     /// The live-list failure that forced a cache fallback. Kept alongside the
@@ -1299,6 +1303,168 @@ fn load_urgent_assignments_with<E: fmt::Display>(
     assignments
 }
 
+/// Issue #4157: discover related PRs once, then read only PRs belonging to
+/// candidates this terminal could admit. Existing in-flight ownership is not
+/// changed by these normal-launch observations.
+fn load_open_pr_launch_observations(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issues: &[IssueMonitorIssue],
+    prefs: &crate::IssueMonitorPrefs,
+) -> (
+    BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
+    Option<String>,
+) {
+    let local = prefs
+        .terminal_queues
+        .get(&crate::process::current_hostname());
+    let candidates: Vec<_> = issues
+        .iter()
+        .filter(|issue| {
+            issue.state == IssueMonitorIssueState::Open
+                && (issue
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+                    || local.is_some_and(|queue| {
+                        queue
+                            .entries
+                            .iter()
+                            .any(|entry| entry.number == issue.number)
+                    }))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return (BTreeMap::new(), None);
+    }
+    let observed_at = chrono::Utc::now().to_rfc3339();
+    let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+    });
+    let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
+    let linked = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, &numbers)
+    });
+    if let Err(error) = &branches {
+        tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
+    }
+    if let Err(error) = &linked {
+        tracing::warn!(%error, "linked PR discovery failed; preserving prior launch holds");
+    }
+    let related = candidates
+        .iter()
+        .filter_map(|issue| {
+            let prs = linked
+                .as_ref()
+                .ok()
+                .and_then(|linked| linked.get(&issue.number));
+            let complete = branches.is_ok() && prs.is_some();
+            let mut numbers: Vec<_> = prs
+                .into_iter()
+                .flatten()
+                .filter(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("OPEN"))
+                .map(|pr| pr.number)
+                .collect();
+            let branch = crate::issue_monitor::issue_monitor_launch_plan(issue).branch_name;
+            numbers.extend(
+                branches
+                    .as_ref()
+                    .ok()
+                    .and_then(|branches| branches.get(&branch))
+                    .copied(),
+            );
+            numbers.sort_unstable();
+            numbers.dedup();
+            // Keep an independently observed branch PR even if the timeline failed.
+            (complete || !numbers.is_empty()).then_some((issue.number, (numbers, complete)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut observations = collect_open_pr_launch_observations(&related, |number| {
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
+        })
+        .map_err(|error| error.to_string())
+    });
+    // Discovery proved an open PR exists. A first, failed lifecycle read must
+    // not admit a duplicate launch; subsequent failures retain the prior fact.
+    for (issue, (prs, _)) in &related {
+        if !observations.contains_key(issue)
+            && prefs
+                .open_pr_observations
+                .get(issue)
+                .is_none_or(|previous| previous.hold.is_none())
+        {
+            if let Some(number) = prs.first() {
+                observations.insert(
+                    *issue,
+                    Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                        pr_number: *number,
+                        lifecycle: "UNDETERMINED".into(),
+                    }),
+                );
+            }
+        }
+    }
+    (observations, Some(observed_at))
+}
+
+fn collect_open_pr_launch_observations(
+    // The bool marks complete association evidence; partial reads prove
+    // presence but can never prove absence.
+    related: &BTreeMap<u64, (Vec<u64>, bool)>,
+    mut fetch: impl FnMut(
+        u64,
+    ) -> Result<
+        (
+            gwt_git::pr_status::PrState,
+            gwt_git::pr_status::PrInventoryItem,
+        ),
+        String,
+    >,
+) -> BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>> {
+    use gwt_git::pr_status::PrState;
+    let mut readbacks = BTreeMap::new();
+    let mut observations = BTreeMap::new();
+    for (issue, (prs, complete)) in related {
+        let mut hold = None;
+        let mut repair = false;
+        let mut unknown = !*complete;
+        for number in prs {
+            if !readbacks.contains_key(number) {
+                readbacks.insert(*number, fetch(*number));
+            }
+            match readbacks.get(number) {
+                Some(Ok((PrState::Open, pr)))
+                    if matches!(pr.lifecycle.as_str(), "CI-RED" | "CONFLICTED") =>
+                {
+                    repair = true
+                }
+                Some(Ok((PrState::Open, pr))) => {
+                    hold = Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                        pr_number: *number,
+                        lifecycle: pr.lifecycle.clone(),
+                    })
+                }
+                Some(Ok(_)) => {} // Closed or merged: release this PR's hold.
+                result => {
+                    tracing::warn!(
+                        issue,
+                        pr = number,
+                        ?result,
+                        "PR lifecycle unobserved; preserving prior launch hold"
+                    );
+                    unknown = true;
+                }
+            }
+        }
+        if repair || hold.is_some() || !unknown {
+            observations.insert(*issue, if repair { None } else { hold });
+        }
+    }
+    observations
+}
+
 /// Load live candidates with the complete REST queue label collection, while
 /// retaining the general open list's capped provenance and cache fallbacks.
 pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
@@ -1361,8 +1527,12 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 })
                 .map_err(|error| error.to_string())
             });
+            let (open_pr_observations, open_pr_observed_at) =
+                load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
+                open_pr_observations,
+                open_pr_observed_at,
                 source,
                 // Issue #4436 AC-1: the live list succeeded and every other
                 // Issue's readiness was refreshed, so this pass is not a failed
@@ -1429,6 +1599,8 @@ where
         Ok((issues, capped)) => {
             let source = live_candidate_source(capped);
             Ok(LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
                 issues,
                 source,
                 live_error: None,
@@ -1440,6 +1612,8 @@ where
             for issues in cache_results.into_iter().flatten() {
                 if !issues.is_empty() {
                     return Ok(LoadedIssueMonitorCandidates {
+                        open_pr_observations: BTreeMap::new(),
+                        open_pr_observed_at: None,
                         issues,
                         source: IssueMonitorCandidateSource::Cache,
                         live_error: Some(live_error),
@@ -1483,6 +1657,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    if let Some(observed_at) = &loaded.open_pr_observed_at {
+        monitor.reconcile_open_pr_holds(&loaded.open_pr_observations, observed_at);
+    }
     // Reconcile local credentials before this scan plans claims. No network
     // request is made here; Claude credential access remains opt-in.
     let usage_config = gwt_config::Settings::load().unwrap_or_default().usage;
@@ -2153,6 +2330,7 @@ fn autonomous_eligibility_candidates<'a>(
     issues
         .iter()
         .filter(|issue| monitor.is_autonomous_two_stage_candidate(issue))
+        .filter(|issue| !monitor.open_pr_launch_held(issue.number))
         .filter(|issue| {
             monitor
                 .inbox_item(issue.number)
@@ -3293,6 +3471,111 @@ mod tests {
     }
 
     #[test]
+    fn issue_4157_related_pr_readbacks_preserve_unknown_and_release_terminal_or_repair() {
+        use gwt_git::pr_status::{parse_pr_inventory_json, PrState};
+        let related = BTreeMap::from([
+            (42, (vec![7, 8], false)),
+            (43, (vec![7], true)),
+            (44, (vec![8], true)),
+            (45, (vec![], true)),
+            (46, (vec![], false)),
+        ]);
+        let now = "2026-10-21T00:00:00Z".parse().unwrap();
+        let item = parse_pr_inventory_json(
+            r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"other-branch","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
+            now,
+        ).unwrap().remove(0);
+        let mut calls = Vec::new();
+        let observations = collect_open_pr_launch_observations(&related, |number| {
+            calls.push(number);
+            if number == 8 {
+                return Err("read failed".into());
+            }
+            Ok((PrState::Open, item.clone()))
+        });
+        assert_eq!(calls, vec![7, 8], "a PR linked to two Issues is read once");
+        assert_eq!(observations[&42].as_ref().unwrap().lifecycle, "IN-PROGRESS");
+        assert_eq!(observations[&42], observations[&43]);
+        assert!(
+            !observations.contains_key(&44),
+            "a failed read cannot clear a hold"
+        );
+        assert_eq!(observations[&45], None, "successful absence clears a hold");
+        assert!(
+            !observations.contains_key(&46),
+            "partial discovery cannot clear a hold"
+        );
+        for state in [PrState::Open, PrState::Closed, PrState::Merged] {
+            let observations = collect_open_pr_launch_observations(&related, |_| {
+                let mut item = item.clone();
+                item.lifecycle = "CI-RED".into();
+                Ok((state, item))
+            });
+            assert!(observations.values().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn issue_4157_loaded_pr_observation_blocks_claim_and_new_autonomous_attempt() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut candidate = issue(42);
+        candidate.labels.push("auto-merge".into());
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: delivery\n".into());
+        let mut loaded = LoadedIssueMonitorCandidates {
+            issues: vec![candidate],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+            readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
+            open_pr_observations: BTreeMap::from([(
+                42,
+                Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "IN-PROGRESS".into(),
+                }),
+            )]),
+            open_pr_observed_at: Some("2026-10-21T00:00:00Z".into()),
+        };
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.terminal_queue_push(&[42], "test", "2026-10-21T00:00:00Z");
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            home.path(),
+            "2026-10-21T00:01:00Z",
+        );
+        assert!(monitor.claim_probe_plan(1).1.is_empty());
+        assert!(autonomous_eligibility_candidates(
+            &monitor,
+            &loaded.issues,
+            "2026-10-21T00:01:00Z"
+        )
+        .is_empty());
+        loaded.open_pr_observations.insert(42, None);
+        loaded.open_pr_observed_at = Some("2026-10-21T00:02:00Z".into());
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            home.path(),
+            "2026-10-21T00:02:00Z",
+        );
+        assert_eq!(monitor.claim_probe_plan(1).1, vec![42]);
+        assert_eq!(
+            autonomous_eligibility_candidates(&monitor, &loaded.issues, "2026-10-21T00:02:00Z")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn urgent_assignment_loaded_metadata_reaches_status_projection() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -3304,6 +3587,8 @@ mod tests {
         let mut urgent = issue(7);
         urgent.labels.push("urgent".into());
         let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![urgent],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
@@ -4412,6 +4697,8 @@ mod tests {
             crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
         );
         let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
@@ -5074,6 +5361,8 @@ mod tests {
                 "{case}"
             );
             let loaded = LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
                 issues: vec![issue(owner.number)],
                 source: IssueMonitorCandidateSource::Cache,
                 live_error: None,
@@ -5181,6 +5470,8 @@ mod tests {
             reused.record_window_snapshot(snapshot);
 
             let loaded = LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
                 issues: vec![issue(owner.number), issue(new_owner)],
                 source: IssueMonitorCandidateSource::Cache,
                 live_error: None,
@@ -5955,6 +6246,8 @@ mod tests {
         assert_eq!(live.issues, vec![live_issue]);
 
         let live_with_failed_spec_enrichment = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![cached_issue.clone()],
             source: IssueMonitorCandidateSource::Live,
             live_error: Some("issue #43 targeted refresh failed".to_string()),
@@ -6009,6 +6302,8 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
         let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Cache,
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),

@@ -6112,12 +6112,13 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 
 /// Issues per bulk timeline query (SPEC #4093 FR-005). A claim frontier of
-/// any size costs `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls — one for
-/// every frontier the Issue Monitor's `max_active` can produce.
+/// any size starts with `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls;
+/// only issues with another timeline page need subsequent calls.
 pub const LINKED_PR_BULK_CHUNK: usize = 25;
 
 /// The timeline selection one issue alias carries in the bulk query.
 const LINKED_PR_TIMELINE_SELECTION: &str = r#"timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           __typename
           ... on CrossReferencedEvent {
@@ -6153,12 +6154,27 @@ const LINKED_PR_TIMELINE_SELECTION: &str = r#"timelineItems(first: 100, itemType
 /// The bulk query for `numbers`: one `i<N>: issue(number: N)` alias each,
 /// plus the rate-limit block that settles the query's cost.
 pub(crate) fn linked_prs_bulk_query(numbers: &[u64]) -> String {
+    linked_prs_bulk_query_with_cursors(numbers, &std::collections::BTreeMap::new())
+}
+
+fn linked_prs_bulk_query_with_cursors(
+    numbers: &[u64],
+    cursors: &std::collections::BTreeMap<u64, String>,
+) -> String {
     let mut query = String::from(
         "query($owner: String!, $repo: String!) {\n  rateLimit { cost remaining resetAt nodeCount }\n  repository(owner: $owner, name: $repo) {\n",
     );
     for number in numbers {
+        let selection = match cursors.get(number) {
+            Some(cursor) => LINKED_PR_TIMELINE_SELECTION.replacen(
+                "first: 100,",
+                &format!("first: 100, after: {},", serde_json::json!(cursor)),
+                1,
+            ),
+            None => LINKED_PR_TIMELINE_SELECTION.to_string(),
+        };
         query.push_str(&format!(
-            "    i{number}: issue(number: {number}) {{\n      {LINKED_PR_TIMELINE_SELECTION}\n    }}\n"
+            "    i{number}: issue(number: {number}) {{\n      {selection}\n    }}\n"
         ));
     }
     query.push_str("  }\n}\n");
@@ -6166,9 +6182,9 @@ pub(crate) fn linked_prs_bulk_query(numbers: &[u64]) -> String {
 }
 
 /// Linked PRs for every issue in `numbers` through the bulk query
-/// (SPEC #4093 FR-005): `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls
-/// instead of one per issue. An issue GitHub does not return (deleted,
-/// no access) is absent from the map.
+/// (SPEC #4093 FR-005), including every timeline page. First pages cost
+/// `ceil(N / LINKED_PR_BULK_CHUNK)` GraphQL calls instead of one per issue.
+/// An issue GitHub does not return (deleted, no access) is absent from the map.
 pub(crate) fn fetch_linked_prs_bulk_via_gh(
     owner: &str,
     repo: &str,
@@ -6213,25 +6229,83 @@ where
 {
     let mut linked = std::collections::BTreeMap::new();
     for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
-        let stdout = run(&linked_prs_bulk_query(chunk))?;
-        let value: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
-            gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
-                &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
-                &rate_limit,
-                chrono::Utc::now(),
-            );
-        }
-        let repository = value.get("data").and_then(|v| v.get("repository"));
-        for number in chunk {
-            let Some(issue) = repository
-                .and_then(|v| v.get(format!("i{number}")))
-                .filter(|v| !v.is_null())
-            else {
-                continue;
+        let mut pending = chunk.to_vec();
+        let mut cursors = std::collections::BTreeMap::new();
+        let mut seen_cursors = std::collections::BTreeSet::new();
+        let mut nodes_by_issue = std::collections::BTreeMap::<u64, Vec<serde_json::Value>>::new();
+        while !pending.is_empty() {
+            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+            let query = if cursors.is_empty() {
+                linked_prs_bulk_query(&pending)
+            } else {
+                linked_prs_bulk_query_with_cursors(&pending, &cursors)
             };
-            linked.insert(*number, parse_linked_pr_timeline(issue, *number));
+            let stdout = run(&query)?;
+            let value: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(&value) {
+                gwt_core::github_budget::BudgetLedger::global().record_graphql_response(
+                    &gwt_core::github_budget::spawn_source(&["api", "graphql"]),
+                    &rate_limit,
+                    chrono::Utc::now(),
+                );
+            }
+            gwt_core::operation_deadline::ensure_remaining("linked PR timeline page")?;
+            let repository = value.get("data").and_then(|v| v.get("repository"));
+            let mut next = Vec::new();
+            for number in &pending {
+                let invalid = || {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("issue #{number} linked PR timeline is incomplete"),
+                    )
+                };
+                let Some(issue) = repository
+                    .and_then(|v| v.get(format!("i{number}")))
+                    .filter(|v| !v.is_null())
+                else {
+                    if cursors.contains_key(number) {
+                        return Err(invalid());
+                    }
+                    continue;
+                };
+                let timeline = issue.get("timelineItems").ok_or_else(invalid)?;
+                let nodes = timeline
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(invalid)?;
+                nodes_by_issue
+                    .entry(*number)
+                    .or_default()
+                    .extend(nodes.iter().cloned());
+                match timeline.get("pageInfo") {
+                    Some(info)
+                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                            == Some(true) =>
+                    {
+                        let cursor = info
+                            .get("endCursor")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|cursor| !cursor.trim().is_empty())
+                            .ok_or_else(invalid)?;
+                        if !seen_cursors.insert((*number, cursor.to_string())) {
+                            return Err(invalid());
+                        }
+                        cursors.insert(*number, cursor.to_string());
+                        next.push(*number);
+                        continue;
+                    }
+                    Some(info)
+                        if info.get("hasNextPage").and_then(serde_json::Value::as_bool)
+                            == Some(false) => {}
+                    _ => return Err(invalid()),
+                }
+                let complete = serde_json::json!({"timelineItems": {
+                    "nodes": nodes_by_issue.remove(number).unwrap_or_default()
+                }});
+                linked.insert(*number, parse_linked_pr_timeline(&complete, *number));
+            }
+            pending = next;
         }
     }
     Ok(linked)
@@ -14856,7 +14930,7 @@ command = "my-agent-cli"
                 }
                 repository.insert(
                     format!("i{number}"),
-                    serde_json::json!({"timelineItems": {"nodes": [{
+                    serde_json::json!({"timelineItems": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [{
                         "__typename": "CrossReferencedEvent",
                         "willCloseTarget": true,
                         "source": {"__typename": "PullRequest", "number": number + 100,
@@ -14880,6 +14954,69 @@ command = "my-agent-cli"
         assert_eq!(linked[&7][0].number, 107);
         assert!(linked[&7][0].will_close_target);
         assert_eq!(linked[&30][0].number, 130);
+    }
+
+    #[test]
+    fn issue_4157_linked_pr_bulk_read_follows_only_incomplete_timelines() {
+        let event = |number, closing| {
+            serde_json::json!({
+                "__typename": "CrossReferencedEvent", "willCloseTarget": closing,
+                "source": {"__typename": "PullRequest", "number": number, "state": "OPEN"}
+            })
+        };
+        let cursor = "next\"page\\42";
+        let mut queries = Vec::new();
+        let linked = fetch_linked_prs_bulk_via_gh_with(&[42, 43], |query| {
+            queries.push(query.to_string());
+            assert!(query.contains("pageInfo { hasNextPage endCursor }"));
+            let repository = if queries.len() == 1 {
+                serde_json::json!({
+                    "i42": {"timelineItems": {"nodes": [event(7, false)],
+                        "pageInfo": {"hasNextPage": true, "endCursor": cursor}}},
+                    "i43": {"timelineItems": {"nodes": [],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+                })
+            } else {
+                assert_eq!(queries.len(), 2);
+                assert!(query.contains("i42: issue(number: 42)"));
+                assert!(!query.contains("i43: issue(number: 43)"));
+                assert!(query.contains(&format!(
+                    "after: {}",
+                    serde_json::to_string(cursor).unwrap()
+                )));
+                serde_json::json!({"i42": {"timelineItems": {
+                    "nodes": [event(7, true), event(8, true)],
+                    "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }}})
+            };
+            Ok(serde_json::json!({"data": {"repository": repository}}).to_string())
+        })
+        .unwrap();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(
+            linked[&42].iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert!(linked[&42].iter().all(|pr| pr.will_close_target));
+        assert!(linked[&43].is_empty());
+
+        for cursor in [serde_json::Value::Null, serde_json::json!("unchanged")] {
+            let mut calls = 0;
+            assert!(
+                fetch_linked_prs_bulk_via_gh_with(&[42], |_| {
+                    calls += 1;
+                    assert!(calls <= 2, "a repeated cursor must not loop");
+                    Ok(
+                        serde_json::json!({"data":{"repository":{"i42":{"timelineItems":{
+                            "nodes":[], "pageInfo":{"hasNextPage":true,"endCursor":cursor}
+                        }}}}})
+                        .to_string(),
+                    )
+                })
+                .is_err(),
+                "an incomplete timeline cannot prove absence"
+            );
+        }
     }
 
     /// SPEC #4093 AC-10: `issue.view refresh:true` inside a persisted GitHub
