@@ -2219,7 +2219,7 @@ esac
         ] {
             cache
                 .write_snapshot(&IssueSnapshot {
-                    author_login: None,
+                    author_login: Some("OriginalCreator".into()),
                     number: IssueNumber(number),
                     title: format!("Cached {number}"),
                     body: format!("Cached body {number}"),
