@@ -16323,6 +16323,15 @@ impl IssueMonitorState {
     fn reconcile_terminal_queue(&mut self) {
         let members = self.local_terminal_queue_numbers();
         self.queue.retain(|number| members.contains(number));
+        let unqueued = self
+            .autonomous_records
+            .keys()
+            .filter(|number| !members.contains(number) && !self.active_launches.contains(number))
+            .copied()
+            .collect::<Vec<_>>();
+        for number in unqueued {
+            self.clear_provisional_implementation(number);
+        }
         let removed = self
             .inbox
             .iter()
@@ -41465,10 +41474,25 @@ mod tests {
     #[test]
     fn terminal_queue_remove_cancels_pending_and_refill_respects_removal() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.terminal_queue_push(&[1, 2], "operator", now);
-        monitor.record_candidate(issue(1));
-        monitor.record_candidate(issue(2));
+        let mut monitor = autonomous_state();
+        let candidate = auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[1, 2, 4, 5], "operator", now);
+        monitor.record_candidate(candidate.clone());
+        for number in [2, 4, 5] {
+            monitor.record_candidate(issue(number));
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.process_held_issues.insert(4);
+        monitor.autonomous_record_mut(5).reviewed_sha = Some("reviewed-head".into());
+        monitor.record_attempt(1);
+        let attempts = monitor.attempt_count(1);
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
         monitor.config.enabled = true;
         monitor.set_gui_connected(true);
         assert_eq!(
@@ -41477,7 +41501,20 @@ mod tests {
         );
         let stale_proposal = monitor.pending_effects[0].clone();
         monitor.complete_active_launch_at(2, "tab::agent", now);
-        monitor.terminal_queue_remove(&[1, 2], now);
+        monitor.terminal_queue_remove(&[1, 2, 4, 5], now);
+        assert_eq!(
+            monitor.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle,
+            "removing an unlaunched candidate must clear its provisional phase"
+        );
+        assert_eq!(monitor.attempt_count(1), attempts);
+        for number in [2, 4, 5] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "queue removal must preserve existing work for Issue #{number}"
+            );
+        }
         assert!(!monitor.prepare_effect(stale_proposal));
         assert!(!monitor.queue.contains(&1));
         assert!(monitor.active_launches.contains(&2));
@@ -41507,6 +41544,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 3]
         );
+        monitor.terminal_queue_push(&[1], "operator", now);
+        assert!(
+            !monitor.autonomous_in_flight_issues().contains(&1),
+            "readmission must not revive work before fresh eligibility"
+        );
+        monitor.record_candidate(candidate.clone());
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            1
+        );
+        assert_eq!(monitor.attempt_count(1), attempts);
     }
 
     #[test]
@@ -41616,14 +41671,33 @@ mod tests {
     #[test]
     fn terminal_queue_disk_rebase_replaces_stale_admission_and_refill_settings() {
         let now = "2026-09-10T00:00:00Z";
-        let mut stale = test_monitor(IssueMonitorConfig::default());
+        let mut stale = autonomous_state();
         stale.terminal_queue_push(&[1, 2], "operator", now);
         stale.record_candidate(issue(1));
         stale.record_candidate(issue(2));
+        stale.set_autonomous_phase(1, AutonomousPhase::Implementing);
+        stale.record_attempt(1);
         let mut fresh = stale.clone();
         fresh.terminal_queue_remove(&[1], now);
         fresh.set_terminal_queue_auto_refill(true, 3);
+        // Prefs retain phases, but not the transient inbox or launch queue.
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), fresh.prefs());
+        cold.autonomous_record_mut(1).phase = AutonomousPhase::Implementing;
+        assert!(cold.inbox_item(1).is_none());
+        assert!(cold.pending_effects().is_empty());
+        scan_issue_monitor_candidates(&mut cold, &[issue(2)], now);
+        assert_eq!(
+            cold.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        cold.terminal_queue_push(&[1], "operator", now);
+        assert!(!cold.autonomous_in_flight_issues().contains(&1));
+        assert_eq!(cold.attempt_count(1), 1);
         stale.rebase_daemon_driver_prefs(&fresh.prefs());
+        assert_eq!(
+            stale.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle
+        );
         assert_eq!(stale.local_terminal_queue_numbers(), vec![2]);
         assert!(!stale.queue.contains(&1));
         assert!(stale.prefs().terminal_queue_auto_refill);
