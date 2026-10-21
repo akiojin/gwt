@@ -71,6 +71,51 @@ test.describe("Project Manager Settings", () => {
       const originalMonitorEnabled = await monitorEnabled(page);
 
       try {
+        await interval.focus();
+        const burst = await page.evaluate(async () => {
+          const panels = [
+            document.querySelector('.workspace-window[data-preset="settings"] [data-settings-panel="project-manager"]')!,
+            document.getElementById("pm-settings-shared-test-mount")!,
+          ];
+          const lines = panels.map(root => root.querySelector('[data-role="pm-running-as"]')!);
+          const before = lines.map(line => line.textContent);
+          const active = document.activeElement;
+          const status = (window as any).__gwtPlaywrightMessages.findLast((entry: any) =>
+            entry.payload?.kind === "pm_status").payload;
+          const renders = [0, 0];
+          const observers = lines.map((line, index) => {
+            const observer = new MutationObserver(records => { renders[index] += records.length; });
+            observer.observe(line, { childList: true });
+            return observer;
+          });
+          try {
+            // The bridge calls receive synchronously, after transport batching.
+            // This measures the actual app-owned Settings mounts.
+            for (let index = 1; index <= 50; index++) {
+              window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+                detail: { ...status, is_running: true, running_agent_id: "codex",
+                  running_model: `frame-${index}`, running_reasoning: null,
+                  agent_options: [{ id: "codex", name: "Codex" }], loop_interval_secs: 60 + index,
+                  loop_interval_secs_decimal: String(60 + index) },
+              }));
+            }
+            const immediate = lines.map(line => line.textContent);
+            await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+            return { unchanged: immediate.every((text, index) => text === before[index]),
+              renders, latest: lines.map(line => line.textContent),
+              values: panels.map(root => (root.querySelector('[data-role="pm-loop-interval"]') as HTMLInputElement).value),
+              focusRetained: document.activeElement === active };
+          } finally {
+            observers.forEach(observer => observer.disconnect());
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: status }));
+          }
+        });
+        expect(burst).toEqual({ unchanged: true, renders: [1, 1],
+          latest: ["Running as: Codex · Model: frame-50", "Running as: Codex · Model: frame-50"],
+          values: ["110", "110"], focusRetained: true });
+        await testInfo.attach("pm-settings-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+        await expect(interval).toHaveValue(originalInterval);
+
         await injectPmStatus(page, { available: false });
         await expect(interval).toHaveValue("60");
         await expect(interval).toBeDisabled();

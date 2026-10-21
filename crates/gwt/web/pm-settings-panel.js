@@ -114,14 +114,14 @@ function agentLabel(state, agentId) {
   return match ? match.name : agentId;
 }
 
-export function createPmSettingsPanel({ document, send, confirm } = {}) {
+export function createPmSettingsPanel({ document, send, confirm, scheduleFrame } = {}) {
   if (!document) throw new TypeError("createPmSettingsPanel requires a document");
   const dispatch = typeof send === "function" ? send : () => {};
   const ask = typeof confirm === "function"
     ? confirm
     : (message) => Boolean(document.defaultView?.confirm?.(message));
 
-  const model = createUiStateStore(emptyStatus());
+  const model = createUiStateStore(emptyStatus(), { scheduleFrame });
   const mounts = new Map();
   const boundDocuments = new Set();
   let nextErrorId = 0;
@@ -468,7 +468,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       releaseMount(container);
       const view = build(container);
       mounts.set(container, view);
-      view.unsubscribe = model.subscribe(state => state, state => renderView(view, state));
+      view.unsubscribe = model.subscribeFrame(state => state, state => renderView(view, state));
       return this;
     },
     unmount(container) {
