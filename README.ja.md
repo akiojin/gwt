@@ -750,6 +750,12 @@ ID の区別に保持します。入力済みの値の意味は評価せず、as
 assumptions と `source_revision` は任意、レビュー日は既存の `policy.review_dates` に任せます。
 この診断は Monitor の取得を必要としません。情報が揃っていても、判断の品質・承認・
 操作の許可を示しません。
+`policy.decision_revisions` は全保存意思決定の ID と `source_revision` を保存順で返します。
+`revisions_since_source` は現在の `planning_revision` との差分で、0を含む非負の数値です。
+参照 revision が未設定なら差分は null、`missing_inputs` は `source_revision`、
+現在計画より先なら差分は null、`source_revision_ahead_of_planning` を返します。
+Monitor の取得を必要とせず、`source_revision` の設定も任意のままです。
+revision の差は判断の入力変更・鮮度・品質・承認・操作許可を証明しません。
 `policy.recurring_runs` は保存済みの定期作業を、保存順・ID・記入済み `next_run` を
 保持して返します。`due_at_scan` は時差・秒未満の精度を含む RFC3339 の絶対時刻を比較し、
 スキャンが `next_run` と同時刻以降なら true、前なら false を返します。時刻が欠落・
