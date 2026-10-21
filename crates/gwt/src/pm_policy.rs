@@ -183,6 +183,53 @@ pub struct PlanningAssessment {
     pub goals: Vec<GoalDiagnostic>,
     pub milestones: Vec<MilestoneDiagnostic>,
     pub review_dates: Vec<ReviewDateObservation>,
+    pub recurring_runs: Vec<RecurringRunObservation>,
+}
+
+/// A saved next-run timestamp reaching the scan is not execution evidence.
+#[derive(Debug, Serialize)]
+pub struct RecurringRunObservation {
+    pub id: String,
+    pub next_run: Option<String>,
+    pub due_at_scan: Option<bool>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+fn observe_recurring_runs(
+    state: &PmPlanningState,
+    scan: Option<&str>,
+) -> Vec<RecurringRunObservation> {
+    // Chrono silently discards fractional digits beyond nanoseconds.
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .filter(|_| {
+                value.split_once('.').is_none_or(|(_, fraction)| {
+                    fraction.bytes().take_while(u8::is_ascii_digit).count() <= 9
+                })
+            })
+    };
+    let scan = scan.and_then(parse);
+    state
+        .recurring_items
+        .iter()
+        .map(|item| {
+            let next_run = item.next_run.as_deref().and_then(parse);
+            let mut missing_inputs = Vec::new();
+            if next_run.is_none() {
+                missing_inputs.push("next_run");
+            }
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            RecurringRunObservation {
+                id: item.id.clone(),
+                next_run: item.next_run.clone(),
+                due_at_scan: scan.zip(next_run).map(|(scan, next_run)| scan >= next_run),
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -1045,6 +1092,10 @@ pub fn assess_planning(
             state,
             monitor.and_then(|status| status.last_scan_at.as_deref()),
         ),
+        recurring_runs: observe_recurring_runs(
+            state,
+            monitor.and_then(|status| status.last_scan_at.as_deref()),
+        ),
     }
 }
 
@@ -1319,6 +1370,73 @@ mod tests {
                 "scan_date_utc":null, "days_past_target_at_scan":null,
                 "missing_inputs":["monitor_scan_time"]
             })
+        );
+    }
+
+    #[test]
+    fn recurring_runs_compare_saved_instants_without_scheduling_work() {
+        let state: PmPlanningState = serde_json::from_value(json!({"recurring_items":[
+            {"id":"same", "next_run":"2024-03-01T00:30:00Z"},
+            {"id":"same", "next_run":"2024-02-29T20:30:00.000000001-04:00"},
+            {"id":"", "next_run":"2024-03-01T00:30:00.000000002Z"},
+            {"id":"precision", "next_run":"2024-03-01T00:30:00.0000000011Z"},
+            {"id":"invalid", "next_run":"2024-03-01T00:30:00"},
+            {"id":"blank", "next_run":""},
+            {"id":"missing"}
+        ]}))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2024-03-01T00:30:00.000000001Z".into());
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["recurring_runs"]
+            .as_array()
+            .expect("recurring observations");
+        assert_eq!(rows.len(), state.recurring_items.len());
+        for (index, item) in state.recurring_items.iter().enumerate() {
+            assert_eq!(
+                rows[index],
+                json!({
+                    "id":item.id, "next_run":item.next_run,
+                    "due_at_scan":([Some(true), Some(true), Some(false), None, None, None, None][index]),
+                    "missing_inputs":(if index < 3 {json!([])} else {json!(["next_run"])})
+                })
+            );
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["recurring_runs"], report["recurring_runs"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2024-03-01T00:30:00.0000000010Z"),
+        ] {
+            monitor.last_scan_at = scan.map(str::to_owned);
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            for (index, item) in state.recurring_items.iter().enumerate() {
+                assert_eq!(
+                    untimed["recurring_runs"][index],
+                    json!({
+                        "id":item.id, "next_run":item.next_run, "due_at_scan":null,
+                        "missing_inputs":(if index < 3 {json!(["monitor_scan_time"])}
+                            else {json!(["next_run", "monitor_scan_time"])})
+                    })
+                );
+            }
+        }
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            absent["recurring_runs"],
+            serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap()
+                ["recurring_runs"]
+        );
+        assert_eq!(
+            serde_json::to_value(assess_planning(&PmPlanningState::default(), None)).unwrap()
+                ["recurring_runs"],
+            json!([])
         );
     }
 

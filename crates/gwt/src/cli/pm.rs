@@ -1006,11 +1006,25 @@ mod tests {
                 id: "release-decision".into(),
                 ..Default::default()
             });
+            state
+                .recurring_items
+                .push(crate::pm_planning::RecurringItem {
+                    id: "maintenance".into(),
+                    next_run: Some("2024-03-01T00:30:00Z".into()),
+                    ..Default::default()
+                });
             Ok(())
         })
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["recurring_runs"],
+            serde_json::json!([
+                {"id":"maintenance", "next_run":"2024-03-01T00:30:00Z", "due_at_scan":null,
+                 "missing_inputs":["monitor_scan_time"]}
+            ])
+        );
         assert_eq!(
             status["policy"]["review_dates"],
             serde_json::json!([
