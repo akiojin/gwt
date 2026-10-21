@@ -529,6 +529,11 @@ impl AppRuntime {
     }
 
     fn observe_provider_capacity_hook(&mut self, window_id: &str, state: WindowProcessStatus) {
+        // A trailing Stop is Idle, not renewed activity. Keep its pending
+        // retry while Waiting and terminal hook states still revoke it.
+        if state == WindowProcessStatus::Idle {
+            return;
+        }
         self.cancel_provider_capacity_resume(window_id);
         if state != WindowProcessStatus::Running {
             return;

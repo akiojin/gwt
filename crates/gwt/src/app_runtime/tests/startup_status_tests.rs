@@ -107,6 +107,17 @@ fn codex_capacity_resume_submits_once_after_a_quiet_minute() {
     let due = runtime.provider_capacity_resumes["capacity-session"]
         .due
         .unwrap();
+    // A turn-ending Stop may arrive after the capacity output; it is not
+    // renewed activity and must preserve the pending retry.
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "waiting",
+        "Stop",
+        "capacity-session",
+    ));
+    assert_eq!(
+        runtime.window_status(&id),
+        Some(WindowProcessStatus::Waiting)
+    );
     runtime.sweep_provider_capacity_resumes(due - Duration::from_secs(1));
     assert!(tasks.lock().unwrap().is_empty());
     runtime.sweep_provider_capacity_resumes(due);
@@ -139,6 +150,7 @@ fn codex_capacity_resume_rechecks_activity_and_session_authority_after_worker_qu
     for changed in [
         "submitted input",
         "recovery hook",
+        "approval hook",
         "different API error",
         "settled execution",
         "replaced Session",
@@ -163,6 +175,13 @@ fn codex_capacity_resume_rechecks_activity_and_session_authority_after_worker_qu
                 runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
                     "running",
                     "PreToolUse",
+                    "capacity-session",
+                ));
+            }
+            "approval hook" => {
+                runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+                    "waiting",
+                    "PermissionRequest",
                     "capacity-session",
                 ));
             }
