@@ -533,7 +533,7 @@ test("Workspace-owned cleanup result re-renders the modal even without a Branche
 // Issue #4433: cleanup progress/result used to be replied to the originating
 // client only, and a mid-cleanup disconnect was rendered as a cleanup failure.
 // A reconnected client must be able to re-sync the running operation instead.
-function mountCleanupSurface(surfaceModule, windowId) {
+function mountCleanupSurface(surfaceModule, windowId, launchPending = { settleWhere() {} }) {
   const { document, modalEl, dialogEl, createNode } = mount();
   const sent = [];
   const windowEl = document.createElement("section");
@@ -546,7 +546,7 @@ function mountCleanupSurface(surfaceModule, windowId) {
     sendWindowFocus() {},
     branchCleanupModal: modalEl,
     branchCleanupDialog: dialogEl,
-    launchPending: { settleWhere() {} },
+    launchPending,
     visibleBounds: () => ({}),
     getActiveWorkProjection: () => null,
     renderWorkspaceWindows: () => {},
@@ -841,4 +841,55 @@ test("cleanup snapshots own received data and release closed window state", asyn
   surface.clearBranchCleanupForWindow(windowId);
   assert.equal(surface.readBranchCleanupState(windowId), null);
   assert.equal(dialogEl.querySelector("h2"), activeHeading, "unrelated removal does not rebuild the active dialog");
+});
+
+test("branch errors settle Resume first and preserve fresh-list and running-cleanup behavior", async (t) => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const pending = [];
+  const { surface, windowEl, dialogEl } = mountCleanupSurface(surfaceModule, "branches", {
+    settleWhere(prefix) {
+      pending.push([prefix, surface.ensureBranchListState("branches").loading]);
+    },
+  });
+  const previousDocument = globalThis.document;
+  globalThis.document = windowEl.ownerDocument;
+  t.after(() => {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  });
+  windowEl.innerHTML = '<div class="branch-notice"></div><div class="branch-list"><div class="branch-empty"></div></div>';
+  const state = surface.ensureBranchListState("branches");
+  state.loading = true;
+  const event = { kind: "branch_error", id: "branches", message: "<b>Resume failed</b>" };
+  surface.applyBranchCleanupReceiveEvent(event);
+  assert.deepEqual(pending, [["branch:", true]]);
+  assert.equal(state.loading, false);
+  assert.equal(state.error, event.message);
+  assert.equal(windowEl.querySelector(".branch-empty").textContent, event.message);
+  assert.equal(windowEl.querySelector("b"), null);
+  event.message = "mutated payload";
+  surface.renderBranches("branches");
+  assert.equal(state.error, "<b>Resume failed</b>");
+
+  state.receivedFreshEntries = true;
+  surface.applyBranchCleanupReceiveEvent(event);
+  assert.equal(state.error, "");
+  assert.equal(state.notice, "mutated payload");
+  state.notice = "";
+  surface.applyBranchCleanupReceiveEvent(event);
+  assert.equal(state.notice, "mutated payload", "an identical new receipt still applies");
+  surface.applyBranchCleanupReceiveEvent({ ...event, id: "other", message: "Other error" });
+  assert.equal(state.notice, "mutated payload");
+  assert.equal(surface.ensureBranchListState("other").error, "Other error");
+
+  surface.openWorkspaceCleanup({ branch: "work/old" }, "branches");
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find(button => button.textContent === "Run cleanup").click();
+  state.loading = true;
+  state.notice = "keep list notice";
+  surface.applyBranchCleanupReceiveEvent({ ...event, message: "Cleanup failed" });
+  assert.equal(state.loading, false);
+  assert.equal(state.notice, "keep list notice", "running cleanup takes priority over the list error");
+  assert.equal(surface.readBranchCleanupState("branches").stage, "result");
+  assert.match(dialogEl.textContent, /Cleanup failed/);
 });

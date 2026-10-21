@@ -37,6 +37,7 @@ export function createBranchesCleanupSurface({
 }) {
       const branchListStateMap = new Map();
       const cleanupModel = createUiStateStore({ owner: null, byWindowId: {} });
+      const branchErrorModel = createUiStateStore(null);
 
       function readBranchCleanupState(windowId) {
         return cleanupModel.read().byWindowId[windowId]?.modal || null;
@@ -1045,7 +1046,7 @@ export function createBranchesCleanupSurface({
         });
       }
 
-      // Cleanup progress/results commit canonical data; branch list errors and
+      // Cleanup lifecycle and branch errors commit shared data; branch list
       // inventory/telemetry remain on their existing migration boundary.
       function applyBranchCleanupReceiveEvent(event) {
         switch (event.kind) {
@@ -1071,24 +1072,30 @@ export function createBranchesCleanupSurface({
             break;
           }
           case "branch_error": {
-            // Failed Resume must still settle its pending control immediately.
-            launchPending.settleWhere("branch:");
-            const state = ensureBranchListState(event.id);
-            state.loading = false;
-            if (failRunningBranchCleanup(event.id, event.message)) break;
-            if (state.receivedFreshEntries) {
-              state.notice = event.message;
-              state.error = "";
-            } else {
-              state.error = event.message;
-            }
-            renderBranches(event.id);
+            branchErrorModel.update(() => ({ windowId: event.id, message: event.message }));
             break;
           }
           default:
             break;
         }
       }
+
+      // Synchronous notification preserves Resume settlement and cleanup priority.
+      // Only the latest receipt is retained; a repeated message still notifies.
+      branchErrorModel.subscribe(state => state, error => {
+        if (!error) return;
+        launchPending.settleWhere("branch:");
+        const state = ensureBranchListState(error.windowId);
+        state.loading = false;
+        if (failRunningBranchCleanup(error.windowId, error.message)) return;
+        if (state.receivedFreshEntries) {
+          state.notice = error.message;
+          state.error = "";
+        } else {
+          state.error = error.message;
+        }
+        renderBranches(error.windowId);
+      });
 
       // Stable active-window selectors isolate unrelated changes. Separate
       // subscribers keep one view's failure from preventing the other update.
