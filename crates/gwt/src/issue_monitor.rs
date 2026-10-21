@@ -16003,6 +16003,15 @@ impl IssueMonitorState {
             state,
             MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
         ) {
+            // Eligibility marks Implementing before a claim starts a pane.
+            // Retire only that provisional phase; resumed reviews retain a SHA.
+            if self.autonomous_record(issue_number).is_some_and(|record| {
+                record.phase == AutonomousPhase::Implementing && record.reviewed_sha.is_none()
+            }) && !self.has_monitor_pane_for_issue(issue_number)
+                && !self.process_held_issues.contains(&issue_number)
+            {
+                self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+            }
             revoke_uncommitted_claims_for_issue(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
