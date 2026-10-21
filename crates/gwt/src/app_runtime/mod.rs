@@ -2313,6 +2313,7 @@ pub struct AppRuntime {
     /// output has genuinely stopped — which is exactly the state being
     /// reported.
     pub(crate) provider_api_error_holds: HashMap<String, gwt_core::usage::ProviderApiError>,
+    pub(crate) provider_capacity_resumes: HashMap<String, runtime_events::ProviderCapacityResume>,
     /// Issue #3616: the newest account-level usage snapshot, used only to
     /// corroborate a screen notice. Never a trigger on its own: the poller is
     /// silent while no client is connected and Claude's account read is opt-in.
@@ -5157,6 +5158,7 @@ impl AppRuntime {
             provider_quota_holds: HashMap::new(),
             provider_quota_candidates: HashMap::new(),
             provider_api_error_holds: HashMap::new(),
+            provider_capacity_resumes: HashMap::new(),
             released_provider_quota_notices: HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
@@ -15082,6 +15084,15 @@ impl AppRuntime {
             composed,
             self.provider_api_error_holds.contains_key(window_id),
         );
+        if self.window_approval_waiting.contains_key(window_id)
+            || self.provider_quota_holds.contains_key(window_id)
+            || matches!(
+                composed,
+                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+            )
+        {
+            self.cancel_provider_capacity_resume(window_id);
+        }
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -15092,6 +15103,7 @@ impl AppRuntime {
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.cancel_provider_capacity_resume(window_id);
         self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
         self.pending_monitor_startups.remove(window_id);

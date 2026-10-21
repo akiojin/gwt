@@ -609,6 +609,14 @@ All operations accept an optional
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
 
+If an autonomous Monitor-launched Codex session ends a turn with “Selected model
+is at capacity”, gwt waits at least 60 seconds, then submits one continuation
+prompt to the same active session. Each session gets at most one automatic
+attempt while the gwt instance remains running. Recovery, manual input,
+approval or quota waits, and a replaced or
+settled session prevent the send. The existing PM notification remains available
+if the attempt fails; manually launched sessions are left for their operator.
+
 Automatic profile selection is opt-in with `issue.monitor.tiers.set` and
 `{"auto":true}`. It supplies three tiers without requiring a profile pool:
 Codex Luna / Claude Haiku, Codex Sol / Claude Sonnet, then Codex Astra / Claude

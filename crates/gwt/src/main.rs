@@ -4806,6 +4806,7 @@ mod tests {
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
             provider_api_error_holds: std::collections::HashMap::new(),
+            provider_capacity_resumes: std::collections::HashMap::new(),
             released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
@@ -11568,6 +11569,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
                 let mut events = app.assign_missing_agent_names();
                 events.extend(app.terminal_convergence_tick_events());
+                app.sweep_provider_capacity_resumes(std::time::Instant::now());
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());
