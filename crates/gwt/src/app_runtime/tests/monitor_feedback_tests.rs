@@ -720,8 +720,8 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     run_worker(0);
     assert_eq!(
         gwt_core::process::thread_git_spawn_count() - before,
-        1,
-        "reused facts leave only the current fallback claim's Git validation"
+        2,
+        "reused facts leave the source preflight and current fallback claim's Git validation"
     );
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read current head claim");
     assert_eq!(
@@ -790,7 +790,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let before = gwt_core::process::thread_git_spawn_count();
     run_worker(0);
     assert!(
-        gwt_core::process::thread_git_spawn_count() - before > 1,
+        gwt_core::process::thread_git_spawn_count() - before > 2,
         "unavailable speculation must run normal facts preparation"
     );
     fixture
@@ -1293,9 +1293,12 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         Some(expected_window_id.as_str()),
         "the reused facts must claim the current proposed pane"
     );
-    // This offline fixture rebinds through local fallback, which validates
-    // the origin. Base/hydration/prompt preparation must not run again.
-    assert_eq!(repeated_git, 1, "only the current claim may validate Git");
+    // Source preflight, the offline fallback claim, and final pane admission
+    // validate the actual origin. Base/hydration/prompt facts remain reused.
+    assert_eq!(
+        repeated_git, 3,
+        "only the current source checks and claim may validate Git"
+    );
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
 }
 

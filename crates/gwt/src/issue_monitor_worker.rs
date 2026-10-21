@@ -6886,6 +6886,31 @@ mod tests {
             github_remote_owner_and_repo(tmp.path()).expect("workspace home origin"),
             ("owner".to_string(), "repo".to_string())
         );
+        // Git fetches the first URL; metadata routing can select a later one.
+        // Admission must follow the actual upstream even with another URL.
+        std::fs::write(
+            bare_repo_path.join("origin.inc"),
+            "[remote \"origin\"]\n url = https://github.com/akiojin/gwt.git\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bare_repo_path.join("config"),
+            "[core]\n bare = true\n[include]\n path = origin.inc\n[remote \"origin\"]\n url = https://github.com/example/other.git\n",
+        )
+        .unwrap();
+        assert_eq!(
+            github_remote_owner_and_repo(tmp.path()).unwrap(),
+            ("akiojin".into(), "gwt".into())
+        );
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        bind_issue_monitor_source_repository(&mut monitor, tmp.path());
+        let mut external = issue(42);
+        external.author_login = Some("external-reporter".into());
+        assert!(monitor
+            .source_exclusion(&external)
+            .expect("the actual upstream requires curation")
+            .1
+            .contains("untrusted external Issue"));
     }
 
     #[cfg(unix)]
