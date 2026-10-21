@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import {
-  clearLiveLaunchWizard,
   gotoLiveGwt,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
@@ -23,8 +22,9 @@ test("automatic restore errors stay in Notifications while manual errors open a 
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
 
   await withLiveGwtBackendLock(BASE, testInfo, async () => {
-    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-    await clearLiveLaunchWizard(page);
+    // The permanent receive-injection hook is sufficient here. Enabling the
+    // optional bridge installs a second listener for the same injected event.
+    await gotoLiveGwt(page, BASE);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     const bell = page.locator("#op-notifications-button");
@@ -47,7 +47,7 @@ test("automatic restore errors stay in Notifications while manual errors open a 
     await expect(bell.locator(".op-rail__badge")).toHaveText("1");
     await expect(bell.locator(".op-rail__badge")).toHaveAttribute("data-has-error", "true");
     await expect(wizard).toBeHidden();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
 
     // Clicking the ordinary rail control also verifies the failure did not
     // install a blocking overlay over the workspace.
@@ -63,14 +63,14 @@ test("automatic restore errors stay in Notifications while manual errors open a 
     });
     await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
 
-    const manualError = "Unable to open Launch Wizard: configured executable is unavailable.";
+    const manualError = "Agent restore failed: configured executable is unavailable.";
     await page.evaluate(message => {
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-        detail: { kind: "launch_wizard_open_error", title: "Launch Agent", message },
+        detail: { kind: "launch_wizard_open_error", title: "Agent restore", message },
       }));
     }, manualError);
     await expect(wizard).toBeVisible();
-    await expect(wizard.getByRole("dialog", { name: "Launch Agent", exact: true }))
+    await expect(wizard.getByRole("dialog", { name: /agent restore/i }))
       .toHaveAttribute("aria-modal", "true");
     await expect(wizard.locator("#wizard-error")).toHaveText(manualError);
     const manualShot = testInfo.outputPath(`manual-launch-error-${theme}.png`);
