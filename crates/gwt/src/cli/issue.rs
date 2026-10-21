@@ -4786,6 +4786,48 @@ fn run_monitor_review_verdict<E: CliEnv>(
     verdict_raw: &str,
     out: &mut String,
 ) -> i32 {
+    let readiness = (|| -> Result<bool, String> {
+        let root = issue_monitor_project_root(env, None).map_err(|error| error.to_string())?;
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .map_err(|error| error.to_string())?;
+        let Some(record) = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == issue_number)
+        else {
+            return Ok(false);
+        };
+        if record.phase != crate::AutonomousPhase::Reviewing
+            || record.reviewed_sha.as_deref() != Some(reviewed_sha)
+        {
+            return Ok(false);
+        }
+        let pr_number = record
+            .pr_number
+            .ok_or("reviewed PR number is unavailable")?;
+        let (owner, repo) = env.github_repository().map_err(|error| error.to_string())?;
+        crate::issue_monitor_review::review_submission_ci_ready(
+            env.repo_path(),
+            &format!("{owner}/{repo}"),
+            pr_number,
+            reviewed_sha,
+        )?;
+        Ok(true)
+    })();
+    if matches!(readiness, Ok(false)) {
+        out.push_str("{\"status\":\"obsolete\",\"reason\":\"Review binding was superseded; no verdict was published. Do not retry this old review.\"}\n");
+        return 0;
+    }
+    if let Err(reason) = readiness {
+        out.push_str(&serde_json::json!({
+            "status": "deferred", "issue_number": issue_number,
+            "reviewed_sha": reviewed_sha, "reason": reason,
+            "recovery": "Keep this review pane active. Wait for required CI, re-read the PR/head and CI evidence, re-evaluate every acceptance criterion, then retry issue.monitor.review_verdict with the refreshed verdict. No verdict was published."
+        }).to_string());
+        out.push('\n');
+        return 0;
+    }
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({
@@ -6709,6 +6751,160 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn monitor_review_verdict_defers_until_required_ci_is_terminal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        gwt_core::test_support::write_executable_script(
+            &bin.join("gh"),
+            "#!/bin/sh\ncase \"$*\" in\n  *'pr view'*) cat pr.json ;;\n  *'api '*) cat protection.json ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let _path =
+            gwt_core::test_support::ScopedEnvVar::set("PATH", std::env::join_paths(paths).unwrap());
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.begin_review(42, 99, "abc123");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let prefs_before = fs::read(&prefs_path).unwrap();
+        fs::write(
+            repo.join("protection.json"),
+            r#"{"required_status_checks":{"contexts":["build","test"]},"allow_force_pushes":{"enabled":false}}"#,
+        )
+        .unwrap();
+        let complete =
+            serde_json::json!({"name":"build","status":"COMPLETED","conclusion":"SUCCESS"});
+        let failed =
+            serde_json::json!({"name":"build","status":"COMPLETED","conclusion":"FAILURE"});
+        let pending = serde_json::json!({"name":"test","status":"IN_PROGRESS"});
+        let test_pass =
+            serde_json::json!({"name":"test","status":"COMPLETED","conclusion":"SUCCESS"});
+        let optional = serde_json::json!({"name":"optional","status":"IN_PROGRESS"});
+        for (state, head, rollup, deferred) in [
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, {"context":"build","state":"PENDING"}, test_pass]),
+                true,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, pending]),
+                true,
+            ),
+            ("OPEN", "abc123", serde_json::json!([failed, pending]), true),
+            ("OPEN", "abc123", serde_json::json!([complete]), true),
+            ("OPEN", "abc123", serde_json::json!(null), true),
+            (
+                "OPEN",
+                "new-head",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "CLOSED",
+                "abc123",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, test_pass, optional]),
+                false,
+            ),
+            (
+                "MERGED",
+                "abc123",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([failed, test_pass]),
+                false,
+            ),
+        ] {
+            fs::write(
+                repo.join("pr.json"),
+                serde_json::json!({
+                    "number":99,"headRefOid":head,"baseRefName":"develop",
+                    "state":state,"statusCheckRollup":rollup
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let mut out = String::new();
+            let code = run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out);
+            if deferred {
+                assert_eq!(code, 0, "nonterminal wait: {out}");
+                assert!(out.contains("\"status\":\"deferred\""), "{out}");
+                assert!(out.contains("re-evaluate"), "{out}");
+                assert!(!out.contains("publish failed"), "must not publish: {out}");
+            } else {
+                // No daemon exists in this isolated project: reaching its
+                // ordinary transport error proves terminal CI allows publish.
+                assert_eq!(code, 1, "{out}");
+                assert!(out.contains("review verdict publish failed"), "{out}");
+            }
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        }
+        for (file, contents) in [
+            ("protection.json", Some("not JSON")),
+            ("protection.json", Some("{}")),
+            ("pr.json", Some("not JSON")),
+            ("pr.json", None),
+        ] {
+            match contents {
+                Some(contents) => fs::write(repo.join(file), contents).unwrap(),
+                None => fs::remove_file(repo.join(file)).unwrap(),
+            }
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let mut out = String::new();
+            assert_eq!(
+                run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+                0
+            );
+            assert!(out.contains("\"status\":\"deferred\""), "{out}");
+            assert!(!out.contains("publish failed"), "must not publish: {out}");
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        }
+        monitor.begin_review(42, 100, "new-head");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let superseded = fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            0
+        );
+        assert!(out.contains("\"status\":\"obsolete\""), "{out}");
+        assert_eq!(fs::read(&prefs_path).unwrap(), superseded);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let removed = fs::read(&prefs_path).unwrap();
+        out.clear();
+        assert_eq!(
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            0
+        );
+        assert!(out.contains("\"status\":\"obsolete\""), "{out}");
+        assert_eq!(fs::read(&prefs_path).unwrap(), removed);
     }
 
     /// Issue #3683 (AC-3): the claim-block probe reads the exact wire format
