@@ -653,6 +653,7 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, is
     if (Number.isFinite(linked) && Number.isFinite(wanted) && linked !== wanted) {
       return false;
     }
+    if (Number.isInteger(wanted) && wanted > 0 && linked === wanted) return true;
     if (remembered.has(windowData.id) || windowIds.has(windowData.id)) return true;
     return Boolean(windowData.session_id) && sessionIds.has(windowData.session_id);
   });
@@ -3249,7 +3250,7 @@ export function createKnowledgeKanbanSurface({
               return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
-                phase === "active" ? (getWorkspaceWindows?.() || []).filter(target =>
+                phase === "active" ? issueProjectWindows(windowId).filter(target =>
                   target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
                     work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
             },
@@ -3267,7 +3268,7 @@ export function createKnowledgeKanbanSurface({
               if (phase === "active") {
                 const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
                 const agents = work?.agents || [];
-                const windows = getWorkspaceWindows?.() || [];
+                const windows = issueProjectWindows(windowId);
                 for (const target of windows) {
                   if (!target.agent_id || target.preset === "pm" ||
                       !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
@@ -3558,8 +3559,11 @@ export function createKnowledgeKanbanSurface({
       // mirror of the agent working on the selected Issue. Exactly one terminal is
       // mounted, and the only control it offers is Windowize.
       function renderIssueAgentPreview(windowId, state) {
+        const entry = issueDetailEntry(state, state.selectedNumber);
+        const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
+        if (entry && issueRowFaces(windowId, entry, work).canvasWindow) return null;
         const previews = issuePreviewWindowsForIssue(
-          typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [],
+          issueProjectWindows(windowId),
           windowId,
           state.selectedNumber,
         );
@@ -3683,7 +3687,12 @@ export function createKnowledgeKanbanSurface({
         elapsed.title = elapsed.textContent ? `${statusView.label} for ${elapsed.textContent}` : "";
         row.appendChild(elapsed);
 
-        row.appendChild(issueRowActionButton("windowize-issue-preview", context));
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const existingCanvas = issueRowFaces(windowId, entry, work).canvasWindow;
+        row.appendChild(issueRowActionButton(
+          existingCanvas ? "focus-canvas-window" : "windowize-issue-preview",
+          existingCanvas ? { ...context, target: existingCanvas } : context,
+        ));
 
         // Last in DOM order: the activity line spans the full width on its own
         // grid row, so it must follow every first-row cell (title / elapsed /
@@ -4619,15 +4628,24 @@ export function createKnowledgeKanbanSurface({
         return menu;
       }
 
-      function issueRowFaces(windowId, entry, work) {
+      function issueProjectWindows(windowId) {
         const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
+        const tabs = windowCatalogModel?.read().catalog?.appState?.tabs;
+        if (!tabs) return windows;
+        const project = tabs.find(tab => tab.workspace?.windows?.some(window => window.id === windowId));
+        const ids = new Set((project?.workspace?.windows || []).map(window => window.id));
+        return windows.filter(window => ids.has(window.id));
+      }
+
+      function issueRowFaces(windowId, entry, work) {
+        const windows = issueProjectWindows(windowId);
         const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
         const canvas = issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
         const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
+        const existingCanvas = canvas.find(isLive) || canvas[0];
+        if (existingCanvas) return { inlineWindow: null, canvasWindow: existingCanvas };
         const inlineWindow = inline.find(isLive) || null;
-        const canvasWindow = inlineWindow ? null : canvas.find(isLive) || null;
-        if (inlineWindow || canvasWindow) return { inlineWindow, canvasWindow };
-        return { inlineWindow: inline[0] || null, canvasWindow: inline.length ? null : canvas[0] || null };
+        return { inlineWindow: inlineWindow || inline[0] || null, canvasWindow: null };
       }
 
       function renderIssueRow(windowId, state, entry) {

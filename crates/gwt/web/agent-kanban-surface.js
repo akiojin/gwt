@@ -334,15 +334,27 @@ export function createAgentKanbanSurface({
     });
 
     const undock = document.createElement("button");
+    const issueNumber = Number(windowData.linked_issue_number);
+    const existingIssueWindow = () => Number.isInteger(issueNumber) && issueNumber > 0
+      ? (activeWorkspace?.()?.windows || []).find(candidate => candidate.id !== windowData.id
+        && isAgentWindow(candidate) && isCanvasPlacement(candidate)
+        && Number(candidate.linked_issue_number) === issueNumber)
+      : null;
+    const focusesExisting = Boolean(existingIssueWindow());
     undock.type = "button";
     undock.dataset.action = "undock";
     undock.className = "agent-kanban-card-action";
-    undock.textContent = "↗";
-    undock.title = "Undock";
-    undock.setAttribute("aria-label", "Undock agent window");
+    undock.textContent = focusesExisting ? "◎" : "↗";
+    undock.title = focusesExisting ? "Focus existing Issue window" : "Undock";
+    undock.setAttribute("aria-label", focusesExisting ? "Focus existing Issue window" : "Undock agent window");
     undock.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      const existing = existingIssueWindow();
+      if (existing) {
+        onUndockAgent?.(existing.id);
+        return;
+      }
       send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
       onUndockAgent?.(windowData.id);
     });

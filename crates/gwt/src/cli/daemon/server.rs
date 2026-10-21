@@ -7272,6 +7272,104 @@ mod agent_failure_source_contract_tests {
     }
 }
 
+#[cfg(test)]
+mod authority_recovery_contract_tests {
+    use std::fs;
+
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+    use tempfile::TempDir;
+
+    #[test]
+    fn malformed_authority_fence_still_allows_direct_canonical_stop() {
+        let _prefs_budget = super::pin_prefs_hang_guard();
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let repo = fs::canonicalize(repo).expect("canonical repo");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 7,
+                launched_issues: vec![
+                    crate::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: "tab-1::agent-42".to_string(),
+                    },
+                    crate::IssueMonitorLaunchedIssue {
+                        issue_number: 43,
+                        window_id: "tab-1::agent-43".to_string(),
+                    },
+                ],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed readable preferences");
+        let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
+        let malformed = b"{\"version\":1,";
+        fs::write(&marker, malformed).expect("seed malformed authority fence");
+        let loaded = super::load_issue_monitor_state_for_daemon_with_lease(
+            &prefs_path,
+            crate::IssueMonitorConfig::default(),
+            None,
+        );
+        assert!(loaded.recovery_blocked);
+        assert!(loaded.authority_lease.is_some());
+        assert!(loaded
+            .monitor
+            .agent_status()
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("authority recovery is blocked")));
+
+        // Issue #4804 AC-6: the PM's direct operation remains available while
+        // the daemon retains its lease and refuses its ordinary control lane.
+        let mut env = crate::cli::TestEnv::new(repo);
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "operation": "issue.monitor.stop",
+            "params": {
+                "number": 42,
+                "reason": "authority recovery fallback",
+                "window_id": "tab-1::agent-42",
+                "remove_from_queue": true,
+            },
+        });
+        let code = crate::cli::dispatch_json_input(&mut env, "gwtd", &request.to_string());
+        let response: serde_json::Value =
+            serde_json::from_slice(&env.stdout).expect("canonical JSON reply");
+        assert_eq!(code, 0, "{response}");
+        assert_eq!(response["ok"], true);
+        let stopped: serde_json::Value =
+            serde_json::from_str(response["output"].as_str().expect("operation output"))
+                .expect("stop result");
+        assert_eq!(stopped["status"], "stopped");
+        assert_eq!(stopped["stopped_window_id"], "tab-1::agent-42");
+        assert!(stopped["pane_teardown"]
+            .as_str()
+            .is_some_and(|next| next.contains("pane.close")));
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("reload stopped state");
+        assert_eq!(prefs.effect_authority_epoch, 8);
+        assert_eq!(prefs.launched_issues.len(), 1);
+        assert_eq!(prefs.launched_issues[0].issue_number, 43);
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.stop_only_reason(42).as_deref(),
+            Some("authority recovery fallback")
+        );
+        assert_eq!(fs::read(marker).expect("reload authority fence"), malformed);
+        assert!(loaded.authority_lease.is_some());
+    }
+}
+
 // The server fixtures below run fake `gh` shell scripts and raw Unix
 // streams. The transport-neutral server surface (bind / accept /
 // handshake / status / publish / subscribe) is covered on every host by
