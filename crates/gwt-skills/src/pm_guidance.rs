@@ -109,6 +109,15 @@ Absent Monitor yields null; no matching rows yields []. Keep Monitor provenance:
 wait timing does not establish queue/claim-block age, SLA, liveness or full WIP,
 and never changes protection, invalidates a wait, releases a slot or triggers execution.
 
+`retry_deadlines` reports every inbox row with `retry_not_before`, retaining supplied order,
+repeated owners and lifecycle states. Remaining whole seconds use only the supplied scan time
+and a valid RFC3339 deadline, respecting offsets, flooring fractions and clamping elapsed deadlines to zero.
+Missing/invalid scan or deadline, including canonical `unknown`, leaves duration unknown with named inputs;
+invalid deadline text and free-text hold reasons are not copied. `retry_hold_started_at` remains missing:
+the snapshot cannot establish hold age. Absent Monitor yields null; no matching rows yields [].
+Keep Monitor provenance. A retry deadline does not prove an active hold or authorize launch,
+even when elapsed; these observations never change retry gates, waits, slots or priority.
+
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
 and, for goals and milestones, referencing roadmap links.
@@ -3808,6 +3817,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
+            "`retry_deadlines` reports every inbox row with `retry_not_before`",
+            "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",
             "An elapsed claim deadline does not prove release or authorize requeue",
             "Activity timing does not establish queue age, SLA breaches or liveness",
