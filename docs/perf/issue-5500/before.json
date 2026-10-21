@@ -1,0 +1,20 @@
+{
+  "project": "E:\\gwt\\work\\issue-5500",
+  "binary": "E:\\gwt\\work\\issue-5500\\target\\debug\\gwt.exe",
+  "pid": 39488,
+  "tid": 34640,
+  "thread_name": "gwt-agent-capacity",
+  "started_at": "2026-10-15T07:59:59.5965861Z",
+  "elapsed_seconds": 60.1529817,
+  "total_processor_time_before_seconds": 0.0,
+  "total_processor_time_after_seconds": 1.140625,
+  "cpu_seconds": 1.140625,
+  "average_cores": 0.01896206917370482,
+  "process_cpu_seconds": 63.5625,
+  "sessions_fixture": "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-capacity-fixture-5500\\sessions",
+  "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-fresh-home.5500-91091458-f7f2-42b1-8028-0aac568caf7c",
+  "source_sha": "166dfefc94b13f4b3124b02e015c7e61a05f2c68",
+  "binary_sha256": "C09E928B4A616A9C42ABB3AD186D8084839B1201297C0D14CAB571264C50AD45",
+  "runtime_files": 3435,
+  "runtime_bytes": 1612683
+}

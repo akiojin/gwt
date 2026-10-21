@@ -2,7 +2,6 @@
 
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -18,6 +17,7 @@ use crate::{
     atomic::write_atomic,
     board_config::BoardConfig,
     error::{ConfigError, Result},
+    home::{assert_test_path, user_home},
     profile::ProfilesConfig,
     usage_config::UsageConfig,
     voice_config::VoiceConfig,
@@ -97,17 +97,6 @@ impl Default for PerfConfig {
     }
 }
 
-fn resolve_config_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> Option<PathBuf> {
-    home.filter(|value| !value.is_empty())
-        .or_else(|| userprofile.filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or(fallback)
-}
-
 fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -150,6 +139,9 @@ impl Default for PrInventoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// App-wide automatic gwt update preference. None is an unmigrated
+    /// installation; an explicit false must never import legacy project ON.
+    pub auto_apply_updates: Option<bool>,
     /// Branches that cannot be deleted.
     pub protected_branches: Vec<String>,
     /// Default base branch for new worktrees.
@@ -195,6 +187,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_apply_updates: None,
             protected_branches: vec![
                 "main".to_string(),
                 "master".to_string(),
@@ -224,17 +217,14 @@ impl Default for Settings {
 impl Settings {
     /// Build the global config file path for a known home directory.
     pub fn global_config_path_for_home(home: &Path) -> PathBuf {
-        home.join(".gwt").join("config.toml")
+        let path = home.join(".gwt").join("config.toml");
+        assert_test_path(&path);
+        path
     }
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        resolve_config_home_dir(
-            std::env::var_os("HOME"),
-            std::env::var_os("USERPROFILE"),
-            dirs::home_dir(),
-        )
-        .map(|home| Self::global_config_path_for_home(&home))
+        user_home().map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -252,6 +242,7 @@ impl Settings {
 
     /// Load settings from an explicit path.
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        assert_test_path(path);
         let content = std::fs::read_to_string(path).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to read config");
             ConfigError::ParseError {
@@ -295,6 +286,7 @@ impl Settings {
     /// future keys, and the file's minimal shape. The typed parse still runs
     /// first so malformed or incompatible settings remain fatal.
     pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
+        assert_test_path(path);
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -352,13 +344,67 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
+        let path = Self::global_config_path().ok_or(ConfigError::NoConfigPath)?;
+        Self::update_at_path(&path, mutate)
+    }
+
+    /// Update an explicit settings file under the same process lock as the
+    /// global writer. Used by the Settings service and its isolated tests.
+    pub fn update_at_path<F, T>(path: &Path, mutate: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        crate::home::assert_test_path(path);
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let mut settings = Self::load()?;
-        mutate(&mut settings)?;
-        settings.save_global()
+        let mut settings = if path.exists() {
+            Self::load_from_path(path)?
+        } else {
+            Self::default()
+        };
+        let result = mutate(&mut settings)?;
+        settings.save(path)?;
+        Ok(result)
+    }
+
+    /// Merge only the app-wide update preference, retaining comments and
+    /// unknown keys. Decide migration while holding the settings writer lock.
+    pub fn persist_auto_apply_updates<F>(path: &Path, decide: F) -> Result<bool>
+    where
+        F: FnOnce(Option<bool>) -> Result<bool>,
+    {
+        crate::home::assert_test_path(path);
+        let _guard = UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target = resolve_existing_settings_target(path)?;
+        let content = match std::fs::read_to_string(&target) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                })
+            }
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let enabled = decide(settings.auto_apply_updates)?;
+        if settings.auto_apply_updates == Some(enabled) {
+            return Ok(enabled);
+        }
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        document["auto_apply_updates"] = value(enabled);
+        write_atomic(&target, &document.to_string())?;
+        Ok(enabled)
     }
 }
 
@@ -450,41 +496,70 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn global_config_path_for_home_uses_canonical_layout() {
-        let home = PathBuf::from("home-dir");
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
 
         assert_eq!(
-            Settings::global_config_path_for_home(&home),
+            Settings::global_config_path_for_home(home),
             home.join(".gwt").join("config.toml")
         );
     }
 
     #[test]
+    fn global_config_path_is_isolated_without_a_scoped_override() {
+        let path = Settings::global_config_path().expect("test config path");
+        crate::home::assert_test_path(&path);
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn explicit_global_config_path_rejects_an_unisolated_home() {
+        // Pure path construction: RED never attempts a real-home write.
+        Settings::global_config_path_for_home(Path::new("/__gwt_protected_test_home__"));
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn settings_update_rejects_unisolated_path_before_mutation() {
+        let _: Result<()> = Settings::update_at_path(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("mutation ran before the HOME guard"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn auto_apply_updates_rejects_unisolated_path_before_decision() {
+        let _ = Settings::persist_auto_apply_updates(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("decision ran before the HOME guard"),
+        );
+    }
+
+    #[test]
     fn config_home_resolution_prefers_env_over_dirs_fallback() {
+        use crate::home::resolve_config_home_dir;
         assert_eq!(
             resolve_config_home_dir(
                 Some("home-env".into()),
                 Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
+                || Some(PathBuf::from("dirs-home")),
             ),
             Some(PathBuf::from("home-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("userprofile-env".into()),
-                Some(PathBuf::from("dirs-home")),
-            ),
+            resolve_config_home_dir(Some("".into()), Some("userprofile-env".into()), || Some(
+                PathBuf::from("dirs-home")
+            ),),
             Some(PathBuf::from("userprofile-env"))
         );
         assert_eq!(
-            resolve_config_home_dir(
-                Some("".into()),
-                Some("".into()),
-                Some(PathBuf::from("dirs-home"))
-            ),
+            resolve_config_home_dir(Some("".into()), Some("".into()), || Some(PathBuf::from(
+                "dirs-home"
+            ))),
             Some(PathBuf::from("dirs-home"))
         );
-        assert_eq!(resolve_config_home_dir(None, None, None), None);
+        assert_eq!(resolve_config_home_dir(None, None, || None), None);
     }
 
     #[test]
@@ -552,7 +627,8 @@ gwtd_mutation_p95_ms = 350.0
 
     #[test]
     fn load_from_missing_file_returns_error() {
-        let result = Settings::load_from_path(Path::new("/nonexistent/config.toml"));
+        let directory = tempfile::tempdir().unwrap();
+        let result = Settings::load_from_path(&directory.path().join("missing/config.toml"));
         assert!(result.is_err());
     }
 

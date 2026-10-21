@@ -70,8 +70,10 @@ fn init_git_clone_with_origin(repo: &Path) {
     run_git(&seed, &["commit", "-qm", "develop marker"]);
     run_git(&seed, &["checkout", "main"]);
 
+    // Transport only reachable objects; a local clone can race background
+    // maintenance while hardlinking transient object-directory lock files.
     let status = hidden_command("git")
-        .args(["clone", "--bare"])
+        .args(["clone", "--bare", "--no-local"])
         .arg(&seed)
         .arg(&origin)
         .status()
@@ -79,7 +81,7 @@ fn init_git_clone_with_origin(repo: &Path) {
     assert!(status.success(), "git clone --bare failed");
 
     let status = hidden_command("git")
-        .args(["clone"])
+        .args(["clone", "--no-local"])
         .arg(&origin)
         .arg(repo)
         .status()

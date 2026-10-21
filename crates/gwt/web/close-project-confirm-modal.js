@@ -1,4 +1,5 @@
 import { createFocusTrap } from './focus-trap.js';
+import { createUiStateStore } from './ui-state-store.js';
 
 // Shared by the Hub and the Project page. Authorization always comes from
 // the runtime preview; UI state never manufactures a close token.
@@ -18,7 +19,7 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
   dialog.setAttribute('aria-labelledby', 'close-project-title');
   dialog.tabIndex = -1;
   modal.append(dialog);
-  let token = null;
+  const model = createUiStateStore({ preview: null, error: null, closed: null });
   let previewPending = false;
   let releaseTrap = null;
   let returnFocus = null;
@@ -29,18 +30,17 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
     releaseTrap = null;
     returnFocus?.focus?.();
     returnFocus = null;
-    token = null;
   }
   function finish(kind) {
-    const current = token;
-    hide();
+    const current = model.read().preview?.token;
+    model.update(state => ({ ...state, preview: null }));
     if (current) send({ kind, token: current });
   }
   modal.addEventListener('click', (event) => {
     if (event.target === modal) finish('cancel_close_project');
   });
   doc.addEventListener('keydown', (event) => {
-    if (token && event.key === 'Escape') {
+    if (model.read().preview && event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
       finish('cancel_close_project');
@@ -48,33 +48,40 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
   });
   function receive(event) {
     if (event.kind === 'project_closed') {
-      if (token?.project_key === event.project_key) hide();
-      onClosed(event.project_key);
+      model.update(state => ({ ...state,
+        preview: state.preview?.token?.project_key === event.project_key ? null : state.preview,
+        closed: { projectKey: event.project_key },
+      }));
       return true;
     }
     if (event.kind === 'close_project_error') {
       previewPending = false;
-      hide();
-      onError(event.message);
+      model.update(state => ({ ...state, preview: null, error: { message: event.message } }));
       return true;
     }
     if (event.kind !== 'close_project_preview') return false;
     previewPending = false;
+    model.update(state => ({ ...state, preview: {
+      token: event.token, title: event.title, running_agents: event.running_agents || [],
+    } }));
+    return true;
+  }
+  model.subscribe(state => state.preview, preview => {
     hide();
-    if (!(event.running_agents || []).length) {
-      send({ kind: 'confirm_close_project', token: event.token });
-      return true;
+    if (!preview) return;
+    if (!preview.running_agents.length) {
+      finish('confirm_close_project');
+      return;
     }
-    token = event.token;
     returnFocus = doc.activeElement;
     const header = node('header', 'modal-header');
     const title = node('h2', '', 'Close Project?');
     title.id = 'close-project-title';
     header.append(title);
     const body = node('div', 'modal-body');
-    body.append(node('p', '', `${event.title}: running agents will be stopped.`));
+    body.append(node('p', '', `${preview.title}: running agents will be stopped.`));
     const list = node('ul', '');
-    for (const agent of event.running_agents) list.append(node('li', '', `${agent.display_name}${agent.branch ? ` (${agent.branch})` : ''}`));
+    for (const agent of preview.running_agents) list.append(node('li', '', `${agent.display_name}${agent.branch ? ` (${agent.branch})` : ''}`));
     body.append(list);
     const footer = node('footer', 'modal-footer');
     const cancel = node('button', 'text-button', 'Cancel');
@@ -91,15 +98,16 @@ export function createCloseProjectController({ document: doc, send, onClosed = (
     modal.removeAttribute('aria-hidden');
     releaseTrap = createFocusTrap(dialog, { document: doc });
     cancel.focus();
-    return true;
-  }
+  });
+  model.subscribe(state => state.error, error => { if (error) onError(error.message); });
+  model.subscribe(state => state.closed, closed => { if (closed) onClosed(closed.projectKey); });
   function connectionLost() {
     previewPending = false;
-    hide();
+    model.update(state => ({ ...state, preview: null }));
   }
   return { modal, receive, connectionLost, request: (projectKey) => {
     if (previewPending) return;
-    if (token) finish('cancel_close_project');
+    if (model.read().preview) finish('cancel_close_project');
     previewPending = true;
     send({ kind: 'preview_close_project', project_key: projectKey });
   } };

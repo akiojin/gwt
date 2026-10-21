@@ -658,14 +658,71 @@ mod tests {
     /// whether they can do anything about it.
     #[test]
     fn an_unreachable_baseline_is_recorded_with_its_cause() {
+        use std::os::unix::process::CommandExt;
+
         assert_eq!(priority_reason(Some(BASELINE_NICE), None), None);
-        let reason = priority_reason(Some(10), None).expect("a degraded child explains itself");
-        assert!(reason.contains("nice 10"), "{reason}");
-        assert!(reason.contains("setpriority"), "{reason}");
-        assert!(
-            reason.contains("runs anyway at what it inherited"),
-            "the record must say the run continued: {reason}"
+        const FIXTURE: &str = "GWT_4473_DEGRADED_DAEMON_FIXTURE";
+        if std::env::var_os(FIXTURE).is_none() {
+            let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+            let module = module_path!().split_once("::").unwrap().1;
+            command
+                .args([
+                    "--exact",
+                    &format!("{module}::an_unreachable_baseline_is_recorded_with_its_cause"),
+                    "--nocapture",
+                ])
+                .env(FIXTURE, "1");
+            // SAFETY: setpriority is async-signal-safe and changes only this
+            // isolated fixture process, never the surrounding test runner.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpriority(libc::PRIO_PROCESS as _, 0, 19) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let output = command.output().expect("run degraded daemon fixture");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = temp_dir("degraded-daemon");
+        let child = spawn(&request(
+            &dir,
+            "/bin/sh",
+            &[
+                "-c",
+                "while [ ! -f release ]; do sleep 0.1; done; printf continued",
+            ],
+        ))
+        .expect("a daemon still spawns when baseline priority cannot be restored");
+        let accepted = child.accepted().clone();
+        std::fs::write(dir.join("release"), "release").unwrap();
+        assert_eq!(child.wait().exit_code, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stdout.log")).unwrap(),
+            "continued"
         );
+        if accepted.nice.is_some_and(|nice| nice > BASELINE_NICE) {
+            let reason = accepted
+                .nice_reason
+                .expect("a degraded child explains itself");
+            assert!(reason.contains("nice 19"), "{reason}");
+            assert!(reason.contains("setpriority"), "{reason}");
+            assert!(
+                reason.contains("runs anyway at what it inherited"),
+                "{reason}"
+            );
+        } else {
+            assert_eq!(accepted.nice, Some(BASELINE_NICE), "{accepted:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A degraded QoS class is the larger inherited penalty on macOS and

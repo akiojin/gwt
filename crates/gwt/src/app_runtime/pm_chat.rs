@@ -27,6 +27,7 @@ impl AppRuntime {
                     id: window_id.to_owned(),
                     session_id: None,
                     reports: Vec::new(),
+                    current: None,
                     error: Some("This window has no registered PM.".to_owned()),
                 },
             )];
@@ -38,28 +39,33 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = tab.project_root.clone();
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        let reader = std::sync::Arc::clone(&state.pm_reports_reader);
+        let pending_update = self.pending_update.clone();
         let window_id = window_id.to_owned();
         let proxy = self.proxy.for_project(context.clone());
         self.blocking_tasks.spawn(move || {
-            let (reports, error) = match gwt_core::pm_report::load_reports(&project_root) {
-                Ok(reports) => (
-                    reports
-                        .into_iter()
-                        .map(gwt::protocol::PmReportView::from)
-                        .collect(),
-                    None,
-                ),
-                Err(error) => (
-                    Vec::new(),
-                    Some(format!("PM reports could not be loaded: {error}")),
-                ),
+            // Keep reads and completion enqueue ordered across concurrent viewers.
+            let mut reader = reader
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let viewer = format!("{client_id}\0{window_id}\0{session_id}");
+            let Some(data) = reader.poll(&project_root, pending_update.as_ref(), &viewer) else {
+                return;
             };
             proxy.send(UserEvent::PmReportsLoaded {
                 client_id,
                 window_id,
                 session_id,
-                reports,
-                error,
+                reports: data
+                    .reports
+                    .into_iter()
+                    .map(gwt::protocol::PmReportView::from)
+                    .collect(),
+                current: data.current.map(Box::new),
+                error: data.error,
             });
         });
         Vec::new()
@@ -71,6 +77,7 @@ impl AppRuntime {
         window_id: &str,
         session_id: &str,
         reports: Vec<gwt::protocol::PmReportView>,
+        current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     ) -> Vec<OutboundEvent> {
         if self.pm_chat_session_id(window_id) != Some(session_id) {
@@ -82,6 +89,7 @@ impl AppRuntime {
                 id: window_id.to_owned(),
                 session_id: Some(session_id.to_owned()),
                 reports,
+                current,
                 error,
             },
         )]

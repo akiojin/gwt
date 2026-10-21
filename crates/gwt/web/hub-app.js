@@ -5,6 +5,7 @@ import { createCloseProjectController } from "./close-project-confirm-modal.js";
 // Project in its own browser tab.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
@@ -31,10 +32,11 @@ function initialCloneState() {
     cloning: false,
     progress: "",
     error: "",
+    existingProjectUrl: "",
   };
 }
 
-export function createHubApp({ document: doc, window: win }) {
+function createHubApp({ document: doc, window: win }) {
   const node = (tag, className, text) => {
     const element = doc.createElement(tag);
     if (className) element.className = className;
@@ -46,7 +48,9 @@ export function createHubApp({ document: doc, window: win }) {
   let cloneState = initialCloneState();
   let socket = null;
   let reconnectTimer = null;
-  const queued = [];
+  let queued = [];
+  let cloneTab = null;
+  const cloneResults = createUiStateStore(null);
 
   const root = node("main", "gwt-hub");
   root.dataset.hub = "";
@@ -197,6 +201,11 @@ export function createHubApp({ document: doc, window: win }) {
     showError("");
   }
 
+  function closeCloneTab() {
+    if (cloneTab && !cloneTab.closed) cloneTab.close();
+    cloneTab = null;
+  }
+
   function renderClone() {
     renderProjectCloneModal({
       modalEl: cloneModal,
@@ -205,11 +214,11 @@ export function createHubApp({ document: doc, window: win }) {
       createNode: node,
       onClose: () => {
         if (cloneState.cloning) return;
-        cloneState = { ...cloneState, open: false, searching: false, error: "", progress: "" };
+        cloneState = { ...cloneState, open: false, searching: false, error: "", progress: "", existingProjectUrl: "" };
         renderClone();
       },
       onModeChange: (mode) => {
-        cloneState = { ...cloneState, mode, error: "", progress: "" };
+        cloneState = { ...cloneState, mode, error: "", progress: "", existingProjectUrl: "" };
         renderClone();
       },
       onUrlChange: (url) => {
@@ -228,10 +237,11 @@ export function createHubApp({ document: doc, window: win }) {
         send({ kind: "github_repository_search", query });
       },
       onRepositorySelect: (url) => {
-        cloneState = { ...cloneState, selectedRepositoryUrl: url, url, error: "" };
+        cloneState = { ...cloneState, selectedRepositoryUrl: url, url, error: "", existingProjectUrl: "" };
         renderClone();
       },
       onClone: () => {
+        if (cloneState.cloning) return;
         const url = (cloneState.mode === "search" ? cloneState.selectedRepositoryUrl : cloneState.url).trim();
         const parentPath = cloneState.parentPath.trim();
         if (!url || !parentPath) {
@@ -243,7 +253,15 @@ export function createHubApp({ document: doc, window: win }) {
           return;
         }
         beginOpenRequest();
-        cloneState = { ...cloneState, cloning: true, progress: "Cloning repository...", error: "" };
+        // Reserve during the click's user activation; asynchronous completion
+        // can then navigate this tab without a second popup permission.
+        try {
+          cloneTab = win.open("about:blank", "_blank");
+          if (cloneTab) cloneTab.opener = null;
+        } catch {
+          closeCloneTab();
+        }
+        cloneState = { ...cloneState, cloning: true, progress: "Cloning repository...", error: "", existingProjectUrl: "" };
         renderClone();
         send({ kind: "clone_project_start", url, parent_path: parentPath });
       },
@@ -251,6 +269,10 @@ export function createHubApp({ document: doc, window: win }) {
   }
 
   function receiveClone(event) {
+    cloneResults.update(() => event);
+  }
+
+  function renderCloneResult(event) {
     switch (event.kind) {
       case "clone_project_parent_selected":
         cloneState = { ...cloneState, parentPath: event.path || "", error: "" };
@@ -270,19 +292,38 @@ export function createHubApp({ document: doc, window: win }) {
         cloneState = { ...cloneState, searching: false, error: event.message || "Repository search failed." };
         break;
       case "clone_project_progress":
+        if (!cloneState.cloning) return;
         cloneState = { ...cloneState, cloning: true, progress: event.message || "Cloning repository...", error: "" };
         break;
       case "clone_project_done":
+        if (!cloneState.cloning) return;
+        if (event.project_key) {
+          const url = projectUrlPath(event.project_key);
+          if (cloneTab && !cloneTab.closed) cloneTab.location.href = new URL(url, win.location.href).href;
+          cloneTab = null;
+          showNotice(event);
+        } else {
+          closeCloneTab();
+        }
         cloneState = { ...cloneState, open: false, cloning: false, searching: false, progress: "", error: "" };
         break;
       case "clone_project_error":
-        cloneState = { ...cloneState, cloning: false, progress: "", error: event.message || "Clone failed." };
+        if (!cloneState.cloning) return;
+        closeCloneTab();
+        cloneState = {
+          ...cloneState, cloning: false, progress: "", error: event.message || "Clone failed.",
+          existingProjectUrl: event.existing_project_key ? projectUrlPath(event.existing_project_key) : "",
+        };
         break;
       default:
         return;
     }
     renderClone();
   }
+
+  cloneResults.subscribe((state) => state, (event) => {
+    if (event) renderCloneResult(event);
+  });
 
   function receive(event) {
     if (event && picker.receive(event)) return;
@@ -329,7 +370,13 @@ export function createHubApp({ document: doc, window: win }) {
     connection.addEventListener("close", () => {
       if (socket !== connection) return;
       closeController.connectionLost();
+      closeCloneTab();
+      if (cloneState.cloning) {
+        cloneState = { ...cloneState, cloning: false, progress: "", error: "Connection lost while cloning. Check the project list before retrying." };
+      }
       picker.connectionLost();
+      queued = queued.filter(({ kind }) =>
+        !["open_project_dialog", "select_clone_project_parent", "clone_project_start"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
@@ -339,7 +386,7 @@ export function createHubApp({ document: doc, window: win }) {
     picker.begin("open");
   });
   cloneButton.addEventListener("click", () => {
-    cloneState = { ...cloneState, open: true, error: "", progress: "" };
+    cloneState = { ...cloneState, open: true, error: "", progress: "", existingProjectUrl: "" };
     renderClone();
   });
 
@@ -353,8 +400,19 @@ export function createHubApp({ document: doc, window: win }) {
     });
   }
 
+  function openInitialAction() {
+    const action = new URL(win.location.href).searchParams.get("action");
+    if (action === "open-folder") {
+      beginOpenRequest();
+      picker.begin("open");
+    } else if (action === "clone") {
+      cloneState = { ...cloneState, open: true };
+      renderClone();
+    }
+  }
+
   render();
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, homeUrl: HUB_URL_PATH };
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
@@ -362,6 +420,9 @@ export function mountHubApp({ window: win, document: doc }) {
   const app = createHubApp({ window: win, document: doc });
   doc.body.className = "route-body";
   doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
+  // Run once after mounting, before connecting: picker requests queue behind
+  // frontend_ready, while reconnect only re-establishes the Hub connection.
+  app.openInitialAction();
   app.installTestBridge();
   app.connect();
   return app;

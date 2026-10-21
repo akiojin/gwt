@@ -884,7 +884,7 @@ fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
 
 /// Issue #4783 AC-1 / AC-3: a gwt restart over three Issue worktrees whose
 /// execution ledgers read Completed, Blocked-by-`issue.monitor.stop`, and
-/// ordinary recoverable Blocked restores only the last — with no Monitor
+/// ordinary Blocked, and Active restores only the last — with no Monitor
 /// hold left in the prefs to lean on. The admitted restore is then re-judged
 /// at the spawn boundary (AC-2): a hold that lands between the sweep and the
 /// drain stops the spawn.
@@ -904,6 +904,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         ),
         ("agent-revoked".to_string(), "session-revoked".to_string()),
         ("agent-blocked".to_string(), "session-blocked".to_string()),
+        ("agent-active".to_string(), "session-active".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -916,6 +917,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         ("session-completed", "wt-completed", 4291u64),
         ("session-revoked", "wt-revoked", 4294),
         ("session-blocked", "wt-blocked", 4275),
+        ("session-active", "wt-active", 4276),
     ] {
         let worktree = temp.path().join(worktree);
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -993,8 +995,8 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         .collect::<Vec<_>>();
     assert_eq!(
         queued,
-        vec!["session-blocked"],
-        "only the recoverable Blocked generation restores"
+        vec!["session-active"],
+        "terminal generations must not restore automatically"
     );
     let refusals = restore_admission_refusals(&logs);
     let completed = refusals
@@ -1009,6 +1011,11 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         refusals.get("session-revoked").map(String::as_str),
         Some("monitor_hold:launch_revoked"),
         "{refusals:?}"
+    );
+    assert_eq!(
+        refusals.get("session-blocked").map(String::as_str),
+        Some("monitor_hold:execution_blocked"),
+        "a terminal Blocked generation retains diagnostics without spawning"
     );
     // The Monitor-revoked generation is a hold, not a terminal: the
     // placeholder and the restore flag stay for `execution.reopen`.
@@ -1026,12 +1033,12 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
             .restore_window_on_startup
     );
 
-    // AC-2: between the sweep and the drain the PM stops #4275 through the
+    // AC-2: between the sweep and the drain the PM stops #4276 through the
     // Monitor. The queued restore is re-judged at the spawn boundary and
     // nothing spawns.
     let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
     monitor.escalate_to_needs_human(
-        4275,
+        4276,
         gwt::NeedsHumanKind::UserChoiceRequired,
         "stopped: PM held this row after the sweep",
     );
@@ -1053,7 +1060,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         .iter()
         .filter(|event| {
             event.fields.get("message").map(String::as_str) == Some("session restore refused")
-                && event.fields.get("session_id").map(String::as_str) == Some("session-blocked")
+                && event.fields.get("session_id").map(String::as_str) == Some("session-active")
         })
         .filter_map(|event| event.fields.get("reason").cloned())
         .collect::<Vec<_>>();
@@ -1070,7 +1077,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
             .persisted()
             .windows
             .iter()
-            .any(|window| window.session_id.as_deref() == Some("session-blocked")),
+            .any(|window| window.session_id.as_deref() == Some("session-active")),
         "a held row keeps its placeholder"
     );
 }
@@ -1118,6 +1125,7 @@ fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
 
 /// Issue #4143 AC-3: a restore nobody asked for that dies before PTY start
 /// records its reason and leaves no window behind.
+/// Issue #4383 AC-5: the ledger retains its linked Issue after the pane closes.
 #[test]
 fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the_reason() {
     let temp = tempdir().expect("tempdir");
@@ -1131,12 +1139,20 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime
+        .tab_mut("tab-1")
+        .expect("tab")
+        .workspace
+        .set_linked_issue_number("agent-1", Some(4383));
+    runtime
         .restore_launch_windows
         .insert(window_id.clone(), Some("session-restore".to_string()));
 
+    let detail = "Rebound continuation lost the exact Active launch handshake race";
     let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("PTY creation failed: too many open files".into()),
+        Err(super::super::launch::AgentLaunchError::active_conflict(
+            detail,
+        )),
     );
 
     assert!(
@@ -1159,7 +1175,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         gwt_core::error_ledger::ErrorKind::LaunchFailure
     );
     assert!(
-        rows[0].message.contains("too many open files"),
+        rows[0].message.contains(detail),
         "the ledger row must keep the cause after the pane is gone: {}",
         rows[0].message
     );
@@ -1167,6 +1183,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         rows[0].target.window_id.as_deref(),
         Some(window_id.as_str())
     );
+    assert_eq!(rows[0].target.issue, Some(4383));
 }
 
 /// Issue #4143 AC-3: the operator's own launch keeps its error pane — that
@@ -1333,6 +1350,10 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         );
         window.agent_id = Some("codex".to_string());
         window.session_id = Some(session_id.clone());
+        // Preassigned persisted identities keep Work admission independent of
+        // the capacity and language of a fresh-name catalog.
+        let initial = char::from_u32(0x4e00 + index as u32).expect("fixture initial");
+        window.agent_name = Some(format!("{initial}Agent"));
         persisted.windows.push(window);
     }
     persisted.next_z_index = fixtures.len() as u32 + 1;
@@ -1394,6 +1415,24 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         runtime.pending_auto_resume_sources
     );
     let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    let queued_initials: std::collections::HashSet<_> = windows
+        .iter()
+        .filter(|window| {
+            runtime
+                .pending_auto_resume_sources
+                .contains_key(&combined_window_id("tab-scale", &window.id))
+        })
+        .map(|window| {
+            window
+                .agent_name
+                .as_deref()
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(queued_initials.len(), OPEN);
     assert_eq!(
         windows
             .iter()

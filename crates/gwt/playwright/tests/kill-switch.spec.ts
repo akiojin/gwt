@@ -40,7 +40,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // Issue #4538: the live server serves the Project app at `/p/<key>`.
     await page.goto(appUrl);
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
+    await expect(win).toBeAttached({ timeout: 10_000 });
     const chip = win.locator(".status-chip");
     // The running turn includes the quiet interval awaiting a model response;
     // Stop returns the provider to its prompt without terminating its process.
@@ -71,11 +71,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
+    await expect(win).toBeAttached({ timeout: 10_000 });
 
     await expect(win.locator('.titlebar [data-action="stop"]')).toHaveCount(0);
-    await expect(win.locator('.titlebar [data-action="close"]')).toBeVisible();
-    await expect(win.locator('.titlebar [data-action="restart"]')).toBeHidden();
+    await expect(win.locator('.titlebar [data-action="close"]')).toBeAttached();
+    await expect(win.locator('.titlebar [data-action="restart"]')).toHaveJSProperty("hidden", true);
     // A session with no Issue behind it (FR-013) shows neither Issue control.
     await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toBeHidden();
     await expect(win.locator('.titlebar [data-action="open-issue"]')).toBeHidden();
@@ -89,15 +89,15 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
+    await expect(win).toBeAttached({ timeout: 10_000 });
 
     // Push a Stopped runtime state; the chrome must swap STOP for RESTART.
     await page.evaluate(() => window.__emit({ kind: "window_state", window_id: "agent-1", state: "stopped" }));
 
     const restart = win.locator('[data-action="restart"]');
-    await expect(restart).toBeVisible();
+    await expect(restart).toHaveJSProperty("hidden", false);
     await expect(win.locator('[data-action="stop"]')).toBeHidden();
-    await restart.click();
+    await restart.dispatchEvent("click");
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))
@@ -111,7 +111,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await installKillSwitchBackend(page);
     await page.goto(appUrl);
 
-    await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeVisible({
+    await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeAttached({
       timeout: 10_000,
     });
 
@@ -131,9 +131,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
-    // Focus the agent window so the focused-pane helper has a target.
-    await win.locator(".titlebar .title-text").click();
+    await expect(win).toBeAttached({ timeout: 10_000 });
+    // Select the agent tab so the focused-pane helper has a target.
+    await page.getByRole("tab", { name: "Aster", exact: true }).click();
+    await page.locator('.agent-tile[data-agent-id="agent-1"]').click();
 
     await page.evaluate(() => {
       window.prompt = () => "hello agent";
@@ -171,10 +172,8 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       const win = page.locator(`.workspace-window[data-id="${id}"]`);
       return {
         win,
+        tile: page.locator(`.agent-tile[data-agent-id="${id}"]`),
         statusChip: win.locator(".status-chip"),
-        minimapCell: page.locator(
-          `.fleet-minimap__cell[data-window-id="${id}"]`,
-        ),
         toast: page.locator(
           `.toast-alerts__item[data-toast-id="attention-${id}"]`,
         ),
@@ -182,8 +181,8 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     };
     const manual = uiFor("agent-2");
     const monitor = uiFor("agent-3");
-    await expect(manual.win).toBeVisible({ timeout: 10_000 });
-    await expect(monitor.win).toBeHidden();
+    await expect(manual.tile).toBeVisible({ timeout: 10_000 });
+    await expect(monitor.tile).toBeHidden();
 
     const emitStatePair = (id: string, state: string) =>
       page.evaluate(
@@ -200,13 +199,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       await expect(ui.win).toHaveAttribute("data-agent-state", "waiting");
       await expect(ui.statusChip).toHaveClass(/waiting/);
       await expect(ui.statusChip.locator(".status-label")).toHaveText("Waiting");
-      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "waiting");
     };
     const expectRunningUi = async (ui) => {
       await expect(ui.win).toHaveAttribute("data-agent-state", "running");
       await expect(ui.statusChip).toHaveClass(/running/);
       await expect(ui.statusChip.locator(".status-label")).toHaveText("Running");
-      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "running");
     };
 
     // Count insertions as well as the final DOM. The shared toast host replaces
@@ -259,10 +256,9 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCount).toHaveText("1");
     await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
 
-    const stage = page.locator("#canvas-stage");
-    const before = await stage.evaluate((el) => el.style.transform);
     await manual.toast.click();
-    await expect.poll(() => stage.evaluate((el) => el.style.transform)).not.toBe(before);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(manual.toast).toHaveCount(0);
 
     // Leaving waiting clears every persistent cue and rearms attention.
@@ -296,10 +292,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // to it through the Windows list before exercising its cues.
     await page.locator("#window-list-button").click();
     await page.locator(".window-list-row")
-      .filter({ has: page.locator(".window-list-title", { hasText: "Monitor-linked Agent" }) })
+      .filter({ has: page.locator(".window-list-title", { hasText: "Cedar — Monitor-linked Agent" }) })
       .click();
-    await expect(monitor.win).toBeVisible();
-    await expect(manual.win).toBeHidden();
+    await expect(monitor.tile).toBeVisible();
+    await expect(manual.tile).toBeHidden();
     // Issue #4887: start the next state in the same browser task after the
     // focus helper returns, so a queued running snapshot cannot hide behind
     // another Playwright round trip before the waiting episode begins.
@@ -361,6 +357,7 @@ async function installKillSwitchBackend(page) {
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: id,
+        agent_name: { "agent-1": "Aster", "agent-2": "Birch", "agent-3": "Cedar" }[id],
         agent_color: "cyan",
         tab_group_id: null,
         tab_group_active: false,
@@ -373,6 +370,7 @@ async function installKillSwitchBackend(page) {
       agentWindow("agent-1", 120, 100, 1),
       agentWindow("agent-2", 1600, 1200, 2, {
         title: "Manual Agent",
+        purpose_title: "Manual Agent",
         tab_group_id: "approval-agent-tabs",
         tab_group_active: true,
       }),
@@ -382,6 +380,7 @@ async function installKillSwitchBackend(page) {
       // without inventing a frontend-only `source` discriminator.
       agentWindow("agent-3", 1600, 1200, 2, {
         title: "Monitor-linked Agent",
+        purpose_title: "Monitor-linked Agent",
         agent_color: "violet",
         tab_group_id: "approval-agent-tabs",
       }),

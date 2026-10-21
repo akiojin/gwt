@@ -33,7 +33,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -326,4 +326,20 @@ test("app.js feeds the Issue surface from the shared Work projection and helpers
     /getActiveWorkProjection:\s*\(\)\s*=>\s*activeWorkProjection[\s\S]*windowizeIssuePreviewWindow|windowizeIssuePreviewWindow[\s\S]*getActiveWorkProjection:\s*\(\)\s*=>\s*activeWorkProjection/,
     "the Issue surface reads the already-broadcast active Work projection",
   );
+});
+
+
+test("Issue detail uses the related agent name with provider context", async (t) => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)]);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", 3671);
+  const requestId = fixture.sent.at(-1).request_id;
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1",
+    knowledge_kind: "issue", request_id: requestId,
+    detail: { number: 3671, title: "Issue #3671", state: "open", sections: [],
+      related_works: [{ title: "Implementation", agents: [{ session_id: "session-1",
+        agent_name: "ミオ", display_name: "Codex", agent_id: "codex", sessions: [] }] }] } });
+  fixture.body.querySelector("[data-issue-detail-view='issue']").click();
+  assert.equal(fixture.body.querySelector(".knowledge-related-agent-name").textContent, "ミオ (Codex)");
 });

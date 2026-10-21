@@ -61,6 +61,7 @@ pub enum IndexScope {
     Discussions,
     Board,
     Works,
+    Reports,
     Files,
     FilesDocs,
 }
@@ -115,6 +116,7 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "works" => Ok(IndexScope::Works),
+        "reports" => Ok(IndexScope::Reports),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -232,6 +234,8 @@ fn run_coordinated_action(
             project_root: context.project_root.clone(),
             action: action.action.to_string(),
             qos: "interactive".to_string(),
+            session_id: None,
+            artifact_lock: None,
         }),
         || {
             let output = if repair {
@@ -598,19 +602,34 @@ mod tests {
                 "smoke_test": "passed"
             },
             "status": {
+                "reports": {
+                    "healthy": true,
+                    "repair_required": false,
+                    "reason": "ready",
+                    "document_count": 3
+                },
                 "files": {
                     "healthy": false,
                     "repair_required": true,
-                    "reason": "manifest_missing",
-                    "document_count": 3
+                    "reason": "build_incomplete",
+                    "document_count": 0,
+                    "build_progress": {
+                        "done": 16,
+                        "total": 64,
+                        "phase": "base",
+                        "updated_at": "2026-10-15T00:00:00Z",
+                        "resumable": true
+                    }
                 }
             }
         });
         let mut out = String::new();
         render_index_status(&mut out, &report, &payload);
         assert!(out.contains("runtime: ready asset=cccccccccccccccc smoke=passed"));
+        assert!(out.contains("reports: ready reason=ready documents=3 repair_required=false"));
         assert!(out
-            .contains("files: unhealthy reason=manifest_missing documents=3 repair_required=true"));
+            .contains("files: unhealthy reason=build_incomplete documents=0 repair_required=true"));
+        assert!(out.contains("files: build phase=base done=16 total=64 resumable=true"));
     }
 
     #[test]

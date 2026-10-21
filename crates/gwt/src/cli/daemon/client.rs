@@ -46,7 +46,16 @@ impl DaemonClient {
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
         let stream = IpcStream::connect(&endpoint.bind)
             .await
-            .map_err(|err| format!("daemon connect failed ({}): {err}", endpoint.bind))?;
+            .map_err(|err| {
+                if crate::process::host_process_liveness(endpoint.pid) == Some(false) {
+                    format!(
+                        "daemon owner exited (pid={}, bind={}): {err}; retry after the supervisor restarts the daemon",
+                        endpoint.pid, endpoint.bind
+                    )
+                } else {
+                    format!("daemon connect failed ({}): {err}", endpoint.bind)
+                }
+            })?;
         check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -160,8 +169,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_connects_to_daemon_and_round_trips_a_frame() {
+    async fn exited_daemon_connect_error_names_the_dead_owner_and_recovery() {
         let temp = TempDir::new().expect("tempdir");
+        let mut endpoint =
+            sample_endpoint(sample_scope(&temp), &temp.path().join("dead.sock"), "dead");
+        endpoint.pid = u32::MAX;
+        let error = DaemonClient::connect(&endpoint)
+            .await
+            .err()
+            .expect("an exited daemon cannot accept a connection");
+        assert!(error.contains("daemon owner exited"), "{error}");
+        assert!(error.contains(&endpoint.pid.to_string()), "{error}");
+        assert!(error.contains("supervisor"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn client_connects_to_daemon_and_round_trips_a_frame() {
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -216,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_handshake_fails_when_auth_token_mismatches() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -254,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_handshake_fails_when_protocol_version_mismatches() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -287,7 +311,7 @@ mod tests {
         // The initial monitor load runs after spawn_server returns, on this
         // current-thread runtime. Keep its fixture budget pinned through Status.
         let _prefs_budget = server::pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -352,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_frame_fans_out_to_subscriber_through_daemon() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -423,7 +447,7 @@ mod tests {
         // subscribed to the same channel. Phase H2-H4 will rely on
         // this — runtime status / hook events / launch lifecycle all
         // assume "broadcast to N gwt instances" is the default.
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");
@@ -500,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribed_client_receives_published_broadcast_events() {
-        let temp = TempDir::new().expect("tempdir");
+        let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let scope = sample_scope(&temp);
         let socket_path = temp.path().join("daemon.sock");
         let endpoint_path = temp.path().join("endpoint.json");

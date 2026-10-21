@@ -377,7 +377,7 @@ fn is_frontend_test_path(path: &str) -> bool {
 /// Issue #4637: outside `crates/gwt/web/` a script extension alone proves
 /// nothing is rendered (`scripts/*.mjs` is tooling), so only markup and
 /// stylesheets keep the doubt-means-UI default there.
-fn is_ui_surface_path(path: &str) -> bool {
+pub(crate) fn is_ui_surface_path(path: &str) -> bool {
     is_frontend_path(path)
         && !is_frontend_test_path(path)
         && (path.starts_with("crates/gwt/web/")
@@ -549,6 +549,7 @@ fn derive_pre_pr_for_host_excluding(
         .filter(|command| command.starts_with("node --test "))
         .collect();
     if workspace || !packages.is_empty() {
+        plan.commands.push("rustc --version".to_string());
         plan.commands.push(CI_FMT_GATE.to_string());
         let scope = if workspace {
             "--workspace".into()
@@ -605,8 +606,13 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
     };
     let test = load("test.yml")?;
     let lint = load("lint.yml")?;
+    let coverage_ci = load("coverage-ci.yml")?;
     let coverage = load("coverage.yml")?;
-    for (name, doc) in [("test.yml", &test), ("lint.yml", &lint)] {
+    for (name, doc) in [
+        ("test.yml", &test),
+        ("lint.yml", &lint),
+        ("coverage-ci.yml", &coverage_ci),
+    ] {
         require(
             doc["on"].get("pull_request").is_some() && doc["on"].get("merge_group").is_some(),
             &format!("{name} PR/merge_group triggers"),
@@ -617,15 +623,18 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
             &format!("unfiltered {name} PR trigger"),
         )?;
     }
-    let contains = |job: &Value, command: &str| {
+    let contains_guarded = |job: &Value, command: &str, condition: Option<&str>| {
         job["steps"].as_sequence().into_iter().flatten().any(|s| {
-            s.get("if").is_none()
-                && s.get("continue-on-error").is_none()
+            condition.map_or_else(
+                || s.get("if").is_none(),
+                |expected| s["if"].as_str() == Some(expected),
+            ) && s.get("continue-on-error").is_none()
                 && s["run"]
                     .as_str()
                     .is_some_and(|run| run.lines().any(|line| line.trim() == command))
         })
     };
+    let contains = |job: &Value, command: &str| contains_guarded(job, command, None);
     let depends = |job: &Value, dependency: &str| {
         job["needs"].as_str() == Some(dependency)
             || job["needs"]
@@ -642,15 +651,34 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                 == Some("${{ needs.test.result }}"),
         "Test (Rust) workspace failure propagation",
     )?;
+    let workspace = &test["jobs"]["test"];
+    // Issue #5564: every slice must run, and the protected check verifies the
+    // disjoint JUnit union against the original unpartitioned inventory.
+    let shards: Vec<_> = workspace["strategy"]["matrix"]["shard"]
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
     require(
-        contains(
-            &test["jobs"]["test"],
-            "cargo nextest run --workspace --all-features --test-threads=1",
-        ) && contains(
-            &test["jobs"]["test"],
-            "cargo test --workspace --all-features --doc",
-        ),
-        "required workspace tests/doctests",
+        shards == [1, 2, 3, 4, 5, 6]
+            && contains(workspace,
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6")
+            && contains(rust_gate,
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6"),
+        "required workspace test slices and inventory union",
+    )?;
+    require(
+        workspace["steps"]
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .any(|step| {
+                step["if"].as_str() == Some("matrix.shard == 1")
+                    && step.get("continue-on-error").is_none()
+                    && step["run"].as_str() == Some("cargo test --workspace --all-features --doc")
+            }),
+        "required workspace doctests",
     )?;
     let lint_gate = &lint["jobs"]["lint"];
     require(
@@ -689,25 +717,98 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         "required markdown lint",
     )?;
     require(
-        lint["jobs"]["coverage"]["uses"].as_str() == Some("./.github/workflows/coverage.yml")
-            && lint["jobs"]["coverage"].get("if").is_none()
-            && lint["jobs"]["coverage"].get("continue-on-error").is_none()
+        coverage_ci["jobs"]["coverage"]["uses"].as_str()
+            == Some("./.github/workflows/coverage.yml")
+            && coverage_ci["jobs"]["coverage"].get("if").is_none()
+            && coverage_ci["jobs"]["coverage"]
+                .get("continue-on-error")
+                .is_none()
+            && lint["jobs"].get("coverage").is_none()
             && coverage["on"].get("workflow_call").is_some(),
         "required reusable coverage job",
     )?;
     let coverage_job = &coverage["jobs"]["rust-coverage"];
     require(
-        lint["jobs"]["coverage"]["name"]
+        coverage_ci["jobs"]["coverage"]["name"]
             .as_str()
             .unwrap_or("coverage")
             == "coverage"
             && coverage_job["name"].as_str() == Some("Rust Coverage"),
         "coverage / Rust Coverage check name",
     )?;
-    for command in ["node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\""] {
-        require(contains(coverage_job, command), &format!("required coverage command {command}"))?;
+    let coverage_shard = &coverage["jobs"]["coverage-shard"];
+    let modern = "${{ steps.transport.outputs.sharded == 'true' }}";
+    let legacy = "${{ steps.transport.outputs.sharded == 'false' }}";
+    let legacy_first = "${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}";
+    // These guards choose a complete transport for the measured source, never
+    // whether to measure it. Keep the selector and both branches fail-closed.
+    let selector = concat!(
+        "git show HEAD:.github/workflows/coverage.yml > \"$RUNNER_TEMP/coverage-head.yml\"\n",
+        "if grep -q '^  coverage-shard:' \"$RUNNER_TEMP/coverage-head.yml\"; then\n",
+        "  echo \"sharded=true\" >> \"$GITHUB_OUTPUT\"\n",
+        "else\n",
+        "  echo \"sharded=false\" >> \"$GITHUB_OUTPUT\"\n",
+        "fi"
+    );
+    for job in [coverage_shard, coverage_job] {
+        require(
+            job["steps"].as_sequence().is_some_and(|steps| {
+                steps.iter().any(|s| {
+                    s["id"].as_str() == Some("transport")
+                        && s["shell"].as_str() == Some("bash")
+                        && s["run"].as_str().is_some_and(|run| run.trim() == selector)
+                        && s.get("if").is_none()
+                        && s.get("continue-on-error").is_none()
+                })
+            }),
+            "source-selected coverage transport",
+        )?;
     }
-    for job in [&test["jobs"]["test"], rust_gate, lint_gate, coverage_job] {
+    require(
+        coverage_shard["strategy"]["fail-fast"].as_bool() == Some(false)
+            && coverage_shard["strategy"]["matrix"]["shard"]
+                .as_sequence().is_some_and(|shards| {
+                    shards.iter().filter_map(serde_yaml::Value::as_u64).collect::<Vec<_>>() == [1, 2, 3, 4, 5, 6]
+                })
+            && coverage_job["needs"].as_str() == Some("coverage-shard")
+            && contains_guarded(coverage_shard, "node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features", Some(modern))
+            && contains_guarded(coverage_shard, "node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features", Some(legacy_first))
+            && contains(coverage_job, "test \"$COVERAGE_SHARDS_RESULT\" = success")
+            && coverage_job["steps"].as_sequence().is_some_and(|steps| steps.iter().any(|s| {
+                s["env"]["COVERAGE_SHARDS_RESULT"].as_str() == Some("${{ needs.coverage-shard.result }}")
+            })),
+        "complete non-advisory coverage shards",
+    )?;
+    for (command, condition) in [
+        ("python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6", Some(modern)),
+        ("node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json", Some(modern)),
+        ("cp target/coverage-shards/workspace-tests-1/coverage-summary.json target/coverage-summary.json", Some(legacy)),
+        ("node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", None),
+        ("node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\"", None),
+    ] {
+        require(contains_guarded(coverage_job, command, condition), &format!("required coverage command {command}"))?;
+    }
+    let coverage_condition = |step: &Value| {
+        match step["name"].as_str() {
+        Some("Run and export coverage shard" | "Verify the complete workspace test union" | "Generate workspace summary") => Some(modern),
+        Some("Run pre-shard head coverage") => Some(legacy_first),
+        Some("Restore pre-shard head summary") => Some(legacy),
+        Some("Install tray + GTK dependencies (Linux)" | "Select instrumented cache") => Some("${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}"),
+        Some("Restore verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py restore") => Some("${{ steps.cache-mode.outputs.rolling == 'true' }}"),
+        Some("Capture verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py capture") => Some("${{ steps.cache-mode.outputs.rolling == 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Generate pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Generate lcov") => Some("${{ steps.transport.outputs.sharded == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Restore pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        _ => None,
+    }
+    };
+    for (job, is_coverage) in [
+        (&test["jobs"]["test"], false),
+        (rust_gate, false),
+        (lint_gate, false),
+        (coverage_shard, true),
+        (coverage_job, true),
+    ] {
         require(
             job.get("continue-on-error").is_none()
                 && job["steps"].as_sequence().is_some_and(|steps| {
@@ -722,10 +823,20 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                         .all(|s| {
                             s.get("continue-on-error").is_none()
                                 && s.get("if").is_none_or(|_| {
-                                    s["name"].as_str().is_some_and(|n| {
-                                        n == "Check for processes the suite failed to reap"
-                                            || n == "Generate lcov"
-                                    })
+                                    (is_coverage
+                                        && coverage_condition(s).is_some_and(|condition| {
+                                            s["if"].as_str() == Some(condition)
+                                        }))
+                                        || s["name"].as_str().is_some_and(|n| {
+                                            n == "Check for processes the suite failed to reap"
+                                        || ([
+                                            "Run doctests",
+                                            "Run real-binary front-door tests (Xvfb)",
+                                            "Voice accuracy regression (optional local dataset)",
+                                        ]
+                                        .contains(&n)
+                                            && s["if"].as_str() == Some("matrix.shard == 1"))
+                                        })
                                 })
                         })
                 }),
@@ -733,7 +844,8 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         )?;
     }
     require(
-        coverage_job.get("if").is_none()
+        coverage_job["if"].as_str() == Some("${{ always() }}")
+            && coverage_shard.get("if").is_none()
             // A source-sync failure must not skip the workspace tests. This
             // status-only guard overrides implicit success() without filtering sources.
             && test["jobs"]["test"].get("if").is_none_or(|condition| {
@@ -837,6 +949,7 @@ fn derive_for_host_excluding(
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
     if code_changed {
+        push_unique(&mut commands, "rustc --version".to_string());
         push_unique(&mut commands, CI_FMT_GATE.to_string());
         push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
         push_unique(&mut commands, CI_RUSTDOC_GATE.to_string());
@@ -982,6 +1095,7 @@ mod tests {
             "crates/gwt/Cargo.toml",
             ".github/workflows/test.yml",
             ".github/workflows/lint.yml",
+            ".github/workflows/coverage-ci.yml",
             ".github/workflows/coverage.yml",
         ] {
             write(
@@ -1034,6 +1148,11 @@ mod tests {
             std::slice::from_ref(&local),
         )
         .unwrap();
+        assert_eq!(
+            plan.commands.first().map(String::as_str),
+            Some("rustc --version"),
+            "pre-pr evidence must capture the selected Rust toolchain before checking code"
+        );
         assert!(plan.commands.contains(&CI_FMT_GATE.to_string()));
         assert!(plan.commands.contains(
             &"cargo clippy -p gwt --all-targets --all-features -- -D warnings".to_string()
@@ -1093,6 +1212,41 @@ mod tests {
     }
 
     #[test]
+    fn pre_pr_refuses_incomplete_coverage_transport_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = [
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        assert!(validate_pre_pr_ci(dir.path(), &required).is_ok());
+        for (before, after) in [
+            ("grep -q '^  coverage-shard:'", "grep -q '^  optional-shard:'"),
+            ("steps.cache-mode.outputs.rolling == 'true'", "steps.cache-mode.outputs.rolling == 'unknown'"),
+            ("python3 scripts/ci_coverage_cache.py restore", "echo skip content verification"),
+            (
+                "node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features",
+                "echo no legacy coverage",
+            ),
+            (
+                "steps.transport.outputs.sharded == 'false' && matrix.shard == 1",
+                "steps.transport.outputs.sharded == 'false' && matrix.shard == 0",
+            ),
+        ] {
+            let changed = coverage.replace(before, after);
+            assert_ne!(changed, coverage);
+            write(dir.path(), ".github/workflows/coverage.yml", &changed);
+            assert!(
+                validate_pre_pr_ci(dir.path(), &required).is_err(),
+                "incomplete transport must not permit delegation: {before}"
+            );
+        }
+    }
+
+    #[test]
     fn pre_pr_workspace_job_accepts_only_the_cancellation_status_guard() {
         let dir = tempfile::tempdir().unwrap();
         pre_pr_fixture(dir.path());
@@ -1103,7 +1257,8 @@ mod tests {
         ];
         let original =
             std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
-        let guarded = "  test:\n    name: Test (Rust workspace)\n    if: ${{ !cancelled() }}\n";
+        let job_header = "  test:\n    name: Test (Rust workspace ${{ matrix.shard }}/6)\n";
+        let guarded = format!("{job_header}    if: ${{{{ !cancelled() }}}}\n");
         for (condition, accepted) in [
             ("", true),
             ("    if: ${{ !cancelled() }}\n", true),
@@ -1113,12 +1268,12 @@ mod tests {
                 false,
             ),
         ] {
-            let replacement = format!("  test:\n    name: Test (Rust workspace)\n{condition}");
-            assert!(original.contains(guarded));
+            let replacement = format!("{job_header}{condition}");
+            assert!(original.contains(&guarded));
             write(
                 dir.path(),
                 ".github/workflows/test.yml",
-                &original.replace(guarded, &replacement),
+                &original.replace(&guarded, &replacement),
             );
             let result = validate_pre_pr_ci(dir.path(), &required);
             assert_eq!(result.is_ok(), accepted, "{condition:?}: {result:?}");
@@ -1137,7 +1292,6 @@ mod tests {
         let original =
             std::fs::read_to_string(dir.path().join(".github/workflows/lint.yml")).unwrap();
         for mutation in [
-            original.replace("  coverage:\n", "  optional-coverage:\n"),
             original.replace(
                 "    name: Clippy & Rustfmt\n",
                 "    name: Clippy & Rustfmt\n    needs: coverage\n",
@@ -1155,6 +1309,22 @@ mod tests {
             .is_err());
         }
         write(dir.path(), ".github/workflows/lint.yml", &original);
+        let caller =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage-ci.yml")).unwrap();
+        write(
+            dir.path(),
+            ".github/workflows/coverage-ci.yml",
+            &caller.replace("  coverage:\n", "  optional-coverage:\n"),
+        );
+        assert!(derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &required,
+            &["cargo test -p gwt --test ci_contracts".into()],
+            &[]
+        )
+        .is_err());
+        write(dir.path(), ".github/workflows/coverage-ci.yml", &caller);
         let coverage =
             std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
         let mutation = coverage.replace(
@@ -1174,6 +1344,70 @@ mod tests {
             .is_err(),
             "a display name must not permit skipping the required coverage threshold"
         );
+    }
+
+    #[test]
+    fn pre_pr_refuses_incomplete_workspace_shards_or_missing_union_check() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        for (before, after) in [
+            ("shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"),
+            (
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6",
+                "echo no inventory check",
+            ),
+            ("if: matrix.shard == 1", "if: matrix.shard == 0"),
+        ] {
+            let changed = original.replace(before, after);
+            assert_ne!(changed, original);
+            write(dir.path(), ".github/workflows/test.yml", &changed);
+            assert!(
+                derive_pre_pr_for_host(
+                    dir.path(),
+                    VerificationHost::Other,
+                    &[
+                        "Test (Rust)".into(),
+                        "Clippy & Rustfmt".into(),
+                        "coverage / Rust Coverage".into()
+                    ],
+                    &["cargo test -p gwt --test ci_contracts".into()],
+                    &[],
+                )
+                .is_err(),
+                "incomplete CI must not permit delegation: {before}"
+            );
+        }
+        write(dir.path(), ".github/workflows/test.yml", &original);
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        for (before, after) in [
+            ("shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"),
+            (
+                "python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6",
+                "echo no inventory check",
+            ),
+        ] {
+            let changed = coverage.replace(before, after);
+            assert_ne!(changed, coverage);
+            write(dir.path(), ".github/workflows/coverage.yml", &changed);
+            assert!(
+                derive_pre_pr_for_host(
+                    dir.path(),
+                    VerificationHost::Other,
+                    &[
+                        "Test (Rust)".into(),
+                        "Clippy & Rustfmt".into(),
+                        "coverage / Rust Coverage".into()
+                    ],
+                    &["cargo test -p gwt --test ci_contracts".into()],
+                    &[]
+                )
+                .is_err(),
+                "incomplete coverage must not permit delegation: {before}"
+            );
+        }
     }
 
     #[test]
@@ -1315,6 +1549,7 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
+                "rustc --version".to_string(),
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
                 CI_RUSTDOC_GATE.to_string(),
@@ -1985,7 +2220,7 @@ mod tests {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                "cargo nextest run --workspace --all-features --test-threads=1".to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6".to_string(),
                 "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
@@ -2084,6 +2319,7 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
+                "rustc --version".to_string(),
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
                 CI_RUSTDOC_GATE.to_string(),

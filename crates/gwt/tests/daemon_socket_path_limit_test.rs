@@ -69,7 +69,7 @@ struct LongPathFixture {
 
 impl LongPathFixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("fixture tempdir");
+        let root = gwt_core::test_support::socket_tempdir().expect("fixture tempdir");
         // `<home>/.gwt/projects/<16>/runtime/daemon/<16>.sock`
         let endpoint_suffix_len =
             "/.gwt/projects/0123456789abcdef/runtime/daemon/".len() + "0123456789abcdef.sock".len();

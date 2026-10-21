@@ -16,6 +16,7 @@ use gwt_core::process::hidden_command;
 use tempfile::TempDir;
 
 const SESSION: &str = "session-admission-test";
+const FOREIGN_SESSION: &str = "session-admission-foreign";
 
 fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path)]) -> Child {
     spawn_gwtd_for_session(home, cwd, envelope, extra_env, SESSION)
@@ -28,6 +29,24 @@ fn spawn_gwtd_for_session(
     extra_env: &[(&str, &Path)],
     session: &str,
 ) -> Child {
+    let mut child = gwtd_command_for_session(home, cwd, extra_env, session)
+        .spawn()
+        .expect("spawn gwtd");
+    child
+        .stdin
+        .take()
+        .expect("gwtd stdin")
+        .write_all(envelope.as_bytes())
+        .expect("write envelope");
+    child
+}
+
+fn gwtd_command_for_session(
+    home: &Path,
+    cwd: &Path,
+    extra_env: &[(&str, &Path)],
+    session: &str,
+) -> std::process::Command {
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     for key in [
         "GWT_BIN_PATH",
@@ -44,7 +63,7 @@ fn spawn_gwtd_for_session(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command
+    command
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("GWT_SESSION_ID", session)
@@ -59,16 +78,8 @@ fn spawn_gwtd_for_session(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn gwtd");
-    child
-        .stdin
-        .take()
-        .expect("gwtd stdin")
-        .write_all(envelope.as_bytes())
-        .expect("write envelope");
-    child
+        .stderr(Stdio::piped());
+    command
 }
 
 fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
@@ -194,6 +205,63 @@ fn verify_run(max_wait_secs: u64) -> String {
 
 const STATUS: &str = r#"{"schema_version":1,"operation":"verify.lease.status","params":{}}"#;
 
+#[test]
+fn degraded_verify_run_without_a_daemon_is_refused_before_its_command_starts() {
+    use std::os::unix::process::CommandExt;
+
+    let arena = Arena::new();
+    let sentinel = arena.home.path().join("unexpected-verification-command");
+    let run_degraded = |envelope: &str| {
+        let mut command = gwtd_command_for_session(
+            arena.home.path(),
+            &arena.repo,
+            &[("GWT_4473_SENTINEL", &sentinel)],
+            SESSION,
+        );
+        command.env_remove("GWT_VERIFY_SPAWN_HOST");
+        // SAFETY: setpriority is async-signal-safe and changes only the child.
+        // Raising its nice value is permitted even for an unprivileged runner.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpriority(libc::PRIO_PROCESS as _, 0, 19) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn degraded gwtd");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(envelope.as_bytes())
+            .unwrap();
+        collect_gwtd(child)
+    };
+
+    let (ok, refusal) = run_degraded(&verify_command(
+        "sh -c 'printf executed > \"$GWT_4473_SENTINEL\"'",
+        0,
+    ));
+    assert!(
+        !ok,
+        "a degraded launcher must refuse without a daemon: {refusal}"
+    );
+    assert!(!sentinel.exists(), "the refused command must never execute");
+    for diagnostic in ["nice 19", "no gwt daemon is reachable", "GUI", "verify.run"] {
+        assert!(refusal.contains(diagnostic), "{refusal}");
+    }
+
+    let (ok, status) = run_degraded(STATUS);
+    assert!(ok, "lease status must remain available: {status}");
+    assert!(status.starts_with("verification lease: free"), "{status}");
+    assert!(status.contains("current_spawn_host: refused\n"), "{status}");
+    assert!(status.contains("current_spawn_error: "), "{status}");
+    for diagnostic in ["nice 19", "no gwt daemon is reachable", "GUI", "verify.run"] {
+        assert!(status.contains(diagnostic), "{status}");
+    }
+}
+
 fn kill(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -207,10 +275,14 @@ struct CanonicalRun {
 
 impl CanonicalRun {
     fn start(arena: &Arena, cwd: &Path) -> Self {
-        Self::start_command(arena, cwd, "canonical_command_parks")
+        Self::start_for_session(arena, cwd, SESSION)
     }
 
-    fn start_command(arena: &Arena, cwd: &Path, fixture: &str) -> Self {
+    fn start_for_session(arena: &Arena, cwd: &Path, session: &str) -> Self {
+        Self::start_command(arena, cwd, "canonical_command_parks", session)
+    }
+
+    fn start_command(arena: &Arena, cwd: &Path, fixture: &str, session: &str) -> Self {
         let ready = arena.home.path().join("canonical-ready");
         let release = arena.home.path().join("canonical-release");
         let exe = std::env::current_exe().unwrap();
@@ -218,11 +290,12 @@ impl CanonicalRun {
             "\"{}\" --ignored --exact verification_admission_cli_test::{fixture}",
             exe.display()
         );
-        let child = spawn_gwtd(
+        let child = spawn_gwtd_for_session(
             arena.home.path(),
             cwd,
             &verify_command(&command, 0),
             &[("ADMISSION_READY", &ready), ("ADMISSION_RELEASE", &release)],
+            session,
         );
         let mut run = Self {
             child: Some(child),
@@ -305,7 +378,12 @@ fn verify_run_does_not_wait_for_sibling_development_tests() {
 
 fn assert_canonical_runs_are_serialized(same_worktree: bool) {
     let arena = Arena::new();
-    let first = CanonicalRun::start(&arena, &arena.repo);
+    let session = if same_worktree {
+        SESSION
+    } else {
+        FOREIGN_SESSION
+    };
+    let first = CanonicalRun::start_for_session(&arena, &arena.repo, session);
     let contender = if same_worktree {
         &arena.repo
     } else {
@@ -521,7 +599,7 @@ fn caller_cancellation_and_waiting_runner_death_release_only_their_reservations(
     assert!(ok, "initial successful run: {output}");
     let predecessor_path = arena.repo.join(".gwt/skill-state/verification-run.json");
     let predecessor = std::fs::read(&predecessor_path).unwrap();
-    let holder = CanonicalRun::start(&arena, &arena.sibling);
+    let holder = CanonicalRun::start_for_session(&arena, &arena.sibling, FOREIGN_SESSION);
     let waiter = spawn_gwtd(arena.home.path(), &arena.repo, &verify_run(30), &[]);
     let waiting = wait_for_attempt(&arena, &arena.repo, None, "waiting", true);
     let id = waiting["attempt_id"].as_str().unwrap();
@@ -670,8 +748,12 @@ fn fixture_process_is_running(pid: u64) -> bool {
 fn caller_cancellation_reclaims_its_command_tree_and_preserves_an_unrelated_process() {
     let arena = Arena::new();
     let mut survivor = arena.spawn_sibling_heavy();
-    let mut run =
-        CanonicalRun::start_command(&arena, &arena.repo, "cancellation_command_tree_parks");
+    let mut run = CanonicalRun::start_command(
+        &arena,
+        &arena.repo,
+        "cancellation_command_tree_parks",
+        SESSION,
+    );
     let tree: serde_json::Value =
         serde_json::from_slice(&std::fs::read(arena.home.path().join("canonical-ready")).unwrap())
             .unwrap();
@@ -904,7 +986,7 @@ fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value
     };
     continuation_wait_ready(&mut first, &signals, "a-first");
     let mut blocker = CanonicalRun {
-        child: Some(spawn_gwtd(
+        child: Some(spawn_gwtd_for_session(
             arena.home.path(),
             &arena.sibling,
             &continuation_run(
@@ -914,6 +996,7 @@ fn measure_two_worktree_continuation(reregister_plan: bool) -> serde_json::Value
                 30,
             ),
             &extra_env,
+            FOREIGN_SESSION,
         )),
         release: signals.join("b-heavy.release"),
     };

@@ -350,6 +350,9 @@ pub struct Session {
     pub repo_hash: Option<String>,
     pub branch: String,
     pub agent_id: AgentId,
+    /// Stable, gwt-assigned window name, distinct from the provider identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub agent_session_id: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
@@ -392,6 +395,9 @@ pub struct Session {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
     pub linked_issue_number: Option<u64>,
+    /// Independent review dispatch, distinct from a producing agent session.
+    #[serde(default)]
+    pub review_dispatch: bool,
     /// Issue #4217 FR-002: who started this session. Stamped by the launcher,
     /// which is the only party that knows; every gate that used to sniff
     /// `GWT_AUTONOMOUS_EXECUTION` reads this instead. Absent in legacy records,
@@ -540,6 +546,7 @@ impl Session {
             repo_hash,
             branch: branch.into(),
             agent_id,
+            agent_name: None,
             agent_session_id: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
@@ -558,6 +565,7 @@ impl Session {
             execution_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            review_dispatch: false,
             launch_route: LaunchRoute::Manual,
             launch_origin: SessionLaunchOrigin::Launch,
             restore_source_session_id: None,
@@ -607,6 +615,10 @@ impl Session {
         session.docker_service = config.docker_service.clone();
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
+        session.review_dispatch = config
+            .env_vars
+            .get("GWT_REVIEW_DISPATCH")
+            .is_some_and(|value| value.trim() == "1");
         session.launch_route = config.launch_route;
         session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
@@ -694,6 +706,15 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
+    /// Apply hook status without reviving an explicitly stopped or closed Session.
+    /// Explicit launch enables restore before the new child's hooks run.
+    pub fn record_hook_status(&mut self, status: AgentStatus) {
+        if self.status == AgentStatus::Stopped && !self.restore_window_on_startup {
+            return;
+        }
+        self.update_status(status);
+    }
+
     /// Persist that a managed runtime hook was observed for this session.
     pub fn record_hook_event(&mut self, event: &str) {
         let now = Utc::now();
@@ -701,7 +722,7 @@ impl Session {
         self.last_hook_event_at = Some(now);
         self.updated_at = now;
         if let Some(status) = hook_event_status(event) {
-            self.update_status(status);
+            self.record_hook_status(status);
         }
     }
 
@@ -715,7 +736,7 @@ impl Session {
             self.last_hook_event = Some("Stop".to_string());
             self.last_hook_event_at = Some(now);
         }
-        self.update_status(AgentStatus::Idle);
+        self.record_hook_status(AgentStatus::Idle);
     }
 
     /// Record a process death without a completed Stop boundary.
@@ -1974,6 +1995,7 @@ impl SessionRuntimeState {
 
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let _publication = runtime_publication_lease(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2008,6 +2030,43 @@ impl SessionRuntimeState {
         serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
+}
+
+/// Retain this shared lease from reading a runtime sidecar through publishing
+/// its replacement. GC takes the exclusive counterpart only during unlink.
+/// Acquire after any Session lease; paths outside the PID runtime layout have
+/// no namespace to collect and return `None`. Contention is bounded by the
+/// existing Session persistence wait, rather than stalling a hook indefinitely.
+pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
+    let publication = path
+        .parent()
+        .and_then(Path::parent)
+        .filter(|root| root.file_name().is_some_and(|name| name == "runtime"))
+        .and_then(Path::parent)
+        .map(crate::runtime_gc::runtime_publication_lock)
+        .transpose()?;
+    if let Some(publication) = publication.as_ref() {
+        let deadline = Instant::now() + SESSION_LEASE_WAIT;
+        loop {
+            match FileExt::try_lock_shared(publication) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(publication)
 }
 
 /// Return the JSON sidecar path for a session runtime state record.
@@ -2921,6 +2980,10 @@ mod tests {
         assert!(!session.skip_permissions);
         assert!(!session.fast_mode);
         assert!(!session.codex_fast_mode);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            false
+        );
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
         assert!(session.docker_service.is_none());
         assert!(session.docker_runtime_binding.is_none());
@@ -2935,26 +2998,45 @@ mod tests {
     }
 
     #[test]
+    fn assigned_agent_name_survives_session_persistence_and_legacy_absence() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let mut value = serde_json::to_value(&session).unwrap();
+        value["agent_name"] = serde_json::json!("ハヤテ");
+        let named: Session = serde_json::from_value(value).unwrap();
+        let persisted = toml::to_string(&named).unwrap();
+        let restored: Session = toml::from_str(&persisted).unwrap();
+        let mut value = serde_json::to_value(restored).unwrap();
+        assert_eq!(value["agent_name"], "ハヤテ");
+        value.as_object_mut().unwrap().remove("agent_name");
+        let legacy: Session = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
+    }
+
+    #[test]
     fn session_launch_origin_preserves_restore_provenance_and_defaults_legacy_to_unknown() {
         let session = Session::new("/tmp/wt", "main", AgentId::Codex);
         let mut value = serde_json::to_value(&session).expect("serialize Session");
         assert_eq!(value["launch_origin"], "launch");
         value["launch_origin"] = serde_json::json!("automatic_restore");
         value["restore_source_session_id"] = serde_json::json!("source-session");
+        value["review_dispatch"] = serde_json::json!(true);
         let restored: Session = serde_json::from_value(value.clone()).expect("restore metadata");
         let persisted = toml::to_string(&restored).expect("persist restore metadata");
         let roundtrip: Session = toml::from_str(&persisted).expect("read restore metadata");
         let roundtrip = serde_json::to_value(roundtrip).expect("inspect restore metadata");
         assert_eq!(roundtrip["launch_origin"], "automatic_restore");
         assert_eq!(roundtrip["restore_source_session_id"], "source-session");
+        assert_eq!(roundtrip["review_dispatch"], true);
 
         let legacy = value.as_object_mut().expect("Session object");
         legacy.remove("launch_origin");
         legacy.remove("restore_source_session_id");
+        legacy.remove("review_dispatch");
         let legacy: Session = serde_json::from_value(value).expect("read legacy Session");
         let legacy = serde_json::to_value(legacy).expect("inspect legacy Session");
         assert_eq!(legacy["launch_origin"], "unknown");
         assert!(legacy["restore_source_session_id"].is_null());
+        assert_eq!(legacy["review_dispatch"], false);
     }
 
     #[test]
@@ -6261,6 +6343,9 @@ display_name = "Claude Code"
         config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
         config.linked_issue_number = Some(1921);
         config.session_mode = crate::SessionMode::Continue;
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
 
         let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
 
@@ -6285,6 +6370,10 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            true
+        );
     }
 
     /// Issue #4217 AC-2: the launch route reaches the durable Session, which

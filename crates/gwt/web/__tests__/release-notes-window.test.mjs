@@ -340,6 +340,18 @@ test("handleError shows the empty state with the CHANGELOG URL", () => {
   assert.ok(link.href.includes("CHANGELOG.md"));
 });
 
+test("sidebar and content keep the committed snapshot when a received payload changes", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({ entries });
+  entries[1].version = "mutated";
+  entries[1].sections[0].heading = "mutated";
+  controller._select("9.37.0");
+  assert.equal(controller.selectedVersion(), "9.37.0");
+  assert.equal(document.querySelector('.release-notes-sidebar-item.is-selected').dataset.version, "9.37.0");
+  assert.equal(document.querySelector('.release-notes-content h2').textContent, "v9.37.0");
+  assert.equal(document.querySelector('.release-notes-content h3').textContent, "Bug Fixes");
+});
+
 test("handlePayload with empty entries falls back to the empty state", () => {
   const { document, controller } = makeFixture();
   controller.handlePayload({ id: "rn-test-1", entries: [], focus_version: null });

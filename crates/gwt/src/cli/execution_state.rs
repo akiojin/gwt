@@ -37,6 +37,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use gwt_core::workspace_projection::{
+    ExternalWorkspaceCommitAuthority, ExternalWorkspaceCommitDecision,
+    ExternalWorkspaceCommitResolution,
+};
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 
@@ -1071,11 +1075,13 @@ pub fn classify_exact_session_runtime(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
 ) -> io::Result<ExactSessionRuntimeDisposition> {
+    gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
     let runtime_root = sessions_dir.join("runtime");
     let entries = match fs::read_dir(&runtime_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(ExactSessionRuntimeDisposition::Absent)
+            gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
+            return Ok(ExactSessionRuntimeDisposition::Absent);
         }
         Err(error) => return Err(error),
     };
@@ -1091,6 +1097,7 @@ pub fn classify_exact_session_runtime(
     let mut conflicting_proof = false;
     let mut saw_reachable_proof = false;
     for namespace in entries {
+        gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
         let namespace = namespace?;
         let Some(host_pid) = namespace
             .file_name()
@@ -1135,10 +1142,30 @@ pub fn classify_exact_session_runtime(
             }
             continue;
         }
-        let Some(runtime_incarnation) = runtime.runtime_incarnation.filter(|value| *value > 0)
+        let Some((child_pid, child_started_at)) = runtime
+            .child_pid
+            .zip(runtime.child_started_at)
+            .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
         else {
             if host_alive {
                 saw_unknown = true;
+            } else {
+                saw_dead_host = true;
+            }
+            continue;
+        };
+        let child_alive =
+            crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at);
+        gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
+        if child_alive {
+            return Ok(ExactSessionRuntimeDisposition::Live);
+        }
+        // Issue #5535: the child identity proves runtime absence even when
+        // the sidecar cannot supply a unique successor-fencing proof.
+        let Some(runtime_incarnation) = runtime.runtime_incarnation.filter(|value| *value > 0)
+        else {
+            if host_alive {
+                saw_exited_child = true;
             } else {
                 saw_dead_host = true;
             }
@@ -1152,49 +1179,15 @@ pub fn classify_exact_session_runtime(
             runtime.status,
             gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
         );
-        if runtime_is_terminal {
-            match (runtime.child_pid, runtime.child_started_at) {
-                (Some(child_pid), Some(child_started_at))
-                    if child_pid > 0 && child_started_at > 0 =>
-                {
-                    if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
-                    {
-                        return Ok(ExactSessionRuntimeDisposition::Live);
-                    }
-                }
-                _ => {
-                    if host_alive {
-                        saw_unknown = true;
-                    } else {
-                        saw_dead_host = true;
-                    }
-                    continue;
-                }
-            }
-        } else {
+        if !runtime_is_terminal {
             let Some(host_started_at) = runtime.host_started_at.filter(|value| *value > 0) else {
                 if host_alive {
-                    saw_unknown = true;
+                    saw_exited_child = true;
                 } else {
                     saw_dead_host = true;
                 }
                 continue;
             };
-            let Some((child_pid, child_started_at)) = runtime
-                .child_pid
-                .zip(runtime.child_started_at)
-                .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
-            else {
-                if host_alive {
-                    saw_unknown = true;
-                } else {
-                    saw_dead_host = true;
-                }
-                continue;
-            };
-            if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
-                return Ok(ExactSessionRuntimeDisposition::Live);
-            }
             if host_alive {
                 // Issue #4131: one GUI Host owns many independent PTYs. Its
                 // survival says nothing about this exact child's survival.
@@ -1232,6 +1225,8 @@ pub fn classify_exact_session_runtime(
             conflicting_proof = true;
         }
     }
+    // A partial census must never authorize reaping a holder or releasing its slot.
+    gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
     if saw_unknown {
         return Ok(ExactSessionRuntimeDisposition::Unknown);
     }
@@ -1242,12 +1237,11 @@ pub fn classify_exact_session_runtime(
     }
     if conflicting_proof || (terminal.is_some() && defunct.is_some()) {
         // Issue #3934: more than one exact record cannot name the single
-        // incarnation a successor would have to fence against. When every Host
-        // that wrote one is gone, the conclusion about the runtime still holds
-        // even though the proof does not, and the durable holder state decides
-        // from there. A reachable Host anywhere in the set stays ambiguous.
+        // incarnation a successor would have to fence against. Every exact
+        // child was checked above, so proof ambiguity does not erase runtime
+        // absence while a shared GUI Host survives (Issue #5535).
         return Ok(if saw_reachable_proof {
-            ExactSessionRuntimeDisposition::Unknown
+            ExactSessionRuntimeDisposition::ChildExited
         } else {
             ExactSessionRuntimeDisposition::HostDead
         });
@@ -2055,6 +2049,9 @@ pub fn reap_startup_defunct_active_generation(
             {
                 return Ok(StartupActiveGenerationReapOutcome::Unchanged);
             }
+            super::verification_record::archive_untracked_work_events_for_recovery(
+                &context.worktree,
+            )?;
             let recorded_at = Utc::now();
             record.status = ExecutionControlStatus::Blocked;
             record.blocked_reason = Some(reason.to_string());
@@ -2120,8 +2117,8 @@ fn launch_release_operation_id(
 /// drifting away from the fail-closed checks the first one makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchGenerationReleaseAuthority {
-    /// The operator revoked the launch (AC-1 / AC-3). No liveness proof is
-    /// asked for: revoking *is* the decision that the holder must not return.
+    /// The operator revoked the launch (AC-1 / AC-3). A known live agent that
+    /// actually started keeps its execution authority (Issue #4214 AC-7).
     Revoked,
     /// The holder never delivered a single agent lifecycle event (AC-2), so
     /// there is no agent whose work could be interrupted by settling it.
@@ -2200,12 +2197,13 @@ pub enum LaunchGenerationRelease {
 /// process itself, which stays alive. Every evidence-based route then answers
 /// "cannot prove it is dead" and refuses, correctly, forever.
 ///
-/// Revoking a launch supplies the missing fact directly: it is not evidence
-/// about the holder, it is the operator's decision that the holder must not
-/// return. So this deliberately asks for no liveness proof. It still refuses,
-/// byte-preserving, on every reading that says the generation is not the one
-/// being revoked — a changed current generation, a prepared successor or
-/// takeover mid-flight, or a projection that no longer matches.
+/// Revoking releases that stranded launch without requiring proof its Host
+/// exited. Issue #4214 AC-7 distinguishes it from an agent that actually started
+/// and still has exact live runtime evidence: revoking its Monitor row does not
+/// settle the agent's execution. It also refuses, byte-preserving, on every
+/// reading that says the generation is not the one being revoked — a changed
+/// current generation, a prepared successor or takeover mid-flight, or a
+/// projection that no longer matches.
 pub fn release_revoked_launch_generation(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -2216,8 +2214,30 @@ pub fn release_revoked_launch_generation(
         owner,
         LaunchGenerationReleaseAuthority::Revoked,
         reason,
-        |_, _| None,
+        |holder_session_id, record| {
+            revoked_live_holder_refusal(worktree, holder_session_id, record)
+        },
     )
+}
+
+fn revoked_live_holder_refusal(
+    worktree: &Path,
+    session_id: &str,
+    record: &ExecutionControlRecord,
+) -> Option<&'static str> {
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&session_path)
+    else {
+        return None;
+    };
+    if !holder.has_lifecycle_recovery_evidence() && holder.exact_resume_session_id().is_none() {
+        return None;
+    }
+    live_active_owner_generation(worktree, record.owner_number).map(|_| {
+        "the holder agent has started and is still live; revoking the Monitor row does not settle its execution"
+    })
 }
 
 /// Issue #4200 AC-2: release an owner's Active execution generation because the
@@ -2408,6 +2428,7 @@ fn release_launch_generation(
                 detail,
             });
         }
+        super::verification_record::archive_untracked_work_events_for_recovery(&context.worktree)?;
         let operation_id = launch_release_operation_id(
             authority,
             &current.identity.generation_id,
@@ -3322,10 +3343,11 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
                     "The holder is live. Continue work in that session instead of launching again."
                         .to_string();
             } else {
-                diagnosis.recommended_recovery = "execution.continue".to_string();
-                diagnosis.recommended_recovery_reason =
-                    "The holder cannot be proven dead, so the generation is held fail-closed. Continue work from the holding session, or stop it so the reaper can release it."
-                        .to_string();
+                diagnosis.recommended_recovery = "issue.monitor.stop".to_string();
+                diagnosis.recommended_recovery_reason = format!(
+                    "The holder cannot be proven dead, so automatic reaping stays fail-closed. The PM can revoke this launch with issue.monitor.stop params {{\"number\":{},\"reason\":\"release stranded execution\"}}. If its pane remains, close it with pane.close before requeueing the Issue.",
+                    owner.number,
+                );
             }
         }
     }
@@ -4174,6 +4196,41 @@ pub fn load_owner_generation_ledger(
     load_owner_generation_ledger_from_context(&context)
 }
 
+/// A build predecessor may have settled while its PTY is still winding down.
+/// Prove termination from its exact binding, including later lifecycle events;
+/// the presence of a concurrent successor alone proves nothing about it.
+pub(crate) fn session_generation_is_terminal(
+    worktree: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<bool> {
+    let binding = &identity.execution_binding;
+    let kind = match binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => return Ok(false),
+    };
+    let owner = ExecutionOwnerKey {
+        kind,
+        number: binding.owner_number,
+    };
+    let Some(ledger) = load_owner_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    Ok(ledger.generations.iter().any(|generation| {
+        generation.identity.worktree_binding_hash == worktree_binding_hash(&identity.worktree_path)
+            && matches!(
+                ledger.effective_status_for(generation),
+                ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed
+            )
+            && execution_binding_authorizes_lifecycle_descendant(
+                &ledger,
+                generation,
+                &identity.session_id,
+                &binding.identity,
+            )
+    }))
+}
+
 /// Load and validate an owner-scoped ledger together with the caller
 /// worktree's independent pointer/projection. Mutation/verification gates use
 /// this strict view so stale worktrees and old flat writers fail closed.
@@ -4973,6 +5030,8 @@ enum CurrentExecutionBindingAuthority {
     ActiveMutation,
     BlockedBuildAbort,
     PrMutation,
+    /// Exact GitHub CI admits only Ready creation, without reopening Blocked.
+    CiPrCreation,
     /// Issue #5078 (AC-1): the Workspace identity (purpose / current focus)
     /// of the Session that holds the exact current binding. A Blocked
     /// generation recovered by `execution.continue` must be able to lift the
@@ -4993,6 +5052,10 @@ impl CurrentExecutionBindingAuthority {
             Self::PrMutation => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Completed
+            ),
+            Self::CiPrCreation => matches!(
+                status,
+                ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
             ),
         }
     }
@@ -5202,6 +5265,22 @@ pub(crate) fn with_current_pr_mutation_execution_binding_lease<T>(
         expected,
         ACTIVE_BINDING_LEASE_WAIT,
         CurrentExecutionBindingAuthority::PrMutation,
+        operation,
+    )
+}
+
+/// Dedicated Issue #4214 dispatch authority. The caller must independently
+/// validate exact-head GitHub CI; this never grants ordinary PR mutations.
+pub(crate) fn with_current_ci_pr_creation_binding_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        ACTIVE_BINDING_LEASE_WAIT,
+        CurrentExecutionBindingAuthority::CiPrCreation,
         operation,
     )
 }
@@ -6029,6 +6108,7 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                     )?
                 }
                 CurrentExecutionBindingAuthority::PrMutation
+                | CurrentExecutionBindingAuthority::CiPrCreation
                 | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6121,6 +6201,7 @@ fn with_current_session_execution_identity_global_lease<T>(
                             )?
                         }
                         CurrentExecutionBindingAuthority::PrMutation
+                        | CurrentExecutionBindingAuthority::CiPrCreation
                         | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6534,6 +6615,17 @@ fn with_generation_activation_leases<T>(
             with_resolved_generation_owner_lease(&context, operation)
         },
     )
+}
+
+/// Fence an exact Work supersession against bound child launch without
+/// changing execution lifecycle or granting general Work mutation authority.
+#[doc(hidden)]
+pub fn with_workspace_successor_supersession_lease<T>(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_generation_activation_leases(worktree, owner, |_| operation())
 }
 
 fn with_resolved_generation_owner_lease<T>(
@@ -9256,6 +9348,212 @@ pub struct PreparedTransactionReleaseOutcome {
     pub generation_id: Option<String>,
     pub released: Vec<PreparedTransactionReleaseEntry>,
     pub retained: Vec<PreparedTransactionReleaseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_commit_resolution: Option<ExternalWorkspaceCommitResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalWorkspaceCommitRecovery {
+    worktree_binding_hash: String,
+    session_id: String,
+    work_id: Option<String>,
+    generation_id: String,
+    decision: ExternalWorkspaceCommitDecision,
+}
+
+fn terminal_workspace_commit_recovery(
+    ledger: &ExecutionGenerationLedger,
+    operation_id: &str,
+) -> io::Result<Option<TerminalWorkspaceCommitRecovery>> {
+    let successor = ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id);
+    let takeover = ledger
+        .takeover_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id);
+    let recovery = match (successor, takeover) {
+        (Some(_), Some(_)) => {
+            return Err(generation_conflict(
+                "external operation has ambiguous ledger authority",
+            ))
+        }
+        (Some(attempt), None) => {
+            if attempt.status == ContinuationAttemptStatus::Prepared {
+                return Ok(None);
+            }
+            if !is_owner_launch_successor_attempt(attempt)
+                && !matches!(
+                    attempt.request.source.as_str(),
+                    "continue-work:resume" | "continue-work:handoff"
+                )
+            {
+                return Ok(None);
+            }
+            let committed = attempt.status == ContinuationAttemptStatus::Activated;
+            if committed
+                && ledger.current_generation().is_none_or(|current| {
+                    attempt.activated_generation.as_ref() != Some(&current.identity)
+                })
+            {
+                return Err(generation_conflict(
+                    "external operation's Activated generation is no longer current",
+                ));
+            }
+            TerminalWorkspaceCommitRecovery {
+                worktree_binding_hash: attempt.worktree_binding_hash.clone(),
+                session_id: attempt.request.initial_session_id.clone(),
+                work_id: attempt.request.work_id.clone(),
+                generation_id: if committed {
+                    attempt.candidate_generation_id.clone()
+                } else {
+                    attempt.predecessor.generation_id.clone()
+                },
+                decision: if committed {
+                    ExternalWorkspaceCommitDecision::Commit
+                } else {
+                    ExternalWorkspaceCommitDecision::Reject
+                },
+            }
+        }
+        (None, Some(attempt)) => {
+            if attempt.status == GenerationTakeoverAttemptStatus::Prepared {
+                return Ok(None);
+            }
+            if !matches!(
+                attempt.request.source.as_deref(),
+                Some("continue-work:resume" | "continue-work:handoff")
+            ) {
+                return Ok(None);
+            }
+            let committed = attempt.status == GenerationTakeoverAttemptStatus::Activated;
+            if committed
+                && ledger.current_generation().is_none_or(|current| {
+                    current.identity.generation_id != attempt.generation_id
+                        || attempt.activated_binding.as_ref().is_none_or(|binding| {
+                            !execution_binding_authorizes_lifecycle_descendant(
+                                ledger,
+                                current,
+                                &attempt.request.to_session_id,
+                                binding,
+                            )
+                        })
+                })
+            {
+                return Err(generation_conflict(
+                    "external operation's Activated takeover is no longer current",
+                ));
+            }
+            TerminalWorkspaceCommitRecovery {
+                worktree_binding_hash: attempt.worktree_binding_hash.clone(),
+                session_id: attempt.request.to_session_id.clone(),
+                work_id: attempt.request.work_id.clone(),
+                generation_id: attempt.generation_id.clone(),
+                decision: if committed {
+                    ExternalWorkspaceCommitDecision::Commit
+                } else {
+                    ExternalWorkspaceCommitDecision::Reject
+                },
+            }
+        }
+        (None, None) => return Ok(None),
+    };
+    if recovery.decision == ExternalWorkspaceCommitDecision::Commit {
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| generation_conflict("current generation is missing"))?;
+        let projection: ExecutionControlRecord =
+            serde_json::from_str(ledger.effective_projection_for(current)).map_err(|error| {
+                invalid_generation_data(format!(
+                    "current generation projection is malformed: {error}"
+                ))
+            })?;
+        if projection.primary_session_id != recovery.session_id
+            || current.identity.worktree_binding_hash != recovery.worktree_binding_hash
+        {
+            return Err(generation_conflict(
+                "external operation no longer owns the current Work authority",
+            ));
+        }
+    }
+    Ok(Some(recovery))
+}
+
+fn recover_terminal_workspace_commit(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+) -> io::Result<Option<(String, ExternalWorkspaceCommitResolution)>> {
+    let caller = GenerationTransactionContext::resolve(worktree, owner)?;
+    let Some(ledger) = load_owner_generation_ledger_from_context(&caller)? else {
+        return Ok(None);
+    };
+    let Some(expected) = terminal_workspace_commit_recovery(&ledger, operation_id)? else {
+        return Ok(None);
+    };
+    let mut candidates = gwt_git::worktree::WorktreeManager::new(worktree)
+        .list()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .into_iter()
+        .filter_map(|entry| dunce::canonicalize(entry.path).ok())
+        .filter(|path| worktree_binding_hash(path) == expected.worktree_binding_hash)
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    let [target] = candidates.as_slice() else {
+        return Err(generation_conflict(
+            "external operation's exact worktree is missing or ambiguous",
+        ));
+    };
+    // Use the target's global -> owner order even when the PM calls from
+    // another worktree. Never take a global lease while holding an owner lease.
+    with_generation_activation_leases(target, owner, |context| {
+        if context.owner_dir != caller.owner_dir {
+            return Err(generation_conflict(
+                "external operation resolves outside the caller's repository",
+            ));
+        }
+        let ledger = load_owner_generation_ledger_from_context(context)?
+            .ok_or_else(|| generation_conflict("external operation's owner ledger disappeared"))?;
+        if terminal_workspace_commit_recovery(&ledger, operation_id)?.as_ref() != Some(&expected) {
+            return Err(generation_conflict(
+                "external operation's authority changed before recovery",
+            ));
+        }
+        if expected.decision == ExternalWorkspaceCommitDecision::Commit {
+            validate_generation_activation_owner(context, true)?;
+        }
+        let owner_label = match owner.kind {
+            ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
+            ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
+        };
+        let resolution =
+            gwt_core::workspace_projection::resolve_workspace_state_external_commit_for_authority(
+                &context.worktree,
+                operation_id,
+                expected.decision,
+                &ExternalWorkspaceCommitAuthority {
+                    owner: &owner_label,
+                    session_id: &expected.session_id,
+                    worktree_path: &context.worktree,
+                    work_id: expected.work_id.as_deref(),
+                },
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        match resolution {
+            ExternalWorkspaceCommitResolution::Busy => Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "external operation is still in flight; retry after its finalizer completes",
+            )),
+            ExternalWorkspaceCommitResolution::Missing => Ok(None),
+            _ => Ok(Some((expected.generation_id.clone(), resolution))),
+        }
+    })
 }
 
 /// How long a still-Prepared transaction is left alone before a blanket
@@ -9333,6 +9631,10 @@ pub fn blocking_prepared_transactions(
 /// of the diagnosis. Releasing is always safe for a launch that does come
 /// back: an Aborted attempt fails its own activation CAS instead of corrupting
 /// the owner.
+/// An exact terminal launch operation may also finish its matching canonical
+/// Workspace publication using its durable Activated/Aborted decision, without
+/// requiring the original Host or Session. A newly released Prepared fence
+/// retains its external marker until the same operation is retried.
 pub fn release_blocking_prepared_transactions(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -9349,6 +9651,22 @@ pub fn release_blocking_prepared_transactions(
     let operation_id = operation_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if let Some(operation_id) = operation_id {
+        if let Some((generation_id, resolution)) =
+            recover_terminal_workspace_commit(worktree, owner, operation_id)?
+        {
+            return Ok(PreparedTransactionReleaseOutcome {
+                status: "external_commit_resolved",
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                generation_id: Some(generation_id),
+                released: Vec::new(),
+                retained: Vec::new(),
+                external_operation_id: Some(operation_id.to_string()),
+                external_commit_resolution: Some(resolution),
+            });
+        }
+    }
     with_generation_owner_lease(worktree, owner, |context| {
         let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
             io::Error::new(
@@ -9364,6 +9682,8 @@ pub fn release_blocking_prepared_transactions(
                 generation_id: None,
                 released: Vec::new(),
                 retained: Vec::new(),
+                external_operation_id: None,
+                external_commit_resolution: None,
             });
         };
         let generation_id = current.identity.generation_id.clone();
@@ -9427,6 +9747,8 @@ pub fn release_blocking_prepared_transactions(
             generation_id: Some(generation_id),
             released,
             retained,
+            external_operation_id: None,
+            external_commit_resolution: None,
         })
     })
 }
@@ -11645,7 +11967,7 @@ fn evaluate_pr_handoff(
         }
         ExecutionControlStatus::Completed => Ok(Vec::new()),
         ExecutionControlStatus::Blocked => Err(format!(
-            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
+            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). Ordinary PR mutations cannot use a blocked execution. If local verification admission is unavailable, do not loop through pr.create → verify.run → execution.reopen: use `pr.create_from_ci` with explicit base, head and head_sha only when canonical mandatory GitHub CI passes for that exact pushed head, or hand that nominated head to the registered PM. This exit leaves the execution Blocked and local verification unchanged. Otherwise resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run `verify.run`, then call `execution.reopen` with a non-empty reason. For a CLOSED delivered owner with no source to hand off, use `execution.settle_delivered` to settle remaining obligations without a matrix.",
             kind = record.owner_kind.as_str(),
             number = record.owner_number,
             reason = record
@@ -11734,6 +12056,11 @@ pub enum ExecutionCommand {
     /// it commits nothing, pushes nothing, requires no verification record,
     /// and rewrites no byte of the predecessor record.
     NoAction {
+        reason: String,
+    },
+    /// Settle the holder's leftover obligations for a freshly proven delivered
+    /// terminal owner, preserving execution and verification history in place.
+    SettleDelivered {
         reason: String,
     },
     /// Issue #4161: abort the Prepared successors/takeovers that fence an
@@ -12474,7 +12801,9 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
+    "execution.settle_delivered",
+    "pr.create_from_ci",
     "execution.release_prepared",
     "execution.no_action",
     "execution.continue",
@@ -12490,6 +12819,11 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
     "workspace.work_prune",
     "workspace.candidates",
     "workspace.join",
+    // Issue #5288: exact registered-PM supersession, live member stop, and
+    // Monitor retry are real operations named by successor repair refusals.
+    "workspace.close",
+    "pane.close",
+    "issue.monitor.requeue",
     "build.abort",
     "verify.plan",
     "verify.run",
@@ -15725,6 +16059,44 @@ fn run_no_action(
     }
 }
 
+fn run_settle_delivered<E: CliEnv>(
+    env: &mut E,
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::delivered_owner::DeliveredSettlementOutcome;
+
+    match crate::cli::delivered_owner::record_delivered_settlement(
+        env, worktree, session_id, reason,
+    ) {
+        Ok(DeliveredSettlementOutcome::Settled(audit)) => {
+            out.push_str(&format!(
+                "execution: delivered-owner obligations settled for {} #{} (session {})\nThe terminal execution, generation ledger, Session, and historical verification remain unchanged. No implementation, verification, PR, or completion is claimed.\n",
+                audit.owner_kind.as_str(), audit.owner_number, audit.session_id,
+            ));
+            Ok(0)
+        }
+        Ok(DeliveredSettlementOutcome::Refused(reason)) => {
+            out.push_str(&format!("execution: settle_delivered refused — {reason}\n"));
+            *refusal = Some(agent_recoverable_refusal(
+                "execution_delivered_settlement_not_applicable",
+                "execution.status",
+            ));
+            Ok(2)
+        }
+        Err(error) => {
+            *refusal = Some(operation_store_failure_refusal(
+                "execution.settle_delivered",
+                &error,
+            ));
+            Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExecutionRunResult {
     pub exit_code: i32,
@@ -16286,6 +16658,9 @@ fn run_impl<E: CliEnv>(
         // all. Nothing here commits, pushes, or reads verification evidence.
         return run_no_action(&worktree, &session_id, reason, out, refusal);
     }
+    if let ExecutionCommand::SettleDelivered { reason } = &command {
+        return run_settle_delivered(env, &worktree, &session_id, reason, out, refusal);
+    }
     if matches!(&command, ExecutionCommand::Complete) {
         // Issue #4544 AC-3: a launch that stopped at a provider permission
         // prompt did not run unattended, whatever else it produced. Checked
@@ -16321,7 +16696,8 @@ fn run_impl<E: CliEnv>(
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
         | ExecutionCommand::Reopen { .. }
-        | ExecutionCommand::NoAction { .. } => {
+        | ExecutionCommand::NoAction { .. }
+        | ExecutionCommand::SettleDelivered { .. } => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
@@ -16346,7 +16722,7 @@ fn run_impl<E: CliEnv>(
                     .map(|record| record.owner_number),
             );
             let mut expected_verification_hash =
-                match super::completion_pr::admit(env, &session_id, None, out) {
+                match super::completion_pr::admit(env, &session_id, None, None, out) {
                     Ok(hash) => hash,
                     Err(reason) => {
                         out.push_str(&format!("execution: completion refused — {reason}\n"));
@@ -16468,6 +16844,22 @@ fn run_impl<E: CliEnv>(
             }
         }
     };
+    if let SettleResult::Settled(record) | SettleResult::AlreadySettled(record) = &result {
+        if record.status == ExecutionControlStatus::Completed
+            && crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_none()
+        {
+            if let Ok(session) = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            ) {
+                crate::session_launch::record_named_issue_activity(
+                    env.client(),
+                    &session,
+                    crate::session_launch::NamedIssueActivity::Completed,
+                )?;
+            }
+        }
+    }
     match result {
         SettleResult::Settled(record) => {
             if record.status == ExecutionControlStatus::Blocked {
@@ -17361,6 +17753,41 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    #[test]
+    fn issue_5644_expired_runtime_scan_cannot_prove_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(temp.path(), "work/issue-5644", gwt_agent::AgentId::Codex);
+        session.repo_hash = Some("repo".to_string());
+        session.linked_issue_number = Some(5644);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: "repo".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 5644,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".to_string(),
+                binding_id: "binding".to_string(),
+                ledger_head_hash: "head".to_string(),
+            },
+            capability_generation: 1,
+        });
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(temp.path(), &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Absent
+        );
+        let deadline = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let error = classify_exact_session_runtime(temp.path(), &identity)
+            .expect_err("expired observation cannot establish runtime absence");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     /// Issue #4074 AC-3 (regression contract for #4029): `execution.status`
     /// must not name a recovery the caller's session and authority would
@@ -18874,6 +19301,182 @@ mod tests {
     }
 
     #[test]
+    fn owner_release_recovers_terminal_external_commit_without_candidate_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        for activated in [true, false] {
+            let iteration_home = home
+                .path()
+                .join(if activated { "activated" } else { "aborted" });
+            let _home = ScopedEnvVar::set("HOME", &iteration_home);
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", &iteration_home);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let worktree = dir.path().join("owner-worktree");
+            gwt_git::worktree::WorktreeManager::new(dir.path())
+                .create_detached("HEAD", &worktree)
+                .unwrap();
+            let owner = generation_owner();
+            let mut active = active_record("external-recovery-predecessor");
+            active.owner_number = owner.number;
+            save(&worktree, &active).unwrap();
+            ensure_generation_ledger(&worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let projection =
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    dir.path(),
+                );
+            let work_id = projection.id.clone();
+            gwt_core::workspace_projection::save_workspace_projection(dir.path(), &projection)
+                .unwrap();
+            let mut request = successor_request(
+                if activated {
+                    "external-recovery-activated"
+                } else {
+                    "external-recovery-aborted"
+                },
+                "host",
+                "continue-work:resume",
+            );
+            request.work_id = Some(work_id.clone());
+            prepare_active_continuation_successor(&worktree, owner, &request).unwrap();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Resume,
+                &work_id,
+                Utc::now(),
+            );
+            event.owner = Some(format!("SPEC-{}", owner.number));
+            event.agent_session_id = Some(request.initial_session_id.clone());
+            event.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    worktree_path: Some(worktree.clone()),
+                    branch: None,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let staged = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+                dir.path(),
+                &request.operation_id,
+                |_, _, _| Ok(((), vec![event])),
+                || {
+                    if activated {
+                        activate_successor(&worktree, owner, &request).unwrap();
+                    } else {
+                        abort_successor(&worktree, owner, &request, "launch failed").unwrap();
+                    }
+                    Err(gwt_core::GwtError::Other("lost external response".into()))
+                },
+            )
+            .unwrap_err();
+            assert!(
+                staged.to_string().contains("lost external response"),
+                "{staged}"
+            );
+            let authority_before = generation_authority_bytes(&worktree, owner);
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            assert!(!sessions_dir
+                .join(format!("{}.toml", request.initial_session_id))
+                .exists());
+            let result = release_blocking_prepared_transactions(
+                dir.path(),
+                owner,
+                &sessions_dir,
+                Some(&request.operation_id),
+                "recover the exact abandoned external transaction",
+                Utc::now(),
+            )
+            .expect("terminal ledger decision must recover the matching Work transaction");
+            assert_eq!(result.status, "external_commit_resolved");
+            assert_eq!(
+                generation_authority_bytes(&worktree, owner),
+                authority_before
+            );
+            assert_eq!(
+                gwt_core::workspace_projection::workspace_state_external_commit_resolution(
+                    dir.path(),
+                    &request.operation_id,
+                )
+                .unwrap(),
+                if activated {
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed
+                } else {
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
+                },
+            );
+            release_blocking_prepared_transactions(
+                dir.path(),
+                owner,
+                &sessions_dir,
+                Some(&request.operation_id),
+                "repeat the exact recovery",
+                Utc::now(),
+            )
+            .expect("terminal receipt makes repeated recovery safe");
+
+            let mut ledger = load_owner_generation_ledger(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            ledger
+                .continuation_attempts
+                .last_mut()
+                .unwrap()
+                .request
+                .source = "execution-continue".into();
+            assert!(
+                terminal_workspace_commit_recovery(&ledger, &request.operation_id)
+                    .unwrap()
+                    .is_none()
+            );
+            if activated {
+                ledger
+                    .continuation_attempts
+                    .last_mut()
+                    .unwrap()
+                    .request
+                    .source = request.source.clone();
+                ledger.current_generation_id.clear();
+                assert_eq!(
+                    terminal_workspace_commit_recovery(&ledger, &request.operation_id)
+                        .unwrap_err()
+                        .kind(),
+                    ErrorKind::AlreadyExists,
+                    "a matching Work transaction must still reject changed authority"
+                );
+            }
+
+            let mut takeover = takeover_request("external-recovery-non-work-takeover");
+            takeover.source = None;
+            takeover.work_id = None;
+            takeover.from_session_id = if activated {
+                request.initial_session_id.clone()
+            } else {
+                active.primary_session_id.clone()
+            };
+            prepare_generation_takeover(&worktree, owner, &takeover).unwrap();
+            let mut ledger = load_owner_generation_ledger(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            for status in [
+                GenerationTakeoverAttemptStatus::Aborted,
+                GenerationTakeoverAttemptStatus::Activated,
+            ] {
+                ledger.takeover_attempts.last_mut().unwrap().status = status;
+                assert!(
+                    terminal_workspace_commit_recovery(&ledger, &takeover.operation_id)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn historical_continuation_audit_survives_legal_takeover() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -19797,6 +20400,74 @@ mod tests {
         );
     }
 
+    /// Issue #4214 AC-7: stopping a Monitor row must not terminalize an agent
+    /// that has actually started and is still running in the same worktree.
+    #[test]
+    fn revoked_launch_release_preserves_a_started_live_holder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 922,
+        };
+        let session_id = "revoked-started-live-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut holder = gwt_agent::Session::load(&session_path).unwrap();
+        holder.record_hook_event("SessionStart");
+        holder.save(&sessions_dir).unwrap();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+        );
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        let session_before = fs::read(&session_path).unwrap();
+        let runtime_before = fs::read(&runtime_path).unwrap();
+
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "PM stopped the wrong row")
+                .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: candidate.generation_id,
+                detail: "the holder agent has started and is still live; revoking the Monitor row does not settle its execution",
+            },
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "the live holder's ECR, owner ledger, and execution binding stay unchanged",
+        );
+        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(runtime_path).unwrap(), runtime_before);
+    }
+
     /// Issue #4200: the release is still fail-closed about *which* generation it
     /// settles. A successor transaction that is prepared but not yet activated
     /// owns the outcome of this generation, so the revoke must not race it.
@@ -20421,11 +21092,10 @@ mod tests {
 
     /// Issue #3934: two Hosts that both recorded a terminal exit cannot name
     /// the single incarnation a successor would fence against, so the proof is
-    /// unusable. The conclusion is not: if both of those Hosts are gone,
-    /// nothing is running the holder. A reachable Host anywhere in the set
-    /// keeps the reading ambiguous.
+    /// unusable. The runtime conclusion remains decisive: every exact child
+    /// is absent, including when one of the shared GUI Hosts remains alive.
     #[test]
-    fn conflicting_terminal_proofs_are_host_dead_only_while_no_host_is_reachable() {
+    fn issue_5535_conflicting_terminal_proofs_still_prove_exited_children() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -20486,8 +21156,51 @@ mod tests {
 
         assert_eq!(
             classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
-            ExactSessionRuntimeDisposition::Unknown,
-            "a reachable Host in the set keeps the conflicting proof ambiguous"
+            ExactSessionRuntimeDisposition::ChildExited,
+            "conflicting terminal proofs cannot hide the absence of every exact child"
+        );
+    }
+
+    #[test]
+    fn issue_5535_unknown_holder_names_the_pm_stop_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 5535,
+        };
+        let session_id = "unknown-stopped-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Stopped,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"{malformed runtime").unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("unknown"));
+        assert!(!diagnosis.reclaimable);
+        assert_eq!(diagnosis.recommended_recovery, "issue.monitor.stop");
+        assert!(diagnosis
+            .recommended_recovery_reason
+            .contains("\"number\":5535"));
+        assert!(diagnosis.recommended_recovery_reason.contains("\"reason\""));
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Unchanged,
+            "a recovery instruction does not authorize evidence-based reaping"
         );
     }
 
@@ -29410,6 +30123,10 @@ exit 1
             active.owner_number = owner.number;
             save(dir.path(), &active).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            // Owner discovery can overlap the winner's authority quarantine.
+            // Seed its durable Session fallback, including cached SPEC owner kind.
+            write_issue_cache_meta(dir.path(), owner.number, serde_json::json!(["gwt-spec"]));
+            persist_recovery_session_snapshot(dir.path(), owner, "repair-session");
             let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
             fs::write(
                 context.worktree_trusted_dir.join("execution-control.json"),
@@ -29443,15 +30160,29 @@ exit 1
                 results
                     .iter()
                     .filter_map(|result| result.as_ref().err())
-                    .filter(|error| error.kind() == ErrorKind::AlreadyExists)
+                    .filter(|error| {
+                        error.kind() == ErrorKind::AlreadyExists
+                            || (error.kind() == ErrorKind::WouldBlock
+                                && error
+                                    .to_string()
+                                    .starts_with("owner write lease is held by another gwt writer")
+                                && error.to_string().contains("(T-149;"))
+                    })
                     .count(),
                 1,
                 "{results:?}"
             );
-            assert!(
-                load_generation_ledger(dir.path(), owner).unwrap().is_some(),
-                "the winning repair must leave strict generation authority"
-            );
+            let winner = results
+                .iter()
+                .find_map(|result| result.as_ref().ok())
+                .unwrap();
+            assert_eq!(winner.owner, owner);
+            let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            assert_eq!(ledger.current_generation_id, winner.generation_id);
+            let audits = load_repair_audits(&repair_audit_dir(&context).unwrap()).unwrap();
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].repair_id, winner.repair_id);
+            assert_eq!(audits[0].new_generation_id, winner.generation_id);
         }
 
         #[test]
@@ -29810,6 +30541,8 @@ exit 1
         // successful *non*-delivery, never a completion claim.
         #[test]
         fn no_action_settles_a_delivered_owner_without_verification_or_completion() {
+            use gwt_core::workspace_projection as work;
+
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -29825,6 +30558,48 @@ exit 1
             };
             save(dir.path(), &active_record("sess-no-action")).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            save_build_state(dir.path(), "sess-no-action", Some(3248), true);
+            // AC-WA3/WA4: delivered source can outlive a foreign terminal
+            // successor; No Action must not need or rewrite its Work authority.
+            let predecessor_id =
+                work::canonical_work_id(dir.path(), Some("work/issue-3248"), Some(dir.path()))
+                    .unwrap();
+            let successor_id = work::successor_work_id(&predecessor_id);
+            let now = Utc::now();
+            let mut works = work::WorkItemsProjection::empty(now);
+            for (work_id, work_owner) in [
+                (&predecessor_id, "SPEC-3248"),
+                (&successor_id, "Issue #999"),
+            ] {
+                let mut start = work::WorkEvent::new(work::WorkEventKind::Start, work_id, now);
+                start.owner = Some(work_owner.to_string());
+                start.execution_container = Some(work::WorkspaceExecutionContainerRef {
+                    branch: Some("work/issue-3248".to_string()),
+                    worktree_path: Some(dir.path().to_path_buf()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                });
+                if work_id == &successor_id {
+                    start.agent_session_id = Some("sess-no-action".to_string());
+                    start.related_work_item_id = Some(predecessor_id.clone());
+                }
+                works.apply_event(start);
+                works.apply_event(work::WorkEvent::new(
+                    work::WorkEventKind::Done,
+                    work_id,
+                    now,
+                ));
+            }
+            assert!(works.work_items.iter().any(|item| {
+                item.id == successor_id
+                    && item.owner.as_deref() == Some("Issue #999")
+                    && item.is_terminal()
+            }));
+            let work_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path());
+            work::save_workspace_work_items_projection_to_path(&work_path, &works).unwrap();
+            let work_before = fs::read(&work_path).unwrap();
             let before = record_contents(dir.path()).unwrap().unwrap();
             let head_before = gwt_core::process::hidden_command("git")
                 .arg("-C")
@@ -29860,6 +30635,28 @@ exit 1
                 record.completion_evidence.is_none(),
                 "No Action claims no verification evidence"
             );
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), crate::cli::build::SKILL_NAME)
+                    .unwrap()
+                    .unwrap()
+                    .active,
+                "No Action must finish the matching build despite foreign terminal Work"
+            );
+            assert_eq!(fs::read(&work_path).unwrap(), work_before);
+            for output in [
+                crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                    dir.path(),
+                    "{}",
+                    Some("sess-no-action"),
+                ),
+                crate::cli::hook::execution_control_stop_check::handle_with_input(
+                    dir.path(),
+                    "{}",
+                    Some("sess-no-action"),
+                ),
+            ] {
+                assert_eq!(output, crate::cli::hook::HookOutput::Silent);
+            }
             assert_eq!(
                 gwt_core::process::hidden_command("git")
                     .arg("-C")
@@ -29908,6 +30705,7 @@ exit 1
                 pr_handoff_refusal(dir.path(), true).is_some(),
                 "and it never opens the Ready PR gate"
             );
+            assert_eq!(fs::read(&work_path).unwrap(), work_before);
         }
 
         // AC-2 / AS-219: a worktree with real source work refuses, and the
@@ -32936,7 +33734,7 @@ exit 1
                 let mut env = TestEnv::new(repo.to_path_buf());
                 run_collect(
                     &mut env,
-                    CliCommand::Build(crate::cli::SkillStateAction::Complete { spec }),
+                    CliCommand::Build(crate::cli::SkillStateAction::Complete { spec, pr: None }),
                 )
                 .unwrap()
             };
@@ -33548,6 +34346,14 @@ exit 1
                     mergeable: "MERGEABLE".to_string(),
                     merge_state_status: "CLEAN".to_string(),
                     review_status: "REVIEW_REQUIRED".to_string(),
+                },
+            );
+            env.pr_quarantine_contexts.insert(
+                4122,
+                crate::cli::pr::PrQuarantineContext {
+                    number: 4122,
+                    body: "Inherited PR description".to_string(),
+                    comments: Vec::new(),
                 },
             );
             let (pr_code, pr_out) = run_collect(

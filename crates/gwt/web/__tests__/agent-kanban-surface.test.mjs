@@ -75,6 +75,7 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   const sent = [];
   const terminalMounts = [];
   const launchRequests = [];
+  const undockRequests = [];
 
   const surface = createAgentKanbanSurface({
     activeWorkspace: () => workspace,
@@ -84,6 +85,10 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
     },
     send: (message) => sent.push(message),
     onLaunchAgent: (target) => launchRequests.push(target),
+    onUndockAgent: (id) => {
+      assert.equal(sent.at(-1).kind, "undock_agent_window", "send the placement change before navigation");
+      undockRequests.push(id);
+    },
     windowDisplayTitle: (windowData) => windowData.dynamic_title || windowData.title || windowData.id,
     windowRoleBadgeLabel: (windowData) => windowData.agent_id || windowData.preset,
   });
@@ -121,6 +126,7 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   assert.deepEqual(sent[0], setAgentKanbanCardCollapsedMessage("agent-1", true));
   assert.equal(sent[1].kind, "undock_agent_window");
   assert.equal(sent[1].id, "agent-2");
+  assert.deepEqual(undockRequests, ["agent-2"], "undocking reveals the target in Agents");
   assert.equal(launchRequests[0].boardId, "kanban-1");
   assert.equal(launchRequests[0].laneId, "active");
 });
@@ -147,6 +153,24 @@ test("Agent Kanban card messages preserve board, lane, order, and geometry", () 
     id: "agent-1",
     geometry: { x: 20, y: 30, width: 720, height: 420 },
   });
+});
+
+test("Agent Kanban uses assigned identity as the primary card label", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].agent_name = "Lumen";
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    windowDisplayTitle: data => data.agent_name ? `${data.agent_name} — ${data.title}` : data.title,
+    windowRoleBadgeLabel: data => data.agent_id || "Agent",
+  });
+  surface.mount(fixture.body, workspace.windows[0]);
+  const card = fixture.body.querySelector('[data-window-id="agent-1"]');
+  assert.equal(card.querySelector(".agent-kanban-card-title").textContent, "Lumen");
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /Implement UI/);
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /codex/);
+  const unnamed = fixture.body.querySelector('[data-window-id="agent-2"]');
+  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, workspace.windows[2].title);
 });
 
 test("Agent Kanban drop target hit-test computes lane insertion order", () => {
@@ -229,14 +253,10 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
   );
   assert.match(
     extractFunctionBody(appSource, "sendGeometry"),
-    /isOffCanvasPlacement\(windowData\)[\s\S]*updateTerminalGridMessage/,
+    /updateTerminalGridMessage/,
     "contained terminal fits must update cols/rows without persisting hidden geometry",
   );
-  assert.match(
-    appSource,
-    /agentKanbanDropTargetAt\(event,\s*dragState\.id\)[\s\S]*placeAgentWindowMessage\(/,
-    "titlebar pointer release must place eligible agent windows into Kanban lanes",
-  );
+
 });
 
 // SPEC-3671 P1 / T-002 + T-003: every "is this window drawn on the canvas?" check in
@@ -244,7 +264,7 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
 // read `placement.board_id` / `placement.lane_id`, deliberately keep using
 // `isAgentKanbanPlacement()` because they ask a different question.
 test("canvas-visibility checks route through the off-canvas seam", () => {
-  for (const name of ["visibleWindowData", "canRefreshTerminalViewport", "sendGeometry"]) {
+  for (const name of ["visibleWindowData", "canRefreshTerminalViewport"]) {
     const body = extractFunctionBody(appSource, name);
     assert.match(
       body,

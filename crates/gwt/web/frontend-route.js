@@ -2,7 +2,7 @@
 // `/p/<repo-hash>` is exactly one Project, and anything else is not found.
 // The hash is the canonical 16-hex ProjectKey; a route never carries a path.
 
-export const PROJECT_KEY_PATTERN = /^[0-9a-f]{16}$/;
+const PROJECT_KEY_PATTERN = /^[0-9a-f]{16}$/;
 
 export function parseFrontendRoute(pathname) {
   if (pathname === "/" || pathname === "/index.html") {

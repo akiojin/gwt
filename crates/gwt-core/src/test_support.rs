@@ -28,9 +28,39 @@ use std::{
     cell::{Cell, RefCell},
     ffi::OsString,
     marker::PhantomData,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
+
+/// A short root for socket fixtures, independent of verification's nested TMPDIR.
+/// Windows fixtures retain the normal temporary directory for named pipes.
+pub fn socket_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    {
+        tempfile::tempdir_in("/tmp")
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::tempdir()
+    }
+}
+
+/// Validate fixture paths before either std or Tokio binds a Unix socket.
+///
+/// Use the macOS/BSD limit even on Linux so a regression fails on both hosts.
+/// Named pipes do not have this limit. Tests probing the kernel's actual path
+/// boundary bind directly with a reasoned hygiene exception.
+#[track_caller]
+pub fn checked_socket_path(path: &Path) -> &Path {
+    #[cfg(unix)]
+    assert!(
+        path.as_os_str().len() <= 103,
+        "socket fixture path exceeds 103 bytes ({}): {}; use test_support::socket_tempdir()",
+        path.as_os_str().len(),
+        path.display()
+    );
+    path
+}
 
 /// Receive a fixture event, with the shared hang guard for stuck producers.
 ///
@@ -57,6 +87,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::PathBuf,
     process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -147,39 +178,8 @@ impl Drop for EnvLockGuard {
     }
 }
 
-thread_local! {
-    static GWT_HOME_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Returns the thread-local gwt home override used by tests.
-pub fn gwt_home_override() -> Option<PathBuf> {
-    GWT_HOME_OVERRIDE.with(|value| value.borrow().clone())
-}
-
-/// RAII guard that overrides the gwt home root for the current test thread.
-///
-/// Prefer this over mutating `HOME` for in-process tests. Environment
-/// variables are process-global, so changing them in one parallel test can
-/// make unrelated tests write into the real user home.
-pub struct ScopedGwtHome {
-    previous: Option<PathBuf>,
-}
-
-impl ScopedGwtHome {
-    pub fn set(path: impl AsRef<Path>) -> Self {
-        let next = path.as_ref().to_path_buf();
-        let previous = GWT_HOME_OVERRIDE.with(|value| value.replace(Some(next)));
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedGwtHome {
-    fn drop(&mut self) {
-        GWT_HOME_OVERRIDE.with(|value| {
-            value.replace(self.previous.take());
-        });
-    }
-}
+// One lower-layer override must drive both core paths and global settings.
+pub use gwt_config::home::{gwt_home_override, ScopedGwtHome};
 
 /// RAII guard that sets or removes one environment variable and restores the
 /// previous value on drop. Hold the [`env_lock`] mutex for the guard's whole
@@ -1154,6 +1154,48 @@ pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_tempdir_ignores_long_tmpdir_and_binds() {
+        const CHILD: &str = "GWT_TEST_LONG_SOCKET_TMPDIR";
+        if std::env::var_os(CHILD).is_some() {
+            let ambient = std::env::temp_dir();
+            assert!(ambient.as_os_str().len() > 103);
+            let root = socket_tempdir().unwrap();
+            assert!(!root.path().starts_with(ambient));
+            let path = root.path().join("daemon.sock");
+            let _listener =
+                std::os::unix::net::UnixListener::bind(checked_socket_path(&path)).unwrap();
+            return;
+        }
+
+        let ambient = tempfile::tempdir().unwrap();
+        let nested = ambient.path().join("gwt-verify-".repeat(12));
+        std::fs::create_dir_all(&nested).unwrap();
+        let output = crate::process::hidden_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "test_support::tests::socket_tempdir_ignores_long_tmpdir_and_binds",
+            ])
+            .env("TMPDIR", &nested)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated socket fixture test failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "socket fixture path exceeds 103 bytes")]
+    fn socket_path_rejects_overlong_utf8_bytes_before_bind() {
+        checked_socket_path(Path::new(&format!("/tmp/{}", "é".repeat(50))));
+    }
 
     #[test]
     fn recv_event_observes_producer_completion() {

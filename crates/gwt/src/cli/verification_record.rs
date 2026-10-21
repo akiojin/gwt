@@ -51,11 +51,14 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+mod admission_resume;
 pub mod cancellation;
 pub mod continuation;
 pub mod driver;
 pub mod headed_e2e;
+pub(crate) mod interactive_process;
 pub mod interruption;
+pub mod measurement;
 pub mod nextest;
 pub mod wire;
 
@@ -106,6 +109,9 @@ pub struct VerificationCommandResult {
     pub terminated_by_signal: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<CommandAdmission>,
+    /// Native Job/CPU observations for performance commands (#5816).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<measurement::Evidence>,
 }
 
 /// The signal that ended a process, when one did (Issue #4528).
@@ -128,13 +134,20 @@ pub(crate) struct RunOutcomeCounts {
     pub passed: usize,
     pub failed: usize,
     pub interrupted: usize,
+    pub environment_incompatible: usize,
 }
 
 impl RunOutcomeCounts {
     pub(crate) fn of(commands: &[VerificationCommandResult]) -> Self {
         let mut counts = Self::default();
         for command in commands {
-            if command.terminated_by_signal.is_some() {
+            if command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                counts.environment_incompatible += 1;
+            } else if command.terminated_by_signal.is_some() {
                 counts.interrupted += 1;
             } else if command.exit_code == 0 {
                 counts.passed += 1;
@@ -146,10 +159,17 @@ impl RunOutcomeCounts {
     }
 
     pub(crate) fn summary(&self) -> String {
-        format!(
+        let mut summary = format!(
             "verify: outcome — {} passed, {} failed, {} interrupted by external signal\n",
             self.passed, self.failed, self.interrupted
-        )
+        );
+        if self.environment_incompatible > 0 {
+            summary.push_str(&format!(
+                "verify: {} environment incompatible\n",
+                self.environment_incompatible
+            ));
+        }
+        summary
     }
 }
 
@@ -162,7 +182,9 @@ pub(crate) fn run_status_label(
     commands: &[VerificationCommandResult],
 ) -> &'static str {
     let counts = RunOutcomeCounts::of(commands);
-    if all_passed {
+    if counts.environment_incompatible > 0 && counts.failed == 0 {
+        "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed {
         "PASS"
     } else if quarantined {
         "QUARANTINED"
@@ -1212,6 +1234,26 @@ fn verification_head(worktree: &Path, head: &str) -> String {
         anchor = parents[1].to_string();
     }
     format!("{anchor}\n")
+}
+
+/// Reuse the fingerprint's strict bookkeeping normalization for a later PR
+/// snapshot. Equivalent ancestors or sibling histories cannot advance a run.
+pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &str) -> bool {
+    if head == verified {
+        return true;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", verified, head])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && verification_head(&worktree, verified) == verification_head(&worktree, head)
+        // A source-identical merge can contain a product commit and its revert
+        // on another parent. Reuse the PR history proof without granting a
+        // base-sync exemption to completion or unavailable-remote diagnostics.
+        && super::pr::head_check::product_changes_since(&worktree, verified, head, verified)
+            .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
 pub(crate) fn worktree_fingerprint_excluding(
@@ -2711,6 +2753,53 @@ fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
     }
 }
 
+/// Preserve uncommitted Work history before releasing a defunct execution.
+pub(crate) fn archive_untracked_work_events_for_recovery(worktree: &Path) -> io::Result<usize> {
+    use gwt_core::workspace_projection::{
+        preserve_workspace_work_event_log_as_shards, workspace_work_event_shard_matches, WorkEvent,
+    };
+
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let dirty = work_event_dirty_paths(worktree)
+        .map_err(|()| io::Error::other("cannot inspect Work events before execution recovery"))?;
+    let archive_dir = gwt_core::paths::gwt_project_dir_for_repo_path(worktree)
+        .join("recovered-work-events")
+        .join("events");
+    let mut archived = 0;
+    for dirty in dirty {
+        if dirty.state != WorkEventPathState::Untracked
+            || classify_path(dirty.path.as_bytes()) != DeliveryPath::WorkEventShard
+        {
+            continue;
+        }
+        let source = worktree.join(&dirty.path);
+        let original = fs::read(&source)?;
+        let Ok(event) = serde_json::from_slice::<WorkEvent>(&original) else {
+            continue;
+        };
+        if source != gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id)
+            || !workspace_work_event_shard_matches(worktree, &event).map_err(io::Error::other)?
+        {
+            continue;
+        }
+        let copies = preserve_workspace_work_event_log_as_shards(&source, &archive_dir)
+            .map_err(io::Error::other)?;
+        if copies.len() != 1 || fs::read(&copies[0])? != original || fs::read(&source)? != original
+        {
+            return Err(io::Error::other(
+                "Work event changed during execution recovery",
+            ));
+        }
+        fs::remove_file(&source)?;
+        archived += 1;
+    }
+    if archived > 0 {
+        tracing::info!(archived, path = %archive_dir.display(), "preserved Work events before execution recovery");
+    }
+    Ok(archived)
+}
+
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
     let mut states = work_event_dirty_paths(worktree)?
         .into_iter()
@@ -3182,19 +3271,21 @@ const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 /// reproduce: a command that passes in the terminal but fails under
 /// `verify.run` reads as a real RED and sends its owner after a bug that is
 /// not there.
-fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
-    vec![
+fn child_environment_contract() -> Vec<(String, Option<String>)> {
+    let mut environment = vec![
         // Live GitHub opt-in must never cross the child boundary (SPEC #4093
         // FR-008, Issue #3850): a `cargo test` child that inherits it spends
         // the real budget from every fixture-free test.
-        (LIVE_GITHUB_OPT_IN_ENV, None),
-        // A test that fetches an unreachable remote makes Windows'
-        // `git-credential-manager` ask for input, and a child with no console
-        // waits on that prompt forever — taking the host-wide verification
-        // lease down with it (#4182 AC-7). GitHub's runners set this for
-        // every step, which is precisely why CI never sees the hang.
-        ("GIT_TERMINAL_PROMPT", Some("0")),
-    ]
+        (LIVE_GITHUB_OPT_IN_ENV.to_string(), None),
+    ];
+    // Share the test defaults with both inherited and daemon-hosted children.
+    // Terminal suppression alone does not disable credential helpers or GCM.
+    environment.extend(
+        gwt_core::process::noninteractive_git_environment()
+            .into_iter()
+            .map(|(key, value)| (key, Some(value))),
+    );
+    environment
 }
 
 fn apply_child_environment_contract(process: &mut std::process::Command) {
@@ -3220,10 +3311,10 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
     for (key, value) in child_environment_contract() {
         match value {
             Some(value) => {
-                env.insert(key.to_string(), value.to_string());
+                env.insert(key, value);
             }
             None => {
-                env.remove(key);
+                env.remove(&key);
             }
         }
     }
@@ -3240,27 +3331,25 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical unit-target matrix avoids rebuilding the regular
-    // gwtd.exe (#4182, #4968). That default matrix does not overwrite the binary.
-    // Explicit binary matrices include their own bootstrap as the last command.
-    if cfg!(windows)
-        || !commands.iter().any(|command| {
-            split_command_line(command).is_ok_and(|args| {
+    // The verification driver is pinned outside Cargo's artifacts on Windows,
+    // so restoring the operational executable is safe there too (Issue #5480).
+    if !commands.iter().any(|command| {
+        split_command_line(command)
+            .and_then(take_env_assignments)
+            .is_ok_and(|(_, args)| {
                 args.first().map(String::as_str) == Some("cargo")
-                    && args.get(1).map(String::as_str) == Some("test")
+                    && (args.get(1).map(String::as_str) == Some("test")
+                        || (args.get(1).map(String::as_str) == Some("nextest")
+                            && args.get(2).map(String::as_str) == Some("run")))
             })
-        })
-    {
+    }) {
         return None;
     }
     gwtd_artifact_restore_command(worktree)
 }
 
 fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    if cfg!(windows) {
-        return None;
-    }
-    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
 }
 
 /// Identify this repository without comparing another project's HEAD to gwt's.
@@ -3326,11 +3415,8 @@ fn restore_gwtd_after_deferral_cancellable(
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
     };
-    // Restore this checkout's operational path, even when Cargo's environment
-    // or user configuration points ordinary builds at another target directory.
-    let command = format!("{command} --target-dir target");
     match execute_command_with_artifact_guard_cancellable(
-        worktree, &command, true, None, host, None, artifacts, check,
+        worktree, command, true, None, host, None, artifacts, check,
     ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
@@ -3477,6 +3563,14 @@ fn execute_command_cancellable(
         None,
         check,
     )
+}
+
+fn command_timeout(
+    command: &str,
+    progress: Option<&CommandProgress>,
+) -> Option<std::time::Duration> {
+    crate::cli::verification_lease::short_non_cargo_timeout(command)
+        .or_else(|| progress.and_then(CommandProgress::timeout))
 }
 
 #[cfg(test)]
@@ -3635,7 +3729,7 @@ fn execute_command_with_artifact_guard_cancellable(
                 &mut process,
                 temp.path(),
                 command,
-                crate::cli::verification_lease::short_non_cargo_timeout(command),
+                command_timeout(command, progress),
                 progress,
                 output_worktree,
                 std::time::Instant::now,
@@ -3707,34 +3801,35 @@ fn execute_inherited_command_cancellable(
             .stderr(fs::File::create(&stderr)?);
         let stdout_reader = fs::File::open(stdout)?;
         let stderr_reader = fs::File::open(stderr)?;
-        let mut spawned =
-            InheritedVerificationChild::spawn(process, timeout.is_some() || check.is_some())?;
+        let mut spawned = InheritedVerificationChild::spawn(process)?;
         let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
-        let (status, timed_out) = spawned.wait_cancellable(timeout, &mut now, check)?;
+        let (status, stopped) = spawned.wait_cancellable(timeout, &mut now, check)?;
         let output = std::process::Output {
             status,
             stdout: captured_output_snapshot(&stdout_reader),
             stderr: captured_output_snapshot(&stderr_reader),
         };
-        Ok((output, spawned.spawned.priority.clone(), timed_out))
+        Ok((output, spawned.spawned.priority.clone(), stopped))
     })();
     let output = match output {
         Ok(output) => output,
         Err(err) if err.kind() == io::ErrorKind::Interrupted => return Err(err.to_string()),
         Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
     };
-    let (output, priority, timed_out) = output;
-    let (exit_code, signal, mut tail) = if timed_out {
-        command_timeout_result(
+    let (output, priority, stopped) = output;
+    let (exit_code, signal, mut tail) = match stopped {
+        Some(InheritedCommandStop::TimedOut) => command_timeout_result(
             command,
             timeout.expect("a timed-out command has a deadline"),
-        )
-    } else {
-        (
+        ),
+        Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)) => {
+            interactive_authentication_result(&diagnostic)
+        }
+        None => (
             output.status.code().unwrap_or(-1),
             terminating_signal(output.status),
             String::new(),
-        )
+        ),
     };
     if !priority.restored {
         tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
@@ -3747,57 +3842,54 @@ fn execute_inherited_command_cancellable(
     Ok((exit_code, signal, tail, output_streams))
 }
 
-/// A bounded child owns its group/Job before any descendants can run.
+/// Every verification child owns its group/Job before descendants can run.
 struct InheritedVerificationChild {
     spawned: gwt_core::process_tree::NormalPriorityChild,
-    bounded: bool,
     reaped: bool,
     #[cfg(windows)]
     job: Option<gwt_core::process_tree::WindowsJobObject>,
 }
 
+enum InheritedCommandStop {
+    TimedOut,
+    InteractiveAuthentication(String),
+}
+
 impl InheritedVerificationChild {
-    fn spawn(process: &mut std::process::Command, bounded: bool) -> io::Result<Self> {
+    fn spawn(process: &mut std::process::Command) -> io::Result<Self> {
         #[cfg(unix)]
-        if bounded {
+        {
             use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
         #[cfg(windows)]
-        let mut job = if bounded {
+        let (spawned, job) = {
             use std::os::windows::process::CommandExt;
-            let job = gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
+            let mut job =
+                gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
             process.creation_flags(
                 gwt_core::process_tree::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS
                     | gwt_core::process_tree::WINDOWS_NORMAL_PRIORITY_CLASS,
             );
-            Some(job)
-        } else {
-            None
-        };
-        #[cfg(windows)]
-        let spawned = if let Some(job) = &mut job {
             let mut child = process.spawn()?;
             if let Err(error) = job.assign_and_resume(child.id()) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(io::Error::other(error));
             }
-            gwt_core::process_tree::NormalPriorityChild {
+            let spawned = gwt_core::process_tree::NormalPriorityChild {
                 child,
                 priority: gwt_core::process_tree::ChildPriorityReport {
                     restored: true,
                     detail: "normal priority class".to_string(),
                 },
-            }
-        } else {
-            gwt_core::process_tree::spawn_at_normal_priority(process)?
+            };
+            (spawned, Some(job))
         };
         #[cfg(not(windows))]
         let spawned = gwt_core::process_tree::spawn_at_normal_priority(process)?;
         Ok(Self {
             spawned,
-            bounded,
             reaped: false,
             #[cfg(windows)]
             job,
@@ -3809,12 +3901,18 @@ impl InheritedVerificationChild {
         timeout: Option<std::time::Duration>,
         now: &mut impl FnMut() -> std::time::Instant,
         check: Option<&CancellationCheck<'_>>,
-    ) -> io::Result<(std::process::ExitStatus, bool)> {
-        if timeout.is_none() && check.is_none() {
-            let status = self.spawned.child.wait()?;
-            self.reaped = true;
-            return Ok((status, false));
-        }
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
+        let mut detector = interactive_process::InteractiveProcessDetector::default();
+        self.wait_cancellable_with_detector(timeout, now, check, &mut |pid| detector.detect(pid))
+    }
+
+    fn wait_cancellable_with_detector(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
+        detect: &mut impl FnMut(u32) -> Option<String>,
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
         let deadline = timeout.map(|timeout| now() + timeout);
         loop {
             if let Err(error) = check_cancellation(check) {
@@ -3822,6 +3920,15 @@ impl InheritedVerificationChild {
                 let _ = self.spawned.child.wait();
                 self.reaped = true;
                 return Err(io::Error::new(io::ErrorKind::Interrupted, error));
+            }
+            if let Some(diagnostic) = detect(self.spawned.child.id()) {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((
+                    status,
+                    Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)),
+                ));
             }
             #[cfg(unix)]
             let completed = if self.exited_without_reaping()? {
@@ -3836,13 +3943,13 @@ impl InheritedVerificationChild {
             let completed = self.spawned.child.try_wait()?;
             if let Some(status) = completed {
                 self.reaped = true;
-                return Ok((status, false));
+                return Ok((status, None));
             }
             if deadline.is_some_and(|deadline| now() >= deadline) {
                 self.reclaim();
                 let status = self.spawned.child.wait()?;
                 self.reaped = true;
-                return Ok((status, true));
+                return Ok((status, Some(InheritedCommandStop::TimedOut)));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -3892,7 +3999,7 @@ impl InheritedVerificationChild {
 
 impl Drop for InheritedVerificationChild {
     fn drop(&mut self) {
-        if self.bounded && !self.reaped {
+        if !self.reaped {
             self.reclaim();
             let _ = self.spawned.child.wait();
         }
@@ -3912,6 +4019,14 @@ fn command_timeout_result(
         .as_bytes(),
     );
     (124, None, format!("--- timeout ---\n{diagnostic}\n"))
+}
+
+fn interactive_authentication_result(diagnostic: &str) -> (i32, Option<i32>, String) {
+    (
+        1,
+        None,
+        format!("--- interactive authentication ---\n{diagnostic}\n"),
+    )
 }
 
 fn captured_output_snapshot(file: &fs::File) -> Vec<u8> {
@@ -3989,7 +4104,7 @@ fn execute_command_on_daemon(
         endpoint,
         request,
         |pid| progress.map(|progress| progress.start(pid)),
-        crate::cli::verification_lease::short_non_cargo_timeout(command),
+        command_timeout(command, progress),
         check,
     );
     let (exit_code, signal, mut tail, mut output_streams) = match delegated {
@@ -4014,6 +4129,10 @@ fn execute_command_on_daemon(
             (exit_code, signal, tail, Vec::new())
         }
         // Keep partial output on errors too; never retry in the caller's tree.
+        Err(DelegatedRunError::InteractiveAuthentication(diagnostic)) => {
+            let (exit_code, signal, tail) = interactive_authentication_result(&diagnostic);
+            (exit_code, signal, tail, Vec::new())
+        }
         Err(DelegatedRunError::Failed(error)) => {
             spawn_failure_result(output_worktree, command, &error)?
         }
@@ -4794,7 +4913,7 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let args = split_command_line(command)?;
+        let (_, args) = take_env_assignments(split_command_line(command)?)?;
         let nextest_capture = (args.starts_with(&["cargo".into(), "nextest".into(), "run".into()])
             && args
                 .windows(2)
@@ -4812,26 +4931,69 @@ where
                 .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
                 .unwrap_or(Ok(false))
         };
-        let executed = execute_command_cancellable(
-            worktree,
-            &execution_command,
-            false,
-            capture.as_ref(),
-            &options.host,
-            admission
+        // Only canonical headed commands imply performance verification;
+        // low-level reporter fixtures have no authoritative caller. Explicit
+        // performance assignments also work for non-browser commands.
+        let measurement_capture = measurement::Capture::prepare(
+            command,
+            capture.is_some() && authority.is_some(),
+            command_admission
                 .as_ref()
-                .map(|granted| granted.command_progress())
-                .or(options.command_progress),
-            options
-                .attempt
-                .map(|_| &check_cancelled as &CancellationCheck<'_>),
+                .map_or(0, |admission| admission.queue_wait_ms),
         );
+        let measurement_ready = measurement_capture
+            .as_ref()
+            .is_none_or(|capture| capture.ready());
+        let executed = if measurement_ready {
+            execute_command_cancellable(
+                worktree,
+                &execution_command,
+                false,
+                capture.as_ref(),
+                &options.host,
+                admission
+                    .as_ref()
+                    .map(|granted| granted.command_progress())
+                    .or(options.command_progress),
+                options
+                    .attempt
+                    .map(|_| &check_cancelled as &CancellationCheck<'_>),
+            )
+        } else {
+            Ok((
+                125,
+                None,
+                measurement_capture
+                    .as_ref()
+                    .expect("incompatible environment")
+                    .diagnostic(),
+                Vec::new(),
+            ))
+        };
         if let Some(granted) = &admission {
             granted.publish_progress(1, 1, command_started.elapsed());
         }
-        // Release before processing evidence or admitting the next command.
+        let (mut exit_code, terminated_by_signal, mut tail, mut output_streams) = executed?;
+        let measurement = measurement_capture
+            .map(|capture| capture.finish(measurement_ready.then_some(exit_code)));
+        // The observer's last native readback precedes release/restoration.
         drop(admission);
-        let (mut exit_code, terminated_by_signal, mut tail, output_streams) = executed?;
+        if let Some(evidence) = &measurement {
+            let json = serde_json::to_vec_pretty(evidence).map_err(|error| error.to_string())?;
+            let (diagnostic, streams) = render_streams(Some(worktree), &[("measurement", &json)])?;
+            tail.push_str(&diagnostic);
+            output_streams.extend(streams);
+            if evidence.incompatible() {
+                tail.push_str(&format!(
+                    "\nENVIRONMENT_INCOMPATIBLE: {}\n",
+                    evidence
+                        .reason
+                        .as_deref()
+                        .unwrap_or("measurement environment is unreadable")
+                ));
+                exit_code = 125;
+            }
+        }
         let nextest = nextest_capture
             .as_ref()
             .and_then(|capture| match capture.evidence() {
@@ -4882,8 +5044,12 @@ where
             )),
             None => transcript.push_str(&format!("exit: {exit_code}\n")),
         }
+        let environment_incompatible = measurement
+            .as_ref()
+            .is_some_and(measurement::Evidence::incompatible);
         results.push(VerificationCommandResult {
             admission: command_admission,
+            measurement,
             command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
@@ -4894,7 +5060,8 @@ where
         });
         // A failure a plan-bound quarantine may still waive keeps the matrix
         // going; its verdict is decided after every command has run.
-        let quarantine_candidate = terminated_by_signal.is_none()
+        let quarantine_candidate = !environment_incompatible
+            && terminated_by_signal.is_none()
             && prepared_quarantines.iter().any(|prepared| {
                 prepared.request.failed_command == *command
                     && plan_snapshot
@@ -4955,6 +5122,14 @@ where
         let merge_base_sha = crate::cli::verify_derivation::integration_merge_base(worktree)
             .ok_or_else(|| "integration merge-base is unavailable".to_string());
         for result in results.iter().filter(|result| result.exit_code != 0) {
+            if result
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                transcript.push_str("quarantine: measurement environment is incompatible; repair the environment and rerun instead\n");
+                continue;
+            }
             // Issue #4528: a killed run's output is cut short, so it cannot
             // be read as a verdict about one test.
             if let Some(signal) = result.terminated_by_signal {
@@ -5785,7 +5960,14 @@ fn evaluate_evidence_snapshot_inner(
     }
     // Issue #5094: commands skipped after a raw FAIL never ran, so neither
     // quarantine nor Board adjudication can turn the run into evidence.
-    if !record.skipped_after_failure.is_empty() {
+    if !record.skipped_after_failure.is_empty()
+        || record.commands.iter().any(|command| {
+            command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+        })
+    {
         return EvidenceStatus::Failing;
     }
     let has_typed_quarantine = if record.all_passed {
@@ -6690,7 +6872,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                 &token,
             )
             .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
-            let _attempt_watchdog = if cfg!(test) {
+            let mut attempt_watchdog = if cfg!(test) {
                 None
             } else {
                 let executable = driver
@@ -6721,7 +6903,10 @@ pub(super) fn run_with_response<E: CliEnv>(
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit_for_attempt(
+                    attempt
+                        .set_admission_waiting(true)
+                        .map_err(|error| error.to_string())?;
+                    let admission = crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
                         &worktree,
                         Some(command),
@@ -6736,8 +6921,18 @@ pub(super) fn run_with_response<E: CliEnv>(
                             )
                         },
                         &heavy_attempt,
-                    )
-                    .map(Some)
+                    )?;
+                    attempt
+                        .set_admission_waiting(false)
+                        .map_err(|error| error.to_string())?;
+                    if !cfg!(test) && admission.waited() >= std::time::Duration::from_secs(5) {
+                        if let Some(watchdog) = attempt_watchdog.as_mut() {
+                            if let Err(error) = watchdog.resume_when_idle() {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }
+                    }
+                    Ok(Some(admission))
                 }
             };
             let run = run_verification_for_caller(
@@ -6772,10 +6967,16 @@ pub(super) fn run_with_response<E: CliEnv>(
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             let (record, transcript) = match run {
                 Ok(result) => result,
-                Err(VerificationError::Deferred(deferral)) => {
+                Err(VerificationError::Deferred(mut deferral)) => {
                     attempt.ensure_active().map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(error.to_string()))
                     })?;
+                    if let Some(watchdog) = attempt_watchdog.as_mut() {
+                        match watchdog.resume_after_deferral() {
+                            Ok(()) => deferral.resume_notification = Some("watchdog armed: capacity + own idle pane; one self-notification".to_string()),
+                            Err(error) => deferral.resume_notification = Some(format!("not armed: {error}; retry or declare issue.monitor.wait explicitly")),
+                        }
+                    }
                     out.push_str(&format!("{deferral}\n"));
                     *response = Some(RunResponse {
                         status: "deferred",
@@ -7157,6 +7358,7 @@ pub(crate) mod tests {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,
@@ -7409,6 +7611,7 @@ pub(crate) mod tests {
                 ".github/workflows/test.yml",
                 ".github/workflows/lint.yml",
                 ".github/workflows/coverage.yml",
+                ".github/workflows/coverage-ci.yml",
             ] {
                 let destination = worktree.join(path);
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -8044,6 +8247,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn command_timeout_bounds_unknown_exclusive_work_and_preserves_short_gates() {
+        use std::time::Duration;
+
+        let shared = CommandProgress::default();
+        let exclusive = CommandProgress::with_exclusive_timeout();
+        assert_eq!(command_timeout("python runner.py", None), None);
+        assert_eq!(command_timeout("python runner.py", Some(&shared)), None);
+        assert_eq!(
+            command_timeout("python runner.py", Some(&exclusive)),
+            Some(Duration::from_secs(20 * 60))
+        );
+        for progress in [None, Some(&shared), Some(&exclusive)] {
+            assert_eq!(
+                command_timeout("git diff --check", progress),
+                Some(Duration::from_secs(60))
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_interactive_authentication_reclaims_only_its_command_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = InheritedVerificationChild::spawn(&mut process).unwrap();
+        let child_pid = child.spawned.child.id();
+        let mut detected_pid = None;
+        let (_, stopped) = child
+            .wait_cancellable_with_detector(None, &mut Instant::now, None, &mut |pid| {
+                if !root.join("ready").exists() {
+                    return None;
+                }
+                detected_pid = Some(pid);
+                Some("interactive authentication fixture".to_string())
+            })
+            .unwrap();
+        let unrelated_survived = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild_pid = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline OS process reclamation has no completion event available to this fixture.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline Observe actual process death; this does not decide the command timeout.
+        while crate::process::is_process_alive(grandchild_pid) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(detected_pid, Some(child_pid));
+        assert!(
+            matches!(stopped, Some(InheritedCommandStop::InteractiveAuthentication(message))
+            if message == "interactive authentication fixture")
+        );
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(
+            unrelated_survived,
+            "only the owned command tree may be reclaimed"
+        );
+    }
+
+    #[test]
     fn inherited_short_command_timeout_keeps_output_and_reclaims_its_tree() {
         use std::time::{Duration, Instant};
 
@@ -8104,6 +8386,91 @@ pub(crate) mod tests {
         assert!(result.2.contains("retry"), "{}", result.2);
         assert!(!crate::process::is_process_alive(grandchild));
         assert!(unrelated_alive, "reclamation must stay in the owned tree");
+    }
+
+    #[test]
+    fn inherited_known_node_gate_timeout_reclaims_its_tree_after_five_minutes() {
+        use std::time::{Duration, Instant};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        let command = r#"node --test "scripts/coverage-summary.test.mjs""#;
+        let timeout = command_timeout(command, None).expect("known Node gate must be bounded");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            command,
+            Some(timeout),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                if clock_calls == 2 {
+                    // test-hygiene: allow-wall-clock-deadline Bounds OS child readiness; the execution deadline uses the injected clock.
+                    let safety = Instant::now() + Duration::from_secs(30);
+                    while !root.join("ready").exists() {
+                        // test-hygiene: allow-wall-clock-deadline This safety assertion guards OS startup, not the injected 299/301s budget.
+                        assert!(Instant::now() < safety, "the fixture did not start");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return started + Duration::from_secs(299);
+                }
+                let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap();
+                assert!(
+                    crate::process::is_process_alive(grandchild),
+                    "owned child tree did not survive the 299s deadline check"
+                );
+                started + Duration::from_secs(301)
+            },
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds real process reaping after timeout; the 300s budget uses the injected clock.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline This OS reap watchdog prevents a hung test; cleanup is asserted separately below.
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            clock_calls, 3,
+            "known Node gate must survive 299s and reach the 301s sample: {}",
+            result.2
+        );
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("timed out after 300s"), "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(
+            !root.join("fixture-deadline-elapsed").exists(),
+            "owned child tree escaped timeout reclamation"
+        );
     }
 
     #[test]
@@ -8290,6 +8657,28 @@ pub(crate) mod tests {
         assert!(paths.iter().all(|path| !Path::new(path).exists()));
     }
 
+    #[test]
+    fn non_admitted_cargo_reports_failed_target_resolution() {
+        let worktree = tempfile::tempdir().unwrap();
+        fs::write(worktree.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        for (command, isolated_baseline) in [
+            ("cargo test -p target-fixture --lib regression", false),
+            ("cargo build -p gwt --bin gwtd --target-dir target", true),
+        ] {
+            let error = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                isolated_baseline,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains("Cargo target resolution failed"), "{error}");
+            assert!(error.contains("Cargo.toml"), "{error}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn non_admitted_cargo_rejects_unresolved_artifact_target() {
@@ -8297,7 +8686,7 @@ pub(crate) mod tests {
         let cargo = worktree.path().join("cargo");
         gwt_core::test_support::write_executable_script(
             &cargo,
-            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) exit 1;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
+            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) if [ -f metadata.json ]; then cat metadata.json; exit 0; else exit 1; fi;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
         )
         .unwrap();
         let execute = |arguments: &str| {
@@ -8324,8 +8713,22 @@ pub(crate) mod tests {
             assert!(
                 result
                     .unwrap_err()
-                    .contains("Cargo artifact target is unresolved"),
+                    .contains("Cargo target resolution failed"),
                 "{arguments}"
+            );
+        }
+        for (metadata, diagnostic) in [
+            ("not JSON", "invalid metadata JSON"),
+            ("{}", "target_directory"),
+            (r#"{"target_directory":42}"#, "target_directory"),
+            (r#"{"target_directory":""}"#, "target_directory"),
+        ] {
+            fs::write(worktree.path().join("metadata.json"), metadata).unwrap();
+            let error = execute("build -p gwt --bin gwtd").unwrap_err();
+            assert!(error.contains(diagnostic), "{error}");
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "invalid metadata must not spawn the artifact workload"
             );
         }
         for arguments in ["--config test fmt --all --check", "metadata --no-deps"] {
@@ -8636,6 +9039,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nextest_restores_gwtd_only_in_the_gwt_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = ["cargo nextest run -p gwt --lib".to_string()];
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"unrelated\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(gwtd_artifact_restoration(dir.path(), &commands), None);
+
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &commands),
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(
+                dir.path(),
+                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
+            ),
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn default_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::create_dir_all(package.join("tests")).unwrap();
+        fs::create_dir_all(dir.path().join(".config")).unwrap();
+        fs::write(
+            dir.path().join(".config/nextest.toml"),
+            "[profile.gwt-verify]\nretries = 0\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n\
+             [dev-dependencies]\ngwt = { path = \".\", features = [\"test-gh-guard\"] }\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            package.join("src/bin/gwtd.rs"),
+            "fn main() { println!(\"{}\", if cfg!(feature = \"test-gh-guard\") { \"guarded\" } else { \"operational\" }); }\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("tests/artifact_state.rs"),
+            r#"#[test]
+fn default_integration_test_builds_a_guarded_binary() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gwtd")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "guarded");
+}
+"#,
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-default",
+            &[
+                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
+        let output = gwt_core::process::hidden_command(
+            dir.path()
+                .join("target/debug")
+                .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (
+                String::from_utf8(output.stdout).unwrap().trim(),
+                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+            ),
+            ("operational", Some(1)),
+            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+        );
+        assert_eq!(
+            record.commands[3].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn gwtd_artifact_restoration_failure_is_recorded_after_passing_tests() {
@@ -8669,7 +9196,10 @@ mod tests {
 
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
@@ -8728,7 +9258,10 @@ mod tests {
 
         assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         assert_eq!(record.skipped_after_failure, vec!["git --version"]);
@@ -8750,8 +9283,8 @@ mod tests {
             fs::write(directory.join("released"), "done").unwrap();
             return;
         }
-        // The fixture intentionally exits first; the parent test releases
-        // the grandchild after it observes the verification result.
+        // Exit while the grandchild holds output. The runner owns its tree;
+        // the parent test also has a release fallback for a broken runner.
         #[allow(clippy::zombie_processes)]
         let _grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
             .args([
@@ -8796,15 +9329,8 @@ mod tests {
         let result = receiver.recv_timeout(std::time::Duration::from_secs(45));
         fs::write(directory.path().join("release"), "release").unwrap();
         runner.join().unwrap();
-        // Keep the release file alive until the grandchild has observed it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !directory.path().join("released").exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "grandchild did not release"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        // Successful completion reclaims the grandchild, so it need not
+        // survive long enough to acknowledge the fallback release file.
         let (record, transcript) = result
             .expect("verification must finish without waiting for grandchild output EOF")
             .unwrap();
@@ -8895,6 +9421,7 @@ mod tests {
     fn run_status_separates_interruption_from_failure() {
         let result = |exit_code, terminated_by_signal| VerificationCommandResult {
             admission: None,
+            measurement: None,
             command: "cmd".to_string(),
             exit_code,
             output_tail: String::new(),
@@ -8914,6 +9441,52 @@ mod tests {
             RunOutcomeCounts::of(&mixed).summary(),
             "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
         );
+    }
+
+    #[test]
+    fn performance_environment_is_not_reported_as_a_product_failure() {
+        let result: VerificationCommandResult = serde_json::from_value(serde_json::json!({
+            "command": "GWT_VERIFY_PERFORMANCE=1 git --version",
+            "exit_code": 125,
+            "measurement": {
+                "status": "environment_incompatible",
+                "reason": "ancestor Job remains capped at 8%",
+                "admission_wait_ms": 100,
+                "cap_relief_wait_ms": 15000,
+                "raw_exit_code": null,
+                "targets": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            run_status_label(false, false, std::slice::from_ref(&result)),
+            "ENVIRONMENT_INCOMPATIBLE"
+        );
+        assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
+    }
+
+    #[test]
+    fn performance_commands_persist_pid_and_environment_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let command = "GWT_VERIFY_PERFORMANCE=1 git --version".to_string();
+        let (record, _) = run_verification(dir.path(), "sess-measurement", &[command]).unwrap();
+        let value = serde_json::to_value(&record.commands[0]).unwrap();
+        let measurement = &value["measurement"];
+        assert!(measurement.is_object(), "{value}");
+        assert!(measurement["cap_relief_wait_ms"].is_u64());
+        assert!(measurement["admission_wait_ms"].is_u64());
+        assert_eq!(measurement["targets"][0]["pid"], std::process::id());
+        assert!(measurement["targets"][0]["cpu_time_ms"].is_u64());
+        assert!(measurement["targets"][0]["job_caps"].is_array());
+        #[cfg(not(windows))]
+        assert!(
+            record.all_passed,
+            "an uncapped performance command must remain valid"
+        );
+        let saved = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&saved));
+        assert_eq!(serde_json::to_value(&saved.commands[0]).unwrap(), value);
     }
 
     /// Issue #4528 AC-1/AC-3: the lease a heavy run was admitted under is part
@@ -8992,6 +9565,7 @@ mod tests {
             driver: None,
             commands: vec![VerificationCommandResult {
                 admission: None,
+                measurement: None,
                 headed_e2e: None,
                 nextest: None,
                 terminated_by_signal: None,
@@ -9038,6 +9612,7 @@ mod tests {
                 std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
+            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("never"));
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9051,10 +9626,12 @@ mod tests {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
             1,
@@ -9073,11 +9650,21 @@ mod tests {
     // hangs on it again.
     #[test]
     fn verify_run_child_environment_contract_is_declared_in_one_place() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
         assert_eq!(
-            child_environment_contract(),
+            child_environment_contract()
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_deref()))
+                .collect::<Vec<_>>(),
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("GIT_ASKPASS", Some("")),
+                ("GCM_INTERACTIVE", Some("never")),
+                ("GIT_CONFIG_PARAMETERS", Some("'credential.helper='")),
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
@@ -9100,6 +9687,125 @@ mod tests {
             terminal_prompt,
             Some(Some(std::ffi::OsStr::new("0"))),
             "verify.run children must never be able to open a credential prompt"
+        );
+        assert_eq!(
+            process
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("GCM_INTERACTIVE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("never"))),
+            "credential manager must fail instead of opening a GUI or TTY prompt"
+        );
+        assert!(resolved_child_environment(false)
+            .contains(&("GCM_INTERACTIVE".to_string(), "never".to_string())));
+    }
+
+    #[test]
+    fn verify_run_fake_remote_fetch_fails_without_invoking_credentials() {
+        use std::io::{Read, Write};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-invoked");
+        let askpass_marker = dir.path().join("askpass-invoked");
+        let askpass = dir.path().join("fixture-askpass");
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho invoked > '{}'\n",
+                askpass_marker.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _askpass = ScopedEnvVar::set("GIT_ASKPASS", &askpass);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(gwt_core::deadline_budget::HANG_GUARD))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        // A helper that records its invocation without risking a real prompt.
+        let helper = format!(
+            "!echo invoked > '{}'",
+            marker.to_string_lossy().replace('\\', "/")
+        );
+        // Git -c settings inherited through hooks outrank GIT_CONFIG_COUNT.
+        let _parameters = ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            format!(
+                "'credential.helper={}'",
+                helper.replace('\\', "\\\\").replace('\'', "'\\''")
+            ),
+        );
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["config", "credential.helper", &helper])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let command = format!("git -c http.proxy= fetch http://{address}/missing.git");
+        let mut process = gwt_core::process::hidden_command("git");
+        apply_child_environment_contract(&mut process);
+        process
+            .args([
+                "-c",
+                "http.proxy=",
+                "fetch",
+                &format!("http://{address}/missing.git"),
+            ])
+            .current_dir(dir.path());
+        let result = execute_inherited_command(
+            &mut process,
+            dir.path(),
+            &command,
+            Some(std::time::Duration::from_secs(30)),
+            None,
+            None,
+            std::time::Instant::now,
+        );
+        // Wake accept if Git failed before connecting; the request assertion
+        // then reports that failure instead of leaving the fixture waiting.
+        let _ = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1));
+        server.join().unwrap();
+        let (exit_code, signal, transcript, _) = result.unwrap();
+        assert_ne!(exit_code, 0, "{transcript}");
+        assert_eq!(signal, None, "{transcript}");
+        assert!(
+            transcript.contains("terminal prompts disabled"),
+            "{transcript}"
+        );
+        assert!(!transcript.contains("timed out"), "{transcript}");
+        assert!(
+            !marker.exists(),
+            "credential helper was invoked: {transcript}"
+        );
+        assert!(
+            !askpass_marker.exists(),
+            "inherited askpass was invoked: {transcript}"
         );
     }
 
@@ -12325,6 +13031,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -12361,6 +13068,44 @@ mod tests {
             evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
             EvidenceStatus::WrongGeneration,
             "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+
+        // Simulate a GUI restart that lost both runner and watchdog, followed
+        // by another host process reusing the old runner's PID.
+        let mut unfinished = run;
+        unfinished.lifecycle = Some(interruption::RunLifecycle::running("old-runner"));
+        let mut document = serde_json::to_value(unfinished).unwrap();
+        document["lifecycle"]["runner_started_at"] =
+            (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+        save(dir.path(), &serde_json::from_value(document).unwrap()).unwrap();
+        persist_generation_scoped_session(dir.path(), "session-successor", successor.clone(), 1);
+        run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .unwrap();
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Run {
+                commands,
+                max_wait_secs: Some(0),
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let completed = load(dir.path()).unwrap().unwrap();
+        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert!(completed.all_passed);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-successor", Some(2359)),
+            EvidenceStatus::Fresh
         );
     }
 
@@ -12989,6 +13734,59 @@ mod tests {
         let deleted = WorkEventGitFixture::tracked_shards();
         fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
         assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn issue_5535_recovery_archives_only_untracked_canonical_work_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            "recovery-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&event);
+        let source = fixture.event_shard_path(&event.id);
+        let original = fs::read(&source).unwrap();
+        fixture.write_event_shard("invalid-event", b"{}\n");
+        let staged = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "staged-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&staged);
+        fixture.git_ok(&[
+            "add",
+            "--",
+            fixture.event_shard_path(&staged.id).to_str().unwrap(),
+        ]);
+        fs::write(fixture.repo.join("source.rs"), "uncommitted source").unwrap();
+
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            1
+        );
+        let archive = gwt_core::paths::gwt_work_event_shard_path(
+            &gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.repo)
+                .join("recovered-work-events")
+                .join("events"),
+            &event.id,
+        );
+        assert_eq!(fs::read(archive).unwrap(), original);
+        assert!(!source.exists());
+        assert!(fixture.event_shard_path("invalid-event").exists());
+        assert!(fixture.event_shard_path(&staged.id).exists());
+        assert_eq!(
+            fs::read_to_string(fixture.repo.join("source.rs")).unwrap(),
+            "uncommitted source"
+        );
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            0
+        );
+        assert_eq!(work_event_dirty_paths(&fixture.repo).unwrap().len(), 2);
     }
 
     #[test]

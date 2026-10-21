@@ -8,6 +8,7 @@
 // its original app.js indentation.
 import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
 import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -118,9 +119,17 @@ export function createTerminalAttachments({
       }
 
       const attachmentProgressControllers = new Map();
+      const attachmentProgressModel = createUiStateStore(null);
+      // This surface shares the app's document lifetime. Keep only the latest
+      // received snapshot; upload controllers and timers stay outside the model.
+      attachmentProgressModel.subscribe(progress => progress, progress => {
+        if (progress) renderAttachmentProgress(progress);
+      });
 
       function ensureAttachmentProgressSurface(windowId) {
-        const host = workspaceWindowElement(windowId) || document.body;
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
+        const host = terminalHost?.dataset.agentId === windowId
+          ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;
@@ -276,6 +285,19 @@ export function createTerminalAttachments({
       }
 
       function handleAttachmentProgress(event) {
+        if (!event?.operation_id) return;
+        attachmentProgressModel.update(() => ({
+          id: event.id,
+          operation_id: event.operation_id,
+          phase: event.phase,
+          filename: event.filename,
+          bytes_total: event.bytes_total,
+          bytes_done: event.bytes_done,
+          message: event.message,
+        }));
+      }
+
+      function renderAttachmentProgress(event) {
         const operationId = event?.operation_id || "";
         if (!operationId) {
           return;
@@ -708,14 +730,21 @@ export function createTerminalAttachments({
         };
       }
 
+      function attachmentWindowIdFromElement(element) {
+        const tile = element?.closest?.(".agent-tile[data-agent-id]");
+        if (tile) {
+          return tile.closest(".agents-surface--preview") ? null : tile.dataset.agentId;
+        }
+        return element?.closest?.(".workspace-window")?.dataset?.id || null;
+      }
+
       function terminalWindowIdFromPoint(x, y) {
         if (!Number.isFinite(x) || !Number.isFinite(y)) {
           return null;
         }
         const target = document.elementFromPoint(x, y);
         const terminalRoot = target?.closest?.(".terminal-root");
-        const windowElement = terminalRoot?.closest?.(".workspace-window");
-        const windowId = windowElement?.dataset?.id || null;
+        const windowId = attachmentWindowIdFromElement(terminalRoot);
         if (!windowId || !terminalMap.has(windowId)) {
           return null;
         }
@@ -723,8 +752,7 @@ export function createTerminalAttachments({
       }
 
       function workspaceWindowIdFromDropEvent(event) {
-        const targetWindow = event.target?.closest?.(".workspace-window");
-        const targetWindowId = targetWindow?.dataset?.id || null;
+        const targetWindowId = attachmentWindowIdFromElement(event.target);
         if (targetWindowId) {
           return targetWindowId;
         }
@@ -734,8 +762,7 @@ export function createTerminalAttachments({
           return null;
         }
         const pointTarget = document.elementFromPoint(x, y);
-        const pointWindow = pointTarget?.closest?.(".workspace-window");
-        return pointWindow?.dataset?.id || null;
+        return attachmentWindowIdFromElement(pointTarget);
       }
 
       function eventTargetsPmReports(event) {

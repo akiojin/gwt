@@ -1,9 +1,10 @@
-import { expect, test } from "@playwright/test";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { expect, test, type WebSocketRoute } from "@playwright/test";
+import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 const CPU_UNITS =
   /Aggregate CPU is logical-core-normalized host share \(0–100%\); process rows use 1 core = 100%\./;
+const transports = new WeakMap<object, WebSocketRoute>();
 const browserErrors = new WeakMap<object, string[]>();
 
 test.describe("Runtime health sort controls", () => {
@@ -22,7 +23,16 @@ test.describe("Runtime health sort controls", () => {
       }
     });
     page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
+    await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+      transports.set(page, socket);
+      const server = socket.connectToServer();
+      server.onMessage(message => {
+        const payload = typeof message === "string" ? JSON.parse(message) : null;
+        if (payload?.kind !== "runtime_health") socket.send(message);
+      });
+    });
     await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
+    await openLiveGwtProject(page, process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd());
     await page.waitForFunction(() => Boolean((window as any).__operatorShell?.applyRuntimeHealth));
   });
 
@@ -30,10 +40,8 @@ test.describe("Runtime health sort controls", () => {
     expect(browserErrors.get(page) ?? []).toEqual([]);
   });
 
-  test("sort buttons keep the process detail open after click", async ({ page }) => {
-    await page.evaluate(() => {
-      const operatorShell = (window as any).__operatorShell;
-      operatorShell.applyRuntimeHealth({
+  test("sort buttons keep the process detail open after click", async ({ page }, info) => {
+    transports.get(page)!.send(JSON.stringify({ kind: "runtime_health", snapshot: {
         state: "hot",
         cpu_percent: 501.2,
         memory_bytes: 5 * 1024 * 1024 * 1024,
@@ -71,9 +79,7 @@ test.describe("Runtime health sort controls", () => {
             memory_bytes: 768 * 1024 * 1024,
           },
         ],
-      });
-      operatorShell.applyRuntimeHealth = () => {};
-    });
+    } }));
 
     const perfCell = page.locator("#op-strip-runtime-health");
     const perfValue = page.locator("#op-strip-runtime-health-value");
@@ -94,13 +100,12 @@ test.describe("Runtime health sort controls", () => {
     await perfCell.focus();
     await expect(detail).toBeVisible();
 
-    for (const theme of ["dark", "light"]) {
-      await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
-      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await perfCell.focus();
-      await expect(detail).toBeVisible();
-      await expect(perfValue).toHaveText("HOT 100% 5.0G");
-    }
+    const theme = info.project.name.endsWith("light") ? "light" : "dark";
+    await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await perfCell.focus();
+    await expect(detail).toBeVisible();
+    await expect(perfValue).toHaveText("HOT 100% 5.0G");
 
     await detail.getByRole("button", { name: "CPU" }).click();
     await page.waitForTimeout(200);
@@ -117,5 +122,20 @@ test.describe("Runtime health sort controls", () => {
     await expect(detail.locator(".op-runtime-health-detail__process-more")).toContainText(
       "sorted by Mem",
     );
+    transports.get(page)!.send(JSON.stringify({ kind: "runtime_health", snapshot: {
+      state: "ok", cpu_percent: 5, memory_bytes: 1024 ** 3, process_count: 1, runner_count: 0,
+      processes: [{ pid: 704, role: "gwt", name: "latest-snapshot", cpu_percent: 5, memory_bytes: 1024 ** 3 }],
+    } }));
+    await expect(perfValue).toHaveText("OK 5% 1.0G");
+    await expect(detail).toContainText("latest-snapshot");
+    await expect(detail).not.toContainText("memory-hog");
+    await expect(detail.locator(".op-runtime-health-detail__process-more")).toContainText("sorted by Mem");
+    await perfCell.focus();
+    await expect(detail).toBeVisible();
+    const screenshot = await page.screenshot({ fullPage: true });
+    await info.attach("runtime-shared-state", { body: screenshot, contentType: "image/png" });
+    if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
+      await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/runtime-${info.project.name}.png`, fullPage: true });
+    }
   });
 });

@@ -4,7 +4,7 @@
 // secondary information, and at most two visible action buttons that depend on
 // that state. Anything else moves into the row's overflow menu. The row's agent
 // status row carries no second badge, and once the agent is Windowized the same
-// slot shows a "Shown on canvas" face instead of a second input face.
+// slot shows a "Shown in Agents" face instead of a second input face.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -43,6 +43,55 @@ test("pending SessionStart diagnosis uses the existing row reason without changi
   assert.equal(pending.primary.label, "Launching");
   assert.deepEqual(pending.secondary, [{ kind: "reason", key: "reason", label: entry.readiness_diagnosis }]);
   assert.deepEqual(issueRowStateModel({ entry: { ...entry, readiness_diagnosis: null } }).secondary, []);
+});
+
+test("Issue #4862 a deliberate stop stays Held despite stale window activity", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(4862, { monitor_state: "needs_human", error_message: "stopped: PM paused for investigation",
+    readiness_diagnosis: "SessionStart readiness pending: stale warning" });
+  assert.equal(issueQueueColumn(entry, workRow()), "backlog");
+  for (const status of ["running", "error"]) {
+    const context = { entry, work: workRow(), inlineWindow: agentWindow("agent-1", 4862, { status }) };
+    const model = issueRowStateModel(context);
+    assert.deepEqual(model.primary, { key: "monitor:held", label: "Held", tone: "idle" });
+    assert.equal(model.secondary[0].label, "PM paused for investigation");
+    const prior = issueRowStateModel({ ...context, entry: { ...entry, error_message: null } });
+    assert.deepEqual(model.actions, prior.actions, "presentation must not change actions");
+    assert.deepEqual(model.overflow, prior.overflow);
+  }
+});
+
+test("Issue #4862 launch diagnoses retain the cause and name the next operation", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  for (const [monitor_state, error_message, recovery] of [
+    ["launch_failed", "cannot launch successor of Work work-42: successor work-42-next has invalid lineage", "Work lineage · Next: workspace.close (superseded), then issue.monitor.requeue"],
+    ["agent_failed", "cannot launch successor of Work work-43: owner or execution container mismatch", "Work owner mismatch · Next: workspace.candidates"],
+    ["needs_human", "autonomous launch attempts exhausted (3/3) with an unchanging failure: Launch timed out: no window was created within 120s; delivery second", "Window timeout · Next: issue.monitor.requeue"],
+    ["needs_human", "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-44-next is duplicated; use workspace.close", "Launch failure · Next: issue.monitor.status"],
+    ["launch_failed", "launch provider unavailable", "Launch failure · Next: issue.monitor.status"],
+    ["agent_failed", "agent process exited", "Agent failure · Next: issue.monitor.status"],
+  ]) {
+    const model = issueRowStateModel({ entry: knowledgeEntry(4862, { monitor_state, error_message }) });
+    assert.deepEqual(model.secondary.map(item => [item.key, item.label]), [["reason", error_message], ["recovery", recovery]]);
+    if (monitor_state === "needs_human") {
+      assert.equal(issueQueueColumn(knowledgeEntry(4862, { monitor_state, error_message }), workRow()), "backlog");
+    }
+  }
+});
+
+test("Issue #5491 judgment holds outrank stale Work activity but preserve live agents", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const reason = "Choose the publication scope before work can continue";
+  for (const monitor_state of ["needs_human", "blocked_by_claim"]) {
+    const entry = knowledgeEntry(5491, { monitor_state, queue_position: 2, error_message: reason });
+    assert.equal(issueQueueColumn(entry, workRow()), "backlog");
+    assert.equal(issueQueueColumn(entry, workRow(), agentWindow("live", 5491)), "active");
+  }
+  assert.equal(issueQueueColumn(knowledgeEntry(5491), workRow({ status_category: "blocked" })), "backlog");
+  assert.equal(issueQueueColumn(knowledgeEntry(5491, { monitor_state: "launching" }), workRow({ status_category: "blocked" })), "active");
+  const model = issueRowStateModel({ entry: knowledgeEntry(5491, { monitor_state: "needs_human", error_message: reason }) });
+  assert.equal(model.primary.label, "Needs human");
+  assert.equal(model.secondary[0].label, reason);
 });
 
 function knowledgeEntry(number, overrides = {}) {
@@ -108,14 +157,14 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], projection = null } = {}) {
+async function makeFixture({ workspaceWindows = [], projection = null, kind = "issue" } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
   const body = document.createElement("div");
   document.body.appendChild(body);
-  const issueWindow = { id: "win-1", preset: "issue" };
+  const issueWindow = { id: "win-1", preset: kind };
   const sent = [];
   const calls = {
     continued: [],
@@ -140,7 +189,7 @@ async function makeFixture({ workspaceWindows = [], projection = null } = {}) {
     workspaceWindowById: (id) => windows.find((entry) => entry.id === id) || null,
     getWorkspaceWindows: () => windows,
     pendingIndexOpenTargetsByPreset: new Map(),
-    knowledgeKindForPreset: () => "issue",
+    knowledgeKindForPreset: () => kind,
     focusWindowLocally: (id) => calls.focusedLocally.push(id),
     sendWindowFocus: (id) => calls.focusedRemotely.push(id),
     focusOrSpawnPreset() {},
@@ -201,6 +250,35 @@ function visibleActions(row) {
     .filter((button) => !button.closest(".knowledge-row-menu-list"))
     .map((button) => button.dataset.action);
 }
+
+test("Issue #5401 identical entries retain rows and one changed key replaces only that row", async t => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entries = [1, 2, 3].map(number => knowledgeEntry(number));
+  const row = number => fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+  applyEntries(fixture.surface, fixture.load, entries);
+  const original = entries.map(entry => row(entry.number));
+  applyEntries(fixture.surface, fixture.load, structuredClone(entries));
+  assert.ok(entries.every((entry, index) => row(entry.number) === original[index]), "identical replay retains every row");
+  applyEntries(fixture.surface, fixture.load, [entries[2], { ...entries[1], title: "Updated" }, entries[0]]);
+  assert.equal(row(1), original[0]);
+  assert.notEqual(row(2), original[1]);
+  assert.equal(row(3), original[2]);
+  assert.deepEqual([...fixture.body.querySelectorAll('[data-queue-column="backlog"] .knowledge-row')]
+    .map(node => Number(node.dataset.issueNumber)), [3, 2, 1]);
+});
+
+test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entries = Array.from({ length: 1545 }, (_, index) => knowledgeEntry(index + 1));
+  applyEntries(fixture.surface, fixture.load, entries.slice(0, 200));
+  assert.equal(fixture.body.querySelectorAll(".knowledge-row").length, 200);
+  applyEntries(fixture.surface, fixture.load, entries);
+  assert.ok(fixture.body.querySelectorAll(".knowledge-row").length < 200);
+  assert.match(fixture.body.querySelector('[data-queue-column="backlog"] h3').textContent, /1545/);
+  assert.ok(fixture.body.querySelector(".knowledge-virtual-spacer"));
+});
 
 function overflowActions(row) {
   return [...row.querySelectorAll(".knowledge-row-menu-list button[data-action]")].map(
@@ -724,7 +802,7 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
 });
 
 // T-005 / FR-012: after Windowize the row keeps the Issue ↔ agent link as a
-// "Shown on canvas" face with no second input face for the PTY.
+// "Shown in Agents" face with no second input face for the PTY.
 test("after Windowize the row shows the agent as on the canvas and offers focus", async (t) => {
   const agent = agentWindow("agent-1", 3671);
   const fixture = await makeFixture({ workspaceWindows: [agent] });
@@ -749,7 +827,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   assert.equal(face.dataset.windowId, "agent-1");
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, 0, "nothing is mounted");
-  assert.match(face.textContent, /Shown on canvas/);
+  assert.match(face.textContent, /Shown in Agents/);
   assert.equal(face.querySelector('[data-action="windowize-issue-preview"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.deepEqual(visibleActions(row), ["focus-canvas-window"]);
@@ -880,7 +958,7 @@ test("Issue menu disclosure survives row replacement without retaining removed r
   const original = menu(41);
   original.setAttribute("open", "");
   refresh(entries);
-  assert.notEqual(menu(41), original, "the row really was replaced");
+  assert.equal(menu(41), original, "unchanged rows retain the native disclosure");
   assert.equal(menu(41).hasAttribute("open"), true);
   assert.equal(menu(42).hasAttribute("open"), false);
   fixture.body.querySelector('[data-issue-view="split"]').click();

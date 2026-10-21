@@ -65,6 +65,8 @@ pub struct ManagedHookHealth {
     pub pending_goal: Option<PendingHookGoal>,
     pub slow_handlers: Vec<HookProfileEvidence>,
     pub issues: Vec<String>,
+    /// Advisory conflicts never change managed hook readiness.
+    pub external_skill_conflicts: super::external_skill_conflicts::ConflictReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,11 +296,13 @@ fn read_managed_hook_health_with(
         }),
         slow_handlers: Vec::new(),
         issues: Vec::new(),
+        external_skill_conflicts: Default::default(),
     };
 
     let surface = cached_surface_audit(input, failures);
     health.status = surface.status;
     health.issues = surface.issues;
+    health.external_skill_conflicts = surface.external_skill_conflicts;
     audit_hook_profile(input, &mut health);
     audit_hook_failures(input, failures, &mut health);
 
@@ -494,7 +498,7 @@ fn comparable_path(path: &Path) -> PathBuf {
 }
 
 /// Environment that decides how a bare hook binary such as `gwtd` resolves.
-const SURFACE_AUDIT_ENV: &[&str] = &["PATH", "GWT_BIN_PATH"];
+const SURFACE_AUDIT_ENV: &[&str] = &["PATH", "GWT_BIN_PATH", "HOME", "USERPROFILE"];
 
 /// Managed hook surface audits reused across projections (Issue #4370).
 ///
@@ -530,6 +534,7 @@ struct CachedSurfaceAudit {
 struct SurfaceAudit {
     status: ManagedHookHealthStatus,
     issues: Vec<String>,
+    external_skill_conflicts: super::external_skill_conflicts::ConflictReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,6 +583,7 @@ fn cached_surface_audit(
         pending_goal: None,
         slow_handlers: Vec::new(),
         issues: Vec::new(),
+        external_skill_conflicts: Default::default(),
     };
     let mut dependencies = Vec::new();
     audit_managed_hook_configs(
@@ -586,12 +592,22 @@ fn cached_surface_audit(
         &mut scratch,
         &mut dependencies,
     );
+    scratch.external_skill_conflicts =
+        super::external_skill_conflicts::scan_worktree(&input.worktree_root);
+    dependencies.extend(
+        scratch
+            .external_skill_conflicts
+            .watched_paths
+            .iter()
+            .cloned(),
+    );
     fingerprint
         .files
         .extend(dependencies.iter().map(|path| file_stamp(path)));
     let audit = SurfaceAudit {
         status: scratch.status,
         issues: scratch.issues,
+        external_skill_conflicts: scratch.external_skill_conflicts,
     };
     counters.refreshed.fetch_add(1, Ordering::Relaxed);
     cache.lock().unwrap_or_else(PoisonError::into_inner).insert(
@@ -605,8 +621,36 @@ fn cached_surface_audit(
     audit
 }
 
+/// File inputs for the Work projection's hook health snapshot. Runtime state
+/// and the error ledger are fingerprinted separately by the projection.
+pub fn managed_hook_health_dependency_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = watched_surface_paths(worktree);
+    paths.extend([
+        worktree.join(SELF_HEALED_MARKER),
+        gwt_core::paths::gwt_work_notes_discussions_path(worktree),
+        worktree.join(crate::discussion_resume::CANONICAL_DISCUSSIONS_DISPLAY_PATH),
+        worktree.join(crate::discussion_resume::DISCUSSION_RELATIVE_PATH),
+    ]);
+    let input = ManagedHookHealthInput::new(worktree);
+    let key = SurfaceAuditKey {
+        worktree: input.worktree_root,
+        expected_hook_bin: input.expected_hook_bin,
+    };
+    if let Some(cache) = SURFACE_AUDITS.get() {
+        if let Some(cached) = cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            paths.extend(cached.dependencies.iter().cloned());
+        }
+    }
+    paths
+}
+
 /// Every path whose presence or content decides the surface audit.
 fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
+    let external_paths = super::external_skill_conflicts::discovery_paths(worktree);
     let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
     let worktree = runtime.as_deref().unwrap_or(worktree);
     let mut paths = vec![
@@ -615,6 +659,7 @@ fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
         worktree.join(".codex"),
         worktree.join(".codex/hooks.json"),
     ];
+    paths.extend(external_paths);
     for hooks in crate::managed_assets::managed_codex_hook_paths(worktree) {
         paths.push(codex_root_of(&hooks));
         paths.push(hooks);

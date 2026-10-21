@@ -28,7 +28,8 @@ test("notice is embedded, dispatched, and styled with Operator tokens in the exi
   const manifest = readFileSync(new URL('../../src/embedded_web.rs', import.meta.url), 'utf8');
   const styles = readFileSync(new URL('../styles/components.css', import.meta.url), 'utf8');
   assert.match(app, /case "workspace_state_notice":/);
-  assert.match(app, /workspaceStateNotice\.receive\(event\.notice\)/);
+  assert.match(app, /receive: applyWorkspaceStateNoticeReceiveEvent/);
+  assert.match(app, /applyWorkspaceStateNoticeReceiveEvent\(event\.notice\)/);
   assert.match(manifest, /"workspace-state-notice.js" => "createWorkspaceStateNotice"/);
   const rule = styles.match(/\.workspace-state-notice\s*\{([^}]+)\}/)?.[1];
   assert.ok(rule);

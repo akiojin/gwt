@@ -295,8 +295,9 @@ pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
         String::new()
     };
     format!(
-        " UNRESOLVED BLOCKED ESCALATIONS ({count}){overflow} — decide fresh launch / spec ruling / \
+        "{}{count}){overflow} — decide fresh launch / spec ruling / \
          tool fix for each, then post the resolution with params.resolves: {lines}",
+        pm_registry::PM_ESCALATION_PROMPT_PREFIX,
         count = open.len(),
         lines = lines.join(" || "),
     )
@@ -1248,7 +1249,7 @@ impl AppRuntime {
         let mut prompt = String::new();
         let mut idle_notifications = std::collections::BTreeMap::new();
         for (id, label) in &self.project_state(&context)?.pm_agent_idle_wakes.pending {
-            let entry = format!("[gwt] Agent idle: {label}");
+            let entry = format!("{}{label}", pm_registry::PM_AGENT_IDLE_WAKE_PREFIX);
             if prompt.len() + entry.len() > 800 {
                 break;
             }
@@ -2924,6 +2925,9 @@ impl AppRuntime {
         state
             .pending_pm_worktree_preparations
             .remove(continuation.project_root());
+        if result.is_ok() {
+            state.project_attention_notice.take();
+        }
         let tab_id = continuation.tab_id().to_string();
         let mut events = match result {
             Err(error) => {
@@ -2983,7 +2987,7 @@ impl AppRuntime {
         // refresh prunes unbundled `gwt-*` skills right after.
         let config = Self::pm_launch_config(worktree, &profile);
         let before = self.pm_window_ids(tab_id);
-        match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None) {
+        match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None, None) {
             Ok(events) => {
                 self.mark_new_pm_windows(tab_id, &before, project_root);
                 events
@@ -3005,6 +3009,9 @@ impl AppRuntime {
         project_root: &Path,
         error: &str,
     ) -> Vec<OutboundEvent> {
+        if error.contains("Git needs attention") {
+            return self.project_attention_events(project_root, Some(error), None);
+        }
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
@@ -3017,6 +3024,7 @@ impl AppRuntime {
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "error".to_string(),
                 message: format!(
                     "PM worktree preparation failed for {}: {error}",

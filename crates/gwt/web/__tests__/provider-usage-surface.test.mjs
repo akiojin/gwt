@@ -178,7 +178,7 @@ test("Status strip classifies usage at the 80 and 95 percent boundaries", async 
 
 test("Usage popover bars use the same 80 and 95 percent severity boundaries", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",
@@ -255,7 +255,7 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
 
 test("Empty usage snapshot closes the popover and clears trigger state", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -321,7 +321,7 @@ test("Empty usage snapshot closes the popover and clears trigger state", async (
 
 test("Usage popover keeps keyboard focus within the trigger-popover boundary", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -440,7 +440,7 @@ test("Status strip compacts three providers while keeping the full accessible su
 
 test("Keyboard focus opens the same labeled usage popover", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -504,7 +504,7 @@ test("Keyboard focus opens the same labeled usage popover", async () => {
 
 test("Usage hover shows account label while status strip stays compact", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -560,7 +560,7 @@ test("Usage hover shows account label while status strip stays compact", async (
 });
 
 test("Usage snapshot owns its data so strip and hover stay consistent", async () => {
-  const { createProviderUsageSurface } = await import(resolve(here, "../provider-usage-surface.js"));
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
     "<html><body><button id='op-strip-usage'></button></body></html>",
@@ -603,7 +603,7 @@ test("Usage snapshot owns its data so strip and hover stay consistent", async ()
 });
 
 test("Mounted usage panel follows snapshots while preserving local controls", async () => {
-  const { createProviderUsageSurface } = await import(resolve(here, "../provider-usage-surface.js"));
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
   const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
   const previous = { document: globalThis.document, window: globalThis.window };
   Object.assign(globalThis, { document, window });
@@ -654,7 +654,7 @@ async function importOperatorShell() {
 
 test("Usage popover labels unknown windows by their reported length (Issue #3860)", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",
@@ -722,7 +722,7 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
 
 test("Usage popover lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",

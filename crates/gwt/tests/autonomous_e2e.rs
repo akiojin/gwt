@@ -498,16 +498,17 @@ fn fr_family_decision_boundaries_are_observable() {
 
 // ---------------------------------------------------------------------------
 // Issue #4084: idle windows (review verdict published / settled implementation
-// window / dead binding) free their slot within one scan so the queue head
-// launches, while a live-but-idle Active record stays on the steering path.
+// window) free their slot within one scan; a missing binding requires two
+// distinct canvas observations. A live-but-idle Active record stays on the
+// steering path.
 // ---------------------------------------------------------------------------
 
 mod idle_windows {
     use super::*;
     use gwt::issue_monitor::IssueMonitorExecutionObservation;
     use gwt::{
-        IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorWindowObservation,
-        IssueMonitorWindowSnapshot, WindowState,
+        IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorIdleReconciliation,
+        IssueMonitorWindowObservation, IssueMonitorWindowSnapshot, WindowState,
     };
     use std::collections::BTreeMap;
 
@@ -517,6 +518,7 @@ mod idle_windows {
     /// observed after that grace has expired.
     const LAUNCHED_AT: &str = "2026-09-07T03:54:00Z";
     const NOW: &str = "2026-09-07T04:00:00Z";
+    const LATER: &str = "2026-09-07T04:00:01Z";
 
     fn settlements(
         entries: &[(u64, IssueMonitorExecutionSettlement)],
@@ -529,6 +531,9 @@ mod idle_windows {
                     IssueMonitorExecutionObservation {
                         settlement: *settlement,
                         process_held: false,
+                        holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
+                        held_holder_session_id: None,
                     },
                 )
             })
@@ -562,6 +567,7 @@ mod idle_windows {
             review_dispatch,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 
@@ -571,6 +577,23 @@ mod idle_windows {
             observed_at: NOW.to_string(),
             windows,
         }
+    }
+
+    fn reconcile_missing_binding_after_two_distinct_scans(
+        monitor: &mut IssueMonitorState,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+    ) -> IssueMonitorIdleReconciliation {
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        for phase in ["first absence", "replayed canvas"] {
+            let outcome = monitor.reconcile_idle_windows(settlements, NOW);
+            assert!(outcome.released.is_empty(), "{phase}");
+            assert!(outcome.requeued.is_empty(), "{phase}");
+            assert_eq!(monitor.active_count(), 1, "{phase}: the slot stays held");
+        }
+        let mut newer = snapshot(Vec::new());
+        newer.observed_at = LATER.to_string();
+        monitor.record_window_snapshot(newer);
+        monitor.reconcile_idle_windows(settlements, LATER)
     }
 
     /// Launch `launched` into the single slot with `queued` waiting behind it.
@@ -685,15 +708,33 @@ mod idle_windows {
     }
 
     #[test]
-    fn dead_binding_frees_the_slot_within_one_scan() {
+    fn dead_binding_frees_the_slot_after_two_distinct_scans() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        assert_slot_freed_for_queue_head(
-            &mut monitor,
-            43,
-            53,
-            IssueMonitorIdleKind::BindingDead,
-            &BTreeMap::new(),
+        let outcome =
+            reconcile_missing_binding_after_two_distinct_scans(&mut monitor, &BTreeMap::new());
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind,
+            IssueMonitorIdleKind::BindingDead
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.queued_issue_numbers(),
+            vec![43, 53],
+            "recovery preserves the operator's terminal queue order"
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the still-open owner is queued even without an execution record"
+        );
+        assert_eq!(
+            monitor
+                .next_launch_request(LATER)
+                .map(|request| request.issue_number),
+            Some(43),
+            "the terminal queue head is admitted when the missing binding is confirmed"
         );
         assert!(
             monitor.take_pending_idle_pane_closes().is_empty(),
@@ -711,10 +752,9 @@ mod idle_windows {
     #[test]
     fn a_restart_killed_pane_frees_its_slot_and_requeues_its_own_issue() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        let outcome = monitor.reconcile_idle_windows(
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
             &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
         );
         assert_eq!(outcome.released, vec![43]);
         assert_eq!(outcome.requeued, vec![43]);
@@ -726,7 +766,7 @@ mod idle_windows {
         );
         assert!(monitor.queued_issue_numbers().contains(&43));
         assert!(
-            monitor.next_launch_request(NOW).is_some(),
+            monitor.next_launch_request(LATER).is_some(),
             "the freed slot admits a launch in the same scan"
         );
     }
@@ -739,10 +779,9 @@ mod idle_windows {
     fn a_dead_binding_frees_its_slot_with_autonomous_mode_off() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.set_autonomous_mode(false);
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        let outcome = monitor.reconcile_idle_windows(
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
             &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
         );
         assert_eq!(outcome.released, vec![43]);
         assert_eq!(outcome.requeued, vec![43]);
@@ -759,11 +798,12 @@ mod idle_windows {
     fn a_dead_binding_recovery_reports_itself_with_autonomous_mode_off() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.set_autonomous_mode(false);
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        monitor.reconcile_idle_windows(
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
             &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
         );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
         let notices = monitor.take_autonomous_notices();
         assert!(
             notices.iter().any(|notice| notice.issue_number == 43

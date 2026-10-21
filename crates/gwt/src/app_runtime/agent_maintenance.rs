@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use gwt::agent_maintenance::{
-    latest_version, run_maintenance, update_available, version_is_current, MaintenanceAction,
-    MaintenanceResult,
+    latest_version, run_maintenance, supports_updates, update_available, version_is_current,
+    MaintenanceAction, MaintenanceResult,
 };
 
 use super::{
@@ -36,28 +36,32 @@ pub(super) fn supported_agent_catalog(
     cwd: &Path,
 ) -> BackendEvent {
     let mut agents = cache.supported_agents();
-    for agent in &mut agents {
-        match latest_version(&agent.id, config_path, cwd) {
-            Ok(Some(version)) => {
-                agent.update_available = agent.installed
-                    && agent
-                        .installed_version
-                        .as_deref()
-                        .is_some_and(|installed| update_available(installed, &version));
-                agent.up_to_date = agent.installed
-                    && agent
-                        .installed_version
-                        .as_deref()
-                        .is_some_and(|installed| version_is_current(installed, &version));
-                agent.available_version = Some(version);
-            }
-            Ok(None) => {
-                agent.update_check_error =
-                    Some("Updater metadata unavailable for this agent.".into());
-            }
-            Err(error) => agent.update_check_error = Some(error),
+    // Only the fixed catalog's metadata probes run concurrently. Each worker
+    // owns one row, retaining catalog order and the existing per-probe deadline.
+    std::thread::scope(|scope| {
+        for agent in &mut agents {
+            scope.spawn(move || match latest_version(&agent.id, config_path, cwd) {
+                Ok(Some(version)) => {
+                    agent.update_available = agent.installed
+                        && agent
+                            .installed_version
+                            .as_deref()
+                            .is_some_and(|installed| update_available(installed, &version));
+                    agent.up_to_date = agent.installed
+                        && agent
+                            .installed_version
+                            .as_deref()
+                            .is_some_and(|installed| version_is_current(installed, &version));
+                    agent.available_version = Some(version);
+                }
+                Ok(None) => {
+                    agent.update_check_error =
+                        Some("Updater metadata unavailable for this agent.".into());
+                }
+                Err(error) => agent.update_check_error = Some(error),
+            });
         }
-    }
+    });
     let auto_update = gwt_config::Settings::load_from_path(config_path)
         .map(|settings| settings.agent.auto_update)
         .unwrap_or(false);
@@ -140,6 +144,7 @@ impl AppRuntime {
         let pending_launch = !self.inflight_launches.is_empty()
             || !self.pending_launch_completions.is_empty()
             || !self.issue_monitor_launch_preparations.is_empty()
+            || !self.issue_monitor_launch_queue.is_empty()
             || !self.pending_continue_work.is_empty()
             || !self.pending_fresh_execution_launches.is_empty()
             || !self.pending_startup_auto_resume_sessions.is_empty()
@@ -274,9 +279,7 @@ impl AppRuntime {
                             .filter(|agent| {
                                 agent.installed
                                     && gwt_agent::builtin_agent_descriptor_for_command(&agent.id)
-                                        .is_some_and(|descriptor| {
-                                            descriptor.distribution.npm_package().is_some()
-                                        })
+                                        .is_some_and(supports_updates)
                             })
                             .map(|agent| (agent.id, MaintenanceAction::Update))
                             .collect()

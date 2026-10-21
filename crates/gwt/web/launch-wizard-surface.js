@@ -19,6 +19,7 @@
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
 //   the frontendUnits registry and visibleBounds() stay there).
+import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";
 import {
@@ -32,7 +33,7 @@ import {
 // conversation with input enabled; producing authority is recovered by the
 // backend continuation coordinator, and Work-level Continue work owns
 // successor generations.
-export function launchWizardStartMethodIntent(methodKind) {
+function launchWizardStartMethodIntent(methodKind) {
   switch (methodKind) {
     case "continue_last_session":
     case "open_session_picker":
@@ -68,6 +69,7 @@ export function createLaunchWizardSurface({
       const displayBranchName = (name) =>
         typeof name === "string" ? name.replace(/^origin\//, "") : name;
 
+      const visibilityModel = createUiStateStore({ open: false });
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -123,10 +125,16 @@ export function createLaunchWizardSurface({
               message: deferred.message || "Unable to open Launch Wizard",
             };
           }
+          publishLaunchWizardVisibility();
           renderLaunchWizard();
         },
       });
       let branchCleanupWindowId = null;
+
+      function publishLaunchWizardVisibility() {
+        const open = Boolean(launchWizard || launchWizardOpenError || launchWizardOpening);
+        visibilityModel?.update(state => state.open === open ? state : { open });
+      }
 
       function setLaunchWizardPendingDisabled(root, disabled) {
         if (!disabled) return;
@@ -595,26 +603,6 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      function appendCheckboxField(
-        parent,
-        label,
-        copy,
-        checked,
-        onChange,
-        wide = false,
-      ) {
-        const field = createLaunchField(label, wide);
-        const checkboxLabel = createNode("label", "launch-inline-check");
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = checked;
-        input.addEventListener("change", () => onChange(input.checked));
-        checkboxLabel.appendChild(input);
-        checkboxLabel.appendChild(createNode("span", "", copy));
-        field.appendChild(checkboxLabel);
-        parent.appendChild(field);
-        return field;
-      }
 
       // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
       // These delegate to the standalone launch-controls.js builders so the
@@ -929,6 +917,7 @@ export function createLaunchWizardSurface({
         // backend state. Discard (do not replay) the deferred event
         // so we don't undo the user-initiated close.
         wizardInteractionGuard.discard();
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -943,6 +932,7 @@ export function createLaunchWizardSurface({
         launchWizardPendingAction = action || null;
         launchWizardPendingActionDisconnected = false;
         launchWizardPendingActionQueued = false;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -1001,6 +991,7 @@ export function createLaunchWizardSurface({
           meta,
           message,
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2162,6 +2153,7 @@ export function createLaunchWizardSurface({
           launchWizardOpenError = null;
         }
         launchWizard = event.wizard;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
         const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
         if (
@@ -2193,6 +2185,7 @@ export function createLaunchWizardSurface({
           title: event.title || "Launch Agent",
           message: event.message || "Unable to open Launch Wizard",
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2315,6 +2308,7 @@ export function createLaunchWizardSurface({
       }
 
       return {
+        visibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,

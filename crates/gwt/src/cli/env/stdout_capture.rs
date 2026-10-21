@@ -14,6 +14,43 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
 
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        self.inner.github_repository()
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_snapshot(operation, params)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_mutate(operation, params, before)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.inner.create_github_discussion(category, title, body)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.inner.required_status_checks(branch)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.update_required_status_checks(branch, settings)
+    }
+
     fn client(&self) -> &Self::Client {
         self.inner.client()
     }
@@ -71,6 +108,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_current_pr()
     }
 
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.inner.fetch_completion_pr_candidates(number)
+    }
+
     fn create_pr(
         &mut self,
         base: &str,
@@ -102,11 +146,31 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
         self.inner.fetch_pr_head_sha(number)
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        self.inner.fetch_ci_delivery_snapshot(base, head)
+    }
     fn fetch_completion_pr(
         &mut self,
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.inner.fetch_completion_pr(number)
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.enable_pr_auto_merge(number, reviewed_head_sha)
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_auto_merge_pr(number)
     }
     fn edit_pr(
         &mut self,

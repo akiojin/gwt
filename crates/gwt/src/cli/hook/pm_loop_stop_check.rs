@@ -29,6 +29,10 @@ use crate::pm_registry::{self, PmLoopState};
 /// revives a parked PM when new monitor activity arrives.
 const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 
+// Longer than the default 60s PM cycle, so an exhausted prompt budget does
+// not cause the same expensive failed refresh on every cycle (#5391).
+const PM_PROMPT_REFRESH_RETRY_SECS: i64 = 300;
+
 /// Finalize a protected PM delivery only when the exact target Session's
 /// UserPromptSubmit hook observes the self-authenticating operation marker.
 /// Invalid or unrelated prompts are ordinary user input and remain silent.
@@ -68,30 +72,42 @@ pub fn handle_delivery_acknowledgement(worktree: &Path, input: &str) {
     }
 }
 
-fn refresh_at_safe_boundary(worktree: &Path, nonblocking: bool) -> io::Result<Option<String>> {
-    let refreshed = if nonblocking {
-        pm_registry::try_refresh_pm_worktree_at_safe_boundary(worktree)
-    } else {
-        pm_registry::refresh_pm_worktree_at_safe_boundary(worktree)
-    };
+fn refresh_at_safe_boundary(worktree: &Path) -> io::Result<Option<String>> {
+    if !pm_registry::is_pm_worktree(worktree) {
+        return Ok(None);
+    }
+    let now = chrono::Utc::now();
+    let previous_freshness = worktree
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|project| pm_registry::load_pm_prefs(&project.join("project-state/pm.json")).ok())
+        .and_then(|prefs| prefs.worktree_freshness);
+    let refreshed = pm_registry::refresh_pm_worktree_at_safe_boundary(worktree);
     match refreshed {
-        Ok(Some(outcome)) if !outcome.is_fresh() => Ok(Some(format!(
-            "Resident PM worktree refresh is degraded: state={:?}, stage={:?}, reason={}",
-            outcome.freshness.state,
-            outcome.freshness.failure_stage,
-            outcome
-                .freshness
-                .failure_reason
-                .as_deref()
-                .unwrap_or("unknown")
-        ))),
+        Ok(Some(outcome)) if !outcome.is_fresh() => {
+            clear_refresh_failure_count(worktree);
+            Ok(Some(format!(
+                "Resident PM worktree refresh is degraded: state={:?}, stage={:?}, reason={}",
+                outcome.freshness.state,
+                outcome.freshness.failure_stage,
+                outcome
+                    .freshness
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or("unknown")
+            )))
+        }
         Ok(_) => {
             clear_refresh_failure_count(worktree);
             Ok(None)
         }
         Err(error) => match degraded_refresh_context(&error) {
             Some(context) => {
-                record_degraded_refresh(worktree, &error);
+                let context = format!(
+                    "{context} {}",
+                    previous_freshness_context(previous_freshness.as_ref())
+                );
+                record_degraded_refresh_at(worktree, &error, now, previous_freshness);
                 tracing::warn!(%error, "resident PM worktree refresh did not run this prompt");
                 Ok(Some(context))
             }
@@ -110,14 +126,16 @@ fn refresh_at_safe_boundary(worktree: &Path, nonblocking: bool) -> io::Result<Op
 /// right — the turn needs its Board and runtime state. But the `errors.list`
 /// row that used to accompany the exit-1 went away with it, so a refresh that
 /// never runs is observable only in the prompt the PM may not re-read. The PM
-/// cannot count how many consecutive ticks lost their refresh, and
+/// cannot count how many consecutive attempts lost their refresh, and
 /// `errors.list` — the one surface that survives the turn — says nothing.
 ///
 /// Only the degraded paths are recorded. A refresh that ran and deliberately
 /// kept a branch holding local commits is `Ok(Some(outcome))`, not an error,
 /// and recording it would bury real faults under a row per tick for as long as
 /// the PM has unlanded work.
-/// Issue #4975 AC-3: how many consecutive ticks have lost their refresh.
+/// Issue #4975 AC-3: how many consecutive attempts have lost their refresh.
+/// The same sidecar holds the deadline retry time and previous observation;
+/// a prompt served from it does not count as another failed attempt (#5391).
 ///
 /// This cannot live in `pm_prefs`, which is where the natural home
 /// (`PmWorktreeFreshness`) sits: the failure being counted is a `pm_prefs`
@@ -138,18 +156,81 @@ fn refresh_failure_counter_path(worktree: &Path) -> Option<std::path::PathBuf> {
         .map(|project_dir| project_dir.join("pm-refresh-failures.txt"))
 }
 
-fn bump_refresh_failure_count(worktree: &Path) -> u32 {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PromptRefreshFailure {
+    consecutive_failures: u32,
+    retry_after: Option<chrono::DateTime<chrono::Utc>>,
+    previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
+    failure_reason: String,
+}
+
+fn load_prompt_refresh_failure(worktree: &Path) -> Option<PromptRefreshFailure> {
+    let path = refresh_failure_counter_path(worktree)?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn previous_freshness_context(freshness: Option<&pm_registry::PmWorktreeFreshness>) -> String {
+    match freshness {
+        Some(previous) => format!(
+            "Previous freshness observation: state={:?}, checked_at={}, head_sha={}, target_sha={}, behind={:?} (not revalidated this prompt).",
+            previous.state, previous.checked_at,
+            previous.head_sha.as_deref().unwrap_or("unknown"),
+            previous.target_sha.as_deref().unwrap_or("unknown"), previous.behind,
+        ),
+        None => "Previous freshness observation: unavailable.".to_owned(),
+    }
+}
+
+fn prompt_refresh_retry_context(
+    worktree: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let failure = load_prompt_refresh_failure(worktree)?;
+    let retry_after = failure
+        .retry_after
+        .filter(|retry_after| now < *retry_after)?;
+    Some(format!(
+        "Resident PM worktree refresh retry after {retry_after}; last attempt failed: {}. \
+         This prompt did not refresh the worktree; freshness is unverified. {}",
+        failure.failure_reason,
+        previous_freshness_context(failure.previous_freshness.as_ref()),
+    ))
+}
+
+fn bump_refresh_failure_count(
+    worktree: &Path,
+    error: &io::Error,
+    now: chrono::DateTime<chrono::Utc>,
+    previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
+) -> u32 {
     let Some(path) = refresh_failure_counter_path(worktree) else {
         return 0;
     };
     let previous = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .and_then(|raw| {
+            serde_json::from_str::<PromptRefreshFailure>(&raw)
+                .map(|failure| failure.consecutive_failures)
+                .ok()
+                .or_else(|| raw.trim().parse::<u32>().ok())
+        })
         .unwrap_or(0);
     let next = previous.saturating_add(1);
-    let temporary = path.with_extension("txt.tmp");
-    if std::fs::write(&temporary, next.to_string().as_bytes()).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
+    let failure = PromptRefreshFailure {
+        consecutive_failures: next,
+        // Actual lock contention is a normal nonblocking defer. Retry it on
+        // the next prompt, preserving immediate identity/error inspection
+        // once the other refresh releases its lock (#4686).
+        retry_after: gwt_core::operation_deadline::is_deadline_expired(error)
+            .then(|| now + chrono::Duration::seconds(PM_PROMPT_REFRESH_RETRY_SECS)),
+        previous_freshness,
+        failure_reason: error.to_string(),
+    };
+    let saved = serde_json::to_vec(&failure)
+        .map_err(io::Error::other)
+        .and_then(|bytes| gwt_github::cache::write_atomic(&path, &bytes));
+    if let Err(error) = saved {
+        tracing::warn!(%error, "PM refresh retry state could not be saved");
     }
     next
 }
@@ -163,15 +244,18 @@ pub(crate) fn clear_refresh_failure_count(worktree: &Path) {
     }
 }
 
+#[cfg(test)]
 fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
-    let form = if error
-        .get_ref()
-        .is_some_and(|cause| cause.is::<pm_registry::PmRefreshDeferred>())
-    {
-        "deferred"
-    } else {
-        "skipped"
-    };
+    record_degraded_refresh_at(worktree, error, chrono::Utc::now(), None);
+}
+
+fn record_degraded_refresh_at(
+    worktree: &Path,
+    error: &io::Error,
+    now: chrono::DateTime<chrono::Utc>,
+    previous_freshness: Option<pm_registry::PmWorktreeFreshness>,
+) {
+    let form = "skipped";
     let target = gwt_core::error_ledger::ErrorTarget {
         project_root: worktree
             .parent()
@@ -179,7 +263,7 @@ fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
             .map(|root| root.to_string_lossy().to_string()),
         ..Default::default()
     };
-    let consecutive = bump_refresh_failure_count(worktree);
+    let consecutive = bump_refresh_failure_count(worktree, error, now, previous_freshness);
     // Issue #4975 AC-2: `git worktree list` measures 0.1s against a budget in
     // seconds, so a deadline that expires on it did not run out of time here —
     // something upstream already spent the budget. Recording what was left
@@ -211,11 +295,9 @@ fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
 /// Which refresh failures are reported to the turn as context instead of
 /// failing the hook closed.
 ///
-/// Two failures mean "the refresh did not get to run", not "the worktree is
-/// wrong", so the turn may start without it as long as it is told:
-///
-/// - another holder had the refresh lock (`PmRefreshDeferred`), and
-/// - the refresh ran out of the UserPromptSubmit budget (Issue #4686) —
+/// A deadline means "the refresh did not get to run", not "the worktree is
+/// wrong", so the turn may continue without it as long as it is told:
+/// - the refresh ran out of its operation budget (Issue #4686) —
 ///   `git worktree list` overrunning the process deadline, or the managed
 ///   asset lock overrunning the file-lock deadline.
 ///
@@ -227,15 +309,6 @@ fn record_degraded_refresh(worktree: &Path, error: &io::Error) {
 /// Everything else still fails. A managed asset that cannot be written is a
 /// real defect and must keep parking the turn.
 fn degraded_refresh_context(error: &io::Error) -> Option<String> {
-    if error
-        .get_ref()
-        .is_some_and(|cause| cause.is::<pm_registry::PmRefreshDeferred>())
-    {
-        return Some(format!(
-            "Resident PM worktree refresh deferred: {error}. \
-             This prompt did not refresh the worktree; freshness is unverified."
-        ));
-    }
     if gwt_core::operation_deadline::is_deadline_expired(error) {
         return Some(format!(
             "Resident PM worktree refresh skipped: {error}. \
@@ -246,16 +319,42 @@ fn degraded_refresh_context(error: &io::Error) -> Option<String> {
     None
 }
 
-/// UserPromptSubmit entry: refresh before the new model turn can start, then
-/// re-arm the loop budget and stamp the conversation clock the T-093 wake path
-/// defers to. Degraded context is returned to the event dispatcher so the PM
-/// reports it immediately instead of silently claiming freshness.
+/// Issue #4975 AC-A1: only read the last recorded freshness on the 200ms
+/// prompt path. Refreshing Git and managed assets belongs to completed Stop
+/// or the launch worker, where it cannot race an active model turn.
+/// Re-arm the loop budget and stamp the conversation clock for T-093.
 pub fn handle_user_prompt_submit(worktree: &Path) -> io::Result<Option<String>> {
-    let refresh_context = if super::is_resident_pm_worktree(worktree) {
-        refresh_at_safe_boundary(worktree, true)?
-    } else {
-        None
-    };
+    let refresh_context = worktree.ancestors().find_map(|root| {
+        if !pm_registry::is_pm_worktree(root) && !pm_registry::is_canonical_pm_worktree(root) {
+            return None;
+        }
+        let project = root.parent()?.parent()?;
+        if let Some(context) = prompt_refresh_retry_context(root, chrono::Utc::now()) {
+            return Some(context);
+        }
+        Some(
+            match pm_registry::load_pm_prefs(&project.join("project-state/pm.json")) {
+                Ok(prefs) => match prefs.worktree_freshness {
+                    Some(freshness) => format!(
+                        "Resident PM worktree last recorded freshness: state={:?}, checked_at={}, \
+                     stage={:?}, reason={}. Refresh runs at completed Stop; \
+                     this prompt does not refresh the worktree.",
+                        freshness.state,
+                        freshness.checked_at,
+                        freshness.failure_stage,
+                        freshness.failure_reason.as_deref().unwrap_or("none"),
+                    ),
+                    None => "Resident PM worktree last recorded freshness: state=Unknown, \
+                         reason=no recorded observation. Refresh runs at completed Stop."
+                        .to_string(),
+                },
+                Err(error) => format!(
+                    "Resident PM worktree last recorded freshness: state=Unknown, \
+                 reason=snapshot unavailable: {error}. Refresh runs at completed Stop."
+                ),
+            },
+        )
+    });
     handle_user_prompt_submit_at(
         worktree,
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -431,7 +530,7 @@ fn handle_at(
     // The current model turn has completed and this gate has decided to start
     // the next resident cycle. This is the only Stop-side mutation boundary;
     // quiet-time wake selection never fetches or repoints the worktree.
-    let refresh_context = match refresh_at_safe_boundary(worktree, false) {
+    let refresh_context = match refresh_at_safe_boundary(worktree) {
         Ok(context) => context,
         Err(error) => {
             tracing::warn!(%error, "resident PM continuation parked after refresh failure");
@@ -570,6 +669,75 @@ mod tests {
     /// to `handle_at`; no process-global session environment is needed.
     const FIXTURE_PM_SESSION: &str = "pm-session-fixture";
 
+    #[test]
+    fn issue_5391_a_hundred_prompts_preserve_prior_freshness_without_repeating_a_failed_refresh() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("gwt.pm.refresh=info")
+            .with_test_writer()
+            .finish();
+        let _tracing = tracing::subscriber::set_default(subscriber);
+        let (_env_lock, home, repo, worktree) = pm_fixture();
+        let _home_guard = set_fixture_gwt_home(&home);
+        {
+            // Exercise the same deadline-aware worktree-list route as a
+            // prompt and retain its measured spawn/wait stages in evidence.
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            );
+            gwt_git::WorktreeManager::new(&repo).list().unwrap();
+        }
+        let project = worktree.parent().unwrap().parent().unwrap();
+        let prefs_path = project.join("project-state/pm.json");
+        let prefs = serde_json::from_value(serde_json::json!({
+            "worktree_freshness": {
+                "state": "fresh", "base_ref": "origin/develop",
+                "head_sha": "previous-head", "target_sha": "previous-head",
+                "behind": 0, "checked_at": "2026-10-14T00:00:00Z",
+                "target_observation": "fresh"
+            }
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&prefs_path, &prefs).unwrap();
+        let previous = std::fs::read(&prefs_path).unwrap();
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
+        let retry_now = chrono::Utc::now();
+        record_degraded_refresh_at(
+            &worktree,
+            &io::Error::new(
+                io::ErrorKind::TimedOut,
+                "operation deadline expired during git",
+            ),
+            retry_now,
+            prefs.worktree_freshness.clone(),
+        );
+        let measured = std::time::Instant::now();
+        for _ in 0..100 {
+            let context = handle_user_prompt_submit(&worktree)
+                .expect("a prompt only reads the failed refresh snapshot")
+                .expect("the prompt must explain unverified freshness");
+            assert!(context.contains("freshness is unverified"), "{context}");
+            assert!(context.contains("2026-10-14T00:00:00Z"), "{context}");
+            assert!(context.contains("previous-head"), "{context}");
+        }
+        let failures = gwt_core::error_ledger::list_since(None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.message.contains("resident PM worktree refresh"))
+            .count();
+        assert_eq!(failures, 1, "100 prompts must make only one failed attempt");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), previous);
+        assert!(prompt_refresh_retry_context(
+            &worktree,
+            retry_now + chrono::Duration::seconds(300)
+        )
+        .is_none());
+        clear_refresh_failure_count(&worktree);
+        assert!(prompt_refresh_retry_context(&worktree, retry_now).is_none());
+        eprintln!("Issue #5391: 100 prompts, 1 failed attempt, prior freshness preserved; elapsed_ms={:.3}", measured.elapsed().as_secs_f64() * 1000.0);
+    }
+
     /// Issue #4975 AC-3: each degraded refresh leaves one `errors.list` row,
     /// and the row says which of the two degraded paths it was.
     ///
@@ -699,7 +867,7 @@ mod tests {
         );
 
         // A real failure still parks the turn. `managed_asset_failure_blocks_\
-        // pre_turn_and_parks_stop_continuation` depends on this staying fatal.
+        // refresh_and_parks_stop_continuation` depends on this staying fatal.
         assert!(
             degraded_refresh_context(&io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1257,7 +1425,64 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_submit_refreshes_pm_before_the_new_turn() {
+    fn issue_4975_prompt_reads_recorded_freshness_without_waiting_for_refresh_or_prefs() {
+        use fs2::FileExt;
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedGwtHome::set(home.path());
+        let project = gwt_core::paths::gwt_projects_dir().join("snapshot-only");
+        let worktree = project.join("pm/worktree");
+        std::fs::create_dir_all(&worktree).expect("PM directory");
+        let prefs_path = project.join("project-state/pm.json");
+        std::fs::create_dir_all(prefs_path.parent().unwrap()).unwrap();
+        let prefs = pm_registry::PmPrefs {
+            worktree_freshness: Some(pm_registry::PmWorktreeFreshness {
+                state: pm_registry::PmWorktreeFreshnessState::Stale,
+                base_ref: "origin/develop".into(),
+                head_sha: None,
+                target_sha: None,
+                behind: None,
+                target_observation: pm_registry::PmWorktreeTargetObservation::Unavailable,
+                checked_at: "2026-10-14T00:00:00Z".into(),
+                failure_stage: Some(pm_registry::PmWorktreeRefreshFailureStage::Fetch),
+                failure_reason: Some("offline origin".into()),
+            }),
+            ..Default::default()
+        };
+        pm_registry::save_pm_prefs(&prefs_path, &prefs).unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+        let refresh_lock =
+            std::fs::File::create(project.join("project-state/pm-refresh.lock")).unwrap();
+        FileExt::lock_exclusive(&refresh_lock).unwrap();
+        let prefs_lock = std::fs::File::open(prefs_path.with_extension("lock")).unwrap();
+        FileExt::lock_exclusive(&prefs_lock).unwrap();
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+
+        let context = handle_user_prompt_submit(&worktree)
+            .unwrap()
+            .expect("snapshot context");
+
+        assert!(context.contains("last recorded freshness"), "{context}");
+        assert!(context.contains("state=Stale"), "{context}");
+        assert!(context.contains("2026-10-14T00:00:00Z"), "{context}");
+        assert!(context.contains("offline origin"), "{context}");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        #[cfg(unix)]
+        {
+            let alias_root = tempfile::tempdir().unwrap();
+            let alias = alias_root.path().join("home");
+            std::os::unix::fs::symlink(home.path(), &alias).unwrap();
+            let _alias_home = ScopedGwtHome::set(alias);
+            let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
+            let context = handle_user_prompt_submit(&canonical_worktree)
+                .unwrap()
+                .expect("canonical PM cwd must retain the recorded snapshot with a symlink HOME");
+            assert!(context.contains("state=Stale"), "{context}");
+        }
+    }
+
+    #[test]
+    fn user_prompt_submit_keeps_checkout_unchanged_until_stop() {
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
@@ -1270,23 +1495,19 @@ mod tests {
         );
         assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
 
-        let runtime =
-            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
-        handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
-
+        let old_head = run_git(&worktree, &["rev-parse", "HEAD"]);
+        handle_user_prompt_submit(&worktree).expect("prompt snapshot");
+        assert_eq!(
+            run_git(&worktree, &["rev-parse", "HEAD"]),
+            old_head,
+            "prompt must not run Git refresh before returning"
+        );
+        refresh_at_safe_boundary(&worktree).expect("completed Stop refresh");
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
-        assert!(
-            runtime.join(".codex/skills/gwt-pm/SKILL.md").exists(),
-            "pre-turn refresh must materialize Codex PM guidance before the model runs"
-        );
-        assert!(
-            runtime.join(".claude/skills/gwt-pm/SKILL.md").exists(),
-            "pre-turn refresh must materialize Claude PM guidance before the model runs"
-        );
     }
 
     #[test]
-    fn user_prompt_submit_reports_typed_stale_context_when_fetch_fails() {
+    fn stop_refresh_reports_typed_stale_context_when_fetch_fails() {
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
@@ -1304,7 +1525,7 @@ mod tests {
         let _ = std::fs::remove_file(&codex_guidance);
         let _ = std::fs::remove_file(&claude_guidance);
 
-        let context = handle_user_prompt_submit(&worktree)
+        let context = refresh_at_safe_boundary(&worktree)
             .expect("degraded refresh succeeds with current managed assets")
             .expect("degraded refresh context");
 
@@ -1318,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_asset_failure_blocks_pre_turn_and_parks_stop_continuation() {
+    fn managed_asset_failure_blocks_refresh_and_parks_stop_continuation() {
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
@@ -1341,8 +1562,8 @@ mod tests {
         let prior_tree = snapshot_worktree(&worktree);
         let prior_runtime = snapshot_worktree(&runtime);
 
-        handle_user_prompt_submit(&worktree)
-            .expect_err("a pre-turn phase must fail closed when assets are incomplete");
+        refresh_at_safe_boundary(&worktree)
+            .expect_err("a Stop refresh must fail closed when assets are incomplete");
 
         assert_eq!(
             run_git(&worktree, &["rev-parse", "HEAD"]),
@@ -1392,7 +1613,7 @@ mod tests {
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
         let (_env_lock, _fixture_home, repo, worktree, _target) = pm_refresh_fixture();
-        handle_user_prompt_submit(&worktree)
+        refresh_at_safe_boundary(&worktree)
             .expect("initial refresh materializes generated hook configs");
         let runtime =
             crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
@@ -1448,7 +1669,7 @@ mod tests {
         let prior_exclude = std::fs::read(&exclude).expect("snapshot Git exclude");
         let prior_runtime = snapshot_worktree(&runtime);
 
-        let error = handle_user_prompt_submit(&worktree)
+        let error = refresh_at_safe_boundary(&worktree)
             .expect_err("an unreadable opted-in policy must fail after runtime regeneration");
         assert!(
             error.to_string().contains("read opted-in PM policy"),
@@ -1485,7 +1706,7 @@ mod tests {
         symlink(&external, worktree.join(".claude")).expect("indirect managed root");
 
         let prior_link = std::fs::read_link(worktree.join(".claude")).expect("source link target");
-        handle_user_prompt_submit(&worktree)
+        refresh_at_safe_boundary(&worktree)
             .expect("project-owned root symlink must not block isolated runtime generation");
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
@@ -1536,7 +1757,7 @@ mod tests {
 
         let prior_link =
             std::fs::read_link(worktree.join(".claude/skills")).expect("source link target");
-        handle_user_prompt_submit(&worktree)
+        refresh_at_safe_boundary(&worktree)
             .expect("project-owned skills symlink must not block isolated runtime generation");
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
@@ -1570,7 +1791,7 @@ mod tests {
         let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
         let _hermes_guard = ScopedEnvVar::set("HERMES_HOME", &hermes_source);
 
-        handle_user_prompt_submit(&worktree).expect("initial managed asset refresh");
+        refresh_at_safe_boundary(&worktree).expect("initial managed asset refresh");
         let runtime =
             crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
         let managed_env = runtime.join(".gwt/hermes/.env");
@@ -1590,7 +1811,7 @@ mod tests {
             "deleting the source must leave the prior managed link broken"
         );
 
-        handle_user_prompt_submit(&worktree)
+        refresh_at_safe_boundary(&worktree)
             .expect("a broken managed credential link must be self-healed on refresh");
 
         assert!(
@@ -1620,10 +1841,23 @@ mod tests {
         );
         assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
 
+        record_degraded_refresh(
+            &worktree,
+            &io::Error::new(
+                io::ErrorKind::TimedOut,
+                "operation deadline expired during git",
+            ),
+        );
+        assert!(prompt_refresh_retry_context(&worktree, chrono::Utc::now()).is_some());
+
         let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false, None);
 
         assert!(matches!(output, HookOutput::StopBlock { .. }));
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        assert!(
+            load_prompt_refresh_failure(&worktree).is_none(),
+            "Stop refresh must bypass and clear the prompt cooldown"
+        );
     }
 
     #[test]
@@ -1753,7 +1987,7 @@ mod tests {
             assert!(minute < 60, "the cap must bound the loop");
         }
         // A user prompt re-arms.
-        handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
+        handle_user_prompt_submit(&worktree).expect("prompt snapshot");
         assert!(matches!(
             handle_at(
                 &worktree,

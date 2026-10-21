@@ -171,7 +171,7 @@ class InProcessYieldTests(unittest.TestCase):
                 )
             self.assertTrue(result.get("ok"), result)
             self.assertTrue(result.get("yielded"), result)
-            self.assertEqual(result.get("newly_embedded"), 16, result)
+            self.assertEqual(result.get("newly_embedded"), 1, result)
 
 
 class PublishFailurePropagationTests(unittest.TestCase):
@@ -202,13 +202,6 @@ class PublishFailurePropagationTests(unittest.TestCase):
             )
             (issue_dir / "body.md").write_text("Body", encoding="utf-8")
             cases = [
-                lambda: runner.action_index_specs_v2(
-                    project_root=str(project),
-                    repo_hash=REPO_HASH,
-                    worktree_hash="",
-                    mode="full",
-                    db_root=db_root,
-                ),
                 lambda: runner.action_index_memory_v2(
                     project_root=str(project),
                     repo_hash=REPO_HASH,
@@ -249,24 +242,33 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     ):
                         result = case()
                     self.assertEqual(result, failure)
-                with mock.patch.object(
-                    runner, "_publish_generation", return_value=failure
-                ) as publish:
-                    result = runner.action_index_issues_v2(
+                shared_cases = [
+                    lambda: runner.action_index_specs_v2(
+                        project_root=str(project), repo_hash=REPO_HASH,
+                        worktree_hash=None, db_root=db_root,
+                    ),
+                    lambda: runner.action_index_issues_v2(
                         repo_hash=REPO_HASH,
                         project_root=str(project),
                         db_root=db_root,
                         respect_ttl=False,
-                    )
+                        repair=True,
+                    ),
+                ]
                 # The issues scope records the failure in its repair gate
                 # (Issue #4205) instead of returning the publisher dict
                 # verbatim, but the failure must still propagate. The
                 # EMPTY_CORPUS short-circuit is covered separately in
                 # test_issue_ttl / test_auto_build_fallback; this case must keep
                 # reaching the publisher.
-                publish.assert_called_once()
-                self.assertFalse(result.get("ok"), result)
-                self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
+                for case in shared_cases:
+                    with mock.patch.object(
+                        runner, "_publish_generation", return_value=failure
+                    ) as publish:
+                        result = case()
+                    publish.assert_called_once()
+                    self.assertFalse(result.get("ok"), result)
+                    self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
 
 
 class SearchClassificationBranchTests(unittest.TestCase):

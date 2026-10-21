@@ -98,7 +98,6 @@ short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepar
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_recorded_event_with_timeout
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|write_fake_gh_issue_list
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_cold_remote_client_construction
 short-wall-clock|crates/gwt/src/board_remote/http.rs|scoped_operation_deadline_bounds_remote_board_requests
 short-wall-clock|crates/gwt/src/cli/action_obligation.rs|prompt_lease_wait_is_bounded_by_the_hook_operation_deadline
@@ -144,7 +143,6 @@ short-wall-clock|crates/gwt/src/cli/workspace.rs|start
 short-wall-clock|crates/gwt/src/daemon_publisher.rs|bootstrap_elapsed_time_consumes_the_control_budget
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|drop
 short-wall-clock|crates/gwt/src/daemon_runtime.rs|hook_live_status_retry_policy
-short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_forwards_events_through_callback
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_resolver_picks_up_new_token_between_sessions
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_picks_up_endpoint_after_initial_failure
 short-wall-clock|crates/gwt/src/embedded_server.rs|accepted_self_close_send_timeout_still_finalizes_exactly_once

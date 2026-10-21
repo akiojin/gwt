@@ -722,7 +722,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
     let fake_gh = write_fake_gh_issue_list(temp.path());
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
-    let (repo, _prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
+    let (repo, prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
     let probed = Arc::new(Mutex::new(Vec::new()));
     let _hook = super::super::set_local_completion_probe_test_hook({
         let probed = Arc::clone(&probed);
@@ -744,6 +744,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan");
+    super::super::wait_scan_generation_reaper(&prefs_path);
     assert!(matches!(
         outcome,
         ScheduledIssueMonitorScanOutcome::Applied(_)
@@ -802,6 +803,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
         std::time::Duration::from_secs(30),
     )
     .expect("an expired probe must not fail the commit");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
         panic!("the scan holds authority, so it must commit its own findings");
@@ -880,6 +882,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan");
+    super::super::wait_scan_generation_reaper(&prefs_path);
     assert!(matches!(
         outcome,
         ScheduledIssueMonitorScanOutcome::Applied(_)
@@ -947,6 +950,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
         std::time::Duration::from_secs(30),
     )
     .expect("an exhausted read phase must not fail the commit");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
         panic!("the scan holds authority, so it must commit its own findings");
@@ -963,12 +967,162 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
 }
 
+#[test]
+fn generation_recovery_reservation_is_single_flight_and_periodic() {
+    let mut state = super::super::ScanGenerationReaperState::default();
+    let now = Instant::now();
+    let interval = Duration::from_secs(60);
+    assert!(state.try_reserve(now), "the first tick starts recovery");
+    assert!(
+        !state.try_reserve(now + interval),
+        "even a later tick cannot queue recovery while its worker is held"
+    );
+    state.running = false;
+    assert!(
+        !state.try_reserve(now + interval - Duration::from_secs(1)),
+        "completed recovery must not run again on every tick"
+    );
+    assert!(state.try_reserve(now + interval), "the next period is due");
+}
+
+#[test]
+fn generation_recovery_releases_its_reservation_when_the_worker_unwinds() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    assert!(super::super::scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(prefs_path.clone())
+        .or_default()
+        .try_reserve(Instant::now()));
+    assert!(std::panic::catch_unwind(|| {
+        let _flight = super::super::ScanGenerationReaperFlight(prefs_path.clone());
+        panic!("recovery failed");
+    })
+    .is_err());
+    assert!(
+        !super::super::scan_generation_reapers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[&prefs_path]
+            .running,
+        "panic and a dropped spawn closure must release the in-flight reservation"
+    );
+}
+
+/// Issue #4975 AC-A3: the scan reads the committed snapshot without joining
+/// a concurrent writer's transaction.
+#[test]
+fn issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed committed prefs");
+    let writer_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open writer lock");
+    writer_lock.lock_exclusive().expect("hold writer lock");
+    let (read_tx, read_rx) = mpsc::channel();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| {
+            read_tx
+                .send(gwt::load_issue_monitor_prefs(&prefs_path))
+                .expect("report snapshot read");
+        });
+        let result = read_rx.recv_timeout(Duration::from_secs(1));
+        FileExt::unlock(&writer_lock).expect("release writer lock");
+        result
+    });
+    assert!(
+        matches!(result, Ok(Ok(prefs)) if prefs.enabled),
+        "snapshot reads must not wait for the prefs writer"
+    );
+}
+
+/// Even the daemon-owned tick must return while local recovery is busy.
+#[test]
+fn scheduled_scan_returns_while_generation_recovery_is_running() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    let daemon = gwt::IssueMonitorAuthorityFence::current_process();
+    let (_, _daemon_lease) =
+        gwt::establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect("live daemon authority");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let _hook = super::super::ScopedScanGenerationReaperTestHook::set(&prefs_path, move || {
+        started_tx.send(()).expect("report recovery started");
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("release recovery");
+    });
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| {
+            let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
+                &repo,
+                None,
+                None,
+                None,
+                None,
+                "2026-10-14T07:00:00Z",
+                &super::super::default_issue_client_factory(),
+                Duration::from_secs(60),
+                Duration::from_secs(30),
+            );
+            completed_tx.send(outcome).expect("report scan completed");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("recovery started");
+        let result = completed_rx.recv_timeout(Duration::from_secs(1));
+        // Release before asserting so the synchronous regression fails cleanly.
+        release_tx.send(()).expect("release recovery");
+        result
+    });
+    super::super::wait_scan_generation_reaper(&prefs_path);
+    assert!(
+        matches!(
+            result,
+            Ok(Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon))
+        ),
+        "the scan waited for generation recovery: {result:?}"
+    );
+}
+
 /// Issue #3934: the generation reaper used to run once, during bootstrap. A
 /// holder that died after that kept its owner unlaunchable until someone
 /// restarted the GUI, which is why 45 Issues had to be re-registered under
-/// fresh numbers. Every scan must try the recovery.
+/// fresh numbers. Periodic background recovery must remain available.
 #[test]
-fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
+fn scheduled_scan_reclaims_a_defunct_generation_in_background() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1031,6 +1185,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan runs");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
@@ -1046,8 +1201,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
 /// worker answered `DeferredToLiveDaemon` before it ever reached the reaper —
 /// and the daemon has no reaper. The scan-cadence recovery therefore never ran
 /// after startup; 38 stranded generations survived every scan. The reaper is
-/// local recovery, not a scan effect, and must run on every tick regardless of
-/// who holds scan authority.
+/// local recovery, not a scan effect, and remains independent of scan authority.
 #[test]
 fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the_scan() {
     let _env_lock = env_test_lock()
@@ -1106,6 +1260,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
         std::time::Duration::from_secs(30),
     )
     .expect("scan runs");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     assert!(
         matches!(
@@ -1120,7 +1275,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
             .expect("ledger")
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
-        "the reaper must run before the scan defers to the daemon"
+        "background recovery must run even when the scan defers to the daemon"
     );
 }
 
@@ -1168,6 +1323,7 @@ fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
         .is_empty());
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
     assert!(matches!(
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
@@ -1355,6 +1511,7 @@ fn scheduled_scan_discards_scanned_state_when_authority_appears_before_commit() 
     runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
 
     assert!(marker.exists(), "the side-effect-free scan completed first");
     assert!(matches!(
@@ -1439,6 +1596,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     assert!(events.is_empty(), "the tick returns before the remote scan");
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
     let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
@@ -1485,12 +1643,29 @@ fn issue_monitor_capacity_sampler_notifies_stopped_projects_without_scanning() {
         "capacity observations must notify stopped GUI monitors"
     );
     assert!(
-        main.contains("app.issue_monitor_capacity_changed_events(&project_root)"),
+        main.contains("app.issue_monitor_capacity_changed_events(&context, revision, update)"),
         "the event loop must publish the capacity-only overlay"
+    );
+    assert!(
+        sampler.contains("CapacityUpdate::read") && sampler.contains("changed_from"),
+        "prepare capacity and suppress unchanged notifications on the sampler worker"
+    );
+    assert!(
+        sampler.contains("let Some(accepted) = accepted")
+            && sampler.contains("previous.remove(&root)"),
+        "initial status must become ready before a notification is consumed"
+    );
+    assert!(
+        sampler.contains("Some(&accepted)"),
+        "worker must preserve the GUI's last accepted Auto limit and Manual mode on read failure"
     );
     assert!(
         !sampler.contains("IssueMonitorScheduledTick"),
         "measurement changes must not trigger scans or PM wakes"
+    );
+    assert!(
+        sampler.contains("refresh_machine_capacity_for_projects(&roots)"),
+        "one tick must share its machine observation and target scan budget across projects"
     );
 }
 
@@ -1500,6 +1675,7 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let active = temp.path().join("active");
@@ -1547,12 +1723,25 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
             reason: "real observation".into(),
             ..Default::default()
         };
+        let reduced = gwt::agent_capacity::AgentCapacity {
+            machine_budget: Some(3),
+            recommended_worker_limit: 2,
+            recommended_total_count: 3,
+            limiting_constraint: "cpu".into(),
+            constraints: vec![gwt::agent_capacity::CapacityConstraint {
+                resource: "cpu".into(),
+                capacity: Some(3),
+                binding: true,
+                reason: "P cores 8; GUI 5 cores".into(),
+            }],
+            ..fresh.clone()
+        };
         let expired = gwt::agent_capacity::AgentCapacity {
             observed_at: Some(1),
             expires_at: Some(2),
-            ..fresh.clone()
+            ..reduced.clone()
         };
-        for (observation, auto_limit) in [(fresh, 4), (expired, 0)] {
+        for (observation, auto_limit) in [(fresh, 4), (reduced, 2), (expired, 2)] {
             let events = runtime.issue_monitor_capacity_changed_events_with(&other, |root| {
                 assert_eq!(root, other);
                 observation.clone()
@@ -1573,8 +1762,55 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
                 "preserve every noncapacity daemon field"
             );
             assert_eq!(status.max_active_agents_override, manual);
+            assert!(
+                runtime
+                    .issue_monitor_capacity_changed_events_with(&other, |_| {
+                        expected.agent_capacity.clone()
+                    })
+                    .is_empty(),
+                "an unchanged capacity must not broadcast the full Monitor status"
+            );
+            let mut renewed = expected.agent_capacity.clone();
+            let observed = renewed.observed_at.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .saturating_sub(2)
+            });
+            renewed.observed_at = Some(observed + 1);
+            renewed.expires_at = Some(renewed.expires_at.unwrap_or(observed + 30) + 1);
+            assert!(
+                runtime
+                    .issue_monitor_capacity_changed_events_with(&other, |_| renewed)
+                    .is_empty(),
+                "a timestamp-only renewal must not broadcast the full Monitor status"
+            );
         }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        let reductions = rows
+            .iter()
+            .filter(|row| row.message.contains("Auto capacity reduced"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reductions.len(),
+            1,
+            "only Auto reductions are reported once"
+        );
+        assert_eq!(reductions[0].context["previous_limit"], "4");
+        assert_eq!(reductions[0].context["effective_limit"], "2");
+        assert_eq!(reductions[0].context["limiting_constraint"], "cpu");
         assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        fs::write(&prefs_path, b"corrupt").unwrap();
+        let events = runtime.issue_monitor_capacity_changed_events_with(&other, |_| {
+            expected.agent_capacity.clone()
+        });
+        assert!(
+            events.is_empty(),
+            "failed prefs read retains unchanged cached mode"
+        );
+        assert_eq!(fs::read(&prefs_path).unwrap(), b"corrupt");
+        fs::write(&prefs_path, prefs_before).unwrap();
     }
     assert!(tasks.lock().unwrap().is_empty(), "no scan, RPC or PM work");
     assert_eq!(runtime.daemon_supervisor.ensure_attempts(), 0);
@@ -1607,6 +1843,160 @@ fn issue_monitor_capacity_waits_for_the_initial_full_projection() {
             panic!("closed project must not publish capacity")
         })
         .is_empty());
+}
+
+#[test]
+fn issue_monitor_capacity_overlay_rejects_observations_before_control_or_reopen() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let (context, revision, ready) = runtime.capacity_observation_contexts().pop().unwrap();
+    assert!(ready.is_none());
+    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    initial.max_active_agents = 7;
+    initial.max_active_agents_override = None;
+    let state = runtime.project_state(&context).unwrap();
+    state
+        .issue_monitor_status_cache
+        .replace(Some(initial.clone()));
+    assert_eq!(
+        runtime
+            .capacity_observation_contexts()
+            .pop()
+            .unwrap()
+            .2
+            .unwrap()
+            .limits,
+        Some((7, None))
+    );
+    let mut measured = initial.clone();
+    measured.max_active_agents = 9;
+    measured.max_active_agents_override = Some(9);
+    let update = gwt::agent_capacity::CapacityUpdate::from_status(&measured);
+    runtime.invalidate_issue_monitor_list(&root);
+    assert!(runtime
+        .issue_monitor_capacity_changed_events(&context, revision, update.clone())
+        .is_empty());
+    assert_eq!(
+        state.issue_monitor_status_cache.borrow().as_ref(),
+        Some(&initial)
+    );
+    let revision = (
+        state.issue_monitor_list_revision.get(),
+        state.issue_monitor_status_revision.get(),
+    );
+    let mut replaced = context.clone();
+    replaced.generation += 1;
+    assert!(runtime
+        .issue_monitor_capacity_changed_events(&replaced, revision, update.clone())
+        .is_empty());
+    assert_eq!(
+        runtime
+            .issue_monitor_capacity_changed_events(&context, revision, update)
+            .len(),
+        1
+    );
+    assert_eq!(
+        state.issue_monitor_status_cache.borrow().as_ref(),
+        Some(&measured)
+    );
+}
+
+#[test]
+fn issue_monitor_capacity_overlay_preserves_newer_daemon_limit_and_accepts_next_observation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    initial.max_active_agents = 7;
+    initial.max_active_agents_override = None;
+    initial.agent_capacity = gwt::agent_capacity::AgentCapacity {
+        measurement_complete: true,
+        recommended_worker_limit: 7,
+        ..Default::default()
+    };
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(initial.clone()));
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let old_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: false,
+                reason: "pending observation".into(),
+                ..initial.agent_capacity.clone()
+            }
+        });
+    assert_eq!(old_update.limits, Some((7, None)));
+
+    let mut newer = initial;
+    newer.max_active_agents = 4;
+    newer.agent_capacity.recommended_worker_limit = 4;
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(newer));
+    runtime.issue_monitor_capacity_changed_events(&context, revision, old_update);
+    let state = runtime.project_state(&context).unwrap();
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        4,
+        "an old incomplete worker observation must not restore the prior Auto limit"
+    );
+
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let next_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: true,
+                recommended_worker_limit: 5,
+                reason: "next observation".into(),
+                ..Default::default()
+            }
+        });
+    assert_eq!(
+        runtime
+            .issue_monitor_capacity_changed_events(&context, revision, next_update)
+            .len(),
+        1,
+        "the next worker observation must still be published"
+    );
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        5
+    );
 }
 
 #[test]

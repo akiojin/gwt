@@ -846,7 +846,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     );
     assert_eq!(code, 0);
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("#2"));
+    assert!(out.starts_with("Issue #2"), "{out}");
     assert!(out.contains("impl two"));
     assert!(!out.contains("draft one"));
     assert!(!out.contains("done three"));
@@ -1376,6 +1376,7 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
         "warm cache path must not re-fetch linked PRs"
     );
     let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.starts_with("PR #10"), "{out}");
     assert!(out.contains("Cached linked PR"));
     assert!(!out.contains("Fresh linked PR"));
 }
@@ -1490,6 +1491,15 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
             merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         },
+    );
+    env.pr_quarantine_contexts.insert(
+        42,
+        serde_json::from_value(serde_json::json!({
+            "number": 42,
+            "body": "Original PR description",
+            "comments": []
+        }))
+        .unwrap(),
     );
 
     let code = dispatch(

@@ -12,13 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 struct CachedSession {
     mtime: SystemTime,
     size: u64,
-    session: Option<crate::Session>,
+    session: Option<Arc<crate::Session>>,
 }
 
 #[derive(Default)]
@@ -31,6 +31,11 @@ pub struct SessionLedgerCache {
 
 static CACHES: OnceLock<Mutex<HashMap<PathBuf, SessionLedgerCache>>> = OnceLock::new();
 
+#[cfg(all(test, windows))]
+thread_local! {
+    static CANDIDATE_PATH_METADATA_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl SessionLedgerCache {
     pub fn new() -> Self {
         Self::default()
@@ -40,16 +45,20 @@ impl SessionLedgerCache {
     /// (mtime, size) are unchanged. Files that fail to stat or parse are
     /// skipped, matching the previous eager loader's semantics.
     pub fn load(&mut self, sessions_dir: &Path) -> Vec<crate::Session> {
-        self.try_load(sessions_dir).unwrap_or_default()
+        self.try_load(sessions_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect()
     }
 
-    fn try_load(&mut self, sessions_dir: &Path) -> std::io::Result<Vec<crate::Session>> {
+    fn try_load(&mut self, sessions_dir: &Path) -> std::io::Result<Vec<Arc<crate::Session>>> {
         let dir = std::fs::read_dir(sessions_dir).inspect_err(|_| self.entries.clear())?;
         let mut seen = HashSet::new();
         let mut sessions = Vec::new();
         for entry in dir.flatten() {
             let path = entry.path();
-            let Some((mtime, size)) = candidate_metadata(&path) else {
+            let Some((mtime, size)) = candidate_metadata(Some(&entry), &path) else {
                 continue;
             };
             if let Some(session) = self.load_entry(&path, mtime, size, false) {
@@ -68,7 +77,7 @@ impl SessionLedgerCache {
         mtime: SystemTime,
         size: u64,
         fresh_success: bool,
-    ) -> Option<crate::Session> {
+    ) -> Option<Arc<crate::Session>> {
         if let Some(hit) = self.entries.get(path) {
             if hit.mtime == mtime && hit.size == size && (!fresh_success || hit.session.is_none()) {
                 return hit.session.clone();
@@ -88,7 +97,7 @@ impl SessionLedgerCache {
         path: &Path,
         mtime: SystemTime,
         size: u64,
-    ) -> Option<Option<crate::Session>> {
+    ) -> Option<Option<Arc<crate::Session>>> {
         self.entries
             .get(path)
             .filter(|hit| hit.mtime == mtime && hit.size == size)
@@ -112,11 +121,11 @@ impl SessionLedgerCache {
             u64,
         ),
         fresh_success: bool,
-    ) -> Option<crate::Session> {
+    ) -> Option<Arc<crate::Session>> {
         let (result, candidate, attempts) = parsed;
         self.parse_count += attempts;
         let session = match result {
-            Ok(session) => session,
+            Ok(session) => session.map(Arc::new),
             Err(error) => {
                 // Concurrent candidate misses may parse twice, but only the
                 // first matching failure commit emits the diagnostic.
@@ -127,7 +136,7 @@ impl SessionLedgerCache {
             }
         };
         let result = if fresh_success {
-            candidate
+            candidate.map(Arc::new)
         } else {
             session.clone()
         };
@@ -183,13 +192,36 @@ impl SessionLedgerCache {
     }
 }
 
-fn candidate_metadata(path: &Path) -> Option<(SystemTime, u64)> {
+fn candidate_path_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(all(test, windows))]
+    CANDIDATE_PATH_METADATA_READS.with(|count| count.set(count.get().wrapping_add(1)));
+    std::fs::symlink_metadata(path)
+}
+
+fn candidate_metadata(entry: Option<&std::fs::DirEntry>, path: &Path) -> Option<(SystemTime, u64)> {
     if path.extension().and_then(|ext| ext.to_str()) != Some("toml")
         || path.file_name()?.to_string_lossy().starts_with('.')
     {
         return None;
     }
-    let metadata = std::fs::symlink_metadata(path).ok()?;
+    #[cfg(windows)]
+    let metadata = if let Some(entry) = entry {
+        use std::os::windows::fs::MetadataExt;
+        let metadata = entry.metadata().ok()?;
+        if metadata.file_attributes() & 0x400 != 0 {
+            // Reparse points retain the original no-follow path semantics.
+            candidate_path_metadata(path).ok()?
+        } else {
+            metadata
+        }
+    } else {
+        candidate_path_metadata(path).ok()?
+    };
+    #[cfg(not(windows))]
+    let metadata = {
+        let _ = entry;
+        candidate_path_metadata(path).ok()?
+    };
     if !metadata.is_file() {
         return None;
     }
@@ -202,7 +234,7 @@ fn candidate_metadata(path: &Path) -> Option<(SystemTime, u64)> {
 pub fn load_session_candidate(sessions_dir: &Path, session_id: &str) -> Option<crate::Session> {
     crate::validate_session_id_path_component(session_id).ok()?;
     let path = sessions_dir.join(format!("{session_id}.toml"));
-    let (mtime, size) = candidate_metadata(&path)?;
+    let (mtime, size) = candidate_metadata(None, &path)?;
     if with_shared_cache(sessions_dir, |cache| {
         cache.is_cached_failure(&path, mtime, size)
     })
@@ -217,6 +249,7 @@ pub fn load_session_candidate(sessions_dir: &Path, session_id: &str) -> Option<c
         cache.commit_entry(&path, mtime, size, parsed, true)
     })
     .0
+    .map(Arc::unwrap_or_clone)
 }
 
 // File reads, parsing, and normalization happen outside the shared guard.
@@ -246,6 +279,13 @@ fn with_shared_cache<T>(
 /// Share both successful and failed directory reads across read-only ledger
 /// consumers. Exact authority reads still use `Session::load` under its lease.
 pub fn load_sessions(sessions_dir: &Path) -> std::io::Result<Vec<crate::Session>> {
+    load_sessions_shared(sessions_dir)
+        .map(|sessions| sessions.into_iter().map(Arc::unwrap_or_clone).collect())
+}
+
+/// Load immutable snapshots without cloning unchanged Session contents.
+/// Replacing a cache entry leaves earlier snapshots valid for their readers.
+pub fn load_sessions_shared(sessions_dir: &Path) -> std::io::Result<Vec<Arc<crate::Session>>> {
     let started = Instant::now();
     let mut seen = HashSet::new();
     let mut hold = Duration::ZERO;
@@ -255,7 +295,7 @@ pub fn load_sessions(sessions_dir: &Path) -> std::io::Result<Vec<crate::Session>
         let mut sessions = Vec::new();
         for entry in dir.flatten() {
             let path = entry.path();
-            let Some((mtime, size)) = candidate_metadata(&path) else {
+            let Some((mtime, size)) = candidate_metadata(Some(&entry), &path) else {
                 continue;
             };
             let (cached, held, waited, _) =
@@ -319,9 +359,99 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(cache.parse_count, 2);
 
+        #[cfg(windows)]
+        let before_metadata = CANDIDATE_PATH_METADATA_READS.with(std::cell::Cell::get);
         let second = cache.load(tmp.path());
         assert_eq!(second.len(), 2);
         assert_eq!(cache.parse_count, 2, "unchanged files must not re-parse");
+        #[cfg(windows)]
+        assert_eq!(
+            CANDIDATE_PATH_METADATA_READS.with(std::cell::Cell::get) - before_metadata,
+            0,
+            "warm ordinary ledger files must reuse directory metadata"
+        );
+    }
+
+    #[test]
+    fn shared_snapshots_reuse_unchanged_sessions_and_preserve_prior_versions() {
+        let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let mut changed = write_session(tmp.path(), "work/changed");
+        let first = load_sessions_shared(tmp.path()).expect("first shared load");
+        #[cfg(windows)]
+        let before_metadata = CANDIDATE_PATH_METADATA_READS.with(std::cell::Cell::get);
+        let second = load_sessions_shared(tmp.path()).expect("unchanged shared load");
+        #[cfg(windows)]
+        assert_eq!(
+            CANDIDATE_PATH_METADATA_READS.with(std::cell::Cell::get) - before_metadata,
+            0,
+            "warm shared ledger files must reuse directory metadata"
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(Arc::ptr_eq(&first[0], &second[0]));
+
+        changed.model = Some("changed-model-with-a-new-file-size".to_string());
+        changed.save(tmp.path()).expect("save changed session");
+        let updated = load_sessions_shared(tmp.path()).expect("updated shared load");
+        assert_eq!(updated.len(), 1);
+        assert!(!Arc::ptr_eq(&first[0], &updated[0]));
+        assert!(first[0].model.is_none(), "prior snapshots remain valid");
+        assert_eq!(updated[0].model, changed.model);
+    }
+
+    #[test]
+    fn shared_load_at_2500_sessions_reparses_only_changed_files() {
+        let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        let mut session = crate::Session::new(
+            tmp.path().join("project"),
+            "work/fixture",
+            crate::AgentId::Codex,
+        );
+        for index in 0..2500 {
+            session.id = format!("fixture-{index:04}");
+            std::fs::write(
+                sessions_dir.join(format!("{}.toml", session.id)),
+                toml::to_string(&session).unwrap(),
+            )
+            .unwrap();
+        }
+
+        for expected_attempts in [2500, 0, 0] {
+            let before = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0;
+            assert_eq!(load_sessions(&sessions_dir).unwrap().len(), 2500);
+            let attempts = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0 - before;
+            assert_eq!(attempts, expected_attempts);
+            println!("shared ledger: sessions=2500, parse_attempts={attempts}");
+        }
+
+        // A size change guarantees invalidation even on coarse timestamp filesystems.
+        session.model = Some("changed-model".to_string());
+        std::fs::write(
+            sessions_dir.join(format!("{}.toml", session.id)),
+            toml::to_string(&session).unwrap(),
+        )
+        .unwrap();
+        let before = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0;
+        let updated = load_sessions(&sessions_dir).unwrap();
+        assert_eq!(updated.len(), 2500);
+        assert_eq!(
+            with_shared_cache(&sessions_dir, |cache| cache.parse_count).0 - before,
+            1
+        );
+        assert_eq!(
+            updated
+                .iter()
+                .find(|entry| entry.id == session.id)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("changed-model"),
+        );
+        println!("shared ledger: sessions=2500, changed=1, parse_attempts=1");
     }
 
     #[test]

@@ -306,6 +306,8 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
         tool_name: Some("Write".to_string()),
         tool_input: Some(serde_json::json!({ "file_path": repo.join("fixture.rs") })),
         transcript_path: None,
+        active_skill: None,
+        active_plugin: None,
         cwd: Some(repo.display().to_string()),
     };
     assert!(matches!(

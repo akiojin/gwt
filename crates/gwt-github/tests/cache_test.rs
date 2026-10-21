@@ -8,7 +8,7 @@ use std::{
 };
 
 use gwt_github::{
-    body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    body::{SectionLocation, SectionsIndex, SpecBody, SpecMeta},
     cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
@@ -47,6 +47,38 @@ fn mk_snapshot(number: u64, body: String) -> IssueSnapshot {
         updated_at: UpdatedAt::new("t1"),
         comments: Vec::new(),
     }
+}
+
+#[test]
+fn cache_revision_changes_only_with_persisted_content() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    assert_eq!(cache.revision().unwrap(), "");
+    let mut snapshot = mk_snapshot(42, "body".into());
+    cache.write_snapshot(&snapshot).unwrap();
+    let initial = cache.revision().unwrap();
+    assert!(!initial.is_empty());
+    cache.write_snapshot_with_receipt(&snapshot).unwrap();
+    assert_eq!(cache.revision().unwrap(), initial);
+    snapshot.body = "changed body".into();
+    let generation = cache.current_generation(snapshot.number).unwrap();
+    cache
+        .write_snapshot_if_generation(&snapshot, generation.as_ref())
+        .unwrap();
+    let changed = cache.revision().unwrap();
+    assert_ne!(changed, initial);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    let phase = cache.revision().unwrap();
+    assert_ne!(phase, changed);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
+    // The probe reads only the marker, even when a full entry is unreadable.
+    fs::remove_file(tmp.path().join("42/body.md")).unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
 }
 
 // RED-50: write_snapshot creates per-issue directory and files
@@ -615,12 +647,6 @@ fn write_snapshot_prunes_stale_comment_files() {
         "v2 must prune the dropped 200.md"
     );
     assert!(comments_dir.join("300.md").exists());
-}
-
-// Keep Comment in use so the import is not a lint warning.
-#[allow(dead_code)]
-fn _ensure_comment_is_used(c: Comment) -> Comment {
-    c
 }
 
 // SPEC-2017 T-008: apply_phase_change rewrites the labels array on the cached

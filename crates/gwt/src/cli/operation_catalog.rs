@@ -54,6 +54,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "board.config.set",
+        aliases: &[],
+    },
+    Operation {
         name: "board.config.show",
         aliases: &["board.config-show"],
     },
@@ -158,6 +162,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "discussion.create",
+        aliases: &[],
+    },
+    Operation {
         name: "discussion.update",
         aliases: &[],
     },
@@ -195,6 +203,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "execution.repair",
+        aliases: &[],
+    },
+    Operation {
+        name: "execution.settle_delivered",
         aliases: &[],
     },
     Operation {
@@ -472,6 +484,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.name",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.read",
         aliases: &[],
     },
@@ -512,7 +528,35 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.approval.request",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.revoke",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.status",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.capabilities",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.operation.execute",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.peer.send",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.plan.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.plan.status",
         aliases: &[],
     },
     Operation {
@@ -521,6 +565,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.status.set",
         aliases: &[],
     },
     Operation {
@@ -552,11 +600,27 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.auto_merge.enable",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.reopen",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.review.submit",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.comment",
         aliases: &[],
     },
     Operation {
         name: "pr.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.create_from_ci",
         aliases: &[],
     },
     Operation {
@@ -632,11 +696,31 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.metadata.set",
+        aliases: &[],
+    },
+    Operation {
         name: "release.update.defer",
         aliases: &[],
     },
     Operation {
+        name: "repository.required_checks.update",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.settings.set",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
+        aliases: &[],
+    },
+    Operation {
+        name: "update.settings.set",
+        aliases: &[],
+    },
+    Operation {
+        name: "update.settings.status",
         aliases: &[],
     },
     Operation {
@@ -709,6 +793,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "workspace.receipt",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.close",
         aliases: &[],
     },
     Operation {
@@ -808,7 +896,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// The existing wording opens the message unchanged so log greps still match;
 /// the candidates follow it. When nothing is close, the namespace's actual
 /// operations are listed rather than nothing — an invented name like
-/// `pr.merge` was never a typo of anything, and the caller still has to learn
+/// `pr.nonexistent_operation` is no typo, and the caller still has to learn
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and

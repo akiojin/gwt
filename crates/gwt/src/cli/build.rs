@@ -17,6 +17,35 @@ pub(super) fn run<E: CliEnv>(
     action: SkillStateAction,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if matches!(
+        &action,
+        SkillStateAction::Start { .. } | SkillStateAction::Phase { .. }
+    ) {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        // Canonical successor activation takes this same lease. Keep both
+        // ownership admission and persistence inside it so a stale caller
+        // cannot overwrite a successor that became live in between.
+        return super::trusted_store::with_write_lease(&worktree, || {
+            Ok(run_action(env, action, out))
+        })
+        .map_err(|error| {
+            SpecOpsError::from(gwt_github::client::ApiError::Unexpected(error.to_string()))
+        })?;
+    }
+    // Finalization already owns its write lease; it must not nest this one.
+    run_action(env, action, out)
+}
+
+fn run_action<E: CliEnv>(
+    env: &mut E,
+    action: SkillStateAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if let SkillStateAction::Phase { spec, .. } = &action {
+        if let Some(code) = admit_build_phase(env, *spec, out) {
+            return Ok(code);
+        }
+    }
     if let SkillStateAction::Start { spec } = &action {
         let mut start_evidence = None;
         if !managed_build_start_preflight(env, *spec, out, &mut start_evidence) {
@@ -34,7 +63,7 @@ pub(super) fn run<E: CliEnv>(
     }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
-    if let SkillStateAction::Complete { spec } = &action {
+    if let SkillStateAction::Complete { spec, pr } = &action {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
         let owning_active_build = gwt_core::skill_state::load(&worktree, SKILL_NAME)
@@ -49,7 +78,7 @@ pub(super) fn run<E: CliEnv>(
                     && state.owner_spec.is_none_or(|owner| owner == *spec)
             });
         match if owning_active_build {
-            super::completion_pr::admit(env, session_id.trim(), Some(*spec), out)
+            super::completion_pr::admit(env, session_id.trim(), Some(*spec), *pr, out)
         } else {
             Ok(None)
         } {
@@ -89,7 +118,7 @@ pub(super) fn run<E: CliEnv>(
                 return Ok(2);
             };
             let expected_owner = match &action {
-                SkillStateAction::Complete { spec } => Some(*spec),
+                SkillStateAction::Complete { spec, .. } => Some(*spec),
                 _ => None,
             };
             let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -159,7 +188,7 @@ pub(super) fn run<E: CliEnv>(
                 return Ok(Ok(2));
             }
             let expected_owner = match &action {
-                SkillStateAction::Complete { spec } => Some(*spec),
+                SkillStateAction::Complete { spec, .. } => Some(*spec),
                 _ => None,
             };
             let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -196,6 +225,90 @@ pub(super) fn run<E: CliEnv>(
     run_after_quarantine_precheck(env, action, out, None, None)
 }
 
+/// `build.phase` uses the same ownership judgment as `build.start`: a live
+/// foreign holder is refused, and a gone holder's lifecycle is inherited.
+fn admit_build_phase<E: CliEnv>(env: &E, spec: u64, out: &mut String) -> Option<i32> {
+    let current_session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+    let current_session_id = current_session_id.trim();
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let state = gwt_core::skill_state::load(&worktree, SKILL_NAME).ok()??;
+    let Some(ownership) = admit_build_lifecycle(&worktree, &state, spec, current_session_id, out)
+    else {
+        return Some(2);
+    };
+    match ownership {
+        BuildLifecycleOwnership::Inherited => {
+            let inherited = gwt_core::skill_state::SkillState {
+                session_id: current_session_id.to_string(),
+                ..state
+            };
+            if let Err(error) = gwt_core::skill_state::save(&worktree, SKILL_NAME, &inherited) {
+                out.push_str(&format!("{VERB}: phase failed: {error}\n"));
+                return Some(1);
+            }
+            None
+        }
+        BuildLifecycleOwnership::Current | BuildLifecycleOwnership::HeldByLiveSession(_) => None,
+    }
+}
+
+/// Validate the same current Execution identity before start or inheritance.
+/// Returns whether this is a managed build; a refusal writes its typed error.
+fn build_execution_owner_preflight(
+    worktree: &std::path::Path,
+    spec: u64,
+    current_session_id: &str,
+    out: &mut String,
+) -> Option<bool> {
+    let execution = match crate::cli::execution_state::load(worktree) {
+        Ok(Some(record)) if crate::cli::execution_state::integrity_ok(&record) => Some(record),
+        Ok(None) => None,
+        Ok(Some(_)) | Err(_) => {
+            push_start_preflight_refusal(
+                out,
+                "execution_state_invalid",
+                "current Execution authority is unreadable or failed integrity validation",
+                "execution.status",
+            );
+            return None;
+        }
+    };
+    let managed = managed_build_environment_present() || execution.is_some();
+    if !managed {
+        return Some(false);
+    }
+    if current_session_id.is_empty() {
+        push_start_preflight_refusal(
+            out,
+            "relaunch_required",
+            "managed build.start is missing its Session identity; inspect execution.status, then relaunch through Start Work / Launch",
+            "execution.status",
+        );
+        return None;
+    }
+    if let Some(record) = execution {
+        if record.primary_session_id != current_session_id {
+            push_start_preflight_refusal(
+                out,
+                "execution_session_mismatch",
+                "current Session does not own the worktree Execution",
+                "execution.status",
+            );
+            return None;
+        }
+        if record.owner_number != spec {
+            push_start_preflight_refusal(
+                out,
+                "execution_owner_mismatch",
+                "requested build owner does not match the current Execution owner",
+                "build.start",
+            );
+            return None;
+        }
+    }
+    Some(managed)
+}
+
 fn managed_build_start_preflight<E: CliEnv>(
     env: &E,
     spec: u64,
@@ -207,18 +320,16 @@ fn managed_build_start_preflight<E: CliEnv>(
         .trim()
         .to_string();
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-    match gwt_core::skill_state::load(&worktree, SKILL_NAME) {
-        Ok(Some(state))
-            if state.active && state.session_id.trim() != current_session_id.as_str() =>
-        {
-            push_start_preflight_refusal(
-                out,
-                "build_state_session_mismatch",
-                "an active build lifecycle belongs to another Session; build.abort can close it after confirming that Session is gone",
-                "build.abort",
-            );
-            return false;
+    let mut inherited = false;
+    if let Ok(Some(state)) = gwt_core::skill_state::load(&worktree, SKILL_NAME) {
+        match admit_build_lifecycle(&worktree, &state, spec, &current_session_id, out) {
+            None => return false,
+            Some(ownership) => {
+                inherited = matches!(ownership, BuildLifecycleOwnership::Inherited);
+            }
         }
+    }
+    match gwt_core::skill_state::load(&worktree, SKILL_NAME) {
         Ok(Some(state))
             if state.active && state.owner_spec.is_none_or(|owner_spec| owner_spec != spec) =>
         {
@@ -230,7 +341,7 @@ fn managed_build_start_preflight<E: CliEnv>(
             );
             return false;
         }
-        Ok(Some(state)) if state.active => {
+        Ok(Some(state)) if state.active && !inherited => {
             // An idempotent restart of the same lifecycle must not erase a
             // previously recorded compatibility path after the Host upgrades.
             *start_evidence = state.start_evidence;
@@ -246,51 +357,12 @@ fn managed_build_start_preflight<E: CliEnv>(
             return false;
         }
     }
-    let execution = match crate::cli::execution_state::load(&worktree) {
-        Ok(Some(record)) if crate::cli::execution_state::integrity_ok(&record) => Some(record),
-        Ok(None) => None,
-        Ok(Some(_)) | Err(_) => {
-            push_start_preflight_refusal(
-                out,
-                "execution_state_invalid",
-                "current Execution authority is unreadable or failed integrity validation",
-                "execution.status",
-            );
-            return false;
-        }
+    let Some(managed) = build_execution_owner_preflight(&worktree, spec, &current_session_id, out)
+    else {
+        return false;
     };
-    let managed = managed_build_environment_present() || execution.is_some();
     if !managed {
         return true;
-    }
-    if current_session_id.is_empty() {
-        push_start_preflight_refusal(
-            out,
-            "relaunch_required",
-            "managed build.start is missing its Session identity; inspect execution.status, then relaunch through Start Work / Launch",
-            "execution.status",
-        );
-        return false;
-    }
-    if let Some(record) = execution {
-        if record.primary_session_id != current_session_id {
-            push_start_preflight_refusal(
-                out,
-                "execution_session_mismatch",
-                "current Session does not own the worktree Execution",
-                "execution.status",
-            );
-            return false;
-        }
-        if record.owner_number != spec {
-            push_start_preflight_refusal(
-                out,
-                "execution_owner_mismatch",
-                "requested build owner does not match the current Execution owner",
-                "build.start",
-            );
-            return false;
-        }
     }
     let target = match crate::daemon_runtime::HookForwardTarget::from_env_strict() {
         Ok(Some(target)) => target,
@@ -516,7 +588,7 @@ fn run_after_quarantine_precheck<E: CliEnv>(
     // finalize" exit 0 must not settle the execution — and only when the
     // record names the same owner. Aborting a build never settles.
     let completed_spec = match &action {
-        SkillStateAction::Complete { spec } => {
+        SkillStateAction::Complete { spec, .. } => {
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let had_active_matching_state = gwt_core::skill_state::load(&worktree, SKILL_NAME)
                 .ok()
@@ -645,33 +717,7 @@ fn abort_abandoned_build<E: CliEnv>(
     }
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     gwt_agent::with_session_path_lease(&sessions_dir, &state.session_id, |holder| {
-        use crate::cli::execution_state::{
-            classify_exact_session_runtime, ExactSessionRuntimeDisposition,
-        };
-        let abandoned = match holder {
-            gwt_agent::SessionPathState::Missing => true,
-            gwt_agent::SessionPathState::Error(error) => return Err(error),
-            gwt_agent::SessionPathState::Present(holder) => {
-                match gwt_agent::SessionExecutionIdentity::from_session(&holder)
-                    .map_err(std::io::Error::other)?
-                {
-                    Some(identity) => matches!(
-                        classify_exact_session_runtime(&sessions_dir, &identity)?,
-                        ExactSessionRuntimeDisposition::Absent
-                            | ExactSessionRuntimeDisposition::Terminal(_)
-                            | ExactSessionRuntimeDisposition::Defunct(_)
-                            | ExactSessionRuntimeDisposition::HostDead
-                            | ExactSessionRuntimeDisposition::ChildExited
-                    ),
-                    None => {
-                        let observed =
-                            crate::session_inventory::observe_session(&holder, &sessions_dir);
-                        observed.sessions.is_empty() && observed.uncertainties.is_empty()
-                    }
-                }
-            }
-        };
-        if !abandoned {
+        if !classify_lifecycle_holder(&sessions_dir, holder)?.is_gone() {
             return Ok(None);
         }
         if gwt_core::skill_state::load(env.repo_path(), SKILL_NAME)?.as_ref() != Some(&state) {
@@ -686,6 +732,190 @@ fn abort_abandoned_build<E: CliEnv>(
             .map_err(std::io::Error::other)
     })
     .map_err(|error| error.to_string())
+}
+
+/// Runtime state of the Session recorded as the build lifecycle holder.
+enum LifecycleHolderLiveness {
+    Gone,
+    Alive { disposition: &'static str },
+}
+
+impl LifecycleHolderLiveness {
+    fn is_gone(&self) -> bool {
+        matches!(self, Self::Gone)
+    }
+}
+
+/// Classify the recorded holder under its Session path lease. Only decisive
+/// evidence that no runtime remains counts as gone; ambiguity stays alive.
+fn classify_lifecycle_holder(
+    sessions_dir: &std::path::Path,
+    holder: gwt_agent::SessionPathState,
+) -> std::io::Result<LifecycleHolderLiveness> {
+    use crate::cli::execution_state::{
+        classify_exact_session_runtime, ExactSessionRuntimeDisposition,
+    };
+    let holder = match holder {
+        gwt_agent::SessionPathState::Missing => return Ok(LifecycleHolderLiveness::Gone),
+        gwt_agent::SessionPathState::Error(error) => return Err(error),
+        gwt_agent::SessionPathState::Present(holder) => holder,
+    };
+    let disposition = match gwt_agent::SessionExecutionIdentity::from_session(&holder)
+        .map_err(std::io::Error::other)?
+    {
+        Some(identity) => match classify_exact_session_runtime(sessions_dir, &identity)? {
+            ExactSessionRuntimeDisposition::Absent
+            | ExactSessionRuntimeDisposition::Terminal(_)
+            | ExactSessionRuntimeDisposition::Defunct(_)
+            | ExactSessionRuntimeDisposition::HostDead
+            | ExactSessionRuntimeDisposition::ChildExited => {
+                return Ok(LifecycleHolderLiveness::Gone)
+            }
+            ExactSessionRuntimeDisposition::Live => "live",
+            ExactSessionRuntimeDisposition::Unknown => "unknown",
+        },
+        None => {
+            let observed = crate::session_inventory::observe_session(&holder, sessions_dir);
+            if observed.sessions.is_empty() && observed.uncertainties.is_empty() {
+                return Ok(LifecycleHolderLiveness::Gone);
+            }
+            "observed"
+        }
+    };
+    Ok(LifecycleHolderLiveness::Alive { disposition })
+}
+
+/// Who may drive an active build lifecycle (Issue #5054).
+enum BuildLifecycleOwnership {
+    /// No active foreign lifecycle: the current Session owns it or may start.
+    Current,
+    /// The recorded holder is terminal or gone; the current Session inherits.
+    Inherited,
+    /// The recorded holder still runs; carries the typed refusal evidence.
+    HeldByLiveSession(serde_json::Value),
+}
+
+/// The single ownership judgment shared by `build.start` and `build.phase`.
+fn judge_build_lifecycle_ownership(
+    worktree: &std::path::Path,
+    state: &gwt_core::skill_state::SkillState,
+    current_session_id: &str,
+) -> std::io::Result<BuildLifecycleOwnership> {
+    let holder_id = state.session_id.trim();
+    if !state.active || holder_id == current_session_id.trim() {
+        return Ok(BuildLifecycleOwnership::Current);
+    }
+    if holder_id.is_empty() {
+        return Ok(BuildLifecycleOwnership::Inherited);
+    }
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let liveness = gwt_agent::with_session_path_lease(&sessions_dir, holder_id, |holder| {
+        if let gwt_agent::SessionPathState::Present(session) = &holder {
+            if let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(session)
+                .map_err(std::io::Error::other)?
+            {
+                if Some(identity.execution_binding.owner_number) == state.owner_spec
+                    && crate::cli::execution_state::session_generation_is_terminal(
+                        worktree, &identity,
+                    )?
+                {
+                    return Ok(LifecycleHolderLiveness::Gone);
+                }
+            }
+        }
+        classify_lifecycle_holder(&sessions_dir, holder)
+    })?;
+    Ok(match liveness {
+        LifecycleHolderLiveness::Gone => BuildLifecycleOwnership::Inherited,
+        LifecycleHolderLiveness::Alive { disposition } => {
+            BuildLifecycleOwnership::HeldByLiveSession(serde_json::json!({
+                "session_id": holder_id,
+                "runtime": disposition,
+                "runtime_sidecars": lifecycle_holder_runtime_evidence(&sessions_dir, holder_id),
+            }))
+        }
+    })
+}
+
+/// pid / heartbeat evidence from every runtime sidecar of the holder.
+fn lifecycle_holder_runtime_evidence(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+) -> Vec<serde_json::Value> {
+    let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
+        return Vec::new();
+    };
+    let mut evidence: Vec<serde_json::Value> = namespaces
+        .flatten()
+        .filter_map(|namespace| {
+            let host_pid = namespace.file_name().to_str()?.parse::<u32>().ok()?;
+            let runtime = gwt_agent::SessionRuntimeState::load(
+                &namespace.path().join(format!("{session_id}.json")),
+            )
+            .ok()?;
+            Some(serde_json::json!({
+                "host_pid": host_pid,
+                "child_pid": runtime.child_pid,
+                "status": runtime.status,
+                "heartbeat_at": runtime.last_activity_at.max(runtime.updated_at),
+            }))
+        })
+        .collect();
+    evidence.sort_by_key(|entry| entry["host_pid"].as_u64());
+    evidence
+}
+
+/// Apply the shared ownership judgment; on refusal writes the typed error.
+fn admit_build_lifecycle(
+    worktree: &std::path::Path,
+    state: &gwt_core::skill_state::SkillState,
+    spec: u64,
+    current_session_id: &str,
+    out: &mut String,
+) -> Option<BuildLifecycleOwnership> {
+    if state.active && state.owner_spec != Some(spec) {
+        push_start_preflight_refusal(
+            out,
+            "build_state_owner_mismatch",
+            "an active build lifecycle belongs to another or unknown owner",
+            "build.abort",
+        );
+        return None;
+    }
+    match judge_build_lifecycle_ownership(worktree, state, current_session_id) {
+        Ok(BuildLifecycleOwnership::HeldByLiveSession(holder)) => {
+            out.push_str(&format!(
+                "{}\n",
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": "build_state_session_mismatch",
+                    "reason": "an active build lifecycle belongs to another Session that is still running",
+                    "holder": holder,
+                    "recovery_operation": "execution.status",
+                    "retryable": true,
+                })
+            ));
+            None
+        }
+        Ok(ownership) => {
+            if state.active
+                && build_execution_owner_preflight(worktree, spec, current_session_id, out)
+                    .is_none()
+            {
+                return None;
+            }
+            Some(ownership)
+        }
+        Err(error) => {
+            push_start_preflight_refusal(
+                out,
+                "build_state_holder_unverified",
+                &format!("the build lifecycle holder could not be classified: {error}"),
+                "execution.status",
+            );
+            None
+        }
+    }
 }
 
 /// Recovery only abandons an orphaned lifecycle. Existing Work, denied Host
@@ -732,7 +962,7 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
     held_trusted_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let (spec, close_kind, abort_reason) = match action {
-        SkillStateAction::Complete { spec } => (*spec, WorkTerminalKind::Done, None),
+        SkillStateAction::Complete { spec, .. } => (*spec, WorkTerminalKind::Done, None),
         SkillStateAction::Abort { spec, reason } => {
             (*spec, WorkTerminalKind::Discarded, reason.as_deref())
         }
@@ -830,6 +1060,26 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                 WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
             },
         };
+        if matches!(close_kind, WorkTerminalKind::Done)
+            && compatibility_authority.is_confirmation_only()
+        {
+            // Issue #5070 / SPEC #3590: an exact canonical Done Work needs
+            // only read-only confirmation under the current identity lease.
+            // Sending another terminal mutation can strand delivered work.
+            let confirmation = if let Some(held_trusted_dir) = held_trusted_dir {
+                crate::agent_project_state::confirm_bound_terminal_compatibility_authority_held_global_lease(
+                    &compatibility_authority,
+                    request,
+                    held_trusted_dir,
+                )
+            } else {
+                crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
+                    &compatibility_authority,
+                    request,
+                )
+            };
+            return confirmation.map_err(|error| terminal_refusal(error.to_string()));
+        }
         let blocked_build_abort = compatibility_authority
             .requires_blocked_build_abort_bridge()
             .map_err(|error| terminal_refusal(error.to_string()))?;
@@ -1919,7 +2169,10 @@ mod tests {
         let mut output = String::new();
         let code = run(
             &mut env,
-            SkillStateAction::Complete { spec: 3327 },
+            SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            },
             &mut output,
         )
         .expect("run build.complete");
@@ -1989,7 +2242,10 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            SkillStateAction::Complete { spec: 3248 },
+            SkillStateAction::Complete {
+                spec: 3248,
+                pr: None,
+            },
             &mut out,
         )
         .unwrap();
@@ -2079,6 +2335,7 @@ format_version: Some(1),
                 driver: None,
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
                     admission: None,
+                    measurement: None,
                     headed_e2e: None,
                     nextest: None,
                     terminated_by_signal: None,
@@ -2158,7 +2415,10 @@ format_version: Some(1),
         assert_eq!(
             run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3248 },
+                SkillStateAction::Complete {
+                    spec: 3248,
+                    pr: None
+                },
                 &mut out,
             )
             .unwrap(),
@@ -2181,7 +2441,7 @@ format_version: Some(1),
     }
 
     #[test]
-    fn managed_build_complete_confirms_canonical_done_after_old_host_wrong_terminal() {
+    fn managed_build_complete_confirms_canonical_done_without_another_host_request() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2201,7 +2461,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -2213,8 +2476,7 @@ format_version: Some(1),
         );
         assert!(fixture.canonical_work().is_terminal());
         assert!(!fixture.canonical_work().discarded);
-        let (_, request) = server.receive();
-        assert_eq!(request["terminal_kind"], "done");
+        server.assert_no_request();
     }
 
     #[test]
@@ -2268,15 +2530,22 @@ format_version: Some(1),
         };
         let before = state_bytes();
         let server = TerminalBridgeServer::start(
-            StatusCode::OK,
-            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "transaction_conflict",
+                "reason": "transaction_conflict",
+                "message": "Host workspace transaction failed without committing"
+            }),
         );
         let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
             let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
             let mut output = String::new();
             let code = run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 &mut output,
             )
             .unwrap();
@@ -2302,7 +2571,10 @@ format_version: Some(1),
             let mut output = String::new();
             let code = run(
                 &mut env,
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 &mut output,
             )
             .unwrap();
@@ -2310,7 +2582,7 @@ format_version: Some(1),
         });
         assert_eq!(code, 0, "idempotent retry: {output}");
         assert_eq!(state_bytes(), before);
-        server.receive();
+        server.assert_no_request();
     }
 
     #[test]
@@ -2343,7 +2615,10 @@ format_version: Some(1),
             with_terminal_bridge_env_for(&fixture.worktree, &fixture.session.id, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
 
@@ -2377,7 +2652,7 @@ format_version: Some(1),
             .expect("canonical split-root Work");
         assert!(work.is_terminal());
         assert!(!work.discarded);
-        server.receive();
+        server.assert_no_request();
     }
 
     /// SPEC-3431 (#3425 family): a session without an execution binding can
@@ -2619,7 +2894,10 @@ format_version: Some(1),
                 let mut output = String::new();
                 let code = run(
                     &mut env,
-                    SkillStateAction::Complete { spec: 3327 },
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                     &mut output,
                 )
                 .expect("run build.complete after execution.blocked");
@@ -2969,7 +3247,10 @@ format_version: Some(1),
             let result = with_terminal_bridge_env(&fixture, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
 
@@ -3028,7 +3309,10 @@ format_version: Some(1),
         let error = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         })
         .expect_err("Host Emitted without canonical readback must fail closed");
@@ -3036,6 +3320,23 @@ format_version: Some(1),
         assert!(
             error.contains("outside the canonical Work authority"),
             "{error}"
+        );
+        let cause = format!(
+            "exact Work terminal confirmation found unprojected machine-local close event {}",
+            unprojected.id
+        );
+        let log = std::fs::read_to_string(gwt_core::logging::current_log_file(
+            &gwt_core::paths::gwt_logs_dir(),
+        ))
+        .expect("checkout compatibility failure must persist its cause");
+        assert!(log.contains(&cause), "{log}");
+        assert!(
+            log.contains("Host workspace transaction failed without committing"),
+            "{log}"
+        );
+        assert!(
+            !error.contains(&cause),
+            "the original cause must stay in the machine log: {error}"
         );
         assert_eq!(
             std::fs::read(&works_path).expect("read active canonical WorkItems"),
@@ -3140,7 +3441,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3194,7 +3498,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3242,7 +3549,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3289,7 +3599,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3507,7 +3820,10 @@ format_version: Some(1),
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
             record_current_work_terminal_before_finalize(
                 env,
-                &SkillStateAction::Complete { spec: 3327 },
+                &SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
             )
         });
 
@@ -3535,7 +3851,10 @@ format_version: Some(1),
                 terminal_receipt(crate::AgentWorkTerminalizationOutcome::Emitted),
             );
             let (code, output, fixture) = run_active_action(
-                SkillStateAction::Complete { spec: 3327 },
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
                 Some(&server.forward_url),
                 Some("terminal-secret"),
                 managed,
@@ -3568,8 +3887,15 @@ format_version: Some(1),
             ("token-only", None, Some("terminal-secret")),
             ("managed-missing", None, None),
         ] {
-            let (code, output, fixture) =
-                run_active_action(SkillStateAction::Complete { spec: 3327 }, url, token, true);
+            let (code, output, fixture) = run_active_action(
+                SkillStateAction::Complete {
+                    spec: 3327,
+                    pr: None,
+                },
+                url,
+                token,
+                true,
+            );
             assert_eq!(code, 1, "{label}: {output}");
             assert_build_still_active(&fixture);
         }
@@ -3602,7 +3928,10 @@ format_version: Some(1),
             let result = with_terminal_bridge_env(&fixture, &server, |env| {
                 record_current_work_terminal_before_finalize(
                     env,
-                    &SkillStateAction::Complete { spec: 3327 },
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None,
+                    },
                 )
             });
             let output = result.expect_err("invalid Host result must fail closed");
@@ -3634,7 +3963,10 @@ format_version: Some(1),
         let env = crate::cli::TestEnv::new(fixture.git.repo.clone());
         let output = record_current_work_terminal_before_finalize(
             &env,
-            &SkillStateAction::Complete { spec: 3327 },
+            &SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            },
         )
         .expect_err("transport failure must fail closed");
         assert!(
@@ -3795,7 +4127,10 @@ format_version: Some(1),
             assert_eq!(
                 skill_state_runtime::run(
                     &mut env,
-                    SkillStateAction::Complete { spec: 3327 },
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
                     SKILL_NAME,
                     SKILL_DISPLAY,
                     VERB,
@@ -4121,7 +4456,7 @@ format_version: Some(1),
     }
 
     #[test]
-    fn abandoned_build_can_be_aborted_before_fresh_session_start() {
+    fn fresh_session_start_inherits_build_of_gone_session() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4132,6 +4467,8 @@ format_version: Some(1),
             StatusCode::OK,
             serde_json::json!({"schema_version": 1, "owner_number": 4687, "work_id": "fresh-work"}),
         );
+        // Issue #5054: the predecessor Session ended (no Session file, no
+        // runtime); its successor's build.start inherits the lifecycle.
         let (code, output, fixture) = run_active_action_with_identity(
             SkillStateAction::Start { spec: 4687 },
             Some(&server.forward_url),
@@ -4141,51 +4478,202 @@ format_version: Some(1),
             "missing-owner",
             Some("fresh-session"),
         );
-        assert_eq!(code, 2, "{output}");
-        let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-        assert_eq!(refusal["recovery_operation"], "build.abort", "{output}");
+        assert_eq!(code, 0, "{output}");
+        assert!(!output.contains("build_state_session_mismatch"), "{output}");
+        let inherited = gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        assert!(inherited.active);
+        assert_eq!(inherited.owner_spec, Some(4687));
+        assert_eq!(inherited.session_id, "fresh-session");
+        server.receive();
+    }
 
-        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "fresh-session");
+    fn save_live_runtime(fixture: &BoundTerminalFixture) {
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&fixture.session)
+            .unwrap()
+            .unwrap();
+        let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            started,
+            std::process::id(),
+            started,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions,
+            &fixture.session.id,
+        ))
+        .unwrap();
+    }
+
+    fn launch_build_successor(fixture: &BoundTerminalFixture, blocked: bool) -> String {
+        use crate::cli::execution_state::*;
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: fixture.binding.owner_number,
+        };
+        let request = SuccessorRequest {
+            operation_id: "build-successor".into(),
+            principal_id: "host".into(),
+            work_id: None,
+            source: if blocked {
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE
+            } else {
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
+            }
+            .into(),
+            session_binding_id: "build-successor-binding".into(),
+            initial_session_id: "build-successor-session".into(),
+            entrypoint: "gwt-execute".into(),
+            requested_at: chrono::Utc::now(),
+        };
+        if blocked {
+            prepare_fresh_linked_owner_launch_successor(&fixture.git.repo, owner, &request)
+                .unwrap();
+        } else {
+            prepare_concurrent_linked_owner_launch_successor(&fixture.git.repo, owner, &request)
+                .unwrap();
+        }
+        activate_successor(&fixture.git.repo, owner, &request).unwrap();
+        let mut successor = gwt_agent::Session::new(
+            &fixture.git.repo,
+            &fixture.session.branch,
+            fixture.session.agent_id.clone(),
+        );
+        successor.id = request.initial_session_id;
+        successor.project_state_root = fixture.session.project_state_root.clone();
+        successor.linked_issue_number = fixture.session.linked_issue_number;
+        successor
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                session_id: successor.id.clone(),
+                identity: current_execution_binding(&fixture.git.repo, owner)
+                    .unwrap()
+                    .unwrap(),
+                ..fixture.binding.clone()
+            }))
+            .unwrap();
+        successor
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .unwrap();
+        successor.id
+    }
+
+    #[test]
+    fn build_start_and_phase_inherit_lifecycle_of_blocked_predecessor_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // The predecessor settled Blocked, but its process is still alive.
+        let predecessor = BoundTerminalFixture::new();
+        predecessor.settle_execution_blocked();
+        save_live_runtime(&predecessor);
+        let predecessor_state = gwt_core::skill_state::load(&predecessor.git.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        let successor_session = launch_build_successor(&predecessor, true);
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            serde_json::json!({"schema_version": 1, "owner_number": 3327, "work_id": "successor-work"}),
+        );
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &successor_session);
         let _url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &server.forward_url);
         let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
         let _runtime = ScopedEnvVar::set(
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
-            fixture.repo.join("managed-runtime.json"),
+            predecessor.git.repo.join("managed-runtime.json"),
         );
-        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut env = crate::cli::TestEnv::new(predecessor.git.repo.clone());
+
         let mut output = String::new();
         let code = run(
             &mut env,
-            SkillStateAction::Abort {
-                spec: 4687,
-                reason: Some("old Session no longer exists".to_string()),
+            SkillStateAction::Start { spec: 3327 },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(!output.contains("build_state_session_mismatch"), "{output}");
+        server.receive();
+        let started = gwt_core::skill_state::load(&predecessor.git.repo, SKILL_NAME)
+            .unwrap()
+            .unwrap();
+        assert!(started.active);
+        assert_eq!(started.session_id, successor_session);
+
+        // build.phase reaches the same verdict on the same lifecycle.
+        gwt_core::skill_state::save(&predecessor.git.repo, SKILL_NAME, &predecessor_state).unwrap();
+        let mut output = String::new();
+        let code = run(
+            &mut env,
+            SkillStateAction::Phase {
+                spec: 3327,
+                label: "verify".to_string(),
             },
             &mut output,
         )
         .unwrap();
         assert_eq!(code, 0, "{output}");
-        let closed = gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+        let phased = gwt_core::skill_state::load(&predecessor.git.repo, SKILL_NAME)
             .unwrap()
             .unwrap();
-        assert!(!closed.active);
-        assert_eq!(closed.session_id, "missing-owner");
-        server.assert_no_request();
-        assert_eq!(
-            run(
-                &mut env,
-                SkillStateAction::Start { spec: 4687 },
-                &mut output
-            )
-            .unwrap(),
-            0,
-            "{output}"
-        );
-        let restarted = gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
-            .unwrap()
-            .unwrap();
-        assert!(restarted.active);
-        assert_eq!(restarted.session_id, "fresh-session");
-        server.receive();
+        assert_eq!(phased.session_id, successor_session);
+        assert_eq!(phased.phase.as_deref(), Some("verify"));
+    }
+
+    #[test]
+    fn build_start_and_phase_refuse_live_holder_with_liveness_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for action in ["start", "phase"] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let fixture = BoundTerminalFixture::new();
+            let holder = fixture.session.id.clone();
+            save_live_runtime(&fixture);
+            let before = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap();
+            // A concurrent successor does not terminalize the live Active holder.
+            let successor_session = launch_build_successor(&fixture, false);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &successor_session);
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            let request = if action == "start" {
+                SkillStateAction::Start { spec: 3327 }
+            } else {
+                SkillStateAction::Phase {
+                    spec: 3327,
+                    label: "verify".to_string(),
+                }
+            };
+            let code = run(&mut env, request, &mut output).unwrap();
+            assert_eq!(code, 2, "{action}: {output}");
+            let refusal: serde_json::Value = serde_json::from_str(output.trim())
+                .unwrap_or_else(|error| panic!("{action}: typed refusal: {error}: {output}"));
+            assert_eq!(refusal["error_code"], "build_state_session_mismatch");
+            assert_eq!(refusal["holder"]["session_id"], holder.as_str());
+            assert_eq!(refusal["holder"]["runtime"], "live");
+            let sidecar = &refusal["holder"]["runtime_sidecars"][0];
+            assert_eq!(sidecar["host_pid"], std::process::id());
+            assert_eq!(sidecar["child_pid"], std::process::id());
+            assert!(sidecar["heartbeat_at"].is_string(), "{output}");
+            assert_eq!(
+                gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .unwrap()
+                    .unwrap(),
+                before,
+                "{action}: lifecycle must be preserved"
+            );
+        }
     }
 
     #[test]
@@ -4194,6 +4682,7 @@ format_version: Some(1),
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for runtime in [
+            "missing-session",
             "absent",
             "live",
             "unknown",
@@ -4208,7 +4697,10 @@ format_version: Some(1),
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "fresh-session");
             let sessions = gwt_core::paths::gwt_sessions_dir();
             let path = gwt_agent::runtime_state_path(&sessions, &fixture.session.id);
-            if !runtime.ends_with("absent") {
+            if runtime == "missing-session" {
+                std::fs::remove_file(sessions.join(format!("{}.toml", fixture.session.id)))
+                    .unwrap();
+            } else if !runtime.ends_with("absent") {
                 let identity = gwt_agent::SessionExecutionIdentity::from_session(&fixture.session)
                     .unwrap()
                     .unwrap();
@@ -4267,7 +4759,7 @@ format_version: Some(1),
             let after = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
                 .unwrap()
                 .unwrap();
-            if runtime.ends_with("absent") {
+            if runtime == "missing-session" || runtime.ends_with("absent") {
                 assert_eq!(code, 0, "{runtime}: {output}");
                 assert!(!after.active);
                 assert_eq!(after.session_id, before.session_id);
@@ -4301,18 +4793,11 @@ format_version: Some(1),
                 "build_state_owner_mismatch",
             ),
             (
-                "foreign-session",
-                Some(3403),
-                "other-session",
-                Some("terminal-bridge-session"),
-                "build_state_session_mismatch",
-            ),
-            (
-                "foreign-session-and-owner",
+                "gone-foreign-session-and-owner",
                 Some(3327),
                 "other-session",
                 Some("terminal-bridge-session"),
-                "build_state_session_mismatch",
+                "build_state_owner_mismatch",
             ),
         ] {
             let server = TerminalBridgeServer::start(
@@ -4414,6 +4899,51 @@ format_version: Some(1),
                 .is_none(),
             "a foreign Session must not downgrade an existing Execution to standalone"
         );
+        let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "start-bridge-session");
+        for holder in ["gone-predecessor", "start-bridge-session"] {
+            let state = gwt_core::skill_state::SkillState {
+                start_evidence: None,
+                active: true,
+                owner_spec: Some(3403),
+                started_at: chrono::Utc::now(),
+                phase: Some("green".into()),
+                session_id: holder.into(),
+            };
+            gwt_core::skill_state::save(&fixture.repo, SKILL_NAME, &state).unwrap();
+            for action in [
+                SkillStateAction::Start { spec: 3403 },
+                SkillStateAction::Phase {
+                    spec: 3403,
+                    label: "verify".into(),
+                },
+            ] {
+                let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+                let mut output = String::new();
+                let lease_observed = std::rc::Rc::new(std::cell::Cell::new(false));
+                let observed = lease_observed.clone();
+                let repo = fixture.repo.clone();
+                crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                    let error = crate::cli::trusted_store::with_write_lease_wait(
+                        &repo,
+                        std::time::Duration::ZERO,
+                        || Ok(()),
+                    )
+                    .expect_err("a concurrent canonical owner writer must be refused");
+                    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                    observed.set(true);
+                });
+                assert_eq!(run(&mut env, action, &mut output).unwrap(), 2, "{output}");
+                assert!(output.contains("execution_session_mismatch"), "{output}");
+                assert!(
+                    lease_observed.get(),
+                    "start/phase must hold the owner lease before judging ownership"
+                );
+                assert_eq!(
+                    gwt_core::skill_state::load(&fixture.repo, SKILL_NAME).unwrap(),
+                    Some(state.clone()),
+                );
+            }
+        }
     }
 
     #[test]
@@ -4595,7 +5125,10 @@ format_version: Some(1),
                 spec: 3403,
                 reason: Some("stale lifecycle owner".to_string()),
             },
-            SkillStateAction::Complete { spec: 3403 },
+            SkillStateAction::Complete {
+                spec: 3403,
+                pr: None,
+            },
         ] {
             let fixture = BoundTerminalFixture::new();
             let mut state = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)

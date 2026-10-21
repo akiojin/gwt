@@ -155,8 +155,10 @@ pub struct SpecSummary {
 /// Errors returned by [`IssueClient`] operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
-    #[error("issue #{0} not found")]
+    #[error("Issue {0} not found")]
     NotFound(IssueNumber),
+    #[error("PR {0} is a pull request, not an issue. Use `pr.view` instead.")]
+    PullRequestInsteadOfIssue(IssueNumber),
     #[error("comment {0} not found")]
     CommentNotFound(CommentId),
     #[error("body exceeds GitHub 65536 byte limit")]

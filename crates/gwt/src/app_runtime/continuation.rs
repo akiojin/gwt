@@ -315,13 +315,13 @@ fn prepare_fresh_execution_launch_session_start(
                 sessions_dir,
                 &pending.session_identity,
                 |activate| {
-                    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
+                    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_supersession_commit(
                         &pending.project_root,
                         &pending.worktree_path,
                         &pending.operation_id,
                         |projection, work_items, _| {
                             let now = chrono::Utc::now();
-                            let event = apply_workspace_launch_for_current_work(
+                            let events = apply_workspace_launch_for_current_work(
                                 &pending.project_root,
                                 projection,
                                 work_items,
@@ -344,8 +344,9 @@ fn prepare_fresh_execution_launch_session_start(
                                     live_session_ids,
                                     now,
                                 },
+                                true,
                             )?;
-                            Ok(((), vec![event]))
+                            Ok(((), events))
                         },
                         || {
                             if !window_is_current()
@@ -378,7 +379,17 @@ fn prepare_fresh_execution_launch_session_start(
     };
     if !matches!(transaction_committed, Ok(true)) {
         if pending_fresh_execution_activation_status(pending) != Some(true) {
-            return Err("the fresh generation activation transaction was rejected".to_string());
+            let reason = match transaction_committed {
+                Err(error) => error.to_string(),
+                Ok(false) => {
+                    "exact Prepared successor Session or binding changed before activation"
+                        .to_string()
+                }
+                Ok(true) => unreachable!("successful transaction was excluded"),
+            };
+            return Err(format!(
+                "the fresh generation activation transaction was rejected: {reason}"
+            ));
         }
         // A response-loss retry owns any partial generation+Work repair.
         // It must reacquire the exact active Session lease and must never
@@ -7277,7 +7288,7 @@ impl AppRuntime {
                             detail,
                             context.issue_monitor_delivery_id.as_deref(),
                             context.issue_monitor_session_mode.unwrap_or(gwt_agent::SessionMode::Normal),
-                            false,
+                            gwt_agent::is_transient_launch_failure(detail),
                         );
                         if committed {
                             self.launch_wizard_cache

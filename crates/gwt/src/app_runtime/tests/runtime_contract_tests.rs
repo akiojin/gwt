@@ -1,6 +1,124 @@
 use super::*;
 
 #[test]
+fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for owner in [
+        serde_json::Value::Null,
+        serde_json::json!("pm"),
+        serde_json::json!("pm"),
+    ] {
+        let request = serde_json::from_value(serde_json::json!({
+            "kind": "create_window", "preset": "settings",
+            "surface_owner": owner, "bounds": canvas_bounds()
+        }))
+        .expect("create request");
+        runtime.handle_frontend_event("client-1".to_string(), request);
+    }
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
+    let tab = runtime.tab("tab-1").expect("tab");
+    let windows = &tab.workspace.persisted().windows;
+    assert_eq!(
+        windows.len(),
+        2,
+        "PM Settings reuse must not steal ordinary Settings"
+    );
+    assert!(
+        windows[0].z_index > windows[1].z_index,
+        "Work must reuse the ordinary view"
+    );
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][1]["surface_owner"], "pm");
+    assert!(windows.iter().all(|window| !window.is_pm));
+}
+
+#[test]
+fn app_runtime_surface_owner_cannot_promote_an_agent_to_pm() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let request = serde_json::from_value(serde_json::json!({
+        "kind": "create_window", "preset": "codex", "surface_owner": "pm",
+        "bounds": canvas_bounds()
+    }))
+    .expect("agent request");
+    runtime.handle_frontend_event("client-1".to_string(), request);
+    for id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
+        runtime.stop_window_runtime(&id);
+    }
+    let tab = runtime.tab("tab-1").expect("tab");
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][0]["is_pm"], false);
+    assert!(snapshot["windows"][0].get("surface_owner").is_none());
+}
+
+#[test]
+fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt::ShellLaunchConfig {
+        working_dir: Some(temp.path().join("missing-worktree")),
+        branch: None,
+        base_branch: None,
+        display_name: "Shell".to_string(),
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+        env_vars: HashMap::new(),
+        remove_env: Vec::new(),
+        command_override: Some("missing-surface-owner-fixture".to_string()),
+        command_args_override: None,
+    };
+    runtime
+        .spawn_wizard_shell_window("tab-1", config, canvas_bounds())
+        .expect("Shell window");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !recorded_events.lock().expect("events").iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::ShellLaunchComplete { .. }
+        )
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "fixture Shell preparation must finish"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let tab = runtime.tab("tab-1").expect("tab");
+    let window = &tab.workspace.persisted().windows[0];
+    assert_eq!(window.preset, WindowPreset::Shell);
+    assert!(!window.persist);
+    assert!(window.session_id.is_none());
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][0]["surface_owner"], "agents");
+    assert!(tab.workspace.persistable_state().windows.is_empty());
+}
+
+#[test]
 fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
@@ -364,6 +482,7 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
         .insert(
             "handle-a".to_string(),
             super::super::RecoveryCenterAction {
+                client_id: "client-a".to_string(),
                 generation: 1,
                 board_entry_id: Some("entry-a".to_string()),
             },
@@ -382,6 +501,80 @@ fn recovery_center_project_reload_preserves_other_project_handles() {
             board_entry_id: None,
             ..
         }
+    ));
+}
+
+#[test]
+fn recovery_center_missing_authority_is_not_found_without_creating_storage() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let session = gwt_agent::Session::new(&repo, "work/issue-4252", gwt_agent::AgentId::Codex);
+    session.save(&runtime.sessions_dir).unwrap();
+    // The project has recovery storage, but this Session has none.
+    RecoveryStore::for_repo(&repo, "another-session").unwrap();
+    let intents = gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("recovery/intents");
+    for _ in 0..2 {
+        let context = runtime.project_context("tab-1").unwrap();
+        let events = runtime.load_recovery_center_events(&context, "client", "load");
+        assert_eq!(
+            serde_json::to_value(&events[0].event).unwrap()["status"],
+            "not_found"
+        );
+        assert_eq!(fs::read_dir(&intents).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn recovery_center_discovers_saved_project_store_after_worktree_deletion() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let worktree = temp.path().join("deleted-worktree");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/recovery",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
+    session.project_state_root = Some(repo.clone());
+    session.repo_hash = Some(
+        gwt_core::paths::project_scope_hash(&repo)
+            .as_str()
+            .to_owned(),
+    );
+    session.save(&runtime.sessions_dir).unwrap();
+    RecoveryStore::for_repo(&worktree, &session.id)
+        .unwrap()
+        .prepare(
+            "prepare-deleted",
+            recovery_center_test_intent(
+                &session.id,
+                "recovery-deleted",
+                "board-deleted",
+                BoardWorktreeForm::BranchBacked,
+                "Retained delivery",
+            ),
+        )
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let context = runtime.project_context("tab-1").unwrap();
+    let events = runtime.load_recovery_center_events(&context, "client", "load");
+    assert!(matches!(&events[0].event,
+        BackendEvent::RecoveryCenterState { items, .. } if items.len() == 1
     ));
 }
 
@@ -651,10 +844,34 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         } if entry_id == "board-ack-action"
     ));
+
+    let context = runtime.project_context("tab-1").unwrap();
+    let foreign_result = runtime.open_recovery_center_board_entry_events(
+        &context,
+        "client-other",
+        "foreign-open",
+        generation,
+        &acknowledged_handle,
+    );
+    let foreign_wire = serde_json::to_value(&foreign_result[0].event).unwrap();
+    assert!(foreign_wire.get("board_entry_id").is_none());
+    assert!(foreign_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("client")));
+
+    runtime.load_recovery_center_events(&context, "client-other", "other-load");
+    assert!(
+        matches!(
+            &open(&mut runtime, generation, acknowledged_handle.clone())[0].event,
+            BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. }
+                if id == "board-ack-action"
+        ),
+        "another client's load must preserve the original client's handle"
+    );
     let stale_result = open(
         &mut runtime,
         generation.saturating_sub(1),
-        acknowledged_handle,
+        acknowledged_handle.clone(),
     );
     assert!(matches!(
         &stale_result[0].event,
@@ -663,6 +880,53 @@ fn recovery_center_resolves_board_history_only_for_current_acknowledged_handle()
             ..
         }
     ));
+    let stale_wire = serde_json::to_value(&stale_result[0].event).unwrap();
+    assert!(stale_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("generation")));
+
+    runtime.load_recovery_center_events(&context, "client-recovery", "reload");
+    let reloaded = open(&mut runtime, generation, acknowledged_handle.clone());
+    let reloaded_wire = serde_json::to_value(&reloaded[0].event).unwrap();
+    assert!(reloaded_wire.get("board_entry_id").is_none());
+    assert!(reloaded_wire["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(&acknowledged_handle) && error.contains("handle")));
+
+    // A captured context cannot authorize actions after the tab is closed.
+    runtime.project_tab_incarnations.remove("tab-1");
+    for closed in [
+        runtime.handle_frontend_event_in_scope(
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "closed-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+            &ClientScope::Project(context.project_key.clone()),
+        ),
+        runtime.handle_frontend_event_for_project(
+            &context,
+            "client-recovery".into(),
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id: "stale-open".into(),
+                generation,
+                action_handle: acknowledged_handle.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            closed.len(),
+            1,
+            "closed project actions require an explicit refusal"
+        );
+        let closed_wire = serde_json::to_value(&closed[0].event).unwrap();
+        assert!(
+            closed_wire["error"].as_str().is_some_and(
+                |error| error.contains(&acknowledged_handle) && error.contains("project")
+            )
+        );
+    }
     assert_eq!(pending.state, RecoveryState::Pending);
 }
 
@@ -1041,8 +1305,12 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Memo, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Memo,
+        canvas_bounds(),
+        None,
+    );
 
     assert!(events.is_empty());
     assert!(runtime.window_lookup.is_empty());
@@ -1053,6 +1321,63 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
         .persisted()
         .windows
         .is_empty());
+}
+
+#[test]
+fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for preset in [
+        WindowPreset::Issue,
+        WindowPreset::IssueMonitor,
+        WindowPreset::Spec,
+        WindowPreset::Work,
+        WindowPreset::Branches,
+    ] {
+        let events =
+            runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds(), None);
+        assert!(!events.is_empty());
+        for window in &runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+        {
+            assert_eq!(window.preset, WindowPreset::Settings);
+            assert_eq!(window.title, "Settings");
+        }
+    }
+    let before = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .len();
+    for _ in 0..2 {
+        runtime.create_window_events(
+            &runtime.test_context(),
+            WindowPreset::Settings,
+            canvas_bounds(),
+            None,
+        );
+    }
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        before + 2,
+        "split views may create distinct Settings windows"
+    );
 }
 
 #[test]
@@ -1068,8 +1393,12 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let first_events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let first_events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let first = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1080,8 +1409,12 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         .expect("first Work window")
         .clone();
 
-    let repeated_events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let repeated_events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -1095,7 +1428,7 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         "repeated Work create must reuse the window"
     );
     assert_eq!(windows[0].id, first.id);
-    assert_eq!(windows[0].preset, WindowPreset::Work);
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
     assert!(
         windows[0].z_index > first.z_index,
         "reuse must raise the existing Work window"

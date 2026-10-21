@@ -302,6 +302,13 @@ impl CliEnv for DefaultCliEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         crate::cli::pr::fetch_current_pr_via_gh(&self.repo_path)
     }
+
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        crate::cli::pr::fetch_completion_pr_candidates_via_gh(&self.repo_path, number)
+    }
     fn create_pr(
         &mut self,
         base: &str,
@@ -324,6 +331,18 @@ impl CliEnv for DefaultCliEnv {
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             &request,
+        )
+    }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        crate::cli::pr::ci_delivery::fetch(
+            &self.repo_path,
+            &format!("{}/{}", self.owner, self.repo),
+            base,
+            head,
         )
     }
     fn compare_pr_head(
@@ -410,6 +429,56 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
             .map_err(io::Error::other)
     }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        use gwt_git::pr_status::{self, PrAutoMergeRemoteState};
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        let remote = pr_status::fetch_pr_auto_merge_remote_state_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .ok_or_else(|| {
+            io::Error::other("auto-merge remote state is unknown; no mutation attempted")
+        })?;
+        let outcome = pr_status::arm_pr_auto_merge_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+            reviewed_head_sha,
+            &remote,
+        );
+        if !outcome.is_success() {
+            return Err(io::Error::other(format!(
+                "external fork auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+            )));
+        }
+        match pr_status::fetch_pr_auto_merge_remote_state_in_repository(&self.repo_path, &repository, number) {
+            Some(PrAutoMergeRemoteState::Open { head_sha, auto_merge_requested: true })
+                if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":true,"state":"OPEN"})),
+            Some(PrAutoMergeRemoteState::Merged { head_sha }) if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":false,"state":"MERGED"})),
+            _ => Err(io::Error::other("auto-merge result is unconfirmed or head changed; inspect the remote PR before retrying")),
+        }
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_completion_snapshot_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
@@ -439,8 +508,19 @@ impl CliEnv for DefaultCliEnv {
         )
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
-        gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
-            .map_err(|err| io::Error::other(err.to_string()))
+        let repo_slug = format!("{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_status(&repo_slug, number).map_err(|error| {
+            if crate::cli::pr::number_is_issue_via_gh(&repo_slug, &self.repo_path, number) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Issue #{number} is an issue, not a pull request. Use `issue.view` instead."
+                    ),
+                )
+            } else {
+                io::Error::other(error.to_string())
+            }
+        })
     }
     fn fetch_pr_quarantine_context(
         &mut self,
@@ -550,6 +630,76 @@ impl CliEnv for DefaultCliEnv {
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
     }
 
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        let identity = gwt_core::repo_hash::detect_repo_identity(&self.repo_path)
+            .ok_or_else(|| io::Error::other("project repository identity is unavailable"))?;
+        let expected = gwt_core::repo_hash::compute_repo_hash(&format!(
+            "https://github.com/{}/{}",
+            self.owner, self.repo
+        ));
+        if identity.hash != expected {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"PM settings operations require the project's canonical GitHub repository; repository overrides cannot select another target"));
+        }
+        Ok((self.owner.clone(), self.repo.clone()))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_snapshot(operation, params)
+            .map_err(api_to_io)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_mutate(operation, params, before)
+            .map_err(api_to_io)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .create_github_discussion(category, title, body)
+            .map_err(api_to_io)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .required_status_checks(branch)
+            .map_err(api_to_io)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .update_required_status_checks(branch, settings)
+            .map_err(api_to_io)
+    }
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
         use gwt_config::Settings;
         crate::cli::actions::validate_dispatch_call(&call)

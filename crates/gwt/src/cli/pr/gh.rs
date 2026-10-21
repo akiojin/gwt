@@ -25,7 +25,11 @@ use crate::cli::{
 
 use super::{PrQuarantineComment, PrQuarantineContext};
 
-fn run_gh_in<I, S>(label: &str, repo_path: Option<&Path>, args: I) -> io::Result<SpawnOutput>
+pub(super) fn run_gh_in<I, S>(
+    label: &str,
+    repo_path: Option<&Path>,
+    args: I,
+) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -65,6 +69,23 @@ where
     run_gh_in(label, None, args)
 }
 
+/// Diagnose a failed PR lookup only when GitHub confirms the same number is
+/// an Issue. An unavailable or malformed probe leaves the original error intact.
+pub fn number_is_issue_via_gh(repo_slug: &str, repo_path: &Path, number: u64) -> bool {
+    let endpoint = format!("repos/{repo_slug}/issues/{number}");
+    let Ok(output) = run_gh_in("gh api issue kind", Some(repo_path), ["api", &endpoint]) else {
+        return false;
+    };
+    if !output.success() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    value.get("number").and_then(serde_json::Value::as_u64) == Some(number)
+        && value.get("pull_request").is_none()
+}
+
 fn run_git_in<I, S>(label: &str, repo_path: &Path, args: I) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,
@@ -80,6 +101,103 @@ where
 const PR_STATUS_FIELDS: &str =
     "number,title,state,url,headRefName,headRepository,headRepositoryOwner,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
 const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,headRepository,headRepositoryOwner";
+
+/// Completion must inspect earlier deliveries on a reused branch (#5842).
+pub fn fetch_completion_pr_candidates_via_gh(
+    repo_path: &std::path::Path,
+    number: Option<u64>,
+) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+    let branch = current_branch_name(repo_path)?
+        .ok_or_else(|| io::Error::other("completion requires the owning branch"))?;
+    let repo = github_remote_owner_and_repo(repo_path)
+        .ok_or_else(|| io::Error::other("completion repository identity is unknown"))?;
+    let slug = format!("{}/{}", repo.0, repo.1);
+    let fields = "number,url,headRefName,headRefOid,headRepository,headRepositoryOwner";
+    let args = if let Some(number) = number {
+        vec![
+            "pr".into(),
+            "view".into(),
+            number.to_string(),
+            "--repo".into(),
+            slug,
+            "--json".into(),
+            fields.into(),
+        ]
+    } else {
+        vec![
+            "pr".into(),
+            "list".into(),
+            "--repo".into(),
+            slug,
+            "--head".into(),
+            branch.clone(),
+            "--state".into(),
+            "all".into(),
+            "--limit".into(),
+            "100".into(),
+            "--json".into(),
+            fields.into(),
+        ]
+    };
+    let output = run_gh_in("gh completion PR candidates", Some(repo_path), args)?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh completion PR candidates: {}",
+            output.stderr.trim()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let values = if number.is_some() {
+        vec![value]
+    } else {
+        let values: Vec<serde_json::Value> = serde_json::from_value(value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if values.len() >= 100 {
+            return Err(io::Error::other("completion candidate list may be truncated; specify the target with build.complete params.pr"));
+        }
+        values
+    };
+    parse_completion_pr_candidates(values, &branch, &repo)
+}
+
+fn parse_completion_pr_candidates(
+    values: Vec<serde_json::Value>,
+    branch: &str,
+    repo: &(String, String),
+) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+    values
+        .into_iter()
+        .filter(|value| pr_value_matches_current_repo_head(value, branch, Some(repo)))
+        .map(|value| {
+            let required = |name| {
+                value
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("completion PR has no {name}"),
+                        )
+                    })
+            };
+            Ok(crate::cli::CompletionPrCandidate {
+                number: value
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|number| *number > 0)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "completion PR has no number")
+                    })?,
+                url: required("url")?,
+                head_ref_name: branch.to_string(),
+                head_sha: required("headRefOid")?,
+            })
+        })
+        .collect()
+}
 
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
     let branch = current_branch_name(repo_path)?;
@@ -1488,6 +1606,34 @@ pub fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completion_pr_candidates_filter_repository_branch_and_require_head() {
+        let value = serde_json::json!({
+            "number":9001, "url":"https://github.com/o/r/pull/9001",
+            "headRefName":"work/slices", "headRefOid":"verified-head",
+            "headRepository":{"name":"r"}, "headRepositoryOwner":{"login":"o"}
+        });
+        let mut fork = value.clone();
+        fork["headRepositoryOwner"]["login"] = "fork".into();
+        let mut other = value.clone();
+        other["headRefName"] = "other".into();
+        let repo = ("o".into(), "r".into());
+        let candidates = super::parse_completion_pr_candidates(
+            vec![value.clone(), fork, other],
+            "work/slices",
+            &repo,
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].number, 9001);
+        assert_eq!(candidates[0].head_sha, "verified-head");
+        let mut missing = value;
+        missing["headRefOid"] = serde_json::Value::Null;
+        assert!(
+            super::parse_completion_pr_candidates(vec![missing], "work/slices", &repo).is_err()
+        );
+    }
+
     fn fork_repository(name: &str, source_id: u64) -> serde_json::Value {
         serde_json::json!({
             "id": 22,

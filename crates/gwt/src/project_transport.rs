@@ -49,8 +49,6 @@ pub enum ClientScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchTarget {
     All,
-    // Explicit Hub recipients are part of the routing contract; producers migrate separately.
-    #[allow(dead_code)]
     Hub,
     Project(gwt_core::repo_hash::ProjectKey),
     Client(String),
@@ -60,6 +58,12 @@ pub enum DispatchTarget {
 pub enum KnowledgeWireMetadata {
     SemanticRetry(crate::KnowledgeSemanticRetry),
     NonSemanticError,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct KnowledgeLoadTiming {
+    pub queued_at: Instant,
+    pub dispatch_enqueued_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,8 @@ pub struct OutboundEvent {
     pub terminal_stream_seq: Option<u64>,
     /// Error provenance only; never serialized or inferred from dispatch targets.
     pub error_origin: Option<crate::error_report::ErrorOrigin>,
+    /// First cache response timing across the GUI dispatch queue; never serialized.
+    pub knowledge_load_timing: Option<KnowledgeLoadTiming>,
 }
 
 impl OutboundEvent {
@@ -88,6 +94,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -107,8 +114,7 @@ impl OutboundEvent {
         assert!(
             matches!(
                 &event,
-                BackendEvent::ProcessLine { .. }
-                    | BackendEvent::LogEntryAppended { .. }
+                BackendEvent::LogEntryAppended { .. }
                     | BackendEvent::RuntimeHealth { .. }
                     | BackendEvent::ProviderUsage { .. }
                     | BackendEvent::BoardAuthStatus { .. }
@@ -134,6 +140,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -146,6 +153,7 @@ impl OutboundEvent {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -153,6 +161,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: Some(crate::error_report::ErrorOrigin::Host),
+            knowledge_load_timing: None,
         }
     }
 
@@ -170,6 +179,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -188,6 +198,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -212,6 +223,7 @@ impl OutboundEvent {
             knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 
@@ -1005,6 +1017,31 @@ impl ClientHub {
             .map(|registration| registration.scope.clone())
     }
 
+    /// Only browser views bound to this Project participate in notification delivery.
+    pub fn project_browser_client_ids(&self, key: &gwt_core::repo_hash::ProjectKey) -> Vec<String> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, client)| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn has_project_browser_clients(&self, key: &gwt_core::repo_hash::ProjectKey) -> bool {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+    }
+
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, false, ClientScope::Hub)
     }
@@ -1142,11 +1179,32 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
+            let target = outbound.target.clone();
+            let client_id = match &target {
+                DispatchTarget::Client(id) => Some(id.as_str()),
+                _ => None,
+            };
+            let knowledge_load = match &outbound.event {
+                BackendEvent::KnowledgeEntries { id, request_id, .. } => Some((
+                    id.clone(),
+                    *request_id,
+                    Instant::now(),
+                    outbound.knowledge_load_timing,
+                )),
+                _ => None,
+            };
+            if let Some((window_id, request_id, started, Some(timing))) = &knowledge_load {
+                let elapsed_ms = started.duration_since(timing.queued_at).as_secs_f64() * 1000.0;
+                tracing::info!(target: "gwt::knowledge_load", stage = "dispatch_wait", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.duration_since(timing.dispatch_enqueued_at).as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = (elapsed_ms >= 60_000.0).then_some("dispatch_wait"),
+                    "Issue cache response dispatch queue wait");
+            }
             crate::error_report::queue_backend_event_with_origin(
                 &outbound.event,
                 outbound.error_origin.as_ref(),
             );
-            let target = outbound.target.clone();
             let prepared = prepare_owned_outbound(outbound);
             for (client_id, queue, receives_broadcasts, scope) in &snapshot {
                 if target_selects(&target, client_id, *receives_broadcasts, scope)
@@ -1154,6 +1212,15 @@ impl ClientHub {
                 {
                     dead_clients.push(client_id.clone());
                 }
+            }
+            if let Some((window_id, request_id, started, timing)) = knowledge_load {
+                let elapsed_ms =
+                    timing.map(|timing| timing.queued_at.elapsed().as_secs_f64() * 1000.0);
+                tracing::info!(target: "gwt::knowledge_load", stage = "send", status = "completed",
+                    %window_id, ?request_id, client_id, elapsed_ms,
+                    duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    deadline_exceeded_stage = elapsed_ms.filter(|elapsed| *elapsed >= 60_000.0).map(|_| "send"),
+                    boundary = "serialize_and_socket_queue", "Issue cache response queued");
             }
         }
 
@@ -1402,6 +1469,28 @@ async fn hook_live_handler(
             .canonical_project_root()
             .to_string_lossy()
             .into_owned(),
+    );
+    let source_event = match event.source_event.as_deref() {
+        Some(
+            source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+            | "SubagentStart" | "SubagentStop" | "Notification" | "PermissionRequest"),
+        ) => source,
+        None => "none",
+        _ => "other",
+    };
+    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+        event.occurred_at.as_str()
+    } else {
+        "invalid"
+    };
+    tracing::info!(
+        target: "gwt.hook.delivery",
+        stage = "receipt",
+        outcome = "authenticated",
+        gwt_session_id = principal.session_id(),
+        source_event,
+        occurred_at,
+        "runtime hook delivery"
     );
     state.send(TransportEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
@@ -1943,6 +2032,22 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::CloseWork {
+                work_id,
+                close_kind,
+            } => Some(AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            }),
+            FrontendEvent::PaneName {
+                candidate,
+                request_id,
+            } if self.grant.principal().authorizes_producing_mutation() => {
+                Some(AgentFrontendRequest::Name {
+                    candidate,
+                    request_id,
+                })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -2032,10 +2137,12 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            "pane_name_result" => Some(payload),
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
             "pane_close_result" => Some(payload),
+            "work_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -2139,6 +2246,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
+            Self::Browser(_) if matches!(event, FrontendEvent::PaneName { .. }) => None,
             Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
@@ -2179,6 +2287,23 @@ impl ClientSessionScope {
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
+}
+
+fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
+    let event = serde_json::from_str(text)?;
+    if matches!(&event, FrontendEvent::PaneName { .. }) {
+        let raw: serde_json::Value = serde_json::from_str(text)?;
+        if raw.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .any(|key| !["kind", "candidate", "request_id"].contains(&key.as_str()))
+        }) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "pane_name accepts only candidate and request_id; target and authority claims are forbidden",
+            ));
+        }
+    }
+    Ok(event)
 }
 
 pub async fn client_session(socket: WebSocket, state: TransportState, scope: ClientScope) {
@@ -2222,6 +2347,30 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_self_close_response<S>(
+    sender: &mut S,
+    response: crate::agent_capability::AgentSelfCloseResponse,
+    deadline: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match response {
+        Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
+        Err(refusal) => {
+            send_agent_pm_terminal_result(
+                sender,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: refusal.window_id,
+                    reason: Some(refusal.reason),
+                },
+                deadline,
+            )
+            .await
+        }
+    }
 }
 
 async fn send_agent_pm_terminal_result<S>(
@@ -2370,7 +2519,7 @@ async fn client_session_with_scope(
                             .await;
                             break;
                         }
-                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
+                        match decode_frontend_event(text.as_ref()) {
                             Ok(event) => {
                                 match scope.filter_inbound(event) {
                                     Some(ScopedFrontendRequest::Browser(event)) => {
@@ -2623,15 +2772,10 @@ async fn client_session_with_scope(
                                                     }
                                                 }
                                             };
-                                            let Some(acceptance) = accepted else {
+                                            let Some(response) = accepted else {
                                                 break;
                                             };
-                                            send_agent_self_close_acceptance(
-                                                &mut sender,
-                                                acceptance,
-                                                Duration::from_secs(2),
-                                            )
-                                            .await;
+                                            send_agent_self_close_response(&mut sender, response, Duration::from_secs(2)).await;
                                             break;
                                         }
                                     }
@@ -2751,6 +2895,51 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
+        use futures_util::{SinkExt, StreamExt};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut sender = socket.with(|message: axum::extract::ws::Message| {
+                    let axum::extract::ws::Message::Text(text) = message else {
+                        panic!("expected text response")
+                    };
+                    futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                        tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                    ))
+                });
+                super::send_agent_self_close_response(
+                    &mut sender,
+                    Err(crate::agent_capability::AgentSelfCloseRefusal {
+                        window_id: "tab::own".into(),
+                        reason: "unread evidence; run board.show all:true".into(),
+                    }),
+                    std::time::Duration::from_secs(1),
+                )
+                .await;
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let message = client.next().await.unwrap().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(payload["kind"], "pane_close_result");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["window_id"], "tab::own");
+            assert!(payload["reason"].as_str().unwrap().contains("board.show"));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
     fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
         use super::{DispatchTarget, OutboundEvent};
         use crate::BackendEvent;
@@ -2776,7 +2965,8 @@ mod tests {
         }
         assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
             BackendEvent::CloneProjectError {
-                message: "project error".into()
+                message: "project error".into(),
+                existing_project_key: None,
             }
         ))
         .is_err());
@@ -2799,6 +2989,23 @@ mod tests {
         assert_eq!(clients.browser_session_state(), (2, false));
         assert!(clients.has_clients());
     }
+
+    #[test]
+    fn project_browser_membership_excludes_hub_panes_and_disconnected_clients() {
+        let clients = ClientHub::default();
+        let key = project_a();
+        clients.register_pane("agent".into());
+        clients.register_scoped("hub".into(), ClientScope::Hub);
+        clients.register_scoped("a".into(), ClientScope::Project(key.clone()));
+        clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        assert_eq!(clients.project_browser_client_ids(&key), ["a"]);
+        assert!(clients.has_project_browser_clients(&key));
+        clients.unregister("a");
+        assert!(!clients.has_project_browser_clients(&key));
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }
@@ -2809,8 +3016,68 @@ mod tests {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
+
+    #[test]
+    fn knowledge_load_transport_records_dispatch_wait_and_send_deadlines() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
+        let event = BackendEvent::KnowledgeEntries {
+            id: "tab-1::issue-1".into(),
+            knowledge_kind: KnowledgeKind::Issue,
+            request_id: Some(5543),
+            revision: "cached".into(),
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: false,
+            cache_revision: None,
+        };
+        let now = Instant::now();
+        let mut outbound = OutboundEvent::reply("client", event.clone());
+        outbound.knowledge_load_timing = Some(KnowledgeLoadTiming {
+            queued_at: now - Duration::from_secs(61),
+            dispatch_enqueued_at: now - Duration::from_secs(60),
+        });
+        assert_eq!(
+            prepare_outbound_event(&outbound).payload.as_ref(),
+            serde_json::to_string(&event).unwrap(),
+            "request timing is internal and must not change the wire payload"
+        );
+        ClientHub::default().dispatch(vec![outbound]);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|record: &serde_json::Value| record["target"] == "gwt::knowledge_load")
+            .collect();
+        for stage in ["dispatch_wait", "send"] {
+            let fields = &records
+                .iter()
+                .find(|record| record["fields"]["stage"] == stage)
+                .unwrap_or_else(|| panic!("missing {stage} timing"))["fields"];
+            assert_eq!(fields["window_id"], "tab-1::issue-1");
+            assert_eq!(fields["request_id"], "Some(5543)");
+            assert_eq!(fields["client_id"], "client");
+            assert_eq!(fields["status"], "completed");
+            assert_eq!(fields["deadline_exceeded_stage"], stage);
+            assert!(fields["elapsed_ms"].as_f64().unwrap() >= 61_000.0);
+            assert!(fields["duration_ms"].as_f64().unwrap() >= 0.0);
+        }
+        let wait = records
+            .iter()
+            .find(|record| record["fields"]["stage"] == "dispatch_wait")
+            .unwrap();
+        assert!(wait["fields"]["duration_ms"].as_f64().unwrap() >= 60_000.0);
+    }
+
     #[tokio::test]
     async fn authenticated_http_and_websocket_dispatch_without_gui() {
         let project = tempfile::tempdir().expect("project");
@@ -2834,6 +3101,13 @@ mod tests {
             }),
         );
         let app = agent_router(state, AccessLogSink::default());
+        let hook_log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(hook_log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2847,7 +3121,8 @@ mod tests {
             .bearer_auth(&grant.token)
             .json(&serde_json::json!({
                 "kind": "runtime_state", "gwt_session_id": "transport-session",
-                "occurred_at": "2026-09-28T00:00:00Z"
+                "source_event": "PostToolUse", "occurred_at": "2026-09-28T00:00:00Z",
+                "agent_session_id": "private-provider-id", "message": "private-hook-content"
             }))
             .send()
             .await
@@ -2859,6 +3134,30 @@ mod tests {
                 .unwrap(),
             Some(TransportEvent::RuntimeHook(_))
         ));
+        let text = std::fs::read_to_string(hook_log.path()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = records
+            .iter()
+            .find(|record| record["target"] == "gwt.hook.delivery")
+            .expect("authenticated receipt must survive outside the access ring");
+        assert_eq!(receipt["level"], "INFO");
+        assert_eq!(receipt["fields"]["stage"], "receipt");
+        assert_eq!(receipt["fields"]["gwt_session_id"], "transport-session");
+        assert_eq!(receipt["fields"]["source_event"], "PostToolUse");
+        assert_eq!(receipt["fields"]["occurred_at"], "2026-09-28T00:00:00Z");
+        for private in [
+            grant.token.as_str(),
+            "private-provider-id",
+            "private-hook-content",
+        ] {
+            assert!(
+                !text.contains(private),
+                "receipt must contain correlation metadata only"
+            );
+        }
         let mut request = format!("ws://{addr}/internal/pane-ws")
             .into_client_request()
             .unwrap();
@@ -2883,6 +3182,72 @@ mod tests {
         socket.close(None).await.unwrap();
         server.abort();
     }
+    #[test]
+    fn pane_name_wire_refuses_target_and_authority_claims() {
+        let request = serde_json::json!({
+            "kind": "pane_name", "candidate": "Aster", "request_id": "request-1"
+        });
+        assert!(decode_frontend_event(&request.to_string()).is_ok());
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut foreign = request.clone();
+            foreign[forbidden] = serde_json::json!("foreign");
+            assert!(
+                decode_frontend_event(&foreign.to_string()).is_err(),
+                "accepted {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+        let project = tempfile::tempdir().expect("project");
+        let request = || {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "pane_name", "candidate": "Aster",
+                "request_id": "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+            }))
+            .expect("self-naming wire request")
+        };
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-name".to_string(),
+            repo_hash: "repo-name".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3824,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-name".to_string(),
+                binding_id: "binding-name".to_string(),
+                ledger_head_hash: "head-name".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let bound =
+            AgentSessionPrincipal::for_test_bound(project.path(), "session-name", binding.clone())
+                .unwrap();
+        let inspection = AgentSessionPrincipal::for_test(project.path(), "session-name").unwrap();
+        let prepared =
+            AgentSessionPrincipal::for_test_prepared(project.path(), "session-name", binding)
+                .unwrap();
+        for principal in [inspection, prepared] {
+            let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+                "observation-capability".to_string(),
+                principal,
+            ));
+            assert!(scope.filter_inbound(request()).is_none());
+        }
+        let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "producing-capability".to_string(),
+            bound,
+        ));
+        let name_request = scope
+            .filter_inbound(request())
+            .expect("producing self-name request");
+        assert!(name_request.mutates_host_state());
+        assert!(name_request.requires_producing_authority());
+        let browser = ClientSessionScope::Browser(ClientScope::Hub);
+        assert!(browser.filter_inbound(request()).is_none());
+    }
+
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -3075,6 +3440,25 @@ mod tests {
                 )
                 .is_some(),
             "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
+    #[test]
+    fn agent_workspace_close_preserves_authenticated_host_dispatch_and_reply() {
+        let project = tempfile::tempdir().expect("project");
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(matches!(scope.filter_inbound(FrontendEvent::CloseWork {
+            work_id: "work-1".into(), close_kind: "done".into(),
+        }), Some(super::AgentFrontendRequest::CloseWork { work_id, close_kind })
+            if work_id == "work-1" && close_kind == "done"));
+        let reply = serde_json::json!({"kind":"work_close_result","work_id":"work-1","close_kind":"done","ok":false,"retryable":true});
+        assert_eq!(
+            scope.filter_outbound(reply.to_string()),
+            Some(reply.to_string())
         );
     }
 
@@ -3840,6 +4224,7 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let event = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "project launch error".into(),
             issue_number: Some(4735),
@@ -3905,6 +4290,7 @@ mod tests {
             )),
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         };
         let prepared = prepare_outbound_event(&outbound);
         let value: serde_json::Value =
@@ -4815,6 +5201,7 @@ mod tests {
                     knowledge_wire_metadata: None,
                     terminal_stream_seq: None,
                     error_origin: None,
+                    knowledge_load_timing: None,
                 },
             };
             hub.dispatch(vec![outbound]);

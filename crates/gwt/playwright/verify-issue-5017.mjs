@@ -2,13 +2,14 @@
 // Usage: node crates/gwt/playwright/verify-issue-5017.mjs [--skip-build] [Playwright arguments]
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const gwt = join(root, "target/debug/gwt");
-const gwtd = join(root, "target/debug/gwtd");
+const windows = process.platform === "win32";
+const gwt = join(root, "target/debug/gwt" + (windows ? ".exe" : ""));
+const gwtd = join(root, "target/debug/gwtd" + (windows ? ".exe" : ""));
 const args = process.argv.slice(2);
 const playwrightArgs = args.filter(argument => argument !== "--skip-build");
 const owned = [];
@@ -19,7 +20,7 @@ let evidence;
 let cleanupPromise;
 
 function start(file, arguments_, env = process.env, cwd = root, input = "", stream = false) {
-  const child = spawn(file, arguments_, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(file, arguments_, { cwd, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
   const record = { child, file, arguments: arguments_, stdout: "", stderr: "", finished: false };
   owned.push(record); // Capture this exact owned PID before readiness or auditing.
   record.closed = new Promise(resolve => {
@@ -80,9 +81,13 @@ async function cleanup() {
       const launches = (await readFile(join(backend.home, "provider-argv.jsonl"), "utf8").catch(() => ""))
         .split("\n").filter(Boolean).map(line => JSON.parse(line));
       for (const launch of launches) {
-        const ps = start("/bin/ps", ["-p", String(launch.pid), "-o", "command="]);
+        if (!Number.isInteger(launch.pid) || launch.pid <= 0) continue;
+        const ps = windows
+          ? start(join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe"), ["-NoProfile", "-Command",
+            `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${launch.pid}').CommandLine`])
+          : start("/bin/ps", ["-p", String(launch.pid), "-o", "command="]);
         await ps.closed;
-        if (!ps.stdout.includes(join(backend.home, "bin", "claude"))) continue;
+        if (!ps.stdout.includes(join(backend.home, "bin", windows ? "claude.cjs" : "claude"))) continue;
         try { process.kill(launch.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") failures.push(String(error)); }
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline) {
@@ -114,18 +119,35 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(signal, () =>
 
 const fixtureSource = String.raw`
 const fs = require('node:fs'), path = require('node:path'), readline = require('node:readline');
-const bin = __dirname, home = path.dirname(bin), command = path.basename(process.argv[1]);
+const bin = __dirname, home = path.dirname(bin), command = path.basename(process.argv[1]).replace(/\.cjs$/, '');
 const args = process.argv.slice(2), statePath = path.join(home, 'agent-versions.json');
 const versions = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
-const packages = {'@anthropic-ai/claude-code':'claude','@openai/codex':'codex','@xai-official/grok':'grok','opencode-ai':'opencode','openclaw':'openclaw'};
-const latest = {claude:'2.1.0',codex:'1.0.0',grok:'2.0.0',opencode:'1.0.0',openclaw:'1.0.0'};
+const packages = {'@openai/codex':'codex','@xai-official/grok':'grok','opencode-ai':'opencode','openclaw':'openclaw'};
+const latest = {codex:'1.0.0',grok:'2.0.0',agy:'1.3.5',opencode:'1.0.0',openclaw:'1.0.0'};
 const log = (name, value) => fs.appendFileSync(path.join(home, name), JSON.stringify(value) + '\n');
 const refuse = () => { log('rejected-operations.jsonl', {command,args}); console.error('Unsupported fixture operation: ' + command + ' ' + args.join(' ')); process.exit(64); };
 if (command === 'npm') {
   log('npm-argv.jsonl', args);
   if (args[0] === 'view' && packages[args[1]] && args[2] === 'version'
     && args.slice(3).every(arg => ['--json','--fetch-timeout=5000','--fetch-retries=0'].includes(arg))) {
-    console.log(JSON.stringify(latest[packages[args[1]]])); process.exit(0);
+    const id = packages[args[1]], marker = path.join(home, 'codex-metadata-started');
+    log('metadata-events.jsonl', {id,stage:'started',pid:process.pid});
+    if (id === 'codex') {
+      fs.writeFileSync(marker, 'started');
+      console.error('Fixture Codex metadata unavailable'); process.exit(8);
+    }
+    if (id === 'openclaw') {
+      // A sequential catalog cannot reach Codex while this query is waiting.
+      const deadline = Date.now() + 10_000;
+      while (!fs.existsSync(marker)) {
+        if (Date.now() >= deadline) {
+          console.error('Codex metadata did not start while OpenClaw was waiting'); process.exit(9);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
+    }
+    log('metadata-events.jsonl', {id,stage:'finished',pid:process.pid});
+    console.log(JSON.stringify(latest[id])); process.exit(0);
   }
   if (args.length === 3 && args[0] === 'install' && args[1] === '-g') {
     const entry = Object.entries(packages).find(([pkg]) => args[2] === pkg || args[2].startsWith(pkg + '@'));
@@ -137,17 +159,44 @@ if (command === 'npm') {
       console.error('Permission denied writing fixture prefix. Fix npm global prefix permissions and retry.'); process.exit(7);
     }
     const state = versions(); state[id] = latest[id]; fs.writeFileSync(statePath, JSON.stringify(state));
-    fs.writeFileSync(path.join(bin, id), '#!' + process.execPath + '\nrequire("./fixture.cjs");\n', {mode:0o755});
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(bin, id + '.cjs'), 'require("./fixture.cjs");\n');
+      fs.writeFileSync(path.join(bin, id + '.cmd'), '@echo off\r\nset "dp0=%~dp0"\r\n"' + process.execPath + '" "%dp0%\\' + id + '.cjs" %*\r\n');
+    } else fs.writeFileSync(path.join(bin, id), '#!' + process.execPath + '\nrequire("./fixture.cjs");\n', {mode:0o755});
     console.log('Installed fixture ' + id + ' ' + state[id]); process.exit(0);
   }
   refuse();
 }
-if (command === 'curl' || command === 'npx' || command === 'bunx') refuse();
+if (command === 'curl') {
+  log('curl-argv.jsonl', args);
+  const manifest = /^https:\/\/antigravity-cli-auto-updater-974169037036\.us-central1\.run\.app\/manifests\/(?:(?:darwin|windows)_(?:amd64|arm64)|linux_(?:amd64|arm64)(?:_musl)?)\.json$/;
+  if (!manifest.test(args.at(-1))) refuse();
+  const flags = ['--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--connect-timeout','5','--max-time','10'];
+  if (JSON.stringify(args.slice(0, -1)) !== JSON.stringify(flags)) refuse();
+  if (fs.existsSync(path.join(home, 'non-npm-metadata-unavailable'))) {
+    console.error('Fixture Antigravity metadata unavailable'); process.exit(8);
+  }
+  log('metadata-events.jsonl', {id:'agy',stage:'finished',pid:process.pid});
+  console.log(JSON.stringify({version:latest.agy,url:'https://storage.googleapis.com/antigravity-public/fixture/agy',sha512:'a'.repeat(128)})); process.exit(0);
+}
+if (command === 'npx' || command === 'bunx') refuse();
 if (command === 'gh') {
-  if ((args.length === 1 && args[0] === '--version') || (args.length === 2 && args[0] === 'copilot' && args[1] === '--version')) {
+  log('gh-argv.jsonl', args);
+  if (args.join(' ') === 'pr list --json number,title,headRefName,state --state all --limit 999') {
+    console.log('[]'); process.exit(0);
+  }
+  if (args.length === 1 && args[0] === '--version') {
     console.log('gh version 2.80.0'); process.exit(0);
   }
+  if (args.length === 2 && args[0] === 'copilot' && args[1] === '--version') {
+    console.log('gh copilot version ' + versions().gh); process.exit(0);
+  }
   refuse();
+}
+if (command === 'agy' && args.length === 1 && args[0] === 'update') {
+  log('native-update-argv.jsonl', {command,args});
+  const state = versions(); state.agy = latest.agy; fs.writeFileSync(statePath, JSON.stringify(state));
+  console.log('Updated fixture Antigravity CLI ' + state.agy); process.exit(0);
 }
 if (args.length === 1 && ['--version','-V'].includes(args[0])) {
   const version = versions()[command];
@@ -156,7 +205,7 @@ if (args.length === 1 && ['--version','-V'].includes(args[0])) {
   console.log(command + ' ' + version); process.exit(0);
 }
 if (command !== 'claude') refuse();
-log('provider-argv.jsonl', {pid:process.pid,argv:args,cwd:process.cwd(),at:new Date().toISOString()});
+log('provider-argv.jsonl', {pid:process.pid,ppid:process.ppid,argv:args,cwd:process.cwd(),at:new Date().toISOString()});
 console.log('GWT_MAINTENANCE_FIXTURE_READY ' + process.pid);
 readline.createInterface({input:process.stdin}).on('line', line => {
   log('provider-input.jsonl', {pid:process.pid,line});
@@ -165,7 +214,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
 `;
 
 try {
-  if (process.platform === "win32") throw new Error("Issue #5017 fixture requires POSIX executables");
   if (!args.includes("--skip-build")) await finish(start("cargo", ["build", "-p", "gwt", "--bin", "gwt", "--bin", "gwtd"], process.env, root, "", true), 1_800_000);
   if (!await exists(gwt) || !await exists(gwtd)) throw new Error("Build this checkout's gwt and gwtd first.");
   // Canonical verification owns and removes TMPDIR after the command. Keep
@@ -177,13 +225,16 @@ try {
   let hookBin = process.env.GWT_HOOK_BIN || "";
   if (disposable.test(hookBin) || (hookBin && hookBin !== "gwtd" && !await exists(hookBin))) hookBin = "";
   if (!hookBin) {
-    const probe = start("/bin/sh", ["-c", "command -v gwtd || true"]);
-    const candidate = (await finish(probe)).trim();
-    if (candidate && !disposable.test(candidate)) hookBin = "gwtd";
+    const resolverEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GWT_(BIN_PATH|HOOK_BIN)$/i.test(key)));
+    const result = JSON.parse(await finish(start(gwtd, [], resolverEnv, root,
+      JSON.stringify({ schema_version: 1, operation: "hook.doctor", params: {} }))));
+    if (!result.ok) throw new Error(`Managed hook fallback resolution failed: ${JSON.stringify(result)}`);
+    hookBin = JSON.parse(result.output).managed_hook_bin;
+    if (!hookBin || disposable.test(hookBin)) throw new Error("Managed hook resolver returned no stable fallback");
   }
-  if (!hookBin && await exists("/Applications/GWT.app/Contents/MacOS/gwtd")) hookBin = "/Applications/GWT.app/Contents/MacOS/gwtd";
-  hookBin ||= "gwtd";
   // browser-check-hook-authority-end
+
+  const git = windows ? (await finish(start("where.exe", ["git.exe"]))).trim().split(/\r?\n/)[0] : "git";
 
   for (const theme of ["dark", "light"]) {
     const home = await mkdtemp(join(evidence, `${theme}-home-`));
@@ -193,25 +244,38 @@ try {
     await Promise.all([bin, project, join(home, ".gwt"), join(home, ".codex"), join(project, ".codex")].map(path => mkdir(path, { recursive: true })));
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(key)
       && !["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key.toUpperCase())));
-    const fixturePath = `${bin}:/usr/bin:/bin:${dirname(process.execPath)}`;
+    const fixturePath = (windows
+      ? [bin, dirname(process.execPath), dirname(git), join(process.env.SystemRoot, "System32"),
+        join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0")]
+      : [bin, "/usr/bin", "/bin", dirname(process.execPath)]).join(delimiter);
+    // Windows environment keys are case insensitive; do not retain an earlier Path.
+    for (const key of Object.keys(env)) if (/^(PATH|SHELL)$/i.test(key)) delete env[key];
     Object.assign(env, { HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"), PATH: fixturePath,
-      SHELL: "/bin/bash", GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GWT_HOOK_BIN: hookBin,
-      GWT_TEST_GH: join(bin, "gh"), GWT_DISABLE_BACKGROUND_INDEX: "1", GWT_PROJECT_ROOT: project });
-    const runtime = join(process.env.HOME || homedir(), ".gwt/runtime");
-    if (await exists(runtime)) await symlink(runtime, join(home, ".gwt/runtime"));
+      SHELL: windows ? join(process.env.SystemRoot, "System32/cmd.exe") : "/bin/bash",
+      GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GWT_HOOK_BIN: hookBin,
+      GWT_TEST_GH: join(bin, windows ? "gh.cmd" : "gh"), GWT_DISABLE_BACKGROUND_INDEX: "1", GWT_PROJECT_ROOT: project });
+    const runtime = join((windows ? process.env.USERPROFILE : process.env.HOME) || homedir(), ".gwt/runtime");
+    if (await exists(runtime)) await symlink(runtime, join(home, ".gwt/runtime"), windows ? "junction" : "dir");
     await writeFile(join(bin, "fixture.cjs"), fixtureSource);
     // Mask every supported provider, including the intentionally missing CLI:
     // macOS path_helper may append real host tools even to an isolated PATH.
     for (const command of ["claude", "codex", "grok", "agy", "opencode", "openclaw", "hermes", "gh", "npm", "npx", "bunx", "curl"]) {
-      await writeFile(join(bin, command), ["opencode", "openclaw"].includes(command)
+      if (windows) {
+        // The restricted PATH contains no host providers. Missing CLIs stay absent
+        // until the fixture installer writes their native npm shim.
+        if (["opencode", "openclaw"].includes(command)) continue;
+        await writeFile(join(bin, `${command}.cjs`), 'require("./fixture.cjs");\n');
+        await writeFile(join(bin, `${command}.cmd`),
+          `@echo off\r\nset "dp0=%~dp0"\r\n"${process.execPath}" "%dp0%\\${command}.cjs" %*\r\n`);
+      } else await writeFile(join(bin, command), ["opencode", "openclaw"].includes(command)
         ? `#!${home}/nonexistent-interpreter\n`
         : `#!${process.execPath}\nrequire("./fixture.cjs");\n`, { mode: 0o755 });
     }
-    await writeFile(join(home, "agent-versions.json"), JSON.stringify({ claude: "2.1.0", codex: null, grok: "1.0.0", agy: "1.0.0", opencode: null, openclaw: null, hermes: "1.0.0" }));
+    await writeFile(join(home, "agent-versions.json"), JSON.stringify({ claude: "2.1.0", codex: null, grok: "1.0.0", agy: "1.0.0", opencode: null, openclaw: null, hermes: "1.0.0", gh: "1.0.0" }));
     await writeFile(join(home, "provider-argv.jsonl"), "");
     await writeFile(join(home, "npm-argv.jsonl"), "");
     await writeFile(join(home, ".gwt/config.toml"), `[profiles]\nactive = "Host"\n[[profiles.profiles]]\nname = "Host"\ndescription = "Isolated supported-agent fixture"\n[profiles.profiles.env_vars]\nPATH = ${JSON.stringify(fixturePath)}\n`);
-    for (const arguments_ of [["init", "-q", "-b", "fixture-main"], ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "fixture"]]) await finish(start("git", arguments_, env, project), 10_000);
+    for (const arguments_ of [["init", "-q", "-b", "fixture-main"], ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "fixture"]]) await finish(start(git, arguments_, env, project), 10_000);
     async function envelope(operation, params = {}, outer = false) {
       const response = JSON.parse(await finish(start(gwtd, [], env, project, JSON.stringify({ schema_version: 1, operation, params }))));
       if (!response.ok) throw new Error(`${operation} failed: ${JSON.stringify(response)}`);
@@ -272,9 +336,28 @@ try {
   // Keep the runner's real HOME/browser cache and canonical measured reporter.
   const testEnv = { ...process.env, GWT_L3_BACKENDS: JSON.stringify(metadata), GWT_L3_AGENT_FIXTURES: "1",
     GWT_L3_MISSING_AGENT: "opencode", GWT_L3_SCREENSHOT_DIR: evidence, GWT_PLAYWRIGHT_CHECKOUT_ROOT: root };
-  const arguments_ = [join(root, "scripts/run-visual-tests.sh"), "settings-supported-agents-live.spec.ts", "--workers=1", "--retries=0", "--trace=on", "--output", join(evidence, "playwright"), ...playwrightArgs];
+  const arguments_ = ["settings-supported-agents-live.spec.ts", "--workers=1", "--retries=0", "--trace=on", "--output", join(evidence, "playwright"), ...playwrightArgs];
   if (!arguments_.includes("--headed")) arguments_.push("--headed");
-  await finish(start("bash", arguments_, testEnv, root, "", true), 600_000);
+  if (windows) {
+    const version = (await readFile(join(root, "scripts/playwright-version.txt"), "utf8")).trim();
+    const deps = process.env.GWT_PLAYWRIGHT_DEPS_DIR || join(tmpdir(), `gwt-playwright-${version}`);
+    const playwright = join(deps, "node_modules/@playwright/test/cli.js");
+    if (!await exists(playwright)) throw new Error(`Pinned Playwright is missing: ${playwright}`);
+    const resolver = join(evidence, "playwright-resolver.cjs");
+    await writeFile(resolver, `const Module = require("module"), path = require("node:path");
+const original = Module._resolveFilename;
+Module._resolveFilename = function(request, parent, ...rest) {
+  if (request === "@playwright/test" || request.startsWith("@playwright/test/")) {
+    return original.call(this, path.join(process.env.GWT_PLAYWRIGHT_NODE_MODULES, request), parent, ...rest);
+  }
+  return original.call(this, request, parent, ...rest);
+};
+`);
+    testEnv.GWT_PLAYWRIGHT_NODE_MODULES = join(deps, "node_modules");
+    testEnv.NODE_OPTIONS = `${testEnv.NODE_OPTIONS || ""} --require ${JSON.stringify(resolver.replaceAll("\\", "/"))}`;
+    await finish(start(process.execPath, [playwright, "test", "--config", join(root, "crates/gwt/playwright/playwright.config.ts"),
+      ...arguments_], testEnv, root, "", true), 600_000);
+  } else await finish(start("bash", [join(root, "scripts/run-visual-tests.sh"), ...arguments_], testEnv, root, "", true), 600_000);
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

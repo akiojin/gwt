@@ -123,17 +123,53 @@ fn hash_file(path: &Path) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
-    let mut file = std::fs::File::open(path)?;
+    let mut file = artifact_io("open for SHA256", &[path], || std::fs::File::open(path))?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {
-        let count = file.read(&mut buffer)?;
+        let count = artifact_io("read for SHA256", &[path], || file.read(&mut buffer))?;
         if count == 0 {
             break;
         }
         hash.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+#[cfg(any(windows, test))]
+fn artifact_io<T>(
+    operation: &str,
+    paths: &[&Path],
+    mut action: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                // AV/indexer handles may briefly deny delete or access. Retry
+                // only this operation: restarting pinning after rename could
+                // move a different artifact published by a concurrent build.
+                if cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)) && attempts <= 10
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                let paths = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "verification driver {operation} {paths} failed after {attempts} attempt(s): {error}"
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -146,28 +182,36 @@ fn pin_artifact(
 
     let sha256 = hash_file(original)?;
     let directory = fixed_root.join(uuid::Uuid::new_v4().simple().to_string());
-    fs::create_dir_all(&directory)?;
+    artifact_io("create_dir_all", &[&directory], || {
+        fs::create_dir_all(&directory)
+    })?;
     let copy = directory.join("restore.exe");
-    fs::copy(original, &copy)?;
+    artifact_io("copy", &[original, &copy], || fs::copy(original, &copy))?;
     if hash_file(&copy)? != sha256 {
-        return Err(io::Error::other(
-            "verification driver copy failed SHA256 validation",
-        ));
+        return Err(io::Error::other(format!(
+            "verification driver copy {} failed SHA256 validation",
+            copy.display()
+        )));
     }
     let fixed_path = directory.join("gwtd.exe");
-    fs::rename(original, &fixed_path)?;
+    artifact_io("rename", &[original, &fixed_path], || {
+        fs::rename(original, &fixed_path)
+    })?;
     // A create-new link restores an independent, verified file object. Never
     // overwrite an artifact a concurrent Cargo build published after rename.
-    match fs::hard_link(&copy, original) {
+    match artifact_io("hard_link", &[&copy, original], || {
+        fs::hard_link(&copy, original)
+    }) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
-    fs::remove_file(copy)?;
+    artifact_io("remove_file", &[&copy], || fs::remove_file(&copy))?;
     if hash_file(&fixed_path)? != sha256 {
-        return Err(io::Error::other(
-            "verification driver image failed SHA256 validation",
-        ));
+        return Err(io::Error::other(format!(
+            "verification driver image {} failed SHA256 validation",
+            fixed_path.display()
+        )));
     }
     Ok(DriverProvenance {
         original_path: original.to_path_buf(),
@@ -235,6 +279,113 @@ mod tests {
         std::fs::write(&artifact, b"relinked").unwrap();
         assert_eq!(std::fs::read(&driver.fixed_path).unwrap(), b"driver");
         assert_eq!(hash_file(&driver.fixed_path).unwrap(), driver.sha256);
+    }
+
+    #[test]
+    fn pin_missing_artifact_identifies_operation_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("missing.exe");
+        let error = pin_artifact(&artifact, &dir.path().join("fixed"), "head").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(message.contains("open"), "{message}");
+        assert!(
+            message.contains(&artifact.display().to_string()),
+            "{message}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pin_locked_artifact_identifies_rename_and_both_paths() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("gwtd.exe");
+        std::fs::write(&artifact, b"driver").unwrap();
+        // Model an AV/indexer handle that allows reads/writes but denies delete.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&artifact)
+            .unwrap();
+        let fixed_root = dir.path().join("fixed");
+        let error = pin_artifact(&artifact, &fixed_root, "head").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("os error 32"), "{message}");
+        assert!(message.contains("11 attempt(s)"), "{message}");
+        assert!(message.contains("rename"), "{message}");
+        assert!(
+            message.contains(&artifact.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&fixed_root.display().to_string()),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&artifact).unwrap(), b"driver");
+        drop(lock);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn artifact_io_recovers_after_observed_sharing_violation() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("gwtd.exe");
+        let fixed = dir.path().join("fixed.exe");
+        std::fs::write(&original, b"driver").unwrap();
+        let mut lock = Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(&original)
+                .unwrap(),
+        );
+        let mut attempts = 0;
+        artifact_io("rename", &[&original, &fixed], || {
+            attempts += 1;
+            let result = std::fs::rename(&original, &fixed);
+            if attempts == 1 {
+                assert_eq!(result.as_ref().unwrap_err().raw_os_error(), Some(32));
+                // Release only after observing the real OS failure, not a timer.
+                drop(lock.take());
+            }
+            result
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(std::fs::read(&fixed).unwrap(), b"driver");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn artifact_io_retries_lock_violations() {
+        let mut attempts = 0;
+        artifact_io("read", &[Path::new("driver.exe")], || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(io::Error::from_raw_os_error(33))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn artifact_io_does_not_retry_unrelated_errors() {
+        let mut attempts = 0;
+        let error = artifact_io("copy", &[Path::new("from"), Path::new("to")], || {
+            attempts += 1;
+            Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("copy from -> to"));
     }
 
     #[test]

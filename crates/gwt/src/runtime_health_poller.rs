@@ -155,10 +155,11 @@ impl Poller {
             .with_exe(UpdateKind::OnlyIfNotSet)
             .with_cwd(UpdateKind::OnlyIfNotSet)
             .without_tasks();
-        match scope {
+        let observed = match scope {
             RefreshScope::FullReconcile => {
                 self.system
                     .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+                observe_processes(self.system.processes().values())
             }
             RefreshScope::KnownPids => {
                 // FR-396: normal ticks only refresh the runtime PIDs selected
@@ -174,9 +175,9 @@ impl Poller {
                     true,
                     refresh_kind,
                 );
+                observe_processes(pids.iter().filter_map(|pid| self.system.process(*pid)))
             }
-        }
-        let observed = observe_processes(&self.system);
+        };
         let parent_by_pid = parent_by_pid(&observed);
         let direct_focus_windows = focus_window_ids_by_pty_pid(&self.pty_writers);
         let mut selected = select_runtime_processes(self.root_pid, &observed);
@@ -420,29 +421,38 @@ impl ObservedProcess {
     }
 }
 
-fn observe_processes(system: &System) -> Vec<ObservedProcess> {
-    system
-        .processes()
-        .values()
-        .map(|process| ObservedProcess {
-            pid: process.pid().as_u32(),
-            parent_pid: process.parent().map(sysinfo::Pid::as_u32),
-            name: process.name().to_string_lossy().into_owned(),
-            command_line: process
-                .cmd()
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" "),
-            executable_path: process
-                .exe()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            current_dir: process
-                .cwd()
-                .map(|path| path.to_string_lossy().into_owned()),
-            cpu_percent: process.cpu_usage(),
-            memory_bytes: process.memory(),
+#[cfg(test)]
+thread_local! {
+    static OBSERVED_PROCESS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn observe_processes<'a>(
+    processes: impl Iterator<Item = &'a sysinfo::Process>,
+) -> Vec<ObservedProcess> {
+    processes
+        .map(|process| {
+            #[cfg(test)]
+            OBSERVED_PROCESS_COUNT.set(OBSERVED_PROCESS_COUNT.get() + 1);
+            ObservedProcess {
+                pid: process.pid().as_u32(),
+                parent_pid: process.parent().map(sysinfo::Pid::as_u32),
+                name: process.name().to_string_lossy().into_owned(),
+                command_line: process
+                    .cmd()
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                executable_path: process
+                    .exe()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                current_dir: process
+                    .cwd()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                cpu_percent: process.cpu_usage(),
+                memory_bytes: process.memory(),
+            }
         })
         .collect()
 }
@@ -977,7 +987,7 @@ mod tests {
     #[test]
     fn poll_once_refreshes_full_and_known_pid_scopes() {
         // FR-396: the full reconciliation discovers the runtime PID set; the
-        // known-PID refresh reuses it without a full OS scan.
+        // known-PID refresh reuses it without projecting unrelated processes.
         let clients = crate::embedded_server::ClientHub::default();
         let mut poller = Poller::new(crate::PtyWriterRegistry::default());
         assert_eq!(
@@ -998,6 +1008,15 @@ mod tests {
         assert!(
             known.process_count >= 1,
             "known-PID refresh keeps reporting the runtime set: {known:?}"
+        );
+        poller.known_pids.clear();
+        OBSERVED_PROCESS_COUNT.set(0);
+        let root_only = poller.poll_once(Utc::now(), &clients, RefreshScope::KnownPids);
+        assert_eq!(root_only.process_count, 1);
+        assert_eq!(
+            OBSERVED_PROCESS_COUNT.get(),
+            1,
+            "known-PID ticks must only project the refreshed runtime PIDs and root"
         );
     }
 }

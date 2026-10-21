@@ -1101,7 +1101,11 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
+    init_git_clone_with_origin(&worktree);
+    run_git(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "unlanded close fixture"],
+    );
     let tab_id = "tab-1";
     let raw_window_id = "agent-1";
     let window_id = combined_window_id(tab_id, raw_window_id);
@@ -1121,6 +1125,10 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
         .save(&runtime.sessions_dir)
         .expect("save active session");
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    assert!(runtime
+        .launch_wizard_cache
+        .session_by_id(&session.id)
+        .is_some());
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
@@ -1138,6 +1146,13 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
+    // A normal hook can fill in the native conversation after cache creation.
+    session.agent_session_id = Some("native-close-clears-restore".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save hook update");
     runtime.close_window_events(&window_id);
     let finalizer = finalizers
         .lock()
@@ -1153,6 +1168,31 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     )
     .expect("load session");
     assert!(!loaded.restore_window_on_startup);
+    assert_eq!(loaded.agent_session_id, session.agent_session_id);
+    assert_eq!(loaded.last_hook_event_at, session.last_hook_event_at);
+
+    gwt_agent::persist_session_hook_event(&runtime.sessions_dir, &session.id, "Stop")
+        .expect("persist late Stop hook");
+    gwt_agent::persist_session_completed_stop(&runtime.sessions_dir, &session.id)
+        .expect("persist late completed Stop");
+    // Model a restart from disk. An unclosed peer remains restore-eligible.
+    let mut open = session.clone();
+    open.id = "session-unclosed-peer".to_string();
+    open.agent_session_id = Some("native-unclosed-peer".to_string());
+    open.save(&runtime.sessions_dir)
+        .expect("save unclosed peer");
+    drop(runtime);
+    let tab = sample_project_tab(tab_id, "Repo", worktree, ProjectKind::Git, &[]);
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some(tab_id));
+    restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert_eq!(
+        restarted
+            .pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-unclosed-peer"]
+    );
 }
 
 #[test]
@@ -2136,6 +2176,8 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    // Share the fixture root with every HOME reader throughout the measurement.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);

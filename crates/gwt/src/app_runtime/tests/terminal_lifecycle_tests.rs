@@ -497,6 +497,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
             session_id: format!("rec-{index:02}"),
             window_id: None,
             agent_id: format!("custom-agent-{index:02}"),
+            agent_name: None,
             display_name: format!("Claude {index:02}"),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -582,6 +583,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1101,6 +1103,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1203,6 +1206,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: String::new(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1328,6 +1332,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: agent_id.to_string(),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1438,6 +1443,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
             session_id: session_id.to_string(),
             window_id: None,
             agent_id: display_name.to_ascii_lowercase().replace(' ', "-"),
+            agent_name: None,
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -1785,6 +1791,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         session_id: "sess-fresh".to_string(),
         window_id: None,
         agent_id: "claude".to_string(),
+        agent_name: None,
         display_name: "Claude".to_string(),
         affiliation_status: "assigned".to_string(),
         workspace_id: None,
@@ -2257,6 +2264,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         .unwrap();
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
+        .readiness
         .base_target(&repo, "work/gwt-writes", &tips)
         .unwrap()
         .is_some());
@@ -2449,6 +2457,269 @@ fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
     assert!(
         targets[0].has_merged_pr,
         "case-insensitive merged PR metadata must request a dirty-worktree guard"
+    );
+}
+
+#[test]
+fn work_merge_scan_unchanged_inputs_spawn_no_git() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "work/reuse"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let external_ignore = temp.path().join("external-ignore");
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    run_git(
+        &repo,
+        &[
+            "config",
+            "core.excludesFile",
+            external_ignore.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.join("ignored-user-change.txt"), "uncommitted\n").unwrap();
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-reuse",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/reuse".into()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut context = runtime.project_context_for_root(&repo).unwrap();
+    let mut cache = super::super::WorkMergeScanCache::default();
+    let first = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(first, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    let repeated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(repeated, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        0,
+        "a repeated unchanged scan must reuse its complete Git result; cached={:?}, observed={:?}",
+        cache.last_inputs,
+        cache.inputs.current_revision()
+    );
+
+    // Compare the pre-change worker body with the warm input cache on the
+    // same immutable repository, retaining #5116's warm SHA-pair cache.
+    let targets = super::super::work_branch_scan_targets(
+        &gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo).unwrap(),
+    );
+    let control = capture_tracing_events(|| {
+        for _ in 0..10 {
+            let _ = AppRuntime::measure_work_merge_status_scan(
+                repo.clone(),
+                &mut cache.readiness,
+                &targets,
+                HashSet::new(),
+            );
+            gwt_git::refs::branch_tip_subjects(&repo).unwrap();
+        }
+    });
+    let treatment = capture_tracing_events(|| {
+        for _ in 0..10 {
+            AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+            assert!(!cache.measured);
+        }
+    });
+    let counts = |events: &[CapturedTracingEvent]| {
+        let mut labels = std::collections::BTreeMap::<String, usize>::new();
+        for event in events.iter().filter(|event| {
+            event.target == "gwt.process.summary"
+                && event
+                    .fields
+                    .get("phase")
+                    .is_some_and(|phase| phase == "start")
+        }) {
+            *labels.entry(event.fields["label"].clone()).or_default() += 1;
+        }
+        labels
+    };
+    let control = counts(&control);
+    let treatment = counts(&treatment);
+    assert_eq!(
+        control.get("git --no-optional-locks status --porcelain=v1"),
+        Some(&10)
+    );
+    assert!(treatment.is_empty());
+    println!(
+        "merge_scan_process_measurement={}",
+        serde_json::json!({
+            "requests": 10,
+            "scope": "unchanged local merge and tip scans; remote PR-title TTL excluded",
+            "control": control, "treatment": treatment,
+            "normalization": "multiply by 12 for 120 unchanged requests/hour; not a fleet-hour observation"
+        })
+    );
+
+    // Reopening clears the UI's tip subjects. The new generation must run
+    // the worker's tip-subject measurement even when Git inputs are unchanged.
+    context.generation += 1;
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "reopened project must republish tip subjects"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(!cache.measured);
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(&external_ignore, "").unwrap();
+    assert_ne!(
+        cache.inputs.observe(&repo, std::slice::from_ref(&repo)),
+        Some(revision),
+        "an external ignore edit must invalidate the dirty verdict"
+    );
+    let external_dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(external_dirty, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/reuse"))
+    );
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(repo.join("user-change.txt"), "uncommitted\n").unwrap();
+    // test-hygiene: allow-wall-clock-deadline Real notify-to-Git invalidation contract; only bounds a hung OS delivery probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while cache.inputs.current_revision() == Some(revision) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Real OS delivery liveness bound, not a latency or ordering assertion.
+            std::time::Instant::now() < deadline,
+            "dirty edit must invalidate scan"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
+        if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
+    );
+
+    run_git(&repo, &["branch", "work/absent"]);
+    let absent = temp.path().join("absent");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-absent",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/absent".into()),
+                worktree_path: Some(absent.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .unwrap();
+    // Start watching after this scenario's refs and projection are in place.
+    cache = super::super::WorkMergeScanCache::default();
+    let missing = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(missing, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/absent"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count(),
+        before,
+        "an unchanged absent worktree must reuse its conservative dirty verdict"
+    );
+    run_git(
+        &repo,
+        &["worktree", "add", absent.to_str().unwrap(), "work/absent"],
+    );
+    let recreated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "worktree reappearance must invalidate reuse"
+    );
+    assert!(
+        matches!(recreated, UserEvent::WorkMergeStatus { merged_branches, .. }
+        if merged_branches.contains_key("work/absent"))
+    );
+}
+
+#[test]
+fn work_merge_scan_coalesces_requests_while_worker_is_active() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    let mut worker = runtime
+        .work_merge_scan_queue
+        .workers
+        .request(context.clone())
+        .unwrap();
+    for _ in 0..10 {
+        runtime.spawn_work_merge_status_scan_with_pr_titles(repo.clone(), true);
+    }
+    assert!(
+        !runtime.work_merge_status_cache.borrow()[&repo]
+            .lock()
+            .unwrap()
+            .measured,
+        "a burst cannot start a competing Git worker"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert!(!runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert_eq!(worker.finish_pass(), Some(context.clone()));
+    let mut reopened = context.clone();
+    reopened.generation += 1;
+    assert!(runtime
+        .work_merge_scan_queue
+        .request(reopened.clone(), true)
+        .is_none());
+    assert!(
+        !runtime.work_merge_scan_queue.take_pr_request(&context),
+        "old generations cannot consume reopened PR requests"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&reopened));
+    assert_eq!(worker.finish_pass(), Some(reopened));
+    assert_eq!(
+        worker.finish_pass(),
+        None,
+        "the burst becomes one follow-up"
     );
 }
 
@@ -2707,9 +2978,13 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         }
         if !reader_ahead || index == 19 {
             for (data, seq) in undispatched.drain(..) {
-                for event in
-                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
-                {
+                for event in runtime.handle_runtime_output_event(
+                    window_id.clone(),
+                    incarnation,
+                    data,
+                    seq,
+                    None,
+                ) {
                     let prepared = prepare_outbound_event(&event);
                     repair_queue.enqueue(&prepared);
                     if resync_connected {
@@ -2742,13 +3017,121 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
     }
 }
 
-// SPEC-2359 W-17 (FR-398, Issue #3034): a second spawn for the same Work
-// while the first launch is still materializing (window registered, agent
-// session not yet live) must focus the pending window, not spawn a duplicate.
+#[test]
+fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).unwrap();
+    fs::create_dir_all(&target_root).unwrap();
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+    let tabs = vec![
+        sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
+    ];
+    for version in [env!("CARGO_PKG_VERSION"), "0.1.0"] {
+        let mut prefs = gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: version.into(),
+                since: "2026-10-13T00:00:00Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut runtime = sample_runtime(temp.path(), tabs.clone(), Some("target"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5351-test")
+            .build();
+        runtime
+            .spawn_agent_window("target", config, canvas_bounds(), None)
+            .expect("an applied drain must not hold another project's launch");
+        prefs.update_drain = None;
+        assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+
+        // Next-scan reconciliation also works without a resume marker or daemon.
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: version.into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Manual,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let context = runtime.project_context("drain").unwrap();
+        assert!(AppRuntime::read_project_auto_update_drain(&context).is_none());
+        assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain
+            .is_none());
+    }
+}
+
+fn stage_host_drain_update(temp: &Path, version: &str) {
+    let payload = temp.join("staged-gwt");
+    fs::write(&payload, b"staged payload").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: version.into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: "2026-10-13T00:00:00Z".into(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+}
+
+#[test]
+fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_wide_release() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("drain");
+    fs::create_dir_all(&project).unwrap();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    let prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "drain",
+            "drain",
+            project,
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("drain"),
+    );
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+    assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+    stage_host_drain_update(temp.path(), "99.0.0");
+    let hold = runtime.host_update_drain_launch_hold().unwrap().unwrap();
+    assert!(
+        hold.contains("release.update.defer {\"version\":\"99.0.0\"}"),
+        "{hold}"
+    );
+    gwt_core::update::defer_pending_update("99.0.0").unwrap();
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+}
+
 #[test]
 fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).expect("drain project");
@@ -2757,9 +3140,10 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     init_repo(&target_root);
     let mut prefs = gwt::IssueMonitorPrefs {
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
-            version: "9.110.0".to_string(),
+            version: "99.0.0".to_string(),
             since: "2026-10-10T08:21:17Z".to_string(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -2812,6 +3196,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
 fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).unwrap();
@@ -2822,9 +3207,10 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
         &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
         &gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.110.0".into(),
+                version: "99.0.0".into(),
                 since: "2026-10-10T08:21:17Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..Default::default()
@@ -3113,6 +3499,188 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
 }
 
 #[test]
+fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let data = b"worker captured output";
+    let seq = {
+        let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+        pane.process_bytes(data);
+        pane.output_seq()
+    };
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        incarnation,
+        data.to_vec(),
+        seq,
+        Some("worker captured output".into()),
+    );
+    let pane = runtime.runtimes[&id].pane.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = pane.lock().unwrap();
+        ready_tx.send(()).unwrap();
+        // Release on failure too, so a regressed GUI wait fails instead of hanging.
+        // test-hygiene: allow-wall-clock-deadline Bound a regressed GUI mutex wait; the ready channel establishes ordering.
+        release_rx.recv_timeout(Duration::from_secs(10)).is_ok()
+    });
+    // test-hygiene: allow-wall-clock-deadline Fail if the lock-holder thread cannot start; elapsed time is not asserted.
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let events =
+        runtime.flush_runtime_output_batches(runtime.next_runtime_output_deadline().unwrap());
+    let _ = release_tx.send(());
+    assert!(
+        holder.join().unwrap(),
+        "GUI flush waited for the PTY parser mutex"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text.contains("worker captured output"))));
+}
+
+#[test]
+fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let chunks: [&[u8]; 2] = [
+        b"Would you like to run the following command?\r\n\r\ncargo test\r\n",
+        b"> 1. Yes, proceed\r\n  2. No, and tell Codex what to do differently\r\nPress enter to confirm or esc to cancel\r\n",
+    ];
+    let mut bytes = Vec::new();
+    let mut deadline = None;
+    for chunk in chunks {
+        let (seq, screen) = {
+            let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+            pane.process_bytes(chunk);
+            (pane.output_seq(), pane.screen().contents())
+        };
+        bytes.extend_from_slice(chunk);
+        let events = runtime.handle_runtime_output_event(
+            id.clone(),
+            incarnation,
+            chunk.to_vec(),
+            seq,
+            Some(screen),
+        );
+        assert_eq!(events.len(), 1, "only raw output is immediate");
+        assert_eq!(events[0].terminal_stream_seq, Some(seq));
+        assert!(
+            matches!(&events[0].event, BackendEvent::TerminalOutput { data_base64, .. }
+            if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == chunk)
+        );
+        let next = runtime
+            .next_runtime_output_deadline()
+            .expect("flush scheduled");
+        assert_eq!(
+            *deadline.get_or_insert(next),
+            next,
+            "continuous output cannot postpone the flush"
+        );
+    }
+    assert_eq!(runtime.pending_runtime_outputs[&id].data, bytes);
+    let deadline = deadline.unwrap();
+    assert!(runtime
+        .flush_runtime_output_batches(deadline - Duration::from_millis(100))
+        .is_empty());
+    assert!(!runtime.window_approval_waiting.contains_key(&id));
+    let events = runtime.flush_runtime_output_batches(deadline);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalPreview { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        runtime.window_approval_waiting.contains_key(&id),
+        "the same latest screen detects approval"
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "no idle wakeups after the final chunk"
+    );
+    assert!(runtime
+        .flush_runtime_output_batches(deadline + Duration::from_secs(1))
+        .is_empty());
+    let events = runtime.handle_runtime_output_event(
+        id,
+        incarnation,
+        vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
+        100,
+        Some("large burst".into()),
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "a size-limited batch flushes immediately"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
+}
+
+#[test]
+fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let old = runtime.runtimes[&id].incarnation;
+    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
+    runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
+    let deadline = runtime.next_runtime_output_deadline().unwrap();
+    assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
+    let current = runtime.runtimes[&id].incarnation;
+    runtime.runtimes[&id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"final output");
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        current,
+        b"final output".to_vec(),
+        2,
+        Some("final output".into()),
+    );
+    let events = runtime.handle_runtime_status_event(
+        id.clone(),
+        current,
+        WindowProcessStatus::Running,
+        None,
+        false,
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "final output")));
+    assert!(runtime.next_runtime_output_deadline().is_none());
+}
+
+#[test]
 fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -3165,6 +3733,17 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
         b"bytes".to_vec(),
         Some("  remote\n\nlast".into()),
     );
+    let intermediate =
+        runtime.handle_daemon_runtime_output(id.clone(), b"next chunk".to_vec(), None);
+    assert_eq!(
+        intermediate.len(),
+        1,
+        "an intermediate relay frame only streams bytes"
+    );
+    assert!(matches!(
+        intermediate[0].event,
+        BackendEvent::TerminalOutput { .. }
+    ));
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
         assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));
@@ -3177,7 +3756,7 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
 }
 
 #[test]
-fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeSet,
@@ -3252,6 +3831,24 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let monitor = RefCell::new(monitor);
     let received = RefCell::new(Vec::new());
     let daemon_accepted = Cell::new(false);
+    let lost_ack = || {
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "claim ACK lost".to_string(),
+        )
+    };
+    assert!(
+        runtime
+            .claim_issue_monitor_launch_delivery_with_publishers(
+                &repo,
+                42,
+                "launch:effect-42",
+                window_id,
+                |_, _| Ok(()),
+                |_| Err(lost_ack()),
+            )
+            .is_err(),
+        "an uncommitted claim must remain uncertain"
+    );
     let accepted = runtime
         .claim_issue_monitor_launch_delivery_with_publishers(
             &repo,
@@ -3293,7 +3890,7 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
                 );
                 gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
                     .expect("commit daemon prefs");
-                Ok(())
+                Err(lost_ack())
             },
         )
         .expect("daemon claim outcome");
@@ -3320,4 +3917,27 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
+
+    let retry =
+        runtime.capture_issue_monitor_launch_claim(&repo, 42, "launch:effect-42", window_id);
+    let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
+    assert!(retry
+        .claim_or_reuse()
+        .expect("reuse the exact current claim"));
+    assert_eq!(
+        super::super::issue_monitor_prefs_stamp(&prefs_path),
+        stamp,
+        "an unchanged claim must not write shared prefs during revalidation"
+    );
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.pending_launch_deliveries.clear();
+        Ok(())
+    })
+    .expect("retire the delivery after the first claim");
+    assert!(
+        !retry
+            .claim_or_reuse()
+            .expect("revalidate the latest delivery"),
+        "a previously valid tuple must not revive a retired delivery"
+    );
 }

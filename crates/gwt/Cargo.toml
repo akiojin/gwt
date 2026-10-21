@@ -83,7 +83,6 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dunce.workspace = true
 dirs.workspace = true
-ignore.workspace = true
 chrono.workspace = true
 semver.workspace = true
 toml.workspace = true
@@ -104,8 +103,6 @@ sha2.workspace = true
 hex.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
-chardetng.workspace = true
-encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
@@ -127,15 +124,14 @@ libc = { workspace = true }
 # autostart entry is registered through the modern `SMAppService` API so the
 # System Settings background/login list attributes it to the app bundle and
 # shows "GWT" instead of the Developer ID team name. macOS 12 and earlier keep
-# the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
-# unregister failures surface a real message instead of a silent fallback.
+# the `auto-launch` LaunchAgent path. Service Management enables its own
+# Foundation error types for register / unregister failures.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = "0.3"
 mac-usernotifications = "0.3.1"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", features = ["NSError"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
@@ -143,7 +139,7 @@ winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 rfd = { version = "0.17", features = ["common-controls-v6"] }
-windows = { version = "0.62.2", features = ["UI_Notifications", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.100"
 windows-result = "0.100"
 
@@ -171,6 +167,10 @@ ctor = "1.0.13"
 # Issue #4095: client-side vt100 model for the pane snapshot / stream
 # ordering fixture (patched to vendor/vt100 like gwt-terminal).
 vt100 = "0.16"
+
+[package.metadata.cargo-machete]
+# Windows build.rs embeds the icon and application manifest with this build dependency.
+ignored = ["winresource"]
 
 [package.metadata.bundle]
 name = "GWT"

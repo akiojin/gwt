@@ -322,7 +322,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
 
   test("Continue work sends opaque intent, ignores stale outcome, and settles on strong fallback", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
@@ -332,6 +332,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installBackend(page);
     await page.goto(liveUrl ? liveGwtProjectUrl(liveUrl, APP_PROJECT_KEY) : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     await page.locator(".issue-other-summary").click();
 
     const button = page.locator("[data-action='continue-work']");
@@ -367,6 +368,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       });
     });
     await expect(button).toBeDisabled();
+    await expect(page.getByText("Work continued", { exact: true })).toHaveCount(0);
 
     const retryHint = await page.evaluate(() => {
       const original = (window as any).__continueWorkMessages[0];
@@ -409,6 +411,24 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
         { exact: true },
       ),
     ).toBeVisible();
+    // A duplicate result must not settle again or overwrite the accepted notice.
+    await page.clock.install();
+    await page.evaluate(() => {
+      const original = (window as any).__continueWorkMessages[0];
+      (window as any).__fixtureSocket.emit({
+        kind: "continue_work_outcome",
+        operation_id: original.operation_id,
+        work_id: original.work_id,
+        outcome: "failed",
+        message: "Duplicate outcome must be ignored",
+        retryable: false,
+      });
+    });
+    await page.clock.runFor(100);
+    await expect(button).toBeEnabled();
+    await expect(page.getByText("Duplicate outcome must be ignored", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Work continued", { exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("continue-work-outcome-state.png") });
     expect(errors).toEqual([]);
   });
 

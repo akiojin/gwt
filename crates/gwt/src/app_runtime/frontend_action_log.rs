@@ -180,9 +180,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CreateWindow { preset, .. } => {
             FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))
         }
-        FrontendEvent::LoadProcessConsole { id } => {
-            FrontendUserActionLog::new("load_process_console", "console").window(id)
-        }
         FrontendEvent::FocusWindow { id, .. } => {
             FrontendUserActionLog::new("focus_window", "window").window(id)
         }
@@ -248,31 +245,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::RestartWindow { id } => {
             FrontendUserActionLog::new("restart_window", "window").window(id)
-        }
-        FrontendEvent::LoadFileTree { id, path } => {
-            FrontendUserActionLog::new("load_file_tree", "file")
-                .window(id)
-                .target(path.as_deref().unwrap_or_default())
-        }
-        FrontendEvent::ListFileTreeWorktrees { id } => {
-            FrontendUserActionLog::new("list_file_tree_worktrees", "file").window(id)
-        }
-        FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
-            FrontendUserActionLog::new("select_file_tree_worktree", "file")
-                .window(id)
-                .target(worktree_id)
-        }
-        FrontendEvent::LoadFileContent { id, path, mode, .. } => {
-            FrontendUserActionLog::new("load_file_content", "file")
-                .window(id)
-                .target(path)
-                .mode(format!("{mode:?}"))
-        }
-        FrontendEvent::SaveFileContent { id, path, mode, .. } => {
-            FrontendUserActionLog::new("save_file_content", "file")
-                .window(id)
-                .target(path)
-                .mode(format!("{mode:?}"))
         }
         FrontendEvent::LoadBranches { id } => {
             FrontendUserActionLog::new("load_branches", "branches").window(id)
@@ -540,6 +512,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateRestartNow => {
             FrontendUserActionLog::new("apply_update_restart_now", "update")
         }
+        FrontendEvent::GetUpdateRestartImpact { .. } => {
+            FrontendUserActionLog::new("get_update_restart_impact", "update")
+        }
+        FrontendEvent::ApplyUpdateWhenIdle => {
+            FrontendUserActionLog::new("apply_update_when_idle", "update")
+        }
         FrontendEvent::CancelUpdateAutoApply => {
             FrontendUserActionLog::new("cancel_update_auto_apply", "update")
         }
@@ -619,6 +597,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::GetSystemSettings => {
             FrontendUserActionLog::new("get_system_settings", "settings")
         }
+        FrontendEvent::GetUpdateSettings => {
+            FrontendUserActionLog::new("get_update_settings", "update")
+        }
         FrontendEvent::GetBoardAuthStatus => {
             FrontendUserActionLog::new("get_board_auth_status", "settings")
         }
@@ -680,6 +661,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .target(format!("{work_id} ({close_kind})")),
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
+        FrontendEvent::PaneName { .. } => return None,
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
@@ -694,9 +676,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
-        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
-            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
-                .mode(if *enabled { "on" } else { "off" })
+        FrontendEvent::SetAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_auto_apply_updates", "update").mode(if *enabled {
+                "on"
+            } else {
+                "off"
+            })
         }
         FrontendEvent::IssueMonitorProfilesSet { profiles, .. } => {
             FrontendUserActionLog::new("issue_monitor_profiles_set", "issue_monitor")
@@ -785,6 +770,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
         | FrontendEvent::ProjectAggregateAck { .. }
+        | FrontendEvent::ProjectClientAttention { .. }
         | FrontendEvent::StartupFirstFrame { .. }
         | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
@@ -793,11 +779,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadPmReports { .. }
+        | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::PasteImage { .. }
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }
         | FrontendEvent::AttachFiles { .. }
-        | FrontendEvent::ReportKnowledgeError { .. } => return None,
+        | FrontendEvent::ReportKnowledgeError { .. }
+        | FrontendEvent::CheckKnowledgeRevision { .. } => return None,
     };
     Some(log)
 }

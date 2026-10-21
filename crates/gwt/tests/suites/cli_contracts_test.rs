@@ -30,5 +30,7 @@ mod verification_command_admission_test;
 mod verification_driver_cli_test;
 #[path = "../verification_lease_cli_test.rs"]
 mod verification_lease_cli_test;
+#[path = "../verification_resume_cli_test.rs"]
+mod verification_resume_cli_test;
 #[path = "../workspace_cli_test.rs"]
 mod workspace_cli_test;

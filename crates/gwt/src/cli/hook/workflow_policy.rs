@@ -19,6 +19,7 @@ use std::{io::Read, path::Path};
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
+use gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_OPERATION;
 
 use crate::discussion_resume::PendingDiscussionGoal;
 use crate::pm_registry::pm_identity_exempt_session_for_worktree;
@@ -397,8 +398,8 @@ fn evaluate_pm_spec_survey_guard(
         "establish the owning gwt-spec before registering",
         "Run JSON operation `issue.spec.list` first, then register.\n\n\
 It returns every open `gwt-spec` with its scope in one call, so it cannot miss the owner the way a keyword phrasing can. `gwt-search` is the supporting step: an empty search result does not establish that no spec owns the area, because the result turns on the words you chose.\n\n\
-If a `gwt-spec` owns the area, register this as that spec's implementation Issue — name the parent spec in the body and make registering the change in its `spec` / `plan` / `tasks` sections one of the acceptance criteria.\n\n\
-If no spec owns it, register exactly as you intended. This gate asks whether you looked, not what you found."
+Read the candidate owner's body, spec/plan/tasks, and all addenda, corrections, and comments. Compare them with current develop, source code, tests, merged PRs, and closed Issues before deciding what remains. Update the existing owner's FR/AC, or justify an independently deliverable child Issue that names its parent.\n\n\
+For `issue.create`, supply `params.owner_check`: `owner_spec` is a positive spec number with a nonempty `reason` for the child, or null with nonempty `search_queries` when no spec owns the area. Record the rationale and search queries in one to three lines. No owner remains a valid outcome; this survey gate asks whether you looked, not what you found."
             .to_string(),
     ))
 }
@@ -610,11 +611,17 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
     if event.tool_name.as_deref() != Some("Bash") {
         return false;
     }
-    event
-        .command()
-        .and_then(json_envelope_operation)
+    let Some(command) = event.command() else {
+        return false;
+    };
+    json_envelope_operation(command)
         .as_deref()
-        .is_some_and(is_identity_gate_exempt_operation)
+        .is_some_and(|operation| {
+            is_identity_gate_exempt_operation(operation)
+                // Naming must not carry a file write past the identity gate.
+                && (operation != PANE_NAME_FIRST_ACTION_OPERATION
+                    || !has_file_output_redirection(command))
+        })
 }
 
 /// Issue #4533: the operations a session may run while the Agent Workspace
@@ -656,9 +663,11 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
 /// now spells out in the refusal itself (AC-1).
 pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "execution.adopt"
+    // Issue #5705: the canonical startup operation must run before identity.
+    operation == PANE_NAME_FIRST_ACTION_OPERATION
+        || matches!(
+            operation,
+            "execution.adopt"
             | "execution.repair"
             | "execution.reopen"
             | "execution.release_prepared"
@@ -671,6 +680,10 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // is exactly the kind that cannot set a title yet needs to settle.
             | "execution.no_action"
             | "execution.no-action"
+            // Both typed exits authenticate their subject and exact proof
+            // internally; neither requires a verification lease or Work title.
+            | "execution.settle_delivered"
+            | "pr.create_from_ci"
             | "execution.blocked"
             | "memory.add"
             // Feedback retains its own source identity and native consent.
@@ -678,7 +691,7 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             | "feedback.create"
             | "feedback.process"
             | "feedback.retry"
-    )
+        )
 }
 
 /// Issue #5078 (AC-3): the PM escalation path never waits for the identity.
@@ -840,6 +853,9 @@ pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
 }
 
 pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+    if operation == "pm.approval.status" {
+        return true;
+    }
     matches!(
         operation,
         "workspace.candidates"
@@ -860,6 +876,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.list"
             | "issue.spec.audit"
             | "issue.monitor.status"
+            | "update.settings.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"
@@ -887,6 +904,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.startup"
             | "perf.violations"
             | "pm.capabilities"
+            | "pm.plan.status"
             | "pm.status"
             | "pm.report.list"
             | "search"
@@ -1288,6 +1306,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1321,6 +1341,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         }
     }
@@ -1413,6 +1435,8 @@ mod tests {
                     "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             let output =
@@ -1503,6 +1527,8 @@ mod tests {
                     "content": "cycle notes",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
             HookEvent {
@@ -1513,6 +1539,8 @@ mod tests {
                     "new_string": "b",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
         ];
@@ -1688,6 +1716,8 @@ mod tests {
                     "file_path": format!("E:/work/repo/{state_file}")
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1706,6 +1736,8 @@ mod tests {
                 "file_path": "E:\\work\\repo\\.gwt\\skill-state\\execution-control.json"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert!(matches!(
@@ -1725,6 +1757,8 @@ mod tests {
                 tool_name: Some("Write".to_string()),
                 tool_input: Some(serde_json::json!({ "file_path": trusted_path })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1743,6 +1777,8 @@ mod tests {
                 "file_path": "E:/work/repo/crates/gwt/src/main.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1753,6 +1789,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": "cargo test" })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1770,6 +1808,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1843,6 +1883,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -1856,6 +1898,8 @@ mod tests {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({ "file_path": path })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         // Worktree bookkeeping (any extension) and the OS temp scratchpad
@@ -2002,6 +2046,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({"command": command})),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -2021,6 +2067,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
@@ -2043,6 +2091,8 @@ mod tests {
                 "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2060,6 +2110,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2081,6 +2133,23 @@ mod tests {
             evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_rejects_work_attached_to_pane_name() {
+        let name = envelope_command("pane.name", "{}");
+        for command in [
+            format!("{name}\ncargo test -p gwt"),
+            name.replacen("gwtd", "gwtd > source.txt", 1),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "startup exemption must not admit work: {command}"
+            );
+        }
     }
 
     #[test]
@@ -2108,6 +2177,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2125,6 +2196,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2142,6 +2215,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON\n&& cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2159,6 +2234,8 @@ mod tests {
                 "command": "rg -n title_summary crates/gwt/src"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2176,6 +2253,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.view\",\"params\":{\"number\":3253}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2193,6 +2272,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2212,6 +2293,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2219,6 +2302,30 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
+        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": envelope_command(operation, "{}")
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            assert_eq!(is_read_only_json_envelope_operation(operation), admitted);
+            assert_eq!(identity_gate_admits_operation(operation), admitted);
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output")
+                    == HookOutput::Silent,
+                admitted,
+                "{operation}"
+            );
+        }
     }
 
     /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in
@@ -2231,6 +2338,14 @@ mod tests {
             envelope_command("execution.adopt", r#"{"reason":"relaunch takeover"}"#),
             envelope_command("execution.repair", r#"{"reason":"integrity failure"}"#),
             envelope_command("execution.reopen", r#"{"reason":"blocker resolved"}"#),
+            envelope_command(
+                "execution.settle_delivered",
+                r#"{"reason":"closed owner is already pushed"}"#,
+            ),
+            envelope_command(
+                "pr.create_from_ci",
+                r#"{"base":"develop","head":"work/issue-4214","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"fix: delivery","body":"User Verification Result: n/a (autonomous)"}"#,
+            ),
             envelope_command(
                 "execution.release_prepared",
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
@@ -2432,6 +2547,8 @@ mod tests {
                 "command": "git config --list --show-origin"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2449,6 +2566,8 @@ mod tests {
                 "command": "git remote -v"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2471,6 +2590,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2507,6 +2628,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2526,6 +2649,8 @@ mod tests {
                 "command": "sed -i '' 's/a/b/' README.md"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2543,6 +2668,8 @@ mod tests {
                 "command": "find target -name '*.tmp' -delete"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2560,6 +2687,8 @@ mod tests {
                 "command": "git config user.name Codex"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2577,6 +2706,8 @@ mod tests {
                 "command": "git remote add origin https://example.com/repo.git"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2602,6 +2733,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2623,6 +2756,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Starting implementation\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2640,6 +2775,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2668,6 +2805,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2697,6 +2836,8 @@ mod tests {
             tool_name: Some("create_goal".to_string()),
             tool_input: Some(serde_json::json!({})),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -2718,6 +2859,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(

@@ -213,6 +213,50 @@ impl DuplicateWorkEventProvenance {
 }
 
 impl WorkEvent {
+    /// An authenticated repair may retire an invalid deterministic successor
+    /// without reopening it. Its reserved, idempotent event identity separates
+    /// this structural lineage audit from ordinary machine-local closes.
+    pub fn is_successor_supersession(&self) -> bool {
+        self.kind == WorkEventKind::Discard
+            && self.owner.is_none()
+            && self.status_category.is_none()
+            && self.id == format!("superseded-{}", self.work_item_id)
+            && self.agent_session_id.is_none()
+            && self.execution_container.is_some()
+            && self
+                .related_work_item_id
+                .as_deref()
+                .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
+    }
+
+    pub fn is_successor_lineage_anchor(&self) -> bool {
+        (self.kind == WorkEventKind::Start || self.is_successor_supersession())
+            && self
+                .related_work_item_id
+                .as_deref()
+                .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
+    }
+
+    /// A fresh authenticated activation may start a new owner's lifetime
+    /// after foreign terminal history occupied the branch's canonical ID.
+    /// Ordinary Start events never grant this owner-boundary authority.
+    pub fn is_owner_successor(&self) -> bool {
+        self.kind == WorkEventKind::Start
+            && self.id == format!("owner-successor-{}", self.work_item_id)
+            && self.agent_session_id.is_some()
+            && self.is_successor_lineage_anchor()
+            && self
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+                .and_then(work_owner_for_branch)
+                .zip(self.owner.as_deref())
+                .is_some_and(|(branch_owner, owner)| {
+                    branch_owner == owner
+                        || can_upgrade_work_owner(Some(&branch_owner), Some(owner))
+                })
+    }
+
     pub fn new(
         kind: WorkEventKind,
         work_item_id: impl Into<String>,
@@ -786,16 +830,22 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         .max()
         .unwrap_or(item.updated_at);
 
-    let lineage_start = item.events[..dropped_events]
+    let lineage_start = if item.events[dropped_events..]
         .iter()
-        .find(|event| {
-            event.kind == WorkEventKind::Start
-                && event
-                    .related_work_item_id
-                    .as_deref()
-                    .is_some_and(|predecessor| successor_work_id(predecessor) == item.id)
-        })
-        .cloned();
+        .any(WorkEvent::is_successor_supersession)
+    {
+        None
+    } else {
+        item.events[..dropped_events]
+            .iter()
+            .find(|event| event.is_successor_supersession())
+            .or_else(|| {
+                item.events[..dropped_events]
+                    .iter()
+                    .find(|event| event.is_successor_lineage_anchor())
+            })
+            .cloned()
+    };
     item.events.drain(..dropped_events);
     if let Some(start) = lineage_start {
         // Keep one provenance anchor and the newest remaining events; the

@@ -32,6 +32,8 @@ pub(crate) struct ExecutionTerminalFacts {
     pub(crate) status: gwt::cli::execution_state::ExecutionDiagnosisState,
     pub(crate) binding: gwt::cli::execution_state::ExecutionBindingState,
     pub(crate) owner_number: Option<u64>,
+    /// Completion belongs to this window's Session, not a previous launch.
+    pub(crate) session_matches_execution: bool,
     /// `settlement_severity == "clear"`.
     pub(crate) settlement_clear: bool,
     pub(crate) settlement_obligation_open: bool,
@@ -52,6 +54,7 @@ impl ExecutionTerminalFacts {
             status: diagnosis.ecr_status,
             binding: diagnosis.binding_state,
             owner_number: diagnosis.owner_number,
+            session_matches_execution: false,
             settlement_clear: diagnosis.settlement_severity == "clear",
             settlement_obligation_open: diagnosis.settlement_obligation_open,
             open_obligations: diagnosis.open_obligations.len(),
@@ -207,6 +210,13 @@ pub(crate) fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalC
     if monitor.issue_closed {
         return Eligible(TerminalCloseReason::ClosedIssue);
     }
+    // Issue #4783 AC-R1: a fresh launch may still read its predecessor's
+    // Completed record before activation. It is not this Session's delivery.
+    if execution.status == ExecutionDiagnosisState::Completed
+        && !execution.session_matches_execution
+    {
+        return Ineligible("execution_session_mismatch");
+    }
     // (a) fully settled execution for this exact owner.
     if execution.status == ExecutionDiagnosisState::Completed
         && execution.binding == ExecutionBindingState::Terminal
@@ -302,10 +312,8 @@ fn restore_admission_for_ineligible(cause: &'static str) -> RestoreAdmission {
         // (a PM pane, a manual launch). These are the restores that should
         // happen.
         //
-        // `execution_blocked_or_corrupt` and `session_interrupted` belong here:
-        // a blocked execution is recovered by adopting and reopening it, and an
-        // interrupted Session is precisely what auto-resume exists to continue
-        // ([`gwt_agent::Session::exact_auto_resume_candidate`] accepts it).
+        // Interrupted Sessions retain exact auto-resume. Blocked generations
+        // are refused separately below; corrupt-state behavior stays unchanged.
         "no_linked_issue"
         | "not_terminal"
         | "monitor_tracking_unsettled"
@@ -325,9 +333,11 @@ fn restore_admission_for_ineligible(cause: &'static str) -> RestoreAdmission {
         // `window_error` is the same answer for a different reason: an error
         // pane is a diagnostic the operator may still need, and respawning it
         // automatically is what #4143 (AC-3) removed.
-        "session_unreadable" | "monitor_unreadable" | "execution_unreadable" | "window_error" => {
-            RestoreAdmission::RefuseUnprovable(cause)
-        }
+        "session_unreadable"
+        | "monitor_unreadable"
+        | "execution_unreadable"
+        | "window_error"
+        | "execution_session_mismatch" => RestoreAdmission::RefuseUnprovable(cause),
         // A cause this function does not name is, by definition, one it could
         // not establish. Refusing here is what keeps a later addition to the
         // close predicate from becoming a new way to respawn a finished window.
@@ -349,6 +359,9 @@ pub(crate) enum RestoreAdmission {
     /// finished even while a settlement obligation is open. Do not spawn;
     /// keep the placeholder as the diagnostic.
     RefuseCompletedWork,
+    /// Issue #5510 AC-3: keep the placeholder but let the stale Active holder
+    /// reach the reaper and the Monitor's existing fresh-launch recovery.
+    RefuseFreshSession,
     /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
     /// spawn, but keep the placeholder — the hold is reversible.
     RefuseHeld(&'static str),
@@ -388,14 +401,9 @@ pub(crate) fn restore_admission_for_facts(
         {
             RestoreAdmission::RefuseRetainedTerminal
         }
-        // Issue #4783 AC-1: a generation Blocked by `issue.monitor.stop` is
-        // not the recoverable Blocked that `execution_blocked_or_corrupt`
-        // admits below — the operator stopped this Work. The Monitor-side
-        // hold (`failure_hold` / `monitor_stopped`) refuses it while the
-        // prefs carry it; the ledger marker refuses it after they stop
-        // carrying it, which is how a stopped Issue's window came back on
-        // the next restart. Held, not terminal: the placeholder stays, and
-        // `execution.reopen` lifts the marker.
+        // Issue #4783 AC-1: preserve the specific operator-stop reason even
+        // after Monitor prefs lose their hold. The ledger marker keeps the
+        // diagnostic placeholder without spawning; explicit reopen lifts it.
         TerminalCloseEligibility::Ineligible(_)
             if facts
                 .execution
@@ -415,6 +423,15 @@ pub(crate) fn restore_admission_for_facts(
             }) =>
         {
             RestoreAdmission::RefuseCompletedWork
+        }
+        // Issue #4783 recurrence: Blocked is terminal even when it was not
+        // an operator revocation. Recovery must be explicit, never startup.
+        TerminalCloseEligibility::Ineligible(_)
+            if facts.execution.as_ref().is_some_and(|execution| {
+                execution.status == gwt::cli::execution_state::ExecutionDiagnosisState::Blocked
+            }) =>
+        {
+            RestoreAdmission::RefuseHeld("execution_blocked")
         }
         TerminalCloseEligibility::Ineligible(cause) => restore_admission_for_ineligible(cause),
     }
@@ -477,6 +494,24 @@ pub(crate) fn read_terminal_window_facts(
     window_status: WindowProcessStatus,
     project_root: &Path,
 ) -> TerminalWindowFacts {
+    let monitor = session.linked_issue_number.and_then(|_| {
+        load_terminal_monitor(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+    });
+    read_terminal_window_facts_with_monitor(session, window_id, window_status, monitor.as_ref())
+}
+
+fn load_terminal_monitor(prefs_path: &Path) -> Option<gwt::IssueMonitorState> {
+    gwt::load_issue_monitor_prefs(prefs_path)
+        .ok()
+        .map(|prefs| gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs))
+}
+
+fn read_terminal_window_facts_with_monitor(
+    session: &gwt_agent::Session,
+    window_id: &str,
+    window_status: WindowProcessStatus,
+    monitor: Option<&gwt::IssueMonitorState>,
+) -> TerminalWindowFacts {
     let Some(issue_number) = session.linked_issue_number else {
         return TerminalWindowFacts {
             linked_issue: None,
@@ -486,20 +521,25 @@ pub(crate) fn read_terminal_window_facts(
             monitor: None,
         };
     };
-    let execution = Some(ExecutionTerminalFacts::from_diagnosis(
-        &gwt::cli::execution_state::diagnose_for_projection(
+    let mut execution = ExecutionTerminalFacts::from_diagnosis(
+        &gwt::cli::execution_state::diagnose_for_projection_with_session(
             &session.worktree_path,
             Some(&session.id),
+            Some(session),
         ),
-    ));
+    );
+    execution.session_matches_execution = gwt::cli::execution_state::load(&session.worktree_path)
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            gwt::cli::execution_state::integrity_ok(&record)
+                && record.primary_session_id == session.id
+                && Some(record.owner_number) == execution.owner_number
+                && record.status == gwt::cli::execution_state::ExecutionControlStatus::Completed
+        });
+    let execution = Some(execution);
     let monitor =
-        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
-            .ok()
-            .map(|prefs| {
-                let monitor =
-                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-                MonitorTerminalFacts::from_monitor(&monitor, issue_number, window_id)
-            });
+        monitor.map(|monitor| MonitorTerminalFacts::from_monitor(monitor, issue_number, window_id));
     TerminalWindowFacts {
         linked_issue: Some(issue_number),
         session_status: Some(session.status),
@@ -585,17 +625,44 @@ pub(crate) fn observe_terminal_windows_in_background(
     snapshots: Vec<TerminalWindowSnapshot>,
     commit_timeout: Duration,
 ) -> Vec<TerminalWindowObservation> {
+    observe_terminal_windows_with_monitor_loader(
+        sessions_dir,
+        snapshots,
+        commit_timeout,
+        load_terminal_monitor,
+    )
+}
+
+fn observe_terminal_windows_with_monitor_loader(
+    sessions_dir: &Path,
+    snapshots: Vec<TerminalWindowSnapshot>,
+    commit_timeout: Duration,
+    mut load_monitor: impl FnMut(&Path) -> Option<gwt::IssueMonitorState>,
+) -> Vec<TerminalWindowObservation> {
+    // A tick shares each repository snapshot, including unreadable prefs. Settlement
+    // below still reads fresh state and commits through its own exact CAS.
+    let mut monitors = HashMap::<PathBuf, Option<gwt::IssueMonitorState>>::new();
     snapshots
         .into_iter()
         .map(|snapshot| {
             let session_path = sessions_dir.join(format!("{}.toml", snapshot.session_id));
             let eligibility = match gwt_agent::Session::load_and_migrate(&session_path) {
                 Ok(session) => {
-                    let facts = read_terminal_window_facts(
+                    let monitor = if session.linked_issue_number.is_some() {
+                        let prefs_path =
+                            gwt::issue_monitor_prefs_path_for_repo_path(&snapshot.project_root);
+                        monitors
+                            .entry(prefs_path)
+                            .or_insert_with_key(|path| load_monitor(path))
+                            .as_ref()
+                    } else {
+                        None
+                    };
+                    let facts = read_terminal_window_facts_with_monitor(
                         &session,
                         &snapshot.window_id,
                         snapshot.window_status,
-                        &snapshot.project_root,
+                        monitor,
                     );
                     let eligibility = classify_terminal_window(&facts);
                     let monitor_owned = facts
@@ -899,7 +966,22 @@ impl AppRuntime {
             WindowProcessStatus::Stopped,
             project_root,
         );
-        restore_admission_for_facts(&facts, window_id.is_some())
+        let admission = restore_admission_for_facts(&facts, window_id.is_some());
+        if admission != RestoreAdmission::Admit {
+            return admission;
+        }
+        // Work may already be Done while verification and delivery still keep
+        // its execution Active. Selecting it would protect the old generation
+        // from the reaper, then Resume would refuse and launch without authority.
+        let project_state_root = session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(project_root);
+        match gwt::continuation_requires_new_session(project_state_root, session) {
+            Ok(true) => RestoreAdmission::RefuseFreshSession,
+            Ok(false) => admission,
+            Err(_) => RestoreAdmission::RefuseUnprovable("work_authority_unreadable"),
+        }
     }
 
     /// Persist a terminal/empty restore refusal and remove its placeholder.
@@ -939,6 +1021,172 @@ impl AppRuntime {
 mod tests {
     use super::*;
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    #[test]
+    fn observer_reads_each_monitor_path_once_per_tick_including_failures() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let sessions_dir = temp.path().join("sessions");
+        let projects = [temp.path().join("project-a"), temp.path().join("project-b")];
+        for project in &projects {
+            std::fs::create_dir_all(project).expect("project dir");
+        }
+        let mut session =
+            gwt_agent::Session::new(&projects[0], "work/issue-42", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.update_status(gwt_agent::AgentStatus::Idle);
+        session.save(&sessions_dir).expect("save session");
+        let snapshots: Vec<_> = (0..4)
+            .map(|index| TerminalWindowSnapshot {
+                window_id: format!("tab-1::agent-{index}"),
+                session_id: session.id.clone(),
+                project_root: projects[index / 2].clone(),
+                worktree_path: projects[0].clone(),
+                window_status: WindowProcessStatus::Running,
+                lifecycle_generation: Some(1),
+            })
+            .collect();
+        let paths = projects.map(|project| gwt::issue_monitor_prefs_path_for_repo_path(&project));
+        assert_ne!(paths[0], paths[1]);
+        let mut reads = HashMap::<PathBuf, usize>::new();
+        // Swap the failed path next tick: neither successful nor failed reads survive it.
+        for (tick, failed_path) in paths.iter().enumerate() {
+            let observations = observe_terminal_windows_with_monitor_loader(
+                &sessions_dir,
+                snapshots.clone(),
+                Duration::from_secs(5),
+                |path| {
+                    *reads.entry(path.to_path_buf()).or_default() += 1;
+                    (path != failed_path).then(|| {
+                        gwt::IssueMonitorState::with_prefs(
+                            gwt::IssueMonitorConfig::default(),
+                            gwt::IssueMonitorPrefs::default(),
+                        )
+                    })
+                },
+            );
+            assert_eq!(observations.len(), snapshots.len());
+            for (index, observation) in observations.iter().enumerate() {
+                assert_eq!(
+                    observation.eligibility
+                        == TerminalCloseEligibility::Ineligible("monitor_unreadable"),
+                    paths[index / 2] == *failed_path,
+                    "each window uses this tick's repository snapshot"
+                );
+            }
+            for path in &paths {
+                assert_eq!(
+                    reads[path],
+                    tick + 1,
+                    "each repository is read once per tick, including failures"
+                );
+            }
+        }
+    }
+
+    /// Issue #4783 AC-R1/R4: a fresh launch sees its predecessor's
+    /// worktree record until it activates its own generation. That record
+    /// must never authorize closing the new Session.
+    #[test]
+    fn completed_predecessor_does_not_close_a_fresh_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+                "--allow-empty"
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/terminal-4783.git"
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        let mut predecessor =
+            gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        predecessor.linked_issue_number = Some(42);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            &predecessor.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 42,
+            },
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &repo,
+                &predecessor.id,
+                gwt::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .unwrap(),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let mut fresh = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        fresh.linked_issue_number = Some(42);
+        fresh.update_status(gwt_agent::AgentStatus::Running);
+        let monitor = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::IssueMonitorPrefs {
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::fresh".to_string(),
+                }],
+                ..Default::default()
+            },
+        );
+        let mut facts = read_terminal_window_facts_with_monitor(
+            &fresh,
+            "tab-1::fresh",
+            WindowProcessStatus::Running,
+            Some(&monitor),
+        );
+        // Settlement delivery is tested separately; isolate the identity fence.
+        let execution = facts.execution.as_mut().unwrap();
+        assert_eq!(execution.status, ExecutionDiagnosisState::Completed);
+        assert_eq!(execution.binding, ExecutionBindingState::Terminal);
+        execution.settlement_clear = true;
+        execution.settlement_obligation_open = false;
+        execution.open_obligations = 0;
+        assert_eq!(
+            classify_terminal_window(&facts),
+            TerminalCloseEligibility::Ineligible("execution_session_mismatch"),
+            "a completed predecessor cannot settle the new launch",
+        );
+    }
 
     /// Issue #4441: every ineligibility cause the close predicate can emit is
     /// answered by name on the restore side.
@@ -994,6 +1242,7 @@ mod tests {
             status: ExecutionDiagnosisState::Completed,
             binding: ExecutionBindingState::Terminal,
             owner_number: Some(owner),
+            session_matches_execution: true,
             settlement_clear: true,
             settlement_obligation_open: false,
             open_obligations: 0,
@@ -1006,6 +1255,7 @@ mod tests {
             status: ExecutionDiagnosisState::Active,
             binding: ExecutionBindingState::Bound,
             owner_number: Some(owner),
+            session_matches_execution: true,
             settlement_clear: false,
             settlement_obligation_open: false,
             open_obligations: 1,
@@ -1020,6 +1270,7 @@ mod tests {
             status: ExecutionDiagnosisState::Blocked,
             binding: ExecutionBindingState::Terminal,
             owner_number: Some(owner),
+            session_matches_execution: true,
             settlement_clear: false,
             settlement_obligation_open: false,
             open_obligations: 0,
@@ -1028,8 +1279,8 @@ mod tests {
     }
 
     /// Issue #4783 AC-1: a generation the Monitor revoked is refused even
-    /// when the Monitor prefs carry no hold any more; an ordinary Blocked
-    /// generation keeps today's recoverable admission.
+    /// when the Monitor prefs carry no hold any more; ordinary terminal
+    /// Blocked generations also require explicit recovery.
     #[test]
     fn restore_refuses_a_monitor_revoked_generation_without_a_prefs_hold() {
         let placeholder = |execution: ExecutionTerminalFacts| TerminalWindowFacts {
@@ -1050,8 +1301,8 @@ mod tests {
         recoverable.launch_revoked = false;
         assert_eq!(
             restore_admission_for_facts(&placeholder(recoverable), true),
-            RestoreAdmission::Admit,
-            "a Blocked generation nobody revoked is still recovered by restore"
+            RestoreAdmission::RefuseHeld("execution_blocked"),
+            "terminal Blocked generations require explicit recovery"
         );
         // The marker is read only off a Blocked diagnosis.
         let mut diagnosis =

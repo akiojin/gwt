@@ -1,8 +1,8 @@
 // Issue #4777 T-1 — the rail picks one of four surfaces.
 //
 // Issues / Agents / Board / Settings are the only places the user can be.
-// Every window preset folds into one of them (or into none, for presets the
-// SPEC retires), so the rail can report which surface the focused window
+// Every known window preset folds into one of them, including restored legacy
+// views, so the rail can report which surface the focused window
 // belongs to without the host keeping a second selection state.
 
 const SURFACE_BY_PRESET = Object.freeze({
@@ -13,13 +13,19 @@ const SURFACE_BY_PRESET = Object.freeze({
   index: "issues",
   work: "issues",
   workspace: "issues",
+  branches: "issues",
+  pr: "issues",
   agent: "agents",
   claude: "agents",
   codex: "agents",
+  shell: "agents",
   board: "board",
+  memo: "board",
   settings: "settings",
-  branches: "settings",
   profile: "settings",
+  logs: "settings",
+  console: "settings",
+  file_tree: "settings",
 });
 
 export function surfaceForPreset(preset) {
@@ -36,6 +42,10 @@ export function surfaceForWindow(windowData) {
   if (windowData?.is_pm) {
     return "pm";
   }
+  if (["agent", "claude", "codex"].includes(windowData?.preset)) return "agents";
+  if (windowData?.preset === "settings" && windowData.surface_owner === "pm") return "pm";
+  if (windowData?.preset === "shell" && windowData.surface_owner === "agents") return "agents";
+  if (windowData?.preset === "settings" && windowData.settingsSection === "issues") return "issues";
   return surfaceForPreset(windowData?.preset);
 }
 

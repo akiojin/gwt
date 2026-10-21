@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+#[cfg(debug_assertions)]
+fn app_runtime_issue_cache_reply_precedes_related_work_decode() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _gate_env = ScopedEnvVar::set("GWT_PLAYWRIGHT_ACTIVE_WORK_RENDEZVOUS", "1");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cached row",
+            &["bug"],
+            "body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .unwrap();
+    let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(works.parent().unwrap()).unwrap();
+    fs::write(
+        &works,
+        r#"{"updated_at":"2026-04-20T10:00:00Z","work_items":[]}"#,
+    )
+    .unwrap();
+    let gate = temp.path().join(".gwt/issue-3777-active-work-rendezvous");
+    fs::create_dir_all(&gate).unwrap();
+    struct ReleaseGate(PathBuf);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release"), b"release");
+        }
+    }
+    let _release = ReleaseGate(gate.clone());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Settings,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    fs::write(
+        gate.join("work-items-path"),
+        works.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    let id = combined_window_id("tab-1", "issue-1");
+    assert!(runtime
+        .load_knowledge_bridge_events(
+            "client-1",
+            KnowledgeLoadRequest {
+                id: &id,
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(5543),
+                selected_number: Some(42),
+                refresh: false,
+            }
+        )
+        .is_empty());
+    let first = wait_for_knowledge_view_dispatch(&events, &id);
+    assert!(
+        matches!(&first[0].event, BackendEvent::KnowledgeEntries { request_id: Some(5543), entries, .. } if entries.iter().any(|entry| entry.number == 42))
+    );
+    wait_for_recorded_event("held related Work decode", &events, |_| {
+        gate.join("started").exists()
+    });
+    assert!(
+        !gate.join("resumed").exists(),
+        "cached rows must arrive before the held historical Work decode resumes"
+    );
+    fs::write(gate.join("release"), b"release").unwrap();
+    wait_for_recorded_event("related enrichment after cached rows", &events, |events| {
+        events.iter().filter(|event| matches!(recorded_project_payload(event), UserEvent::Dispatch(dispatched) if dispatched.iter().any(|outbound| matches!(&outbound.event, BackendEvent::KnowledgeEntries { request_id: Some(5543), .. })))).count() >= 2
+    });
+}
+
+#[test]
 fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures() {
     let _lock = env_test_lock()
         .lock()
@@ -14,7 +95,7 @@ fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures(
         "tab-1",
         "issue-1",
         repo.clone(),
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -90,7 +171,7 @@ fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_direct
         "tab-1",
         "issue-1",
         repo,
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -223,7 +304,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         "tab-1",
         "issue-1",
         repo.clone(),
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let (mut runtime, recorded_events) =
@@ -268,7 +349,16 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         },
     );
     assert!(immediate.is_empty());
-    wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let initial_events = wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    assert_eq!(
+        initial_events.len(),
+        1,
+        "Issue list completion must send entries without generating a preview detail"
+    );
+    assert!(matches!(
+        &initial_events[0].event,
+        BackendEvent::KnowledgeEntries { .. }
+    ));
     let scans_after_full_load = runtime
         .knowledge_related_snapshot
         .lock()
@@ -469,119 +559,6 @@ fn select_knowledge_bridge_entry_snapshot_miss_stays_empty_without_full_scan() {
 }
 
 #[test]
-fn select_pr_knowledge_bridge_entry_preserves_the_legacy_full_view_path() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "pr-1",
-        repo,
-        WindowPreset::Pr,
-        WindowProcessStatus::Ready,
-    );
-    let (mut runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "pr-1");
-
-    let immediate = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::SelectKnowledgeBridgeEntry {
-            id: window_id.clone(),
-            knowledge_kind: gwt::KnowledgeKind::Pr,
-            request_id: Some(91),
-            number: 77,
-        },
-    );
-    assert!(immediate.is_empty(), "PR selection stays off the GUI loop");
-    wait_for_recorded_event("PR selection full view", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::Dispatch(dispatched)
-                    if dispatched.iter().any(|outbound| matches!(
-                        &outbound.event,
-                        BackendEvent::KnowledgeEntries {
-                            request_id: Some(91),
-                            ..
-                        } | BackendEvent::KnowledgeError {
-                            request_id: Some(91),
-                            ..
-                        }
-                    ))
-            )
-        })
-    });
-
-    let recorded = recorded_events.lock().expect("events lock");
-    let dispatch = recorded
-        .iter()
-        .filter_map(|event| match event {
-            UserEvent::Dispatch(dispatched) => Some(dispatched),
-            _ => None,
-        })
-        .find(|dispatched| {
-            dispatched.iter().any(|outbound| {
-                matches!(
-                    &outbound.event,
-                    BackendEvent::KnowledgeEntries {
-                        request_id: Some(91),
-                        ..
-                    } | BackendEvent::KnowledgeError {
-                        request_id: Some(91),
-                        ..
-                    }
-                )
-            })
-        })
-        .expect("PR selection completion");
-    assert_eq!(
-        dispatch.len(),
-        2,
-        "legacy PR selection returns the full entries + detail view"
-    );
-    assert!(matches!(
-        &dispatch[0].event,
-        BackendEvent::KnowledgeEntries {
-            knowledge_kind: gwt::KnowledgeKind::Pr,
-            request_id: Some(91),
-            entries,
-            refresh_enabled: false,
-            ..
-        } if entries.is_empty()
-    ));
-    assert!(matches!(
-        &dispatch[1].event,
-        BackendEvent::KnowledgeDetail {
-            knowledge_kind: gwt::KnowledgeKind::Pr,
-            request_id: Some(91),
-            detail,
-            ..
-        } if detail.sections.iter().any(|section| {
-            section.body.contains("cache-backed PR list support")
-        })
-    ));
-    assert!(dispatch
-        .iter()
-        .all(|outbound| !matches!(outbound.event, BackendEvent::KnowledgeError { .. })));
-    assert_eq!(
-        runtime
-            .knowledge_related_snapshot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .full_scan_count(),
-        1,
-        "PR selection retains the existing full-load augmentation pass",
-    );
-}
-
-#[test]
 fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
     let _env_lock = env_test_lock()
         .lock()
@@ -650,19 +627,7 @@ fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
                                 && entries.len() == 1
                                 && entries[0].number == 43
                         )
-                    }) && dispatched.iter().any(|outbound| {
-                        matches!(
-                            &outbound.event,
-                            BackendEvent::KnowledgeDetail {
-                                id,
-                                request_id,
-                                detail,
-                                ..
-                            } if id == &window_id
-                                && *request_id == Some(31)
-                                && detail.number == Some(43)
-                        )
-                    })
+                    }) && dispatched.len() == 1
             )
         })
     });
@@ -889,59 +854,6 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         events.lock().expect("event log").is_empty(),
         "noop background refresh should return silently without dispatch"
     );
-}
-
-#[test]
-fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_support_exists() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "pr-1",
-        repo,
-        WindowPreset::Pr,
-        WindowProcessStatus::Ready,
-    );
-    let (runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-
-    let immediate = runtime.load_knowledge_bridge_events(
-        "client-1",
-        KnowledgeLoadRequest {
-            id: &combined_window_id("tab-1", "pr-1"),
-            kind: gwt::KnowledgeKind::Pr,
-            request_id: None,
-            selected_number: None,
-            refresh: false,
-        },
-    );
-    assert!(immediate.is_empty());
-    let events =
-        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "pr-1"));
-
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[0].event,
-        BackendEvent::KnowledgeEntries {
-            knowledge_kind,
-            entries,
-            refresh_enabled,
-            empty_message,
-            ..
-        } if *knowledge_kind == gwt::KnowledgeKind::Pr
-            && entries.is_empty()
-            && !*refresh_enabled
-            && empty_message.as_deref().is_some_and(|message| message.contains("cache-backed PR list support"))
-    ));
-    assert!(matches!(
-        &events[1].event,
-        BackendEvent::KnowledgeDetail { detail, .. }
-            if detail.sections.iter().any(|section| section.body.contains("cache-backed PR list support"))
-    ));
 }
 
 #[test]
@@ -1472,7 +1384,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
     );
 
     let context_b = runtime.project_context(&tab_b_id).unwrap();
-    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds());
+    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds(), None);
     let logs_b_raw_id = runtime
         .tab(&tab_b_id)
         .expect("opened project tab")

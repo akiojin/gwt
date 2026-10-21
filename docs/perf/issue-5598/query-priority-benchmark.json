@@ -1,0 +1,652 @@
+{
+  "python": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-python\\Scripts\\python.exe",
+  "torch": "2.13.0+cpu",
+  "sentence_transformers": "5.6.0",
+  "import_seconds": 23.258574299999964,
+  "initial_settings": {
+    "intra_op": 4,
+    "inter_op": 24,
+    "priority_class": 16384,
+    "cpu_count": 32
+  },
+  "env": {
+    "OMP_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "4",
+    "MKL_NUM_THREADS": "4",
+    "NUMEXPR_NUM_THREADS": "4",
+    "VECLIB_MAXIMUM_THREADS": "4"
+  },
+  "phases": [
+    {
+      "label": "original_env4",
+      "settings": {
+        "intra_op": 4,
+        "inter_op": 24,
+        "priority_class": 16384,
+        "cpu_count": 32
+      },
+      "warmup_ms": 1002.5284999992436,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 55.96719999994093,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 597.7665999998862,
+          "process_cpu_ms": 453.125,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 566.1846000002697,
+          "process_cpu_ms": 390.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 587.8197000001819,
+          "process_cpu_ms": 265.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 571.5783000005104,
+          "process_cpu_ms": 484.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 124.01890000001004,
+          "process_cpu_ms": 312.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 508.4557999998651,
+          "process_cpu_ms": 421.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 607.8060999998343,
+          "process_cpu_ms": 843.75,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 580.4075999994893,
+          "process_cpu_ms": 812.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 554.9055999999837,
+          "process_cpu_ms": 531.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 179.02789999970992,
+          "process_cpu_ms": 312.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 435.6026999994356,
+          "process_cpu_ms": 609.375,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 75.5982596084119,
+      "mean_ms": 447.46174999992644,
+      "p95_ms": 607.8060999998343,
+      "total_ms": 5369.540999999117,
+      "mean_process_cpu_ms": 467.4479166666667
+    },
+    {
+      "label": "normal_intra_4",
+      "settings": {
+        "intra_op": 4,
+        "inter_op": 1,
+        "priority_class": 32,
+        "cpu_count": 32
+      },
+      "warmup_ms": 64.67009999960283,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 1079.5336000001043,
+          "process_cpu_ms": 250.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 557.8865999996196,
+          "process_cpu_ms": 234.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 52.384100000381295,
+          "process_cpu_ms": 187.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 570.1540999998542,
+          "process_cpu_ms": 406.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 315.1585999994495,
+          "process_cpu_ms": 437.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 283.0344000003606,
+          "process_cpu_ms": 250.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 573.4551000005013,
+          "process_cpu_ms": 671.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 47.74130000078003,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 555.2826000002824,
+          "process_cpu_ms": 484.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 567.5956999994014,
+          "process_cpu_ms": 500.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 48.422799999571,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 555.6212000001324,
+          "process_cpu_ms": 390.625,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 80.61167227833894,
+      "mean_ms": 433.85584166670316,
+      "p95_ms": 1079.5336000001043,
+      "total_ms": 5206.270100000438,
+      "mean_process_cpu_ms": 346.3541666666667
+    },
+    {
+      "label": "normal_intra_2",
+      "settings": {
+        "intra_op": 2,
+        "inter_op": 1,
+        "priority_class": 32,
+        "cpu_count": 32
+      },
+      "warmup_ms": 212.56840000023658,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 394.8970000001282,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 89.01849999983824,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 100.45220000029076,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 405.2492999999231,
+          "process_cpu_ms": 250.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 113.29960000057326,
+          "process_cpu_ms": 109.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 468.59720000065863,
+          "process_cpu_ms": 187.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 103.54430000006687,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 107.26429999976972,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 403.94759999981034,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 79.2580999996062,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 229.1108000008535,
+          "process_cpu_ms": 265.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 303.92720000054396,
+          "process_cpu_ms": 187.5,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 73.40277777777777,
+      "mean_ms": 233.21384166683856,
+      "p95_ms": 468.59720000065863,
+      "total_ms": 2798.5661000020627,
+      "mean_process_cpu_ms": 171.875
+    },
+    {
+      "label": "normal_intra_1",
+      "settings": {
+        "intra_op": 1,
+        "inter_op": 1,
+        "priority_class": 32,
+        "cpu_count": 32
+      },
+      "warmup_ms": 149.33109999947192,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 345.93500000028143,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 135.3620999998384,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 157.00459999970917,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 216.614899999513,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 221.7043000000558,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 131.1926999997013,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 170.72960000041348,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 286.6275999995196,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 132.98130000021047,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 300.98809999981313,
+          "process_cpu_ms": 109.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 210.1518000008582,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 183.69040000015957,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 72.83203125,
+      "mean_ms": 207.74853333333945,
+      "p95_ms": 345.93500000028143,
+      "total_ms": 2492.9824000000735,
+      "mean_process_cpu_ms": 135.41666666666666
+    },
+    {
+      "label": "restored_priority_intra_1",
+      "settings": {
+        "intra_op": 1,
+        "inter_op": 1,
+        "priority_class": 16384,
+        "cpu_count": 32
+      },
+      "warmup_ms": 194.03419999980542,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 200.9821000001466,
+          "process_cpu_ms": 109.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 184.91900000026362,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 340.69329999965703,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 538.6680999999953,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 156.07790000012756,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 524.1376000003584,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 530.1847000000635,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 176.93680000047607,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 547.0681000006152,
+          "process_cpu_ms": 93.75,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 516.6392000000997,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 646.8322999999145,
+          "process_cpu_ms": 140.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 584.9428000001353,
+          "process_cpu_ms": 109.375,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 90.63485804416403,
+      "mean_ms": 412.34015833348775,
+      "p95_ms": 646.8322999999145,
+      "total_ms": 4948.081900001853,
+      "mean_process_cpu_ms": 132.8125
+    },
+    {
+      "label": "restored_priority_intra_2",
+      "settings": {
+        "intra_op": 2,
+        "inter_op": 1,
+        "priority_class": 16384,
+        "cpu_count": 32
+      },
+      "warmup_ms": 539.048399999956,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 572.4614000000656,
+          "process_cpu_ms": 265.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 96.25450000021374,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 526.5169999993304,
+          "process_cpu_ms": 281.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 101.78129999985686,
+          "process_cpu_ms": 125.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 509.26150000032067,
+          "process_cpu_ms": 265.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 110.86749999958556,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 441.4735999998811,
+          "process_cpu_ms": 203.125,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 116.59400000007736,
+          "process_cpu_ms": 156.25,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 483.1915000004301,
+          "process_cpu_ms": 265.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 150.1170000001366,
+          "process_cpu_ms": 171.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 506.9398999994519,
+          "process_cpu_ms": 250.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 537.8967999995439,
+          "process_cpu_ms": 203.125,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 92.12875939849624,
+      "mean_ms": 346.1129999999078,
+      "p95_ms": 572.4614000000656,
+      "total_ms": 4153.355999998894,
+      "mean_process_cpu_ms": 210.9375
+    },
+    {
+      "label": "restored_priority_intra_4",
+      "settings": {
+        "intra_op": 4,
+        "inter_op": 1,
+        "priority_class": 16384,
+        "cpu_count": 32
+      },
+      "warmup_ms": 579.8434999996971,
+      "samples": [
+        {
+          "query": "search admission index sharing repair performance worker",
+          "wall_ms": 587.9978000002666,
+          "process_cpu_ms": 468.75,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance launch",
+          "wall_ms": 583.1201000000874,
+          "process_cpu_ms": 500.0,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance runtime",
+          "wall_ms": 607.2269999995115,
+          "process_cpu_ms": 515.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance model",
+          "wall_ms": 1177.89300000004,
+          "process_cpu_ms": 812.5,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance project",
+          "wall_ms": 563.6100999990958,
+          "process_cpu_ms": 453.125,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance window",
+          "wall_ms": 320.4495999998471,
+          "process_cpu_ms": 484.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance source",
+          "wall_ms": 319.2172999997638,
+          "process_cpu_ms": 390.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance memory",
+          "wall_ms": 646.4995999995153,
+          "process_cpu_ms": 859.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance queue",
+          "wall_ms": 539.7598000008657,
+          "process_cpu_ms": 390.625,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance lease",
+          "wall_ms": 547.4299999996219,
+          "process_cpu_ms": 609.375,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance token",
+          "wall_ms": 363.5249999997541,
+          "process_cpu_ms": 546.875,
+          "dimensions": 768
+        },
+        {
+          "query": "search admission index sharing repair performance generation",
+          "wall_ms": 275.3292000006695,
+          "process_cpu_ms": 390.625,
+          "dimensions": 768
+        }
+      ],
+      "system_busy_percent": 85.34688995215312,
+      "mean_ms": 544.3382083332532,
+      "p95_ms": 1177.89300000004,
+      "total_ms": 6532.058499999039,
+      "mean_process_cpu_ms": 535.15625
+    }
+  ],
+  "model_load_seconds": 2.908839800000351,
+  "attention_implementation": "sdpa",
+  "final_settings": {
+    "intra_op": 4,
+    "inter_op": 1,
+    "priority_class": 16384,
+    "cpu_count": 32
+  }
+}

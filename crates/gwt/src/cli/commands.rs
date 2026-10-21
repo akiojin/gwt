@@ -127,6 +127,7 @@ pub enum IssueCommand {
         title: String,
         body: String,
         labels: Vec<String>,
+        owner_check: Option<super::hook::pm_spec_survey::IssueOwnerCheck>,
     },
     /// Issue #3865: update a plain Issue in place. Every field is optional and
     /// only the supplied ones are sent; `body` is a whole-body replacement and
@@ -230,22 +231,17 @@ pub enum IssueCommand {
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
-        /// Issue #3906 AC-1: explicit auto-apply-updates override (`None`
-        /// leaves the stored value untouched).
-        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
         /// clear (`false`) the non-destructive update drain.
         update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
-    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
-    /// the usage threshold.
+    /// SPEC #3914 FR-011: read the launch candidate pool and provider holds.
     MonitorProfiles {
         project_root: Option<std::path::PathBuf>,
     },
-    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
-    /// and optionally the usage threshold.
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
@@ -286,6 +282,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        remove_from_queue: bool,
         claim_id: Option<String>,
         delivery_id: Option<String>,
         window_id: Option<String>,
@@ -313,6 +310,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        force: bool,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.
@@ -374,6 +372,8 @@ pub enum IssueCommand {
 /// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
+    /// Narrow Ready-creation path backed by exact canonical GitHub CI.
+    CreateFromCi(crate::cli::pr::ci_delivery::CiCreateRequest),
     Current,
     /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
     HeadCheck {

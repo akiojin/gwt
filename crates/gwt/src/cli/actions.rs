@@ -725,18 +725,26 @@ pub(super) fn fetch_actions_job_log_via_gh(
 ) -> io::Result<String> {
     let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
     let hub = gwt_core::process_console::global();
-    // Issue #4849 AC-1: current `gh` refuses to print a response that carries
-    // terminal escape sequences unless told otherwise, and a job log with
-    // colour codes is exactly that. The sequences are stripped by the caller
-    // before anything leaves the operation.
-    let output = gwt_core::process_console::spawn_logged_blocking(
-        &hub,
-        gwt_core::process_console::ProcessKind::Gh,
-        "gh",
-        &["api", "--allow-escape-sequences", endpoint.as_str()],
-        gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}"))
-            .current_dir(repo_path),
-    )?;
+    let fetch = |args: &[&str]| {
+        gwt_core::process_console::spawn_logged_blocking(
+            &hub,
+            gwt_core::process_console::ProcessKind::Gh,
+            "gh",
+            args,
+            gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}"))
+                .current_dir(repo_path),
+        )
+    };
+    // Newer gh requires explicit permission for ANSI logs; older gh accepts
+    // those logs but rejects the flag. The caller strips ANSI in either case.
+    let mut output = fetch(&["api", "--allow-escape-sequences", endpoint.as_str()])?;
+    if !output.success()
+        && output
+            .stderr
+            .contains("unknown flag: --allow-escape-sequences")
+    {
+        output = fetch(&["api", endpoint.as_str()])?;
+    }
     if !output.success() {
         return Err(io::Error::other(format!(
             "gh api {endpoint}: {}",
@@ -958,6 +966,29 @@ mod tests {
         );
         assert!(focused.contains("--\n"), "blocks are separated: {focused}");
         assert!(focused.lines().count() < out.lines().count());
+    }
+
+    #[test]
+    fn issue_4849_job_logs_support_gh_without_the_escape_flag() {
+        crate::cli::test_support::with_fake_gh("job-log-unsupported-escape-flag", |path| {
+            let mut env = crate::cli::DefaultCliEnv::new("akiojin", "gwt", path.to_path_buf());
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                ActionsCommand::JobLogs {
+                    job_id: 91,
+                    failed_only: true,
+                    context_lines: 0,
+                },
+                &mut out,
+            )
+            .expect("job logs succeed when gh does not support the escape flag");
+            assert_eq!(code, 0);
+            assert!(!out.contains('\x1b'), "{out:?}");
+            assert!(out.contains("test fails ... FAILED"), "{out}");
+            assert!(out.contains("panicked at src/lib.rs:1:1"), "{out}");
+            assert!(!out.contains("unrelated output"), "{out}");
+        });
     }
 
     /// Issue #4849 AC-2: a log without any marker still shows its tail, and

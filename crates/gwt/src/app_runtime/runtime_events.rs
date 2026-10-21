@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
@@ -24,6 +24,15 @@ pub(super) fn terminal_preview_text(contents: &str) -> String {
         lines.pop();
     }
     lines[lines.len().saturating_sub(3)..].join("\n")
+}
+
+pub(super) const RUNTIME_OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(150);
+
+pub(crate) struct PendingRuntimeOutput {
+    incarnation: Option<u64>,
+    deadline: Instant,
+    pub(super) data: Vec<u8>,
+    screen: Option<String>,
 }
 
 /// Issue #3274: how many trailing non-empty screen lines survive into the
@@ -420,6 +429,14 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
         return Some(gwt_agent::codex_shared_state_lock_detail());
     }
+    let sandbox_error =
+        "Could not read Windows sandbox configuration and requirements from the app server.";
+    if tail.contains(sandbox_error) {
+        return Some(format!(
+            "Agent startup failed: {sandbox_error}; {}",
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        ));
+    }
     // Issue #4445: an npm shim whose target executable was renamed away by the
     // provider's auto-update reports a localized shell message and a bare exit
     // status. The path it could not find is the whole diagnosis, and it is at
@@ -472,16 +489,6 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn process_line_events(
-        &self,
-        line: gwt_core::process_console::ProcessLine,
-    ) -> Vec<OutboundEvent> {
-        self.project_events_for_open_surface(
-            WindowPreset::Console,
-            BackendEvent::ProcessLine { line },
-        )
-    }
-
     pub(crate) fn log_entry_events(
         &self,
         entry: gwt_core::logging::LogEvent,
@@ -500,7 +507,7 @@ impl AppRuntime {
         events
     }
 
-    /// Test-only entry that streams output without a pane stream position;
+    /// Test-only entry that streams output and drains its derived batch;
     /// production output arrives through [`Self::handle_runtime_output_event`]
     /// with the reader thread's position (Issue #4095).
     #[cfg(test)]
@@ -509,7 +516,16 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, true, None)
+        let screen = self.runtimes.get(&id).and_then(|runtime| {
+            runtime
+                .pane
+                .lock()
+                .ok()
+                .map(|pane| pane.screen().contents())
+        });
+        let mut events = self.handle_runtime_output_inner(id.clone(), data, true, None, screen);
+        events.extend(self.flush_runtime_output_batch(&id));
+        events
     }
 
     /// `seq` is the pane stream position the reader thread observed right
@@ -521,11 +537,12 @@ impl AppRuntime {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        screen: Option<String>,
     ) -> Vec<OutboundEvent> {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output_inner(id, data, true, Some(seq))
+        self.handle_runtime_output_inner(id, data, true, Some(seq), screen)
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -534,15 +551,24 @@ impl AppRuntime {
         data: Vec<u8>,
         preview_text: Option<String>,
     ) -> Vec<OutboundEvent> {
-        if self.window_lookup.contains_key(&id) {
-            if let Some(text) = preview_text {
-                self.remote_terminal_previews.insert(id.clone(), text);
-            }
-        }
+        let preview = preview_text.and_then(|text| {
+            let project_key = self.project_key_for_window(&id)?.clone();
+            self.remote_terminal_previews
+                .insert(id.clone(), text.clone());
+            Some(OutboundEvent::project(
+                project_key,
+                BackendEvent::TerminalPreview {
+                    id: id.clone(),
+                    text,
+                },
+            ))
+        });
         // Daemon publications describe another process; a local PTY
         // incarnation is neither
         // available nor authoritative for this path.
-        self.handle_runtime_output_inner(id, data, false, None)
+        let mut events = self.handle_runtime_output_inner(id, data, false, None, None);
+        events.extend(preview);
+        events
     }
 
     fn handle_runtime_output_inner(
@@ -551,11 +577,12 @@ impl AppRuntime {
         data: Vec<u8>,
         publish_to_daemon: bool,
         stream_seq: Option<u64>,
+        screen: Option<String>,
     ) -> Vec<OutboundEvent> {
         let _project_scope = self.enter_window_log_scope(&id);
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
+        if !self.window_lookup.contains_key(&id) {
             return Vec::new();
-        };
+        }
         // Issue #3475: progress evidence for the authenticated SessionStart
         // readiness deadline. Saturating because the counter only ever needs to
         // answer "did this pane emit anything since the last deadline".
@@ -567,75 +594,149 @@ impl AppRuntime {
             self.window_last_output_at
                 .insert(id.clone(), chrono::Utc::now());
         }
-        let preview_text = if publish_to_daemon {
-            self.runtimes.get(&id).and_then(|runtime| {
-                runtime
-                    .pane
-                    .lock()
-                    .ok()
-                    .map(|pane| terminal_preview_text(&pane.screen().contents()))
-            })
-        } else {
-            self.remote_terminal_previews.get(&id).cloned()
-        };
+        // Raw bytes retain their original stream position and latency. Only
+        // screen-derived work and the best-effort daemon relay are batched.
+        let mut flush = false;
         if publish_to_daemon {
-            if let Some(tab) = self.tab(&address.tab_id) {
-                publish_runtime_output_change(&tab.project_root, &id, &data, preview_text.clone());
+            let incarnation = self.runtimes.get(&id).map(|runtime| runtime.incarnation);
+            let pending = self
+                .pending_runtime_outputs
+                .entry(id.clone())
+                .or_insert_with(|| PendingRuntimeOutput {
+                    incarnation,
+                    deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
+                    data: Vec::new(),
+                    screen: None,
+                });
+            if pending.incarnation != incarnation {
+                *pending = PendingRuntimeOutput {
+                    incarnation,
+                    deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
+                    data: Vec::new(),
+                    screen: None,
+                };
             }
+            pending.data.extend_from_slice(&data);
+            pending.screen = screen;
+            flush = pending.data.len() >= gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES;
         }
-        let output_id = id.clone();
         let Some(project_key) = self.project_key_for_window(&id).cloned() else {
             return Vec::new();
         };
         let mut events = vec![OutboundEvent::project(
-            project_key.clone(),
+            project_key,
             BackendEvent::TerminalOutput {
-                id,
+                id: id.clone(),
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
             },
         )
         .with_terminal_stream_seq(stream_seq)];
-        if let Some(text) = preview_text {
-            events.push(OutboundEvent::project(
-                project_key,
-                BackendEvent::TerminalPreview {
-                    id: output_id.clone(),
-                    text,
-                },
-            ));
-        }
-        if publish_to_daemon {
-            events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
-            let prompt = self.current_screen_approval_prompt(&output_id);
-            // Issue #4544 AC-3: the same fingerprint, read for a different
-            // question. `observe_runtime_approval_prompt` asks "is this pane
-            // waiting?"; this asks "was this pane ever allowed to wait?".
-            self.observe_permission_prompt_regression(&output_id, prompt);
-            events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
-            // Issue #3616: the only place a still-running quota-blocked pane can
-            // be recognized. Claude keeps its process alive and reports `idle`,
-            // so no exit or status event ever arrives to classify.
-            events.extend(
-                self.observe_provider_quota_notice_from_screen(&output_id, chrono::Utc::now()),
-            );
-            // Issue #4584: the turn can also end on a transient provider
-            // error, which leaves the process alive and the hook state on
-            // whatever the turn was last doing. Nothing else fires, so this
-            // read is the only thing standing between a stopped pane and
-            // twenty minutes of reading as healthy.
-            events.extend(self.observe_provider_api_error_from_screen(&output_id));
+        if flush {
+            events.extend(self.flush_runtime_output_batch(&id));
         }
         events
     }
 
-    fn observe_codex_directory_trust_prompt_from_screen(
-        &mut self,
-        window_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let Some((provider, screen)) = self.current_approval_screen(window_id) else {
+    pub(crate) fn next_runtime_output_deadline(&self) -> Option<Instant> {
+        self.pending_runtime_outputs
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
+    }
+
+    pub(crate) fn flush_runtime_output_batches(&mut self, now: Instant) -> Vec<OutboundEvent> {
+        let due: Vec<String> = self
+            .pending_runtime_outputs
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut events = Vec::new();
+        for id in due {
+            events.extend(self.flush_runtime_output_batch(&id));
+        }
+        events
+    }
+
+    fn flush_runtime_output_batch(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(pending) = self.pending_runtime_outputs.remove(id) else {
             return Vec::new();
         };
-        if gwt::window_state::directory_trust_prompt_fingerprint(provider, &screen).is_none() {
+        if self.runtimes.get(id).map(|runtime| runtime.incarnation) != pending.incarnation {
+            return Vec::new();
+        }
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(project_key) = self.project_key_for_window(id).cloned() else {
+            return Vec::new();
+        };
+        let batch_started = Instant::now();
+        let _project_scope = self.enter_window_log_scope(id);
+        let scope_elapsed = batch_started.elapsed();
+        // The parser worker captured this screen with the batch's stream
+        // position. Never wait for the Pane mutex or render on the GUI thread.
+        let screen = pending.screen;
+        let preview = screen.as_deref().map(terminal_preview_text);
+        let preview_elapsed = batch_started.elapsed();
+        if let Some(tab) = self.tab(&address.tab_id) {
+            publish_runtime_output_change(&tab.project_root, id, &pending.data, preview.clone());
+        }
+        let relay_elapsed = batch_started.elapsed();
+        let mut events = Vec::new();
+        if let Some(text) = preview {
+            events.push(OutboundEvent::project(
+                project_key,
+                BackendEvent::TerminalPreview {
+                    id: id.to_string(),
+                    text,
+                },
+            ));
+        }
+        let provider = self.approval_prompt_provider(id);
+        if let Some(screen) = screen.as_deref() {
+            events.extend(self.observe_codex_directory_trust_prompt(id, provider, screen));
+        }
+        let prompt = screen
+            .as_deref()
+            .and_then(|screen| gwt::window_state::approval_prompt_fingerprint(provider, screen));
+        self.observe_permission_prompt_regression(id, prompt);
+        events.extend(self.observe_runtime_approval_prompt(id, prompt));
+        let approval_elapsed = batch_started.elapsed();
+        events.extend(self.observe_provider_quota_notice(
+            id,
+            screen.as_deref(),
+            chrono::Utc::now(),
+        ));
+        let quota_elapsed = batch_started.elapsed();
+        let error_tail = screen
+            .as_deref()
+            .and_then(|screen| screen_tail_text(screen, API_ERROR_TAIL_LINES, "\n"));
+        events.extend(self.observe_provider_api_error(id, error_tail.as_deref()));
+        // Flushes run at the start of any native callback, so the outer
+        // callback's label alone cannot establish this work's latency budget.
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            marker = "issue_5379_runtime_output_batch",
+            elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            scope_us = scope_elapsed.as_micros() as u64,
+            preview_us = (preview_elapsed - scope_elapsed).as_micros() as u64,
+            relay_us = (relay_elapsed - preview_elapsed).as_micros() as u64,
+            approval_us = (approval_elapsed - relay_elapsed).as_micros() as u64,
+            quota_us = (quota_elapsed - approval_elapsed).as_micros() as u64,
+            api_error_us = (batch_started.elapsed() - quota_elapsed).as_micros() as u64,
+            "GUI runtime output batch handled"
+        );
+        events
+    }
+
+    fn observe_codex_directory_trust_prompt(
+        &mut self,
+        window_id: &str,
+        provider: gwt::window_state::ApprovalPromptProvider,
+        screen: &str,
+    ) -> Vec<OutboundEvent> {
+        if gwt::window_state::directory_trust_prompt_fingerprint(provider, screen).is_none() {
             return Vec::new();
         }
         let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) else {
@@ -1028,7 +1129,17 @@ impl AppRuntime {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, true)
+        // Flush the final bytes/preview before status can tear the pane down.
+        let mut events = self.flush_runtime_output_batch(&id);
+        events.extend(self.handle_runtime_status_inner(
+            id,
+            status,
+            detail,
+            true,
+            exit_confirmed,
+            true,
+        ));
+        events
     }
 
     fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
@@ -1419,15 +1530,7 @@ impl AppRuntime {
     fn screen_tail(&self, id: &str, lines: usize, separator: &str) -> Option<String> {
         let runtime = self.runtimes.get(id)?;
         let pane = runtime.pane.lock().ok()?;
-        let contents = pane.screen().contents();
-        let screen_lines: Vec<&str> = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let start = screen_lines.len().saturating_sub(lines);
-        let tail = screen_lines[start..].join(separator);
-        (!tail.is_empty()).then_some(tail)
+        screen_tail_text(&pane.screen().contents(), lines, separator)
     }
 
     /// Copy this window's PTY exit receipt onto its durable Session
@@ -1493,9 +1596,9 @@ impl AppRuntime {
         }
         let notice = screen
             .and_then(|screen| {
-                gwt_core::usage::detect_provider_limit_notice(
+                gwt_core::usage::limit_notice::detect_provider_limit_notice_with_clock(
                     screen,
-                    &now.with_timezone(&chrono::Local),
+                    || now.with_timezone(&chrono::Local),
                 )
             })
             .filter(|notice| notice.provider == self.quota_provider_for_window(window_id));
@@ -1669,20 +1772,6 @@ impl AppRuntime {
                 events
             }
         }
-    }
-
-    /// Issue #4584: classify this pane's own live screen, the same way the
-    /// quota path does, so a test exercises the read a real pty feeds.
-    ///
-    /// A wider tail than the quota notice needs: the CLI writes its own "done"
-    /// line plus four lines of prompt furniture underneath the error, so an
-    /// eight-line window would only just reach it.
-    pub(crate) fn observe_provider_api_error_from_screen(
-        &mut self,
-        window_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let screen = self.screen_tail(window_id, API_ERROR_TAIL_LINES, "\n");
-        self.observe_provider_api_error(window_id, screen.as_deref())
     }
 
     /// Issue #3616: classify this pane's own live screen. The production entry
@@ -1898,9 +1987,36 @@ impl AppRuntime {
                 ));
             }
         }
-        let Some(window_id) = self.active_window_for_runtime_event(&event) else {
+        let window_id = self.active_window_for_runtime_event(&event);
+        let source_event = match event.source_event.as_deref() {
+            Some(
+                source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse"
+                | "Stop" | "SubagentStart" | "SubagentStop" | "Notification"
+                | "PermissionRequest"),
+            ) => source,
+            None => "none",
+            _ => "other",
+        };
+        let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
+        tracing::info!(
+            target: "gwt.hook.delivery",
+            stage = "window",
+            outcome = if window_id.is_some() { "matched" } else { "unmatched" },
+            route = if publish_to_daemon { "live" } else { "daemon" },
+            gwt_session_id = event.gwt_session_id.as_deref().unwrap_or_default(),
+            source_event,
+            occurred_at,
+            window_id = window_id.as_deref().unwrap_or_default(),
+            "runtime hook delivery"
+        );
+        let Some(window_id) = window_id else {
             return events;
         };
+        self.observe_issue_monitor_startup_activity(&window_id, &event);
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
         let effective_before = self.window_status(&window_id);
         let approval_wait_cleared = self.window_approval_waiting.contains_key(&window_id);
@@ -1916,7 +2032,13 @@ impl AppRuntime {
         // one. Throttled inside `schedule_runtime_hook_heartbeat`.
         if let Some(project_root) = issue_monitor_project_root.clone() {
             stages.measure("issue_monitor_heartbeat", || {
-                self.schedule_runtime_hook_heartbeat(&project_root, &window_id)
+                self.schedule_runtime_hook_heartbeat(
+                    &project_root,
+                    &window_id,
+                    event.gwt_session_id.as_deref(),
+                    source_event,
+                    occurred_at,
+                )
             });
         }
         if event.source_event.as_deref() == Some("SessionStart") {
@@ -2068,6 +2190,15 @@ impl AppRuntime {
         event.kind != gwt::RuntimeHookEventKind::RuntimeState
     }
 }
+fn screen_tail_text(contents: &str, lines: usize, separator: &str) -> Option<String> {
+    let screen_lines: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = screen_lines[screen_lines.len().saturating_sub(lines)..].join(separator);
+    (!tail.is_empty()).then_some(tail)
+}
 const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
 enum RuntimeDaemonPublish {
     Output {
@@ -2138,8 +2269,12 @@ fn runtime_daemon_publish_sender_from(
     }
 }
 fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
+    let Ok(mut publisher) = gwt::daemon_publisher::PersistentEventPublisher::new() else {
+        tracing::warn!("runtime daemon publisher initialization failed");
+        return;
+    };
     for publish in receiver {
-        publish_runtime_daemon_event(publish);
+        publish_runtime_daemon_event(&mut publisher, publish);
     }
 }
 fn runtime_daemon_approval_publish_sender() -> Option<std_mpsc::Sender<RuntimeDaemonApprovalPublish>>
@@ -2178,8 +2313,12 @@ fn runtime_daemon_approval_publish_sender_from(
 fn run_runtime_daemon_approval_publish_worker(
     receiver: std_mpsc::Receiver<RuntimeDaemonApprovalPublish>,
 ) {
+    let Ok(mut publisher) = gwt::daemon_publisher::PersistentEventPublisher::new() else {
+        tracing::warn!("runtime daemon approval publisher initialization failed");
+        return;
+    };
     for publish in receiver {
-        publish_runtime_daemon_approval_event(publish);
+        publish_runtime_daemon_approval_event(&mut publisher, publish);
     }
 }
 fn try_enqueue_runtime_daemon_publish(
@@ -2202,7 +2341,10 @@ fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
         );
     }
 }
-fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
+fn publish_runtime_daemon_event(
+    publisher: &mut gwt::daemon_publisher::PersistentEventPublisher,
+    publish: RuntimeDaemonPublish,
+) {
     match publish {
         RuntimeDaemonPublish::Output {
             project_root,
@@ -2216,7 +2358,7 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
                 std::process::id(),
                 preview_text.as_deref(),
             );
-            let result = gwt::daemon_publisher::publish_event(
+            let result = publisher.publish(
                 &project_root,
                 gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
                 payload,
@@ -2242,7 +2384,7 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
                 detail,
                 std::process::id(),
             );
-            let result = gwt::daemon_publisher::publish_event(
+            let result = publisher.publish(
                 &project_root,
                 gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
                 payload,
@@ -2262,7 +2404,7 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
         } => {
             let payload =
                 gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
-            let result = gwt::daemon_publisher::publish_event(
+            let result = publisher.publish(
                 &project_root,
                 gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
                 payload,
@@ -2277,13 +2419,16 @@ fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
         }
     }
 }
-fn publish_runtime_daemon_approval_event(publish: RuntimeDaemonApprovalPublish) {
+fn publish_runtime_daemon_approval_event(
+    publisher: &mut gwt::daemon_publisher::PersistentEventPublisher,
+    publish: RuntimeDaemonApprovalPublish,
+) {
     let payload = gwt::runtime_daemon_events::runtime_approval_overlay_payload(
         &publish.id,
         publish.waiting,
         std::process::id(),
     );
-    let result = gwt::daemon_publisher::publish_event(
+    let result = publisher.publish(
         &publish.project_root,
         gwt::runtime_daemon_events::RUNTIME_APPROVAL_OVERLAY_CHANNEL,
         payload,
@@ -2302,14 +2447,24 @@ fn publish_runtime_output_change(
     project_root: &Path,
     id: &str,
     data: &[u8],
-    preview_text: Option<String>,
+    mut preview_text: Option<String>,
 ) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
-        project_root: project_root.to_path_buf(),
-        id: id.to_string(),
-        data: data.to_vec(),
-        preview_text,
-    });
+    // Keep the original 4KiB-per-slot queue bound even during a large burst.
+    // The frames are enqueued together at the batch deadline, in byte order;
+    // only the last carries the shared screen preview.
+    let mut chunks = data.chunks(4096).peekable();
+    while let Some(chunk) = chunks.next() {
+        enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
+            project_root: project_root.to_path_buf(),
+            id: id.to_string(),
+            data: chunk.to_vec(),
+            preview_text: if chunks.peek().is_none() {
+                preview_text.take()
+            } else {
+                None
+            },
+        });
+    }
 }
 pub(super) fn publish_runtime_status_change(
     project_root: &Path,
@@ -2420,6 +2575,15 @@ mod tests {
             gwt_agent::is_transient_launch_failure(&detail),
             "the Issue Monitor must requeue this without spending an attempt: {detail}"
         );
+    }
+
+    #[test]
+    fn issue_5415_codex_sandbox_startup_error_retries_without_spending_an_attempt() {
+        let error =
+            "Could not read Windows sandbox configuration and requirements from the app server.";
+        let detail = super::compose_agent_error_detail(None, Some(error)).unwrap();
+        assert!(detail.contains(error), "keep the provider's diagnostic");
+        assert!(gwt_agent::is_transient_launch_failure(&detail));
     }
 
     #[test]

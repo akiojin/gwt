@@ -92,7 +92,7 @@ Re-run this gate before every code-changing push during the drive loop.
 - Resolve the current-branch PR through JSON operation `pr.current`, or use the
   user-supplied PR number / URL.
 - Read merge-relevant state through JSON operation `pr.view`. Its output lines
-  are: `#<n> [<state>] <title>` (state `OPEN` / `CLOSED` / `MERGED`), `url:`,
+  are: `PR #<n> [<state>] <title>` (state `OPEN` / `CLOSED` / `MERGED`), `url:`,
   `ci:`, `mergeable:`, `merge_state:`, and `review:`. `mergeable:` carries
   GitHub's mergeability (`MERGEABLE` / `CONFLICTING` / `UNKNOWN`) and
   `merge_state:` the merge-state status (`CLEAN` / `BEHIND` / `BLOCKED` /

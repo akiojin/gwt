@@ -14,14 +14,17 @@
 //! Per-session rows are gathered by [`collect_sessions`], which enumerates the
 //! gwt session store and reads each session's local rollout / transcript.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gwt_agent::{AgentId, AgentStatus};
 use gwt_config::{usage_config::UsageConfig, Settings};
 use gwt_core::usage::{
-    claude, codex, consumption,
+    cache::UsageCache,
+    claude, codex,
     state::{age_secs, apply_staleness, should_fetch_claude, DEFAULT_STALE_AFTER_SECS},
     ProviderConsumption, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     WindowKind,
@@ -41,7 +44,7 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-/// Called with each tick's account rows, in addition to the client broadcast.
+/// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
 /// event loop can touch, so the caller supplies the hop. Taking a callback
@@ -53,17 +56,24 @@ pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
     observe_accounts: AccountsObserver,
 ) {
     drop(
         runtime
             .handle()
-            .spawn(run(clients, refresh, observe_accounts)),
+            .spawn(run(clients, refresh, project_roots, observe_accounts)),
     );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
+async fn run(
+    clients: ClientHub,
+    refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
+    observe_accounts: AccountsObserver,
+) {
     let mut poller = Poller::default();
+    let mut observed_accounts = None;
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -79,12 +89,27 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
             continue;
         }
         let now = Utc::now();
-        let snapshot = poller.poll_once(now, forced).await;
-        publish_accounts(&snapshot.accounts, now);
-        // Issue #3616: hand the account rows to the event loop before the
-        // broadcast. Both consumers need the same tick, and the classifier is
-        // the one whose absence lets a quota-dead pane hold a slot for days.
-        observe_accounts(snapshot.accounts.clone());
+        let roots = project_roots
+            .read()
+            .map(|roots| roots.clone())
+            .unwrap_or_default();
+        let snapshot = match poller.poll_in_background(now, forced, roots).await {
+            Ok((returned, snapshot)) => {
+                poller = returned;
+                snapshot
+            }
+            Err(error) => {
+                tracing::warn!(%error, "usage collection worker failed; retrying next tick");
+                poller = Poller::default();
+                continue;
+            }
+        };
+        // Issue #5597: only meaningful changes need a GUI-thread update.
+        // The existing terminal-convergence clock still sweeps pending quota
+        // candidates even when the account observation remains unchanged.
+        if account_usage_changed(&mut observed_accounts, &snapshot.accounts) {
+            observe_accounts(snapshot.accounts.clone());
+        }
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,
@@ -92,6 +117,73 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
                 consumption: snapshot.consumption,
             },
         )]);
+    }
+}
+
+/// Poll timestamps and the age of an already-stale reading do not alter quota
+/// decisions. Preserve state transitions, account identity and every usage
+/// window (including its reset) when deciding whether the GUI needs a notice.
+fn account_usage_changed(
+    previous: &mut Option<Vec<ProviderUsage>>,
+    accounts: &[ProviderUsage],
+) -> bool {
+    let current = accounts
+        .iter()
+        .cloned()
+        .map(|mut account| {
+            account.fetched_at = None;
+            if let UsageState::Stale { age_secs } = &mut account.state {
+                *age_secs = 0;
+            }
+            account
+        })
+        .collect::<Vec<_>>();
+    if previous.as_ref() == Some(&current) {
+        return false;
+    }
+    *previous = Some(current);
+    true
+}
+
+/// Account recovery requires repository discovery and a durable prefs
+/// transaction. Keep both on the collection worker, including unchanged ticks
+/// so newly opened projects and failed writes still receive the observation.
+fn reconcile_project_accounts(
+    project_roots: &[PathBuf],
+    accounts: &[ProviderUsage],
+    now: DateTime<Utc>,
+) {
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let prefs_paths = project_roots
+        .iter()
+        .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
+        .collect::<HashSet<_>>();
+    for prefs_path in prefs_paths {
+        #[cfg(test)]
+        let timeout = crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        #[cfg(not(test))]
+        let timeout = crate::app_runtime::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + timeout,
+        );
+        if let Err(error) =
+            gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                let mut monitor = gwt::IssueMonitorState::with_prefs(
+                    gwt::IssueMonitorConfig::default(),
+                    prefs.clone(),
+                );
+                let mut changed = false;
+                for account in accounts {
+                    changed |= monitor.reconcile_provider_usage(account, &timestamp);
+                }
+                if changed {
+                    *prefs = monitor.prefs();
+                }
+                Ok(())
+            })
+        {
+            tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
+        }
     }
 }
 
@@ -116,6 +208,9 @@ fn publish_accounts(accounts: &[ProviderUsage], now: DateTime<Utc>) {
 /// consumption cache).
 #[derive(Default)]
 struct Poller {
+    #[cfg(test)]
+    collection_thread: Option<std::thread::ThreadId>,
+    transcripts: UsageCache,
     codex_account_id: Option<String>,
     codex_auth_observed: bool,
     codex_authenticated_at: Option<DateTime<Utc>>,
@@ -128,17 +223,42 @@ struct Poller {
 }
 
 impl Poller {
+    /// Keep all synchronous work (settings/auth, directory scans, parsing and
+    /// publication/account recovery) off async workers and the GUI thread.
+    /// HTTP futures still use the shared runtime.
+    async fn poll_in_background(
+        mut self,
+        now: DateTime<Utc>,
+        force: bool,
+        project_roots: Vec<PathBuf>,
+    ) -> Result<(Self, UsageSnapshot), tokio::task::JoinError> {
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = runtime.block_on(self.poll_once(now, force));
+            publish_accounts(&snapshot.accounts, now);
+            reconcile_project_accounts(&project_roots, &snapshot.accounts, now);
+            (self, snapshot)
+        })
+        .await
+    }
+
     async fn poll_once(&mut self, now: DateTime<Utc>, force: bool) -> UsageSnapshot {
+        #[cfg(test)]
+        {
+            self.collection_thread = Some(std::thread::current().id());
+        }
+        self.transcripts.begin_poll();
         let config = Settings::load().unwrap_or_default().usage;
         let accounts = vec![
             self.codex_account(&config, now),
             self.claude_account(&config, now, force).await,
         ];
-        let consumption =
-            tokio::task::block_in_place(|| self.consumption(&config, &accounts, now, force));
+        let consumption = self.consumption(&config, &accounts, now, force);
+        let sessions = collect_sessions(&config, &mut self.transcripts);
+        self.transcripts.end_poll();
         UsageSnapshot {
             accounts,
-            sessions: collect_sessions(&config),
+            sessions,
             consumption,
         }
     }
@@ -169,14 +289,14 @@ impl Poller {
         if config.codex_enabled {
             if let Some(home) = codex::codex_home() {
                 let week_start = week_start_for(accounts, UsageProvider::Codex, now);
-                out.push(consumption::read_codex_consumption(&home, week_start, now));
+                out.push(self.transcripts.codex_consumption(&home, week_start, now));
             }
         }
         // Claude consumption is read from local transcripts only, so it does not
         // require the account opt-in (mirrors Claude per-session usage).
         if let Some(home) = claude::claude_home() {
             let week_start = week_start_for(accounts, UsageProvider::ClaudeCode, now);
-            out.push(consumption::read_claude_consumption(&home, week_start, now));
+            out.push(self.transcripts.claude_consumption(&home, week_start, now));
         }
         self.cached_consumption = out.clone();
         self.last_consumption_at = Some(now);
@@ -201,7 +321,9 @@ impl Poller {
             self.codex_auth_observed = true;
             self.last_consumption_at = None;
         }
-        let account = codex::read_codex_account_since(&home, now, self.codex_authenticated_at);
+        let account = self
+            .transcripts
+            .codex_account_since(&home, now, self.codex_authenticated_at);
         if account.account_id != self.codex_account_id {
             // The auth file changed during collection. Publish identity only;
             // the next tick will establish the new observation boundary.
@@ -381,12 +503,12 @@ fn is_active_status(status: AgentStatus) -> bool {
 /// per-session usage from local rollout / transcript files. Keyed by the gwt
 /// session id so the frontend can match it to agent cards. Per-session reads
 /// are local-only; Claude does not require the account opt-in here.
-fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
+fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<SessionUsage> {
     let mut out = Vec::new();
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
     let claude_home = claude::claude_home();
-    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(&dir);
+    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load_shared(&dir);
     for session in sessions {
         if !is_active_status(session.status) {
             continue;
@@ -404,11 +526,11 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
                 }
                 codex_home
                     .as_ref()
-                    .and_then(|home| codex::read_codex_session(home, &agent_sid))
+                    .and_then(|home| cache.codex_session(home, &agent_sid))
             }
             UsageProvider::ClaudeCode => claude_home
                 .as_ref()
-                .and_then(|home| claude::read_claude_session(home, &agent_sid)),
+                .and_then(|home| cache.claude_session(home, &agent_sid)),
         };
         if let Some(mut usage) = usage {
             // Re-key to the gwt session id (frontend agent cards use it) and
@@ -422,8 +544,100 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
 }
 
 #[cfg(test)]
+#[path = "usage_poller_performance_tests.rs"]
+mod performance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_notifications_ignore_poll_time_but_preserve_usage_changes() {
+        let mut previous = None;
+        let mut account = account_with_weekly_reset(UsageProvider::Codex, Some(now()));
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.fetched_at = Some(now() + chrono::Duration::seconds(30));
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].used_percent = 100.0;
+        account.limit_reached = true;
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 300 };
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 330 };
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.account_id = Some("replacement".into());
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].resets_at = Some(now() + chrono::Duration::days(7));
+        assert!(account_usage_changed(&mut previous, &[account]));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // isolated env must survive the worker's reads
+    async fn complete_poll_collects_on_a_blocking_thread_and_keeps_its_cache() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        // The collector crosses threads, so isolate the inherited environment.
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _codex =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", home.path().join("codex"));
+        let _claude = gwt_core::test_support::ScopedEnvVar::set(
+            "CLAUDE_CONFIG_DIR",
+            home.path().join("claude"),
+        );
+        let codex_home = home.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            r#"{"tokens":{"account_id":"account-a"}}"#,
+        )
+        .unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let calling_thread = std::thread::current().id();
+        let (poller, first) = Poller::default()
+            .poll_in_background(now(), false, vec![project.clone()])
+            .await
+            .unwrap();
+        assert_ne!(poller.collection_thread, Some(calling_thread));
+        assert_eq!(first.accounts.len(), 2);
+        assert!(first.sessions.is_empty());
+        assert_eq!(first.accounts[1].state, UsageState::Disabled);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        let prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.provider_quota_accounts["codex"].account_id,
+            first.accounts[0].account_id.as_deref().unwrap(),
+            "the collection worker must persist the same account recovery observation"
+        );
+        let (poller, second) = poller
+            .poll_in_background(now(), false, vec![project])
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(poller.last_consumption_at, Some(now()));
+        assert_eq!(poller.transcripts.bytes_read(), 0);
+    }
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_780_000_000, 0).unwrap()
@@ -518,10 +732,13 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(Warnings(warnings.clone()));
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..2 {
-                collect_sessions(&UsageConfig {
-                    codex_enabled: false,
-                    claude_account_enabled: false,
-                });
+                collect_sessions(
+                    &UsageConfig {
+                        codex_enabled: false,
+                        claude_account_enabled: false,
+                    },
+                    &mut UsageCache::default(),
+                );
             }
         });
         assert_eq!(

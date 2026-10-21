@@ -979,8 +979,23 @@ fn fresh_monitor_startup_failure_stops_delivery_once() {
 }
 
 #[test]
+fn issue_5415_fresh_monitor_startup_timeout_requeues_without_spending_an_attempt() {
+    assert_fresh_monitor_startup_failures_stop(&["startup-timeout", "startup-timeout-replay"]);
+}
+
+#[test]
+fn issue_5415_startup_timeout_preserves_submitted_and_replaced_sessions() {
+    assert_fresh_monitor_startup_failures_stop(&["startup-submitted", "startup-replaced"]);
+}
+
+#[test]
 fn fresh_monitor_readiness_failure_stops_delivery_once() {
     assert_fresh_monitor_startup_failures_stop(&["readiness"]);
+}
+
+#[test]
+fn fresh_monitor_activation_failure_keeps_rejected_check_and_owners() {
+    assert_fresh_monitor_startup_failures_stop(&["activation"]);
 }
 
 #[test]
@@ -1071,20 +1086,129 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
             .runtime
             .pending_launch_feedback_contexts
             .insert(fixture.window_id.clone(), feedback);
-        let mut message = if failure.starts_with("readiness") {
+        let startup_generation = failure.starts_with("startup-").then(|| {
+            let feedback =
+                fixture.runtime.pending_launch_feedback_contexts[&fixture.window_id].clone();
+            fixture
+                .runtime
+                .arm_issue_monitor_startup(&fixture.window_id, &feedback)
+                .unwrap()
+        });
+        if matches!(failure, "startup-submitted" | "startup-replaced") {
+            if failure == "startup-submitted" {
+                let mut hook = runtime_hook_coordination_event(&fixture.candidate_session_id);
+                hook.source_event = Some("SessionStart".to_string());
+                fixture
+                    .runtime
+                    .observe_issue_monitor_startup_activity(&fixture.window_id, &hook);
+                assert!(
+                    fixture
+                        .runtime
+                        .pending_monitor_startups
+                        .contains_key(&fixture.window_id),
+                    "SessionStart alone does not prove prompt submission"
+                );
+                hook.source_event = Some("UserPromptSubmit".to_string());
+                hook.gwt_session_id = Some("foreign-session".to_string());
+                fixture
+                    .runtime
+                    .observe_issue_monitor_startup_activity(&fixture.window_id, &hook);
+                assert!(fixture
+                    .runtime
+                    .pending_monitor_startups
+                    .contains_key(&fixture.window_id));
+                hook.gwt_session_id = Some(fixture.candidate_session_id.clone());
+                // Hooks buffered before the pane was installed still prove submission.
+                fixture
+                    .runtime
+                    .observe_issue_monitor_startup_activity(&fixture.window_id, &hook);
+                assert!(!fixture
+                    .runtime
+                    .pending_monitor_startups
+                    .contains_key(&fixture.window_id));
+            } else {
+                fixture
+                    .runtime
+                    .active_agent_sessions
+                    .get_mut(&fixture.window_id)
+                    .unwrap()
+                    .session_id = "replacement-session".to_string();
+            }
+            let before = fs::read(&prefs_path).unwrap();
+            assert!(fixture
+                .runtime
+                .handle_issue_monitor_startup_timeout(
+                    &fixture.window_id,
+                    startup_generation.unwrap()
+                )
+                .is_empty());
+            assert_eq!(fs::read(&prefs_path).unwrap(), before);
+            assert!(fixture.runtime.tracked_window_exists(&fixture.window_id));
+            assert!(fixture
+                .runtime
+                .pending_fresh_execution_launches
+                .contains_key(&fixture.window_id));
+            continue;
+        }
+        let mut message = if failure.starts_with("startup-timeout") {
+            gwt_agent::prepare::TRANSIENT_LAUNCH_RETRY_HINT
+        } else if failure.starts_with("readiness") {
             "the authenticated SessionStart readiness nonce did not match"
         } else {
             "fresh Session failed before authenticated SessionStart"
         }
         .to_string();
+        if failure.starts_with("startup-timeout") {
+            message = super::super::issue_monitor_delivery_ack::monitor_startup_failure_detail(
+                fixture.owner.number,
+                None,
+            );
+        }
+        if failure == "activation" {
+            let work_id = gwt_core::workspace_projection::canonical_work_id(
+                &fixture.repo,
+                Some("work/issue-2359"),
+                Some(&fixture.repo),
+            )
+            .unwrap();
+            let mut start = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                &work_id,
+                Utc::now(),
+            );
+            start.owner = Some("Issue #999".to_string());
+            start.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some("work/issue-2359".to_string()),
+                    worktree_path: Some(fixture.repo.clone()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
+                .unwrap();
+            // Active foreign ownership must reject activation; terminal roots allow a successor.
+            message = format!("the fresh generation activation transaction was rejected: Work {work_id} owner mismatch: expected Issue #2359, actual Issue #999");
+        }
         let deferred = matches!(
             failure,
-            "replay" | "readiness-replay" | "prepty-replay" | "replacement"
+            "replay"
+                | "readiness-replay"
+                | "prepty-replay"
+                | "replacement"
+                | "startup-timeout-replay"
         );
         if deferred {
             fixture.runtime.issue_monitor_fallback_commit_timeout = std::time::Duration::ZERO;
         }
         let mut events = match failure {
+            "startup-timeout" | "startup-timeout-replay" => {
+                fixture.runtime.handle_issue_monitor_startup_timeout(
+                    &fixture.window_id,
+                    startup_generation.unwrap(),
+                )
+            }
             "worker" => fixture.runtime.handle_launch_complete_and_drain(
                 fixture.window_id.clone(),
                 Err(message.clone().into()),
@@ -1120,12 +1244,16 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                     .contains_key(&fixture.window_id));
                 events
             }
-            "readiness" | "readiness-replay" => {
+            "readiness" | "readiness-replay" | "activation" => {
                 fixture
                     .runtime
                     .finalize_fresh_execution_launch_session_start(
                         &fixture.window_id,
-                        Some("wrong-nonce"),
+                        Some(if failure == "activation" {
+                            "readiness-fresh-monitor-failure"
+                        } else {
+                            "wrong-nonce"
+                        }),
                     );
                 commit_pending_fresh_execution(&mut fixture.runtime)
             }
@@ -1183,16 +1311,36 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         assert_pending_fresh_execution_was_rolled_back(&fixture);
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(prefs.pending_launch_deliveries.is_empty());
-        assert_eq!(
-            prefs
-                .failed_issues
-                .iter()
-                .find(|failure| failure.issue_number == fixture.owner.number)
-                .map(|failure| failure.message.as_str()),
-            Some(message.as_str())
-        );
+        if !failure.starts_with("startup-timeout") {
+            assert_eq!(
+                prefs
+                    .failed_issues
+                    .iter()
+                    .find(|failure| failure.issue_number == fixture.owner.number)
+                    .map(|failure| failure.message.as_str()),
+                Some(message.as_str())
+            );
+        }
         let mut restored = gwt::IssueMonitorState::with_prefs(config, prefs);
         restored.set_gui_connected(true);
+        if failure.starts_with("startup-timeout") {
+            restored.record_candidate(candidate.clone());
+            assert_eq!(restored.attempt_count(fixture.owner.number), 0);
+            assert_eq!(
+                restored
+                    .inbox_item(fixture.owner.number)
+                    .unwrap()
+                    .error_message
+                    .as_deref(),
+                Some(message.as_str())
+            );
+            assert_eq!(
+                restored.inbox_item(fixture.owner.number).unwrap().state,
+                gwt::MonitorInboxState::Queued,
+                "a pre-task startup timeout must retry instead of parking the Issue"
+            );
+            continue;
+        }
         for now in [
             "2026-07-28T00:01:00Z",
             "2026-07-28T00:02:00Z",
@@ -2628,6 +2776,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
             UserEvent::LaunchComplete {
                 window_id: event_window_id,
                 result,
+                ..
             } if event_window_id == &window_id => Some(result.as_ref().clone()),
             _ => None,
         })
@@ -3248,7 +3397,10 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
             _ => None,
         })
         .expect("failed LaunchComplete event");
-    assert!(launch_error.detail.contains("Host capability issuer"));
+    assert!(
+        launch_error.detail.contains("Host capability issuer"),
+        "expected Host capability issuer failure, got {launch_error:?}",
+    );
     let persisted_candidates = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .flatten()
