@@ -55,6 +55,55 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       reply({ kind: "agent_backend_list", agent: "codex", backends: [{ ...profile, id: "codex-fixture", display_name: "Codex fixture" }] });
       await expect(panel).toContainText("Fixture backend");
       await expect(panel).toContainText("Codex fixture");
+      const tab = settings.getByRole("tab", { name: "Agent Backends", exact: true });
+      await tab.focus();
+      await tab.hover();
+      const burst = await panel.evaluate(async (panel, profile) => {
+        const before = panel.innerHTML;
+        const focused = document.activeElement;
+        let renders = 0;
+        const observer = new MutationObserver(records => {
+          renders += records.flatMap(record => Array.from(record.addedNodes))
+            .filter(node => node instanceof HTMLElement && node.dataset.agent === "claudeCode").length;
+        });
+        observer.observe(panel, { childList: true });
+        try {
+          for (let index = 1; index <= 50; index++) {
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+              kind: "agent_backend_list", agent: "claudeCode",
+              backends: [{ ...profile, display_name: `Backend ${index}` }],
+            } }));
+          }
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "agent_backend_list", agent: "codex",
+            backends: [{ ...profile, id: "codex-fixture", display_name: "Codex fixture", model: "codex-latest" }],
+          } }));
+          const unchanged = panel.innerHTML === before;
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          return { unchanged, renders, text: panel.textContent, focusPreserved: document.activeElement === focused,
+            hoverPreserved: focused?.matches(":hover") };
+        } finally { observer.disconnect(); }
+      }, profile);
+      expect(burst.unchanged).toBe(true);
+      expect(burst.renders).toBe(1);
+      expect(burst.text).toContain("Backend 50");
+      expect(burst.text).toContain("codex-latest");
+      expect(burst.focusPreserved).toBe(true);
+      expect(burst.hoverPreserved).toBe(true);
+      await info.attach("agent-backends-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+      await page.evaluate(profile => {
+        (window as any).__backendFrameRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "agent_backend_list", agent: "claudeCode",
+          backends: [{ ...profile, display_name: "Fallback backend" }],
+        } }));
+      }, profile);
+      try {
+        await expect(panel).toContainText("Fallback backend", { timeout: 1000 });
+      } finally {
+        await page.evaluate(() => { window.requestAnimationFrame = (window as any).__backendFrameRaf; });
+      }
       reply({ kind: "agent_backend_saved", agent: "claudeCode", profile: { ...profile, display_name: "Updated backend" } });
       await expect(panel).toContainText("Updated backend");
       await expect(panel.locator('[data-agent="claudeCode"] .agent-backend-row')).toHaveCount(1);

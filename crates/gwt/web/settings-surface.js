@@ -780,6 +780,7 @@ export function createSettingsSurface({
   getIndexStatus,
   pmSettingsPanel,
   mountIssues,
+  scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -920,7 +921,7 @@ export function createSettingsSurface({
       const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-      });
+      }, { scheduleFrame });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsModel = createUiStateStore({
@@ -967,7 +968,7 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
-      agentBackendsModel.subscribe(state => state, state => {
+      agentBackendsModel.subscribeFrame(state => state, state => {
         renderAgentBackendsPanelInAllSettingsWindows(state);
       });
       systemSettingsModel.subscribe(state => state, state => {
