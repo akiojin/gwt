@@ -334,6 +334,69 @@ test.describe("Issue preview placement", () => {
     await expect(pair.locator('[data-action="focus-canvas-window"]')).toBeVisible();
   });
 
+  test("Issue #4804: a stopped canvas preserves live inline output until closed", async ({ page }) => {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page, { includeWorkProjection: false });
+    await page.goto(liveUrl || APP_URL);
+    await openIssueOutput(page);
+    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview-2", {
+      linked_issue_number: 3671, placement: { kind: "canvas" }, status: "stopped",
+    }));
+
+    const row = page.locator('.knowledge-row[data-issue-number="3671"]');
+    const detail = page.locator(".knowledge-detail-pane");
+    const preview = detail.locator(".issue-preview");
+    await expect(preview).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
+    await expect(preview.locator(".issue-preview-mode")).toHaveText("Read-only preview");
+    await expect(preview.locator(".knowledge-monitor-chip")).toHaveText("Running");
+    await expect(row.locator(".knowledge-row-badge")).toHaveText("Running");
+    await expect(row.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
+    await expect(detail.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi
+      .metrics("tab-issue::agent-preview").readOnly)).toBe(true);
+    await page.evaluate(() => window.__emitAgentOutput("LIVE INLINE WITH RETAINED CANVAS"));
+    await expect(preview.locator(".terminal-root")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
+    await preview.locator('[data-action="focus-canvas-window"]').click();
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "focus_window").at(-1)?.id))
+      .toBe("tab-issue::agent-preview-2");
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+
+    await detail.locator('[data-issue-detail-view="issue"]').click();
+    await detail.locator('[data-action="open-window"]').click();
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "focus_window").at(-1)?.id))
+      .toBe("tab-issue::agent-preview-2");
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+
+    await page.locator('[data-issue-view="split"]').click();
+    const pair = page.locator('.issue-split-pair[data-issue-number="3671"]');
+    await expect(pair).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
+    await expect(pair.locator(".knowledge-row-badge")).toHaveText("Running");
+    await expect(pair.locator(".issue-split-terminal .terminal-root")).toBeVisible();
+    await expect(pair.locator(".issue-split-terminal")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
+    await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
+    await pair.locator('[data-action="focus-canvas-window"]').click();
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "focus_window").at(-1)?.id))
+      .toBe("tab-issue::agent-preview-2");
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
+
+    await page.locator('.workspace-window[data-id="tab-issue::agent-preview-2"] [data-action="close"]').dispatchEvent("click");
+    await page.locator("#window-close-confirm-modal").getByRole("button", { name: "Close window", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "close_window").map(message => message.id)))
+      .toEqual(["tab-issue::agent-preview-2"]);
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+    await expect(pair.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await page.locator('[data-issue-view="list"]').click();
+    await openIssueOutput(page);
+    await expect(preview).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
+    await expect(row.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await expect(preview.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+  });
+
   // 受け入れシナリオ 5 / FR-011.
   test("an errored agent is badged in the Issue row, not opened on the canvas", async ({
     page,
