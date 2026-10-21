@@ -51,17 +51,43 @@ const PREFIX: &str = "api error";
 /// carries a reset instant this does not), and for an error that has already
 /// scrolled out of the tail.
 pub fn detect_provider_api_error(screen: &str) -> Option<ProviderApiError> {
-    let lines: Vec<&str> = screen
+    let lines: Vec<(&str, bool)> = screen
         .lines()
-        .map(|line| strip_gutter(line.trim()))
-        .filter(|line| !line.is_empty())
+        .scan(None::<(char, usize)>, |fence, raw| {
+            let line = strip_gutter(raw.trim());
+            // A fence allows up to three spaces, never renderer/tool gutters.
+            let fence_line = raw.trim_start_matches(' ');
+            if let Some(marker @ ('`' | '~')) = fence_line
+                .chars()
+                .next()
+                .filter(|_| raw.len() - fence_line.len() <= 3)
+            {
+                let count = fence_line.chars().take_while(|ch| *ch == marker).count();
+                if count >= 3 {
+                    match *fence {
+                        None => *fence = Some((marker, count)),
+                        Some((opened, minimum))
+                            if marker == opened
+                                && count >= minimum
+                                && fence_line[count..].trim().is_empty() =>
+                        {
+                            *fence = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some((line, fence.is_none() && raw.trim_end() == line))
+        })
+        .filter(|(line, _)| !line.is_empty())
         .collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
     // Last wins: a pane that failed twice is reporting the newer failure.
-    let (line, rest) = lines[start..]
-        .iter()
-        .rev()
-        .find_map(|line| split_prefix(line).map(|rest| (*line, rest)))?;
+    let (line, rest) = lines[start..].iter().rev().find_map(|(line, native)| {
+        split_prefix(line)
+            .or_else(|| native.then(|| split_codex_capacity(line)).flatten())
+            .map(|rest| (*line, rest))
+    })?;
 
     if is_quoted_mention(line, rest) {
         return None;
@@ -126,6 +152,12 @@ fn split_prefix(line: &str) -> Option<&str> {
     rest.strip_prefix(':')
         .map(str::trim_start)
         .or_else(|| rest.starts_with('(').then_some(rest))
+}
+
+fn split_codex_capacity(line: &str) -> Option<&str> {
+    let message = line.strip_prefix("■ ")?;
+    let suffix = message.strip_prefix("Selected model is at capacity")?;
+    matches!(suffix.chars().next(), None | Some('.' | ',')).then_some(message)
 }
 
 /// Whether this line is prose *about* an error rather than the error itself.
@@ -205,6 +237,37 @@ fn is_transient(http_status: Option<u16>, summary: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_capacity_turn_end_is_native_not_quoted_prose() {
+        let native = "■ Selected model is at capacity. Please try again later.";
+        let detected = detect_provider_api_error(&pane(native)).expect("native capacity error");
+        assert_eq!(detected.http_status, None);
+        assert!(detected.transient);
+        assert_eq!(
+            detected.summary,
+            native.trim_start_matches("■ ").trim_end_matches('.')
+        );
+        for quoted in [
+            format!("    {native}"),
+            format!("│ {native}"),
+            format!("⏺ {native}"),
+            format!("- {native}"),
+            format!("> {native}"),
+            format!("`{native}`"),
+            format!("The pane displayed {native}"),
+            format!("~~~text\n```\n{native}\n```\n~~~"),
+            format!("````text\n```\n{native}\n```\n````"),
+            format!("```text\n    ```\n{native}\n```"),
+            format!("```text\n│ ```\n{native}\n```"),
+            format!(
+                "```text\n{}\n{native}\n```",
+                "quoted output\n".repeat(TAIL_LINES)
+            ),
+        ] {
+            assert_eq!(detect_provider_api_error(&quoted), None, "{quoted}");
+        }
+    }
 
     /// The renderer draws the error, then its own prompt furniture underneath.
     fn pane(error: &str) -> String {

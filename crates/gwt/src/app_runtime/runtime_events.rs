@@ -40,10 +40,6 @@ pub(crate) struct PendingRuntimeOutput {
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 
-/// Issue #4584: how much of a pane's screen is read for a turn-ending API
-/// error. Wider than the quota window because the CLI draws its own "done"
-/// line and four lines of prompt furniture below the error.
-const API_ERROR_TAIL_LINES: usize = 16;
 /// Issue #3616: how long a quota notice must sit on a *live* pane's screen,
 /// with no agent activity at all, before it is treated as a block.
 ///
@@ -709,10 +705,9 @@ impl AppRuntime {
             chrono::Utc::now(),
         ));
         let quota_elapsed = batch_started.elapsed();
-        let error_tail = screen
-            .as_deref()
-            .and_then(|screen| screen_tail_text(screen, API_ERROR_TAIL_LINES, "\n"));
-        events.extend(self.observe_provider_api_error(id, error_tail.as_deref()));
+        // Preserve fences and indentation so native errors can be distinguished
+        // from tool/code quotations. The detector bounds its own tail.
+        events.extend(self.observe_provider_api_error(id, screen.as_deref()));
         // Flushes run at the start of any native callback, so the outer
         // callback's label alone cannot establish this work's latency budget.
         tracing::debug!(

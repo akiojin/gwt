@@ -1058,6 +1058,25 @@ impl AppRuntime {
         })
     }
 
+    fn pm_agent_capacity_failure(
+        &self,
+        window_id: &str,
+        current: WindowProcessStatus,
+    ) -> Option<&str> {
+        if current != WindowProcessStatus::Waiting
+            || self.window_approval_waiting.contains_key(window_id)
+            || self.provider_quota_holds.contains_key(window_id)
+        {
+            return None;
+        }
+        self.provider_api_error_holds
+            .get(window_id)
+            .filter(|error| {
+                error.transient && error.summary.starts_with("Selected model is at capacity")
+            })
+            .map(|error| error.summary.as_str())
+    }
+
     /// Observe the final composed edge, after approval and quota overlays.
     /// Arm only on an observed running hook; the launch-time Running placeholder
     /// followed by SessionStart is not a finished Agent turn.
@@ -1078,22 +1097,27 @@ impl AppRuntime {
         let context = self.project_context_for_root(&tab.project_root);
         let observed_running = current == WindowProcessStatus::Running
             && self.window_hook_states.get(window_id) == Some(&WindowProcessStatus::Running);
-        let label = (window.preset == WindowPreset::Agent && current == WindowProcessStatus::Idle)
-            .then(|| {
-                let title = window.purpose_title.as_deref().unwrap_or(&window.title);
-                let title: String = title
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .filter(|ch| !ch.is_control())
-                    .take(96)
-                    .collect();
-                match window.linked_issue_number {
-                    Some(number) => format!("{title} (#{number})"),
-                    None => title,
-                }
-            });
+        let capacity_failure = self.pm_agent_capacity_failure(window_id, current);
+        let needs_wake = current == WindowProcessStatus::Idle || capacity_failure.is_some();
+        let label = (window.preset == WindowPreset::Agent && needs_wake).then(|| {
+            let title = window.purpose_title.as_deref().unwrap_or(&window.title);
+            let title: String = title
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(96)
+                .collect();
+            let label = match window.linked_issue_number {
+                Some(number) => format!("{title} (#{number})"),
+                None => title,
+            };
+            match capacity_failure {
+                Some(reason) => format!("{label}: {reason}"),
+                None => label,
+            }
+        });
         let Some(context) = context else { return };
         let Some(state) = self.project_state_mut(&context) else {
             return;
@@ -1112,7 +1136,7 @@ impl AppRuntime {
                 .running
                 .insert(window_id.to_string());
         }
-        if current != WindowProcessStatus::Idle {
+        if !needs_wake {
             state.pm_agent_idle_wakes.pending.remove(window_id);
         } else if let Some(label) = label.filter(|_| was_running) {
             state
@@ -1205,7 +1229,11 @@ impl AppRuntime {
             .pending
             .keys()
             .filter(|id| {
-                **id == window_id || self.window_status(id) != Some(WindowProcessStatus::Idle)
+                **id == window_id
+                    || self.window_status(id).is_none_or(|status| {
+                        status != WindowProcessStatus::Idle
+                            && self.pm_agent_capacity_failure(id, status).is_none()
+                    })
             })
             .cloned()
             .collect();
