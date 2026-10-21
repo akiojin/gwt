@@ -1389,21 +1389,18 @@ fn load_open_pr_launch_observations(
     // Discovery proved an open PR exists. A first, failed lifecycle read must
     // not admit a duplicate launch; subsequent failures retain the prior fact.
     for (issue, (prs, _)) in &related {
-        if !observations.contains_key(issue)
-            && prefs
+        if let Some(number) = prs.first().filter(|_| {
+            prefs
                 .open_pr_observations
                 .get(issue)
                 .is_none_or(|previous| previous.hold.is_none())
-        {
-            if let Some(number) = prs.first() {
-                observations.insert(
-                    *issue,
-                    Some(crate::issue_monitor::IssueMonitorOpenPrHold {
-                        pr_number: *number,
-                        lifecycle: "UNDETERMINED".into(),
-                    }),
-                );
-            }
+        }) {
+            observations.entry(*issue).or_insert_with(|| {
+                Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: *number,
+                    lifecycle: "UNDETERMINED".into(),
+                })
+            });
         }
     }
     (observations, Some(observed_at))
@@ -1431,22 +1428,20 @@ fn collect_open_pr_launch_observations(
         let mut repair = false;
         let mut unknown = !*complete;
         for number in prs {
-            if !readbacks.contains_key(number) {
-                readbacks.insert(*number, fetch(*number));
-            }
-            match readbacks.get(number) {
-                Some(Ok((PrState::Open, pr)))
+            let result = readbacks.entry(*number).or_insert_with(|| fetch(*number));
+            match result {
+                Ok((PrState::Open, pr))
                     if matches!(pr.lifecycle.as_str(), "CI-RED" | "CONFLICTED") =>
                 {
                     repair = true
                 }
-                Some(Ok((PrState::Open, pr))) => {
+                Ok((PrState::Open, pr)) => {
                     hold = Some(crate::issue_monitor::IssueMonitorOpenPrHold {
                         pr_number: *number,
                         lifecycle: pr.lifecycle.clone(),
                     })
                 }
-                Some(Ok(_)) => {} // Closed or merged: release this PR's hold.
+                Ok(_) => {} // Closed or merged: release this PR's hold.
                 result => {
                     tracing::warn!(
                         issue,
