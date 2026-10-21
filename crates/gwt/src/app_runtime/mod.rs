@@ -3889,6 +3889,13 @@ fn local_probe_batch<'a>(
 /// observed, keyed by Issue number (Issue #3528).
 type LocalClaimObservation = (String, std::collections::BTreeMap<u64, bool>);
 
+type LocalIssueMonitorFallbackProjection = (
+    Vec<gwt::IssueMonitorIssue>,
+    Option<String>,
+    String,
+    Option<(String, String)>,
+);
+
 /// Issue #3528 (SPEC #3200 FR-057..FR-059): observe merged-PR completion for
 /// the claim frontier of one GUI-local scan. Shared by the scheduled fallback
 /// and the non-Unix compatibility scan so both probe the same candidates and
@@ -9176,12 +9183,7 @@ impl AppRuntime {
 
     fn load_local_issue_monitor_fallback_projection(
         project_root: &Path,
-    ) -> (
-        Vec<gwt::IssueMonitorIssue>,
-        Option<String>,
-        String,
-        Option<(String, String)>,
-    ) {
+    ) -> LocalIssueMonitorFallbackProjection {
         let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
         );
