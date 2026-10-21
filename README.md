@@ -791,6 +791,13 @@ decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
+The PM delegates intake and investigation to at most one auxiliary agent at a
+time, including any delegated event subscription. Further requests wait for that
+agent to finish; queued intake takes precedence over another subscription while
+the PM continues responding and checking status snapshots. Native harness limits
+still apply. If capacity is unknown, the PM may try admission once when its
+auxiliary slot is free; a refusal leaves the work queued without a retry loop.
+
 Ask the PM to link planned Issues to a project goal or an explicit maintenance
 or compliance category. `pm.plan.status` shows the saved planning revision and a
 `policy` assessment with unlinked or invalid work, Now/Next/Later items, and

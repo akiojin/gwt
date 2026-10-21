@@ -572,7 +572,8 @@ Approved existing operations:
   section / acceptance criteria used by default intake. A later opt-in refines
   the existing owner rather than creating a duplicate Issue.
 - For every new work request that may require Issue registration or update,
-  delegate a bounded intake packet to one or more in-session sub-agents. The
+  delegate a bounded intake packet to an in-session sub-agent under the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents). The
   packet must inspect the existing implementation and duplicate Issues,
   draft a spec with verifiable acceptance criteria, and enumerate the
   decision branches. Sub-agents return evidence and options; you retain the
@@ -1442,6 +1443,8 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   hang-risk work. Delegate it to a
   background job or exactly one in-session sub-agent. A background job owns one
   bounded operation; it does not start another daemon process.
+  Sub-agent delegation follows the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents).
 - Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
   from the operation, normalized target and parameters, and logical effect.
   While that key is pending, do not run or delegate the same logical operation
@@ -1489,6 +1492,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   so the snapshot is the truth, and nothing the subscribe missed is lost —
   the next cycle's snapshot still carries it. Act on the differences: triage
   newly arrived issues, re-evaluate order, and issue launch instructions.
+  When subscribe uses a sub-agent, apply the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents);
+  defer it while that slot is occupied or intake is queued, and continue
+  snapshot reconciliation instead.
 - In `akiojin/gwt`, inspect retained external-feedback exclusions and fixed
   `gwt-feedback-triage` / `gwt-feedback-evidence` updates through existing
   canonical Issue reads/search (`search`, `issue.view`, `issue.comments`).
@@ -2168,6 +2175,17 @@ and urgency.
 - For investigation, design, and planning work, use your harness's own
   in-session sub-agents. They inherit your boundary: they must not
   modify production code or spawn implementation agents.
+- At most one auxiliary sub-agent may run per PM session. Count
+  intake, investigation, design, planning, and delegated `daemon.subscribe`
+  against this same limit. Nested delegation must not bypass this shared limit.
+- Known exhausted harness capacity defers new delegation. Unknown harness
+  capacity permits one native admission attempt only when your auxiliary slot
+  is free; if admission is refused, leave the packet queued without an immediate
+  retry loop. Harness limits always take precedence over this budget.
+- Without terminal completion evidence, keep the auxiliary slot occupied.
+  When the task finishes, serve queued intake before starting another subscriber.
+  While delegation is deferred, continue lightweight snapshot reconciliation
+  and respond to the user; do not wait on the task in the foreground.
 
 ## Stopping
 
@@ -3026,6 +3044,48 @@ mod tests {
             "otherwise register a plain Issue",
         ] {
             assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn generated_auxiliary_budget_is_shared_by_intake_and_subscribe() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let references = dir.path().join(provider).join("skills/gwt-pm/references");
+            let reporting = unwrapped(
+                &std::fs::read_to_string(references.join("escalation-and-reporting.md")).unwrap(),
+            );
+            for required in [
+                "At most one auxiliary sub-agent may run per PM session",
+                "intake, investigation, design, planning, and delegated `daemon.subscribe`",
+                "Nested delegation must not bypass this shared limit",
+                "Known exhausted harness capacity defers new delegation",
+                "Unknown harness capacity permits one native admission attempt",
+                "leave the packet queued without an immediate retry loop",
+                "Without terminal completion evidence, keep the auxiliary slot occupied",
+                "serve queued intake before starting another subscriber",
+                "continue lightweight snapshot reconciliation",
+                "must not modify production code or spawn implementation agents",
+            ] {
+                assert!(
+                    reporting.contains(required),
+                    "{provider}: missing {required}"
+                );
+            }
+            for name in [
+                "intake-and-priority.md",
+                "runtime-isolation.md",
+                "resident-loop.md",
+            ] {
+                let reference = std::fs::read_to_string(references.join(name)).unwrap();
+                assert!(
+                    reference.contains(
+                        "[auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents)"
+                    ),
+                    "{provider}/{name}: missing shared-budget reference"
+                );
+            }
         }
     }
 
