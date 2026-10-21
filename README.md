@@ -801,6 +801,14 @@ dates with the scan's UTC calendar date, returning zero before or on the review 
 Missing or invalid inputs leave the count unknown with named missing inputs. It uses
 no current clock; source, scan age and coverage limits still apply. Days past a review
 date do not establish whether a review occurred or authorize action.
+`policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
+timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
+fractional seconds: it is true at or after `next_run` and false before it. Missing or
+invalid timestamps, including fractional seconds beyond nine digits, leave it unknown
+with `next_run` or `monitor_scan_time` named.
+It uses only the recorded scan, retaining its source, age and coverage limits;
+it does not read the current clock or interpret cadence. A due timestamp does not
+prove missed work or authorize scheduling, Issue creation or launch.
 Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
 work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,
