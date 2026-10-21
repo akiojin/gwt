@@ -7,8 +7,9 @@
 
 use base64::Engine as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,17 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// not waiting is releasing a healthy launch because its own output quoted the
 /// provider's sentence.
 const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
+
+/// One attempt belongs to the Session, even when its live PTY is replaced.
+pub(crate) struct ProviderCapacityResume {
+    window_id: String,
+    incarnation: u64,
+    binding: gwt_agent::SessionExecutionBinding,
+    pub(super) due: Option<Instant>,
+    input_revision: Option<u64>,
+    attempted: bool,
+    permit: Arc<AtomicBool>,
+}
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
 /// This bounded settle window avoids a false Running frame between the clear
 /// and the redraw without ever blocking the tao event loop.
@@ -461,6 +473,238 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
 }
 
 impl AppRuntime {
+    fn provider_capacity_target(
+        &self,
+        window_id: &str,
+    ) -> Option<(
+        gwt::monitor_duplicate_runtime::RegisteredMonitorRuntime,
+        gwt_agent::SessionExecutionBinding,
+    )> {
+        if self.window_preset(window_id) != Some(WindowPreset::Agent) {
+            return None;
+        }
+        let active = self.active_agent_sessions.get(window_id)?;
+        let runtime = self.runtimes.get(window_id)?;
+        let writers = self.pty_writers.read().ok()?;
+        let entry = writers.get(window_id)?;
+        let registration = entry.monitor_runtime.as_ref()?;
+        if active.agent_id != "codex"
+            || active.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+            || registration.review_dispatch
+            || registration.window_id != window_id
+            || registration.session_id != active.session_id
+            || registration.incarnation != runtime.incarnation
+            || registration.worktree_path != active.worktree_path
+            || !Arc::ptr_eq(&entry.handle, &runtime.pty)
+        {
+            return None;
+        }
+        let binding = self
+            .agent_capability_issuer
+            .as_ref()?
+            .active_execution_binding_for_token(self.agent_capability_tokens.get(window_id)?)?;
+        if binding.session_id != active.session_id
+            || binding.owner_number != registration.issue_number
+        {
+            return None;
+        }
+        Some((
+            gwt::monitor_duplicate_runtime::RegisteredMonitorRuntime {
+                registration: registration.clone(),
+                handle: Arc::clone(&entry.handle),
+            },
+            binding,
+        ))
+    }
+
+    pub(super) fn cancel_provider_capacity_resume(&mut self, window_id: &str) {
+        for resume in self
+            .provider_capacity_resumes
+            .values_mut()
+            .filter(|resume| resume.window_id == window_id)
+        {
+            resume.permit.store(false, Ordering::Release);
+            resume.due = None;
+        }
+    }
+
+    fn observe_provider_capacity_hook(&mut self, window_id: &str, state: WindowProcessStatus) {
+        // A trailing Stop is Idle, not renewed activity. Keep its pending
+        // retry while Waiting and terminal hook states still revoke it.
+        if state == WindowProcessStatus::Idle {
+            return;
+        }
+        self.cancel_provider_capacity_resume(window_id);
+        if state != WindowProcessStatus::Running {
+            return;
+        }
+        let Some((target, binding)) = self.provider_capacity_target(window_id) else {
+            return;
+        };
+        let resume = self
+            .provider_capacity_resumes
+            .entry(binding.session_id.clone())
+            .or_insert_with(|| ProviderCapacityResume {
+                window_id: window_id.to_string(),
+                incarnation: target.registration.incarnation,
+                binding: binding.clone(),
+                due: None,
+                input_revision: None,
+                attempted: false,
+                permit: Arc::new(AtomicBool::new(false)),
+            });
+        resume.window_id = window_id.to_string();
+        resume.incarnation = target.registration.incarnation;
+        resume.binding = binding;
+    }
+
+    fn arm_provider_capacity_resume(&mut self, window_id: &str) {
+        if self.window_approval_waiting.contains_key(window_id)
+            || self.provider_quota_holds.contains_key(window_id)
+            || !self
+                .provider_api_error_holds
+                .get(window_id)
+                .is_some_and(|error| {
+                    error.transient && error.summary.starts_with("Selected model is at capacity")
+                })
+        {
+            return;
+        }
+        let Some((target, binding)) = self.provider_capacity_target(window_id) else {
+            return;
+        };
+        let Some(resume) = self.provider_capacity_resumes.get_mut(&binding.session_id) else {
+            return;
+        };
+        if resume.attempted
+            || resume.incarnation != target.registration.incarnation
+            || resume.binding != binding
+        {
+            return;
+        }
+        resume.due = Some(Instant::now() + Duration::from_secs(60));
+        resume.input_revision = target.handle.ordinary_input_revision();
+        resume.permit = Arc::new(AtomicBool::new(true));
+    }
+
+    /// The existing convergence clock schedules a single revocable worker;
+    /// no sleep, Session read or execution lease runs on the application loop.
+    pub(crate) fn sweep_provider_capacity_resumes(&mut self, now: Instant) {
+        let due: Vec<_> = self
+            .provider_capacity_resumes
+            .iter()
+            .filter(|(_, resume)| !resume.attempted && resume.due.is_some_and(|due| now >= due))
+            .map(|(session_id, resume)| (session_id.clone(), resume.window_id.clone()))
+            .collect();
+        for (session_id, window_id) in due {
+            let Some((target, binding)) = self.provider_capacity_target(&window_id) else {
+                self.cancel_provider_capacity_resume(&window_id);
+                continue;
+            };
+            if session_id != binding.session_id
+                || self.window_status(&window_id) != Some(WindowProcessStatus::Waiting)
+                || self.window_approval_waiting.contains_key(&window_id)
+                || self.provider_quota_holds.contains_key(&window_id)
+                || !self
+                    .provider_api_error_holds
+                    .get(&window_id)
+                    .is_some_and(|error| {
+                        error.transient
+                            && error.summary.starts_with("Selected model is at capacity")
+                    })
+            {
+                self.cancel_provider_capacity_resume(&window_id);
+                continue;
+            }
+            let Some(resume) = self.provider_capacity_resumes.get_mut(&session_id) else {
+                continue;
+            };
+            if resume.incarnation != target.registration.incarnation
+                || resume.binding != binding
+                || target.handle.has_unsent_user_input()
+                || resume.input_revision.is_none()
+                || target.handle.ordinary_input_revision() != resume.input_revision
+            {
+                resume.permit.store(false, Ordering::Release);
+                resume.due = None;
+                continue;
+            }
+            // An ambiguous outcome consumes the same budget as a success.
+            resume.attempted = true;
+            resume.due = None;
+            let permit = Arc::clone(&resume.permit);
+            let input_revision = resume.input_revision;
+            let writers = Arc::clone(&self.pty_writers);
+            let issuer = self
+                .agent_capability_issuer
+                .clone()
+                .expect("captured issuer");
+            let token = self.agent_capability_tokens[&window_id].clone();
+            let spawn = self.blocking_tasks.try_spawn(move || {
+                let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + Duration::from_secs(5),
+                );
+                let result = (|| -> Result<(), String> {
+                    let registration = &target.registration;
+                    let session = gwt_agent::Session::load(&registration.sessions_dir.join(format!("{}.toml", registration.session_id))).map_err(|error| error.to_string())?;
+                    if session.launch_route != gwt_agent::LaunchRoute::Autonomous || session.agent_id != gwt_agent::AgentId::Codex || session.execution_binding.as_ref() != Some(&binding) || session.worktree_path != registration.worktree_path || session.linked_issue_number != Some(registration.issue_number) {
+                        return Err("the autonomous Monitor Session changed".into());
+                    }
+                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)?.ok_or("the producing Session is unbound")?;
+                    let reservation = Arc::clone(&target.handle).reserve_input_transaction().map_err(|error| error.to_string())?;
+                    let mut body_attempted = false;
+                    // Physical submission is the only evidence here. Provider
+                    // recovery and its prompt hook are observed independently.
+                    let _unverified = super::pty_io::drive_verified_pane_submit(
+                        "[gwt] Automated retry after model capacity. Continue the current task within its existing authorization; permission and verification gates still apply.\r",
+                        reservation.bracketed_paste_enabled(),
+                        1,
+                        |bytes| reservation.write_input_authorized(bytes, |commit| {
+                            let fail = |details: &str| gwt_terminal::TerminalError::PtyIoError { details: details.into() };
+                            gwt_core::operation_deadline::ensure_remaining("capacity retry input").map_err(|error| fail(&error.to_string()))?;
+                            if !body_attempted && (!permit.load(Ordering::Acquire) || target.handle.has_unsent_user_input() || target.handle.ordinary_input_revision() != input_revision) {
+                                return Err(fail("capacity retry cancelled by newer activity"));
+                            }
+                            let authorized = gwt::cli::execution_state::with_current_active_session_execution_identity_lease(&registration.sessions_dir, &identity, || {
+                                let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
+                                if !prefs.enabled || !prefs.autonomous_mode || !issuer.active_token_is_current(&token, &binding) {
+                                    return Err(fail("autonomous Monitor authority changed"));
+                                }
+                                let pm = gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
+                                if pm.settings.paused || pm.registration.as_ref().is_some_and(|pm| pm.session_id == registration.session_id) {
+                                    return Err(fail("PM is paused or owns the target Session"));
+                                }
+                                let current = writers.read().map_err(|_| fail("PTY registry unavailable"))?;
+                                if !current.get(&registration.window_id).is_some_and(|entry| Arc::ptr_eq(&entry.handle, &target.handle) && entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch)) {
+                                    return Err(fail("the Monitor PTY was replaced"));
+                                }
+                                if body_attempted {
+                                    commit(&mut || {})
+                                } else {
+                                    reservation.with_unchanged_ordinary_input(input_revision.expect("captured ordinary input revision"), || {
+                                        if !permit.load(Ordering::Acquire) {
+                                            return Err(fail("capacity retry cancelled by newer activity"));
+                                        }
+                                        commit(&mut || body_attempted = true)
+                                    })
+                                }
+                            }).map_err(|error| fail(&error.to_string()))?;
+                            authorized.ok_or_else(|| fail("the producing execution is no longer Active"))?
+                        }).map_err(|error| error.to_string()),
+                        thread::sleep,
+                        || Ok(false),
+                    )?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    tracing::warn!(%error, session_id = %binding.session_id, "capacity retry refused; existing waiting state and PM notification retained");
+                }
+            });
+            if let Err(error) = spawn {
+                tracing::warn!(%error, "capacity retry worker unavailable; attempt remains consumed");
+            }
+        }
+    }
     /// Deliver the shared diagnostic stream only to projects with a consumer.
     /// Docked surfaces retain their subscriptions, independently of UI selection.
     fn project_events_for_open_surface(
@@ -1721,6 +1965,7 @@ impl AppRuntime {
         // dropped rather than left behind: the quota hold now explains the
         // pane, and a stale entry would outlive it at teardown.
         if self.provider_quota_holds.contains_key(window_id) {
+            self.cancel_provider_capacity_resume(window_id);
             self.provider_api_error_holds.remove(window_id);
             return Vec::new();
         }
@@ -1730,6 +1975,7 @@ impl AppRuntime {
                 if self.provider_api_error_holds.get(window_id) == Some(&error) {
                     return Vec::new();
                 }
+                self.cancel_provider_capacity_resume(window_id);
                 let detail = gwt_core::usage::describe_provider_api_error(
                     &error,
                     self.pane_agent_id(window_id).as_deref(),
@@ -1743,6 +1989,7 @@ impl AppRuntime {
                 );
                 self.provider_api_error_holds
                     .insert(window_id.to_string(), error);
+                self.arm_provider_capacity_resume(window_id);
                 self.window_details
                     .insert(window_id.to_string(), detail.clone());
                 let mut events = Vec::new();
@@ -1756,6 +2003,7 @@ impl AppRuntime {
                 events
             }
             None => {
+                self.cancel_provider_capacity_resume(window_id);
                 if self.provider_api_error_holds.remove(window_id).is_none() {
                     return Vec::new();
                 }
@@ -2074,6 +2322,7 @@ impl AppRuntime {
         self.released_provider_quota_notices.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
+        self.observe_provider_capacity_hook(&window_id, hook_state);
         if !hook_state_changed && !approval_wait_cleared {
             return events;
         }

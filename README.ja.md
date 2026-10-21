@@ -567,6 +567,13 @@ reset がすべて不明なら定期再試行せず、`needs_human_fleet` の
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
 
+Monitor が自律起動した Codex が作業途中に「Selected model is at capacity」で
+ターン終了した場合、gwt は60秒以上待ってから、同じ稼働中 Session に続行指示を
+一度だけ送ります。同じ gwt インスタンスの稼働中、自動送信は Session ごとに最大一回です。
+回復、手動入力、承認・quota
+待ち、Session の置換・精算を検出した場合は送りません。再失敗時も既存の PM 通知を
+保持します。手動起動した Session の続行は操作者が行います。
+
 `issue.monitor.tiers.set` に `{"auto":true}` を渡すと、エージェント・モデル・
 推論レベルの自動選択を有効にできます。候補プールを設定しなくても、Codex Luna /
 Claude Haiku、Codex Sol / Claude Sonnet、Codex Astra / Claude Opus の3段を使えます。
