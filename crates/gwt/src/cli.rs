@@ -60,6 +60,7 @@ pub mod update;
 pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
+mod work_event_reconcile;
 mod workflow;
 mod workspace;
 pub(crate) mod worktree_gc;
@@ -167,6 +168,8 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
+    EventsReconcile { reference: String, dry_run: bool },
     /// Ask the authenticated Host to close one eligible Work record.
     Close { work_id: String, close_kind: String },
     /// Read the outcome of one update without contacting or mutating the Host.

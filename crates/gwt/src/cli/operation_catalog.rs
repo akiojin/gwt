@@ -764,6 +764,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.events_reconcile",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.join",
         aliases: &[],
     },
