@@ -2348,6 +2348,11 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        author_login: issue
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -2393,6 +2398,11 @@ fn parse_rest_issue(json: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        author_login: json
+            .pointer("/user/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -2742,7 +2752,7 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
     issue: issueOrPullRequest(number:$number){
       __typename
       ... on Issue {
-        number title body state updatedAt
+        number title body state updatedAt author{login}
         labels(first:50){nodes{name}}
         comments(first:100, after:$after){
           nodes{databaseId body updatedAt}

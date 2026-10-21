@@ -133,7 +133,13 @@ impl AppRuntime {
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         monitor.refresh_agent_capacity(project_root);
-        let (issues, error, now) = Self::load_local_issue_monitor_fallback_projection(project_root);
+        let (issues, error, now, source_repository) =
+            Self::load_local_issue_monitor_fallback_projection(project_root);
+        monitor.set_source_repository(
+            source_repository
+                .as_ref()
+                .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+        );
         // A List is a read model, like the quick cache view. Scheduled scans own
         // durable admission, launch expiry and PM wake transitions.
         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);

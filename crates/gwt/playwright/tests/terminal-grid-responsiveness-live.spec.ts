@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
@@ -9,6 +9,108 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
   test.skip(!base || !home, "requires an isolated browser-check checkout and fresh HOME");
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("output advances without animation frames in an unfocused terminal window", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      let observation: Record<string, any> | undefined;
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      try {
+        const id = await createShell(page, created, 80);
+        const focusedId = await createShell(page, created, 820);
+        await page.locator('.op-rail__surface[data-surface="agents"]').click();
+        await page.getByRole("tab", { name: "All agents", exact: true }).click();
+        const target = page.locator(`.agent-tile[data-agent-id="${id}"]`);
+        const focusedTerminal = page.locator(`.agent-tile[data-agent-id="${focusedId}"] .xterm-helper-textarea`);
+        await focusedTerminal.focus();
+        await expect(focusedTerminal).toBeFocused();
+        await expect(target).toBeVisible();
+        const token = `GWT_AC13_${Date.now()}`;
+        const chunks = [`\r\n${token}_FI`, `RST\r\n${token}_SECOND\r\n`, `${token}_THIRD\r\n`];
+        await page.evaluate(({ id, chunks }) => {
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).pathname === "/ws"
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          const target = document.querySelector(`.agent-tile[data-agent-id="${id}"]`)!;
+          const originalFrame = window.requestAnimationFrame;
+          const originalCancel = window.cancelAnimationFrame;
+          const captured = new Map<number, FrameRequestCallback>();
+          let requestedFrames = 0;
+          let focusEvents = 0;
+          const onFocus = () => { focusEvents += 1; };
+          target.addEventListener("focusin", onFocus);
+          window.requestAnimationFrame = callback => {
+            const handle = -(++requestedFrames);
+            captured.set(handle, callback);
+            return handle;
+          };
+          window.cancelAnimationFrame = handle => {
+            if (!captured.delete(handle)) originalCancel.call(window, handle);
+          };
+          const expected = chunks.join("").replace(/\r/g, "").trim();
+          const startedAt = performance.now();
+          (window as any).__gwtAc13OutputFallback = {
+            sample: () => ({
+              elapsed_ms: performance.now() - startedAt,
+              ordered_output: window.__gwtTerminalTestApi.bufferText(id).includes(expected),
+              requested_frames: requestedFrames,
+              captured_frames: captured.size,
+              window_focused: target.contains(document.activeElement),
+              focus_events: focusEvents,
+              visibility_state: document.visibilityState,
+              socket_url: socket.url,
+              chunks: chunks.length,
+            }),
+            restore: () => {
+              window.requestAnimationFrame = originalFrame;
+              window.cancelAnimationFrame = originalCancel;
+              target.removeEventListener("focusin", onFocus);
+              for (const callback of captured.values()) originalFrame.call(window, callback);
+              delete (window as any).__gwtAc13OutputFallback;
+            },
+          };
+          // Controlled inbound frames use the real app's project transport and
+          // output pipeline; this is not a real-PTY throughput measurement.
+          for (const text of chunks) socket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify({ kind: "terminal_output", id, data_base64: btoa(text) }),
+          }));
+        }, { id, chunks });
+        // Poll from the controller because animation frames are withheld.
+        await expect.poll(async () => {
+          observation = await page.evaluate(() => (window as any).__gwtAc13OutputFallback.sample());
+          return observation!.ordered_output;
+        }, { timeout: 1_000, intervals: [25] }).toBe(true);
+        expect(observation!.elapsed_ms, "ordered canonical output within one second").toBeLessThanOrEqual(1_000);
+        expect(observation!.requested_frames, "animation callbacks were withheld").toBeGreaterThan(0);
+        expect(observation!.window_focused).toBe(false);
+        expect(observation!.focus_events, "no terminal focus restored output").toBe(0);
+      } finally {
+        await page.evaluate(() => (window as any).__gwtAc13OutputFallback?.restore());
+        // rAF is restored only after measuring buffer progress. The PNG records
+        // the resumed renderer, not a paint guarantee while rAF was withheld.
+        await page.evaluate(() => new Promise<void>(resolve =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const screenshot = info.outputPath(`${theme}-terminal-output-fallback.png`);
+        await page.screenshot({ path: screenshot });
+        await info.attach(`${theme}-terminal-output-fallback`, { path: screenshot, contentType: "image/png" });
+        const evidence = info.outputPath(`${theme}-terminal-output-fallback.json`);
+        await writeFile(evidence, JSON.stringify({ theme, observation, errors }));
+        await info.attach("terminal-output-fallback-observation", { contentType: "application/json", path: evidence });
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
 
   test("grid queue wait p95 stays within 500ms under rendering and frontend traffic", async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {

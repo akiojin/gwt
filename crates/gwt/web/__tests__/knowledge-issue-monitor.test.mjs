@@ -22,7 +22,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -175,7 +175,10 @@ test("Issue #5287: a failed Issue renderer displays and reports the cause, then 
 for (const stage of ["load", "render"]) {
   test(`Issue #5287: detail-only ${stage} failure stays visible and reaches diagnostics`, async (t) => {
     const { body, surface, load, sent, reports, opened } = await makeFixture({
-      createKnowledgeMarkdownBody() { throw new Error("detail Markdown failed"); },
+      createNode(...args) {
+        if (args[1] === "knowledge-section") throw new Error("detail Markdown failed");
+        return createNode(globalThis.document, ...args);
+      },
     });
     t.after(() => surface.clearKnowledgeBridgeState("win-1"));
     surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",

@@ -110,6 +110,127 @@ fn failed_report_and_issue_body_preserve_the_entire_refusal() {
 }
 
 #[test]
+fn public_snapshot_masks_private_content_without_changing_the_local_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.title = "Failure in src/private.rs".into();
+    report.operation = "open ./private/config".into();
+    report.refusal = concat!(
+        "before\r\ngithub_pat_synthetic_0123456789ABCDEF\r\n",
+        "sk-proj-synthetic_0123456789-ABCDEF\r\n",
+        "PRIVATE_SETTING=\"private value; with spaces\"\r\n",
+        "{\"PRIVATE_JSON\": \"json secret\"}\r\n",
+        "C:\\Private\\source.rs \\\\server\\private\\source.rs ~/private/file\r\n",
+        "```rust\r\nfn confidential_code() {}\r\n"
+    )
+    .into();
+    report.body = "before `inline_secret()` after\n\n    indented_secret()\n\nend".into();
+    report.workaround = Some("PRIVATE_OPTION='other secret'".into());
+    report.labels = vec!["private/label".into()];
+    report.error_record_id = Some("SECRET_ID=hidden-id".into());
+    let (record, _) = store
+        .submit(report.clone(), context(dir.path()), Utc::now())
+        .unwrap();
+    let public = record.public_snapshot();
+    let rendered = format!("{}\n{}", public.input.title, public.render_issue());
+    for hidden in [
+        "github_pat_synthetic_0123456789ABCDEF",
+        "sk-proj-synthetic_0123456789-ABCDEF",
+        "private.rs",
+        "./private",
+        "private value",
+        "json secret",
+        "source.rs",
+        "server",
+        "~/private",
+        "confidential_code",
+        "inline_secret",
+        "indented_secret",
+        "other secret",
+        "private/label",
+        "hidden-id",
+    ] {
+        assert!(
+            !rendered.contains(hidden),
+            "public snapshot exposed {hidden}"
+        );
+    }
+    assert!(public
+        .input
+        .refusal
+        .starts_with("before\r\n***redacted***\r\n***redacted***\r\n"));
+    assert_ne!(public.context.project_root, record.context.project_root);
+    assert_eq!(public.context.project_hash, record.context.project_hash);
+    assert_eq!(public.marker(), record.marker());
+    assert_eq!(
+        public.input.refusal.matches("\r\n").count(),
+        report.refusal.matches("\r\n").count()
+    );
+    assert!(public
+        .input
+        .body
+        .starts_with("before [REDACTED CODE] after\n\n"));
+    assert!(public.input.body.ends_with("\n\nend"));
+    assert_eq!(store.read(&record.id).unwrap().input, report);
+}
+
+#[test]
+fn public_snapshot_keeps_safe_refusal_bytes_without_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.refusal = format!(
+        "  before\r\nERROR: access denied\r\n{}\tend\r\nafter  ",
+        "拒否".repeat(1800)
+    );
+    let (record, _) = store
+        .submit(report.clone(), context(dir.path()), Utc::now())
+        .unwrap();
+    assert_eq!(
+        record.public_snapshot().input.refusal.as_bytes(),
+        report.refusal.as_bytes()
+    );
+}
+
+#[test]
+fn public_snapshot_masks_complete_bearer_and_multiline_assignment_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.refusal = "before\r\nBearer abc+bearer-secret\r\nPRIVATE_SETTING = \"first-part\\\nmiddle\r\nmultiline-secret\"suffix-secret\r\nUNQUOTED=first unquoted-secret\r\nCONTINUED_LF=first\\\nlf-continuation-secret\r\nCONTINUED_CRLF=first\\\r\ncrlf-continuation-secret\r\nafter  ".into();
+    let (record, _) = store
+        .submit(report.clone(), context(dir.path()), Utc::now())
+        .unwrap();
+    let public = record.public_snapshot().input.refusal;
+    let leaked: Vec<_> = [
+        "bearer-secret",
+        "multiline-secret",
+        "suffix-secret",
+        "unquoted-secret",
+        "lf-continuation-secret",
+        "crlf-continuation-secret",
+    ]
+    .into_iter()
+    .filter(|secret| public.contains(secret))
+    .collect();
+    assert!(leaked.is_empty(), "public snapshot exposed {leaked:?}");
+    assert!(public.starts_with("before\r\n"));
+    assert!(public.ends_with("\r\nafter  "));
+    assert_eq!(
+        public
+            .chars()
+            .filter(|c| matches!(c, '\r' | '\n'))
+            .collect::<String>(),
+        report
+            .refusal
+            .chars()
+            .filter(|c| matches!(c, '\r' | '\n'))
+            .collect::<String>()
+    );
+}
+
+#[test]
 fn repeat_intake_reuses_one_receipt_within_an_hour_and_retains_old_reports() {
     let dir = tempfile::tempdir().unwrap();
     let store = FeedbackStore::new(dir.path().join("feedback"));
@@ -150,4 +271,51 @@ fn repeated_problem_with_new_evidence_retains_both_reports() {
     assert_ne!(first.id, second.id);
     assert_eq!(store.read(&first.id).unwrap().input, original);
     assert_eq!(store.read(&second.id).unwrap().input, updated);
+    // Text-identical reports must not lose new version/OS/evidence identity.
+    let mut without_evidence_id = original.clone();
+    without_evidence_id.error_record_id = None;
+    for (report, environment) in [
+        (
+            original.clone(),
+            FeedbackContext {
+                gwt_version: "2.0.0".into(),
+                ..context(dir.path())
+            },
+        ),
+        (
+            original.clone(),
+            FeedbackContext {
+                gwtd_version: "2.0.0".into(),
+                ..context(dir.path())
+            },
+        ),
+        (
+            original.clone(),
+            FeedbackContext {
+                os: "different-os".into(),
+                ..context(dir.path())
+            },
+        ),
+        (without_evidence_id, context(dir.path())),
+    ] {
+        let (additional, fresh) = store
+            .submit(report.clone(), environment.clone(), now)
+            .unwrap();
+        assert!(
+            fresh,
+            "new context/evidence must not reuse an older receipt"
+        );
+        assert_ne!(additional.id, first.id);
+        assert_eq!(additional.context, environment);
+        assert_eq!(additional.input, report);
+        let (repeat, fresh) = store
+            .submit(report, environment, now + TimeDelta::minutes(15))
+            .unwrap();
+        assert!(
+            !fresh,
+            "complete duplicates still share one receipt within one hour"
+        );
+        assert_eq!(repeat.id, additional.id);
+    }
+    assert_eq!(store.read(&first.id).unwrap().input, original);
 }

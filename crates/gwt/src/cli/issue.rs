@@ -1085,6 +1085,7 @@ pub(crate) fn load_monitor_agent_status(
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     let mut authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    crate::issue_monitor_worker::bind_issue_monitor_source_repository(&mut authority, project_root);
     refresh_monitor_capacity(
         &mut authority,
         project_root,
@@ -1243,6 +1244,7 @@ fn attach_monitor_control_identity(
                 || row.launched_window_id != window_id)
         {
             lifecycle.record_candidate(crate::IssueMonitorIssue {
+                author_login: None,
                 number: row.issue_number,
                 title: String::new(),
                 labels: Vec::new(),
@@ -1261,6 +1263,7 @@ fn attach_monitor_control_identity(
     for number in &status.active_launches {
         if !status.inbox.iter().any(|row| row.issue_number == *number) {
             lifecycle.record_candidate(crate::IssueMonitorIssue {
+                author_login: None,
                 number: *number,
                 title: String::new(),
                 labels: Vec::new(),
@@ -1556,12 +1559,36 @@ fn run_monitor_queue_push<E: CliEnv>(
     let mut accepted_numbers = Vec::new();
     let mut outcomes: Vec<QueuePushOutcome> = Vec::new();
     let mut urgent_observations = Vec::new();
-    // Queue claims are advisory: a GitHub outage must not make the local
-    // queue unusable. Active claims remain authoritative and are left alone.
+    let source_repository = monitor_client_source_repository(env, &root);
+    let mut source_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+    source_monitor.set_source_repository(
+        source_repository
+            .as_ref()
+            .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+    );
+    // Queue claims are advisory for ordinary repositories. Upstream reports
+    // require proven source input before any queued marker is published.
     for number in numbers {
-        if let Ok(gwt_github::client::FetchResult::Updated(snapshot)) =
-            env.client().fetch(IssueNumber(*number), None)
+        let snapshot = if source_repository.is_some() {
+            match env.client().fetch(IssueNumber(*number), None) {
+                Ok(gwt_github::client::FetchResult::Updated(snapshot)) => Some(snapshot),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(reason) =
+            monitor_snapshot_source_exclusion(&source_monitor, *number, snapshot.as_ref())
         {
+            outcomes.push(QueuePushOutcome {
+                number: *number,
+                accepted: false,
+                refusal_code: Some(QUEUE_PUSH_REFUSAL_UNTRUSTED_SOURCE),
+                refusal_detail: Some(reason),
+            });
+            continue;
+        }
+        if let Some(snapshot) = snapshot {
             let claims =
                 if snapshot.labels.iter().any(|label| {
                     label.eq_ignore_ascii_case(gwt_github::issue_auto_claim::QUEUED_LABEL)
@@ -1662,9 +1689,17 @@ fn run_monitor_queue_push<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
+        monitor.set_source_repository(
+            source_repository
+                .as_ref()
+                .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+        );
+        if !accepted_numbers.is_empty() {
+            monitor.terminal_queue_push(&accepted_numbers, "operation", &now);
+        }
         for (snapshot, assignment) in &urgent_observations {
             let observed = crate::IssueMonitorIssue {
+                author_login: snapshot.author_login.clone(),
                 number: snapshot.number.0,
                 title: snapshot.title.clone(),
                 labels: snapshot.labels.clone(),
@@ -1686,7 +1721,7 @@ fn run_monitor_queue_push<E: CliEnv>(
                 );
             }
         }
-        if let Some(position) = position {
+        if let Some(position) = position.filter(|_| !accepted_numbers.is_empty()) {
             let current = monitor.prefs();
             let queue = &current.terminal_queues[&crate::process::current_hostname()];
             let mut order: Vec<_> = queue
@@ -1801,6 +1836,54 @@ impl QueuePushOutcome {
 /// declines a number (Issue #4819 AC-2).
 const QUEUE_PUSH_REFUSAL_CLAIMED_BY_OTHER_OWNER: &str = "claimed_by_other_owner";
 const QUEUE_PUSH_REFUSAL_NOT_IN_QUEUE_AFTER_WRITE: &str = "not_in_queue_after_write";
+const QUEUE_PUSH_REFUSAL_UNTRUSTED_SOURCE: &str = "untrusted_issue_source";
+
+/// A client fixed to another cwd cannot supply upstream author evidence for
+/// the requested project. Ordinary projects keep their existing local path.
+fn monitor_client_source_repository<E: CliEnv>(
+    env: &E,
+    project_root: &Path,
+) -> Option<(String, String)> {
+    let target = crate::issue_monitor_worker::github_remote_owner_and_repo(project_root).ok()?;
+    if target.0.eq_ignore_ascii_case("akiojin")
+        && target.1.eq_ignore_ascii_case("gwt")
+        && env.repo_path() != project_root
+    {
+        let client =
+            crate::issue_monitor_worker::github_remote_owner_and_repo(env.repo_path()).ok()?;
+        if !target.0.eq_ignore_ascii_case(&client.0) || !target.1.eq_ignore_ascii_case(&client.1) {
+            tracing::warn!(
+                "Issue Monitor target/client repository mismatch; refusing source evidence"
+            );
+            return None;
+        }
+    }
+    Some(target)
+}
+
+/// Use the shared provenance gate before advisory queue writes or priority
+/// changes. Missing evidence still preserves ordinary non-upstream queuing.
+fn monitor_snapshot_source_exclusion(
+    monitor: &crate::IssueMonitorState,
+    number: u64,
+    snapshot: Option<&IssueSnapshot>,
+) -> Option<String> {
+    monitor
+        .source_exclusion(&crate::IssueMonitorIssue {
+            number,
+            author_login: snapshot.and_then(|snapshot| snapshot.author_login.clone()),
+            title: String::new(),
+            labels: snapshot
+                .map(|snapshot| snapshot.labels.clone())
+                .unwrap_or_default(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: snapshot.map(|snapshot| snapshot.body.clone()),
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        })
+        .map(|(_, reason)| reason)
+}
 
 /// Render a claim status as the word the refusal detail names it by.
 fn claim_status_word(status: &gwt_github::issue_auto_claim::ClaimStatus) -> &'static str {
@@ -1930,6 +2013,36 @@ fn run_monitor_launch_now<E: CliEnv>(
         out.push('\n');
         return Ok(1);
     }
+    let source_repository = monitor_client_source_repository(env, &project_root);
+    let mut source_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+    source_monitor.set_source_repository(
+        source_repository
+            .as_ref()
+            .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+    );
+    // Ordinary repositories retain the local-only launch instruction path.
+    // Upstream needs authoritative creator/body evidence; unresolved identity
+    // refuses without attempting a read against an unproven repository.
+    let snapshot = if source_repository.is_some()
+        && monitor_snapshot_source_exclusion(&source_monitor, number, None).is_some()
+    {
+        match env.client().fetch(IssueNumber(number), None) {
+            Ok(gwt_github::client::FetchResult::Updated(snapshot)) => Some(snapshot),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(reason) =
+        monitor_snapshot_source_exclusion(&source_monitor, number, snapshot.as_ref())
+    {
+        out.push_str(&serde_json::json!({
+            "number": number, "status": "refused", "reason": QUEUE_PUSH_REFUSAL_UNTRUSTED_SOURCE,
+            "detail": reason, "priority_updated": false, "scan_requested": false,
+        }).to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
@@ -1941,6 +2054,11 @@ fn run_monitor_launch_now<E: CliEnv>(
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
+        );
+        monitor.set_source_repository(
+            source_repository
+                .as_ref()
+                .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         let now = chrono::Utc::now().to_rfc3339();
         monitor.terminal_queue_push(&[number], "launch_now", &now);
@@ -4786,6 +4904,48 @@ fn run_monitor_review_verdict<E: CliEnv>(
     verdict_raw: &str,
     out: &mut String,
 ) -> i32 {
+    let readiness = (|| -> Result<bool, String> {
+        let root = issue_monitor_project_root(env, None).map_err(|error| error.to_string())?;
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .map_err(|error| error.to_string())?;
+        let Some(record) = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == issue_number)
+        else {
+            return Ok(false);
+        };
+        if record.phase != crate::AutonomousPhase::Reviewing
+            || record.reviewed_sha.as_deref() != Some(reviewed_sha)
+        {
+            return Ok(false);
+        }
+        let pr_number = record
+            .pr_number
+            .ok_or("reviewed PR number is unavailable")?;
+        let (owner, repo) = env.github_repository().map_err(|error| error.to_string())?;
+        crate::issue_monitor_review::review_submission_ci_ready(
+            env.repo_path(),
+            &format!("{owner}/{repo}"),
+            pr_number,
+            reviewed_sha,
+        )?;
+        Ok(true)
+    })();
+    if matches!(readiness, Ok(false)) {
+        out.push_str("{\"status\":\"obsolete\",\"reason\":\"Review binding was superseded; no verdict was published. Do not retry this old review.\"}\n");
+        return 0;
+    }
+    if let Err(reason) = readiness {
+        out.push_str(&serde_json::json!({
+            "status": "deferred", "issue_number": issue_number,
+            "reviewed_sha": reviewed_sha, "reason": reason,
+            "recovery": "Keep this review pane active. Wait for required CI, re-read the PR/head and CI evidence, re-evaluate every acceptance criterion, then retry issue.monitor.review_verdict with the refreshed verdict. No verdict was published."
+        }).to_string());
+        out.push('\n');
+        return 0;
+    }
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({
@@ -6711,6 +6871,160 @@ mod tests {
         value.to_string()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn monitor_review_verdict_defers_until_required_ci_is_terminal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        gwt_core::test_support::write_executable_script(
+            &bin.join("gh"),
+            "#!/bin/sh\ncase \"$*\" in\n  *'pr view'*) cat pr.json ;;\n  *'api '*) cat protection.json ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let _path =
+            gwt_core::test_support::ScopedEnvVar::set("PATH", std::env::join_paths(paths).unwrap());
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.begin_review(42, 99, "abc123");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let prefs_before = fs::read(&prefs_path).unwrap();
+        fs::write(
+            repo.join("protection.json"),
+            r#"{"required_status_checks":{"contexts":["build","test"]},"allow_force_pushes":{"enabled":false}}"#,
+        )
+        .unwrap();
+        let complete =
+            serde_json::json!({"name":"build","status":"COMPLETED","conclusion":"SUCCESS"});
+        let failed =
+            serde_json::json!({"name":"build","status":"COMPLETED","conclusion":"FAILURE"});
+        let pending = serde_json::json!({"name":"test","status":"IN_PROGRESS"});
+        let test_pass =
+            serde_json::json!({"name":"test","status":"COMPLETED","conclusion":"SUCCESS"});
+        let optional = serde_json::json!({"name":"optional","status":"IN_PROGRESS"});
+        for (state, head, rollup, deferred) in [
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, {"context":"build","state":"PENDING"}, test_pass]),
+                true,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, pending]),
+                true,
+            ),
+            ("OPEN", "abc123", serde_json::json!([failed, pending]), true),
+            ("OPEN", "abc123", serde_json::json!([complete]), true),
+            ("OPEN", "abc123", serde_json::json!(null), true),
+            (
+                "OPEN",
+                "new-head",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "CLOSED",
+                "abc123",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([complete, test_pass, optional]),
+                false,
+            ),
+            (
+                "MERGED",
+                "abc123",
+                serde_json::json!([complete, test_pass]),
+                false,
+            ),
+            (
+                "OPEN",
+                "abc123",
+                serde_json::json!([failed, test_pass]),
+                false,
+            ),
+        ] {
+            fs::write(
+                repo.join("pr.json"),
+                serde_json::json!({
+                    "number":99,"headRefOid":head,"baseRefName":"develop",
+                    "state":state,"statusCheckRollup":rollup
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let mut out = String::new();
+            let code = run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out);
+            if deferred {
+                assert_eq!(code, 0, "nonterminal wait: {out}");
+                assert!(out.contains("\"status\":\"deferred\""), "{out}");
+                assert!(out.contains("re-evaluate"), "{out}");
+                assert!(!out.contains("publish failed"), "must not publish: {out}");
+            } else {
+                // No daemon exists in this isolated project: reaching its
+                // ordinary transport error proves terminal CI allows publish.
+                assert_eq!(code, 1, "{out}");
+                assert!(out.contains("review verdict publish failed"), "{out}");
+            }
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        }
+        for (file, contents) in [
+            ("protection.json", Some("not JSON")),
+            ("protection.json", Some("{}")),
+            ("pr.json", Some("not JSON")),
+            ("pr.json", None),
+        ] {
+            match contents {
+                Some(contents) => fs::write(repo.join(file), contents).unwrap(),
+                None => fs::remove_file(repo.join(file)).unwrap(),
+            }
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let mut out = String::new();
+            assert_eq!(
+                run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+                0
+            );
+            assert!(out.contains("\"status\":\"deferred\""), "{out}");
+            assert!(!out.contains("publish failed"), "must not publish: {out}");
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        }
+        monitor.begin_review(42, 100, "new-head");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let superseded = fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            0
+        );
+        assert!(out.contains("\"status\":\"obsolete\""), "{out}");
+        assert_eq!(fs::read(&prefs_path).unwrap(), superseded);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let removed = fs::read(&prefs_path).unwrap();
+        out.clear();
+        assert_eq!(
+            run_monitor_review_verdict(&mut env, 42, "abc123", "raw verdict", &mut out),
+            0
+        );
+        assert!(out.contains("\"status\":\"obsolete\""), "{out}");
+        assert_eq!(fs::read(&prefs_path).unwrap(), removed);
+    }
+
     /// Issue #3683 (AC-3): the claim-block probe reads the exact wire format
     /// the daemon status projection serves, so the state match must survive
     /// the snake_case serialization of `MonitorInboxState`.
@@ -7117,6 +7431,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let snapshot = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(42),
             title: "Issue family direct run".to_string(),
             body: "body".to_string(),
@@ -7149,6 +7464,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Original title".to_string(),
             body: "Original body".to_string(),
@@ -7187,6 +7503,7 @@ mod tests {
         let isolation = TempDir::new().expect("isolated home");
         let _home = ScopedGwtHome::set(isolation.path().join("home"));
         let (_repo, mut env) = seeded_edit_env(&["bug"]);
+        init_monitor_test_repository(env.repo_path(), "https://github.com/example/repo.git");
         env.cache_root =
             crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&env.repo_path);
         let mut out = String::new();
@@ -7935,11 +8252,13 @@ mod tests {
                 .unwrap();
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_source_repository(Some(("example", "repo")));
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![8, 7]);
         let open = fetched(&env, 7);
         crate::scan_issue_monitor_candidates(
             &mut monitor,
             &[crate::IssueMonitorIssue {
+                author_login: None,
                 number: 7,
                 title: open.title,
                 labels: open.labels,
@@ -8248,6 +8567,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
             body: "Original body".to_string(),
@@ -8299,6 +8619,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
@@ -8309,6 +8630,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         env.client.use_rfc3339_timestamps();
         env.client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Closed by mistake".to_string(),
             body: "Original body".to_string(),
@@ -8336,6 +8658,7 @@ mod tests {
         crate::scan_issue_monitor_candidates(
             &mut monitor,
             &[crate::IssueMonitorIssue {
+                author_login: None,
                 number: 7,
                 title: "Closed by mistake".to_string(),
                 labels: vec!["bug".to_string()],
@@ -8501,6 +8824,7 @@ mod tests {
         let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -8636,6 +8960,7 @@ mod tests {
         let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -8682,6 +9007,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -8728,6 +9054,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -8834,6 +9161,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
@@ -8947,6 +9275,7 @@ mod tests {
         );
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         assert_eq!(
@@ -8997,6 +9326,7 @@ mod tests {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[1, 2], "operator", "2026-10-03T00:00:00Z");
         let candidate = crate::IssueMonitorIssue {
+            author_login: None,
             number: 2,
             title: "urgent".to_string(),
             labels: vec!["urgent".to_string()],
@@ -9061,6 +9391,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut monitor = crate::IssueMonitorState::new(Default::default());
         monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-03T00:00:00Z");
@@ -9098,6 +9429,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let mut env = crate::cli::TestEnv::new(repo);
         for number in 1..=3 {
             if number == 2 {
@@ -9181,6 +9513,27 @@ mod tests {
         );
     }
 
+    fn init_monitor_test_repository(repo: &Path, origin: &str) {
+        if repo.join(".git").exists() {
+            return;
+        }
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["remote", "add", "origin", origin],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("git fixture");
+            assert!(
+                output.status.success(),
+                "git fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     /// Seed one open Issue carrying the queue label and, optionally, a claim
     /// comment owned by somebody other than this process.
     fn queue_push_issue(
@@ -9188,6 +9541,7 @@ mod tests {
         number: u64,
         foreign_claim_expires_at: Option<&str>,
     ) {
+        init_monitor_test_repository(env.repo_path(), "https://github.com/example/repo.git");
         let updated_at = UpdatedAt::new("2026-09-30T09:00:00Z");
         let comments = foreign_claim_expires_at
             .map(|expires_at| {
@@ -9211,6 +9565,7 @@ mod tests {
             })
             .unwrap_or_default();
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("issue {number}"),
             body: String::new(),
@@ -9257,6 +9612,109 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn upstream_feedback_refuses_queue_markers_and_launch_priority_before_mutation() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/akiojin/gwt.git");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        for (number, author, raw) in [
+            (481001, "akiojin", true),
+            (481002, "external", false),
+            (481003, "akiojin", false),
+        ] {
+            queue_push_issue(&mut env, number, None);
+            let gwt_github::client::FetchResult::Updated(mut snapshot) =
+                env.client.fetch(IssueNumber(number), None).unwrap()
+            else {
+                unreachable!()
+            };
+            snapshot.author_login = Some(author.into());
+            if raw {
+                snapshot.body = "<!-- gwt-feedback:raw -->".into();
+            }
+            env.client.seed(snapshot);
+        }
+        let (code, result) = run_queue_push(&mut env, vec![481001, 481002, 481003], true);
+        assert_eq!(code, 1);
+        assert_eq!(result["accepted"], serde_json::json!([481003]));
+        assert_eq!(result["refused"], serde_json::json!([481001, 481002]));
+        assert!(env.client.comments(IssueNumber(481001)).is_empty());
+        assert!(env.client.comments(IssueNumber(481002)).is_empty());
+        assert_eq!(queued_numbers(&repo), vec![481003]);
+        let before =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_launch_now(&env, None, 481002, &mut out).unwrap(),
+            1
+        );
+        let refused: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(refused["priority_updated"], false);
+        assert!(refused["detail"].as_str().unwrap().contains("PM triage"));
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap(),
+            before
+        );
+        let gwt_github::client::FetchResult::Updated(evidence) =
+            env.client.fetch(IssueNumber(481003), None).unwrap()
+        else {
+            unreachable!()
+        };
+        for (name, origin) in [
+            ("other-client", Some("https://github.com/example/repo.git")),
+            ("unknown-client", None),
+        ] {
+            let client_repo = tmp.path().join(name);
+            std::fs::create_dir_all(&client_repo).unwrap();
+            if let Some(origin) = origin {
+                init_monitor_test_repository(&client_repo, origin);
+            }
+            let client_env = crate::cli::TestEnv::new(client_repo);
+            client_env.client.seed(evidence.clone());
+            let calls = client_env.client.call_log();
+            let mut queue_out = String::new();
+            assert_eq!(
+                run_monitor_queue_push(
+                    &client_env,
+                    Some(&repo),
+                    &[481003],
+                    Some(0),
+                    true,
+                    &mut queue_out
+                )
+                .unwrap(),
+                1
+            );
+            let refused: serde_json::Value = serde_json::from_str(&queue_out).unwrap();
+            assert_eq!(refused["accepted"], serde_json::json!([]));
+            assert_eq!(refused["refused"], serde_json::json!([481003]));
+            let mut launch_out = String::new();
+            assert_eq!(
+                run_monitor_launch_now(&client_env, Some(&repo), 481003, &mut launch_out).unwrap(),
+                1
+            );
+            let refused: serde_json::Value = serde_json::from_str(&launch_out).unwrap();
+            assert_eq!(refused["priority_updated"], false);
+            assert_eq!(
+                client_env.client.call_log(),
+                calls,
+                "mismatched evidence must not be fetched or mutated"
+            );
+            assert_eq!(
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &repo
+                ))
+                .unwrap(),
+                before
+            );
+        }
     }
 
     /// Issue #4819 AC-4 / AC-1 / AC-3: the 2026-09-30 observation. #4803 and
@@ -9390,11 +9848,13 @@ mod tests {
         prefs.max_active_agents_mode = crate::issue_monitor::IssueMonitorMaxActiveMode::Manual;
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_source_repository(Some(("example", "repo")));
         monitor.set_gui_connected(true);
         let now = queued.heartbeat_at.as_str();
         crate::scan_issue_monitor_candidates_with_provenance(
             &mut monitor,
             &[crate::IssueMonitorIssue {
+                author_login: None,
                 number: 5133,
                 title: "queued issue".to_string(),
                 labels: vec!["bug".to_string(), "gwt-queued".to_string()],
@@ -9430,6 +9890,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -9495,6 +9956,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -9544,6 +10006,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -9663,6 +10126,7 @@ mod tests {
         let cache =
             Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo));
         let cached = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(2338),
             title: "Running Issue".to_string(),
             body: String::new(),
@@ -9841,6 +10305,7 @@ mod tests {
         for number in [1, 2, 3] {
             cache
                 .write_snapshot(&IssueSnapshot {
+                    author_login: None,
                     number: IssueNumber(number),
                     title: format!("Issue {number}"),
                     body: "## Acceptance Criteria\n\n- [ ] AC-1: Deliver the change.\n".to_string(),
@@ -10170,6 +10635,7 @@ mod tests {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(2338),
                 title: "Closed owner".to_string(),
                 body: String::new(),
@@ -10376,6 +10842,7 @@ mod tests {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(2338),
                 title: "Closed owner".to_string(),
                 body: String::new(),
@@ -10497,6 +10964,7 @@ mod tests {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(2338),
                 title: "Closed owner".to_string(),
                 body: String::new(),
@@ -10658,6 +11126,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -10689,6 +11158,7 @@ mod tests {
         for number in [1, 2] {
             cache
                 .write_snapshot(&IssueSnapshot {
+                    author_login: None,
                     number: IssueNumber(number),
                     title: format!("Issue {number}"),
                     body: String::new(),
@@ -11121,6 +11591,7 @@ mod tests {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(42),
                 title: "Still open".to_string(),
                 body: String::new(),
@@ -11156,6 +11627,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -11202,6 +11674,7 @@ mod tests {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(42),
                 title: "Claimed elsewhere".to_string(),
                 body: String::new(),
@@ -11213,6 +11686,7 @@ mod tests {
             .expect("write stale cache candidate");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(46),
                 title: "Closed but still reserved".to_string(),
                 body: String::new(),
@@ -11559,9 +12033,11 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         let now = "2026-10-06T00:00:00Z";
         let candidates = [1, 2, 3].map(|number| crate::IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: vec!["bug".to_string()],
@@ -11597,6 +12073,7 @@ mod tests {
                     ..Default::default()
                 },
             );
+            monitor.set_source_repository(Some(("example", "repo")));
             monitor.set_gui_connected(true);
             monitor.terminal_queue_push(&[1, 2, 3], "operation", now);
             crate::scan_issue_monitor_candidates(&mut monitor, &candidates, now);
@@ -13275,6 +13752,7 @@ command = "my-agent-cli"
             crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo),
         )
         .write_snapshot(&IssueSnapshot {
+            author_login: None,
             number: IssueNumber(3705),
             title: "Terminal Work launch".to_string(),
             body: String::new(),
@@ -13653,6 +14131,7 @@ command = "my-agent-cli"
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
             gwt_github::Cache::new(cache_root)
                 .write_snapshot(&IssueSnapshot {
+                    author_login: None,
                     number: IssueNumber(4324),
                     title: "Waiting on the host lease".to_string(),
                     body: String::new(),

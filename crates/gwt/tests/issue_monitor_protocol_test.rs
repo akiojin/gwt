@@ -336,6 +336,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
 fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let item = IssueMonitorInboxItem {
         issue: IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Improve monitor".to_string(),
             labels: vec!["auto-improve".to_string()],
@@ -407,6 +408,7 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     ] {
         let item = IssueMonitorInboxItem {
             issue: IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Excluded issue".to_string(),
                 labels: vec!["hold".to_string()],

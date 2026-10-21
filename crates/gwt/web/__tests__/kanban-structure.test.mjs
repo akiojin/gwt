@@ -466,17 +466,17 @@ test("Kanban card click uses targeted Issue/SPEC selection", () => {
 test("Knowledge detail pane renders section bodies through sanitized Markdown helper", () => {
   assert.match(
     appSource,
-    /function\s+createKnowledgeMarkdownBody\(/,
+    /content: \{ type: "markdown"/,
     "expected a shared Markdown body helper for Knowledge detail sections",
   );
   assert.match(
     appSource,
-    /renderUiContent\(document, markdownContent\(section\), className\)/,
+    /renderUiContent\(document, section\.content/,
     "expected detail helper to delegate to the shared typed Markdown renderer",
   );
   assert.match(
     appSource,
-    /createKnowledgeMarkdownBody\(section\)/,
+    /renderUiContent\(document, section\.content, "knowledge-section-body"\)/,
     "expected right detail pane to append section bodies through the Markdown helper",
   );
   assert.doesNotMatch(

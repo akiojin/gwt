@@ -319,6 +319,7 @@ fn next_link(value: &str) -> Result<Option<String>, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestIssueRow {
     pub number: u64,
+    pub author_login: Option<String>,
     pub title: String,
     /// `OPEN` / `CLOSED`, normalized to the casing the GraphQL list used.
     pub state: String,
@@ -340,6 +341,12 @@ pub fn parse_issue_rows(rows: &[Value]) -> Vec<RestIssueRow> {
             let number = row.get("number")?.as_u64()?;
             Some(RestIssueRow {
                 number,
+                author_login: row
+                    .pointer("/user/login")
+                    .or_else(|| row.pointer("/author/login"))
+                    .and_then(Value::as_str)
+                    .filter(|login| !login.is_empty())
+                    .map(str::to_string),
                 title: text(row, &["title"]).unwrap_or_default(),
                 state: text(row, &["state"])
                     .map(|state| state.to_ascii_uppercase())
@@ -783,11 +790,11 @@ mod tests {
         let rows: Vec<Value> = serde_json::from_str(
             r#"[
               {"number": 1, "title": "Bug", "state": "open", "labels": [{"name": "bug"}],
-               "assignees": [{"login": "alice"}], "body": "b", "html_url": "https://github.com/o/r/issues/1",
+               "assignees": [{"login": "alice"}], "user": {"login": "OriginalCreator"}, "body": "b", "html_url": "https://github.com/o/r/issues/1",
                "url": "https://api.github.com/repos/o/r/issues/1", "updated_at": "2026-09-01T00:00:00Z"},
               {"number": 2, "title": "PR", "state": "open", "pull_request": {"url": "x"}},
               {"number": 3, "title": "Legacy", "state": "CLOSED", "url": "https://github.com/o/r/issues/3",
-               "updatedAt": "2026-09-02T00:00:00Z"},
+               "updatedAt": "2026-09-02T00:00:00Z", "author": {"login": ""}},
               {"title": "no number"}
             ]"#,
         )
@@ -798,6 +805,7 @@ mod tests {
         assert_eq!(parsed[0].state, "OPEN");
         assert_eq!(parsed[0].labels, ["bug"]);
         assert_eq!(parsed[0].assignee.as_deref(), Some("alice"));
+        assert_eq!(parsed[0].author_login.as_deref(), Some("OriginalCreator"));
         assert_eq!(parsed[0].url, "https://github.com/o/r/issues/1");
         assert_eq!(
             parsed[0].updated_at.as_deref(),
@@ -811,5 +819,6 @@ mod tests {
             Some("2026-09-02T00:00:00Z")
         );
         assert!(parsed[1].body.is_none());
+        assert!(parsed[1].author_login.is_none());
     }
 }

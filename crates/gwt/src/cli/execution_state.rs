@@ -33721,6 +33721,7 @@ exit 1
             save(repo.path(), &active_record("sess-owner")).unwrap();
             let mut env = TestEnv::new(repo.path().to_path_buf());
             env.client.seed(gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(3248),
                 title: "execution authority".to_string(),
                 body: String::new(),
@@ -33786,6 +33787,7 @@ exit 1
             );
             let mut env = TestEnv::new(repo.path().to_path_buf());
             env.client.seed(gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(3248),
                 title: "terminal execution".to_string(),
                 body: String::new(),

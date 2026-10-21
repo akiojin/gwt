@@ -219,6 +219,9 @@ impl std::fmt::Display for AgentBridgeFailure {
         // Keep the Host's free-form cause private. Only our known diagnostic
         // tokens select static guidance to the actual persisted surface.
         match self.diagnostic_reason.as_deref() {
+            Some("workspace_operation_in_flight") => formatter.write_str(
+                "; another workspace operation is still in flight; the update did not run; retry after its finalizer completes",
+            )?,
             Some("workspace_transaction_failed") => formatter.write_str(
                 "; inspect ~/.gwt/logs/gwt.log.* for the original cause; do not retry until the cause is resolved",
             )?,
@@ -960,12 +963,27 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
     send_workspace_update_via_agent_bridge_with_operation_id(target, request, None)
 }
 
+fn workspace_update_retry_delay(
+    error: &AgentBridgeFailure,
+    remaining: Duration,
+) -> Option<Duration> {
+    let delay = Duration::from_secs(5);
+    (error.reason == AgentBridgeFailureReason::OperationRejected
+        && error.http_status == Some(reqwest::StatusCode::CONFLICT)
+        && error.error_code == Some(crate::AgentWorkspaceUpdateErrorCode::TransactionConflict)
+        && error.bridge_reason.as_deref() == Some("transaction_conflict")
+        && error.diagnostic_reason.as_deref() == Some("workspace_operation_in_flight")
+        && remaining > delay)
+        .then_some(delay)
+}
+
 pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
     target: &HookForwardTarget,
     request: &crate::AgentWorkspaceUpdateRequest,
     operation_id: Option<&str>,
 ) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
     let observation = HostBridgeObservation::begin(gwt_agent::HostBridgeKind::WorkspaceUpdate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let result = (|| {
         let url = target.workspace_update_url().map_err(|_| {
             AgentBridgeFailure::new(
@@ -983,19 +1001,30 @@ pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
                     "failed to build the Host workspace bridge client",
                 )
             })?;
-        let mut post = client.post(url).bearer_auth(&target.token).json(request);
-        if let Some(id) = operation_id {
-            post = post.header(crate::workspace_update_receipt::OPERATION_HEADER, id);
-        }
-        let response = post.send()
+        let response = loop {
+            let mut post = client
+                .post(url.clone())
+                .bearer_auth(&target.token)
+                .json(request)
+                .timeout(
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(Duration::from_secs(10)),
+                );
+            if let Some(id) = operation_id {
+                post = post.header(crate::workspace_update_receipt::OPERATION_HEADER, id);
+            }
+            let response = post.send()
         .map_err(|_| {
             AgentBridgeFailure::new(
                 AgentBridgeFailureReason::TransportFailure,
                 "Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
             )
         })?;
-        let status = response.status();
-        if !status.is_success() {
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
             let body = read_bounded_agent_bridge_error_body(
             response,
             "Host workspace bridge rejection body could not be read safely; no local fallback was attempted",
@@ -1026,14 +1055,26 @@ pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
             } else {
                 AgentBridgeFailureReason::OperationRejected
             };
-            return Err(AgentBridgeFailure::rejected(
+            let error = AgentBridgeFailure::rejected(
                 reason,
                 status,
                 diagnostic.as_ref(),
                 exact_workspace_ensure_required,
                 "Host workspace bridge rejected the update; no local fallback was attempted",
-            ));
-        }
+            );
+            if let Some(delay) = workspace_update_retry_delay(
+                &error,
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ) {
+                // Only this typed rejection proves the mutation callback never ran.
+                // Reuse the exact request and operation id; never retry an unknown outcome.
+                std::thread::sleep(delay);
+                if std::time::Instant::now() < deadline {
+                    continue;
+                }
+            }
+            return Err(error);
+        };
         let body = response.bytes().map_err(|_| AgentBridgeFailure::new(
             AgentBridgeFailureReason::TransportFailure,
             "Host workspace bridge response body was interrupted; no update retry or local fallback was attempted",
@@ -2508,6 +2549,8 @@ mod tests {
         rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
         redirect_rx: mpsc::Receiver<HeaderMap>,
         forward_url: String,
+        workspace_responses:
+            Arc<std::sync::Mutex<std::collections::VecDeque<(StatusCode, String)>>>,
     }
 
     #[derive(Clone)]
@@ -2517,6 +2560,8 @@ mod tests {
         body: String,
         redirect_location: Option<String>,
         redirect_tx: mpsc::Sender<HeaderMap>,
+        workspace_responses:
+            Arc<std::sync::Mutex<std::collections::VecDeque<(StatusCode, String)>>>,
     }
 
     impl BindingProbeServer {
@@ -2545,6 +2590,8 @@ mod tests {
             let (tx, rx) = mpsc::channel();
             let (redirect_tx, redirect_rx) = mpsc::channel();
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let workspace_responses =
+                Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
             let app = Router::new()
                 .route(
                     "/internal/execution-binding-probe",
@@ -2575,10 +2622,16 @@ mod tests {
                                 .tx
                                 .send((headers, body))
                                 .expect("capture workspace update request");
+                            let (status, body) = state
+                                .workspace_responses
+                                .lock()
+                                .unwrap()
+                                .pop_front()
+                                .unwrap_or((state.status, state.body));
                             (
-                                state.status,
+                                status,
                                 [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                state.body,
+                                body,
                             )
                                 .into_response()
                         },
@@ -2648,6 +2701,7 @@ mod tests {
                     body: body.to_string(),
                     redirect_location,
                     redirect_tx,
+                    workspace_responses: Arc::clone(&workspace_responses),
                 });
             runtime.spawn(async move {
                 axum::serve(listener, app)
@@ -2663,6 +2717,7 @@ mod tests {
                 rx,
                 redirect_rx,
                 forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+                workspace_responses,
             }
         }
 
@@ -2688,6 +2743,111 @@ mod tests {
             self.runtime
                 .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
         }
+    }
+
+    #[test]
+    fn workspace_update_retry_requires_exact_rejection_and_remaining_budget() {
+        let response: WorkspaceBridgeDiagnosticResponse =
+            serde_json::from_value(serde_json::json!({
+                "code": "transaction_conflict", "reason": "transaction_conflict",
+                "diagnostic_reason": "workspace_operation_in_flight"
+            }))
+            .unwrap();
+        let error = AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            StatusCode::CONFLICT,
+            Some(&response),
+            false,
+            "test rejection",
+        );
+        assert_eq!(
+            workspace_update_retry_delay(&error, Duration::from_secs(30)),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            workspace_update_retry_delay(&error, Duration::from_secs(5)),
+            None
+        );
+        let mut generic = error.clone();
+        generic.diagnostic_reason = Some("workspace_transaction_failed".into());
+        assert_eq!(
+            workspace_update_retry_delay(&generic, Duration::from_secs(30)),
+            None
+        );
+        let mut authority = error.clone();
+        authority.error_code = Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch);
+        assert_eq!(
+            workspace_update_retry_delay(&authority, Duration::from_secs(30)),
+            None
+        );
+        let mut unknown_outcome = error;
+        unknown_outcome.reason = AgentBridgeFailureReason::TransportFailure;
+        assert_eq!(
+            workspace_update_retry_delay(&unknown_outcome, Duration::from_secs(30)),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_update_retries_only_precommit_in_flight_with_the_same_operation() {
+        let server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "transaction_conflict", "reason": "transaction_conflict",
+                "diagnostic_reason": "workspace_operation_in_flight"
+            }),
+        );
+        server.workspace_responses.lock().unwrap().extend([
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "code": "transaction_conflict", "reason": "transaction_conflict",
+                    "diagnostic_reason": "workspace_operation_in_flight"
+                })
+                .to_string(),
+            ),
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "schema_version": 1, "work_id": "work", "journal_entry_id": "entry"
+                })
+                .to_string(),
+            ),
+        ]);
+        let request = crate::AgentWorkspaceUpdateRequest {
+            schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+            claimed_session_id: "session-workspace-busy".into(),
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/workspace/repo".into(),
+                git_toplevel: "/workspace/repo".into(),
+                repo_hash: "repo".into(),
+                branch: "work/test".into(),
+            },
+            intent: crate::AgentWorkspaceUpdateIntent::default(),
+        };
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let receipt = send_workspace_update_via_agent_bridge_with_operation_id(
+            &HookForwardTarget {
+                url: server.forward_url.clone(),
+                token: "private-token".into(),
+            },
+            &request,
+            Some(&operation_id),
+        )
+        .expect("a definitely uncommitted in-flight rejection must wait and recover");
+        assert_eq!(receipt.journal_entry_id, "entry");
+        for _ in 0..2 {
+            let (headers, body) = server.receive();
+            assert_eq!(
+                headers[crate::workspace_update_receipt::OPERATION_HEADER],
+                operation_id
+            );
+            assert_eq!(body, serde_json::to_value(&request).unwrap());
+        }
+        assert!(matches!(
+            server.rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[test]

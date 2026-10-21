@@ -1546,6 +1546,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(2338),
             title: "launch rebinds dead sessions".to_string(),
             body: String::new(),

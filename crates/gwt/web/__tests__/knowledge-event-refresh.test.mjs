@@ -12,7 +12,8 @@ async function surfaceModule() {
     .replace('from "./control-explanations.js"',
       `from "${new URL("../control-explanations.js", import.meta.url).href}"`)
     .replace('from "./ui-state-store.js"',
-      `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+      `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"',
+      `from "${new URL("../ui-content.js", import.meta.url).href}"`);
   return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 }
 

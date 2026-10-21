@@ -807,20 +807,27 @@ test("checkout baseline satisfies the live and Git base contracts", () => {
 });
 
 
-test("cleanup progress/result receivers commit shared data and reject direct rendering", () => {
+test("cleanup and branch error receivers commit shared data and reject direct rendering", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
   const modules = new Map([[surfaceFile, surface]]);
   const selected = findings => findings.filter(finding =>
-    /\/branch_cleanup_(progress|result)$/.test(finding.context));
+    /\/(branch_cleanup_(progress|result)|branch_error)$/.test(finding.context));
   assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
   assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
   const bypass = surface.replace('case "branch_cleanup_result": {',
     'case "branch_cleanup_result": { renderBranches(event.id);');
   assert.notEqual(bypass, surface);
   assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const errorBypass = surface.replace('case "branch_error": {',
+    'case "branch_error": { renderBranches(event.id);');
+  assert.notEqual(errorBypass, surface);
+  assert.ok(selected(scanModule(errorBypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(selected(scanModule(app, appFile, { modules: new Map([[surfaceFile, errorBypass]]) }))
     .some(finding => finding.kind.startsWith('dom-')));
 });
 

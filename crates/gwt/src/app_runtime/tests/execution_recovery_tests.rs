@@ -4007,7 +4007,7 @@ fn runtime_hook_agent_failure_completion_preserves_replaced_session_and_pane() {
     runtime
         .pending_launch_feedback_contexts
         .insert(window_id.clone(), issue_monitor_feedback(43));
-    let monitor = gwt::IssueMonitorState::with_prefs(
+    let monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
             autonomous_mode: true,
@@ -4112,7 +4112,7 @@ fn runtime_hook_agent_failure_completion_survives_sibling_tab_close() {
 
     runtime.close_project_tab_events("tab-a");
     assert!(runtime.window_lookup.contains_key(&window_id));
-    let monitor = gwt::IssueMonitorState::with_prefs(
+    let monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
             autonomous_mode: true,
@@ -4241,9 +4241,8 @@ fn runtime_hook_agent_failure_local_fallback_preserves_successor_launch() {
         launched_claims: std::collections::BTreeMap::from([(42, "claim-old".to_string())]),
         ..gwt::IssueMonitorPrefs::default()
     };
-    let source =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone())
-            .launch_identity(42);
+    let source = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone())
+        .launch_identity(42);
     // The same Issue and window now belong to a different launch. A GUI-only
     // completion check would be too late to protect this durable state.
     prefs
@@ -4294,8 +4293,7 @@ fn runtime_hook_agent_failure_local_fallback_preserves_successor_launch() {
 
     // Retirement during the scan must also be refused, after the initial
     // generation and launch checks succeeded.
-    let monitor =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), actual.clone());
+    let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), actual.clone());
     source.launch = Some((42, monitor.launch_identity(42)));
     let generations = source.generations.clone();
     let replacement_window = window_id.clone();

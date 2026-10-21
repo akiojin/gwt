@@ -215,8 +215,9 @@ fn process_with(
     ) {
         return Ok(record);
     }
+    let public = record.public_snapshot();
     if gwt_core::feedback::requires_approval(root) {
-        let prompt = format!("Send this report to the public GitHub repository akiojin/gwt?\nCancel leaves it saved locally and your project work can continue.\n\nTitle: {}\n\n{}", record.input.title, record.render_issue());
+        let prompt = format!("Send this report to the public GitHub repository akiojin/gwt?\nPrivacy masks are applied below; the complete original stays local.\nCancel leaves it saved locally and your project work can continue.\n\nTitle: {}\n\n{}", public.input.title, public.render_issue());
         match consent(&prompt) {
             Ok(true) => {}
             Ok(false) => {
@@ -238,7 +239,7 @@ fn process_with(
     // invitation to repeat a POST. Send exactly the immutable approved snapshot.
     record.state = FeedbackState::Sending;
     store.save(&record)?;
-    match send(&record) {
+    match send(&public) {
         Ok(number) => {
             record.state = FeedbackState::Sent;
             record.issue_number = Some(number);
@@ -488,6 +489,55 @@ mod tests {
     }
 
     #[test]
+    fn public_preview_and_submission_share_masked_evidence_and_keep_local_original() {
+        let (dir, store, mut record) = report("https://github.com/acme/private-app.git");
+        let source = dir.path().join("src/private.rs").display().to_string();
+        record.input.title = format!("Failure in {source}");
+        record.input.refusal = format!(
+            "  before\r\n{source}\nPRIVATE_SETTING=confidential-value\nBearer private-bearer-value\n  after  "
+        );
+        record.input.body = "```rust\nfn private_business_logic() {}\n```".into();
+        record.input.reproduction = "Open `private_business_logic()` in src/private.rs".into();
+        store.save(&record).unwrap();
+        let preview = std::cell::RefCell::new(String::new());
+        let client = FakeIssueClient::new();
+        let result = process_with(
+            &store,
+            &record.id,
+            dir.path(),
+            |prompt| {
+                for hidden in [
+                    source.as_str(),
+                    "confidential-value",
+                    "private-bearer-value",
+                    "private_business_logic",
+                    "src/private.rs",
+                ] {
+                    assert!(!prompt.contains(hidden), "public preview exposed {hidden}");
+                }
+                assert!(prompt.contains("  before\r\n"));
+                assert!(prompt.contains("  after  "));
+                *preview.borrow_mut() = prompt.to_owned();
+                Ok(true)
+            },
+            |published| send_to_upstream(&client, published),
+        )
+        .unwrap();
+        let published = client
+            .fetch_issue(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(result.issue_number.unwrap()),
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120)),
+            )
+            .unwrap();
+        assert!(preview
+            .borrow()
+            .ends_with(&format!("Title: {}\n\n{}", published.title, published.body)));
+        assert_eq!(result.state, FeedbackState::Sent);
+        assert_eq!(store.read(&record.id).unwrap().input, record.input);
+    }
+
+    #[test]
     fn retry_does_not_overwrite_a_receipt_owned_by_an_active_sender() {
         let _lock = gwt_core::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -574,7 +624,9 @@ mod tests {
 
     #[test]
     fn gwt_feedback_sends_once_without_requesting_consent() {
-        let (dir, store, record) = report("https://github.com/akiojin/gwt.git");
+        let (dir, store, mut record) = report("https://github.com/akiojin/gwt.git");
+        record.input.refusal = "PRIVATE_SETTING=exempt-secret".into();
+        store.save(&record).unwrap();
         let client = FakeIssueClient::new();
         let mut send = |r: &FeedbackRecord| send_to_upstream(&client, r);
         let sent = process_with(
@@ -603,6 +655,15 @@ mod tests {
             client.owner_mutation_call_log()[0].repository,
             RepositoryIdentity::gwt_upstream()
         );
+        let published = client
+            .fetch_issue(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(1),
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120)),
+            )
+            .unwrap();
+        assert!(!published.body.contains("exempt-secret"));
+        assert_eq!(store.read(&record.id).unwrap().input, record.input);
     }
 
     #[test]
@@ -640,7 +701,12 @@ mod tests {
 
     #[test]
     fn similar_closed_legacy_issue_receives_a_comment_and_its_number_is_returned() {
-        let (_dir, _store, record) = report("https://github.com/akiojin/gwt.git");
+        let (dir, store, mut record) = report("https://github.com/akiojin/gwt.git");
+        record.input.body = "PRIVATE_SETTING=duplicate-secret".into();
+        let (record, fresh) = store
+            .submit(record.input, record.context, record.created_at)
+            .unwrap();
+        assert!(fresh);
         let client = FakeIssueClient::new();
         client.seed_repository_issue(RepositoryIssue {
             repository: RepositoryIdentity::gwt_upstream(),
@@ -652,7 +718,28 @@ mod tests {
             kind: RepositoryIssueKind::Plain,
             updated_at: UpdatedAt("2026-10-01T00:00:00Z".into()),
         });
-        assert_eq!(send_to_upstream(&client, &record).unwrap(), 4918);
+        let sent = process_with(
+            &store,
+            &record.id,
+            dir.path(),
+            |_| panic!("gwt needs no approval"),
+            |public| send_to_upstream(&client, public),
+        )
+        .unwrap();
+        assert_eq!(sent.issue_number, Some(4918));
+        let comments = client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(4918),
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120)),
+            )
+            .unwrap();
+        assert_eq!(comments.items().len(), 1);
+        assert_eq!(
+            comments.items()[0].body,
+            record.public_snapshot().render_issue()
+        );
+        assert!(!comments.items()[0].body.contains("duplicate-secret"));
         // The immutable request marker also reconciles a retry after an interrupted local save.
         assert_eq!(send_to_upstream(&client, &record).unwrap(), 4918);
         assert_eq!(client.owner_mutation_count(), 1);
@@ -660,6 +747,53 @@ mod tests {
             client.owner_mutation_call_log()[0].operation,
             OwnerRepositoryOperation::CreateComment
         );
+
+        let environment = FeedbackContext {
+            gwt_version: "2.0.0".into(),
+            gwtd_version: "2.0.0".into(),
+            os: "different-os".into(),
+            ..record.context.clone()
+        };
+        let (additional, fresh) = store
+            .submit(
+                record.input.clone(),
+                environment.clone(),
+                record.created_at + chrono::TimeDelta::minutes(1),
+            )
+            .unwrap();
+        assert!(fresh, "new environment must retain a distinct receipt");
+        assert_ne!(additional.id, record.id);
+        let additional_sent = process_with(
+            &store,
+            &additional.id,
+            dir.path(),
+            |_| panic!("gwt needs no approval"),
+            |public| send_to_upstream(&client, public),
+        )
+        .unwrap();
+        assert_eq!(additional_sent.issue_number, sent.issue_number);
+        let comments = client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(4918),
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120)),
+            )
+            .unwrap();
+        assert_eq!(comments.items().len(), 2);
+        assert_eq!(
+            comments.items()[1].body,
+            additional.public_snapshot().render_issue()
+        );
+        assert_eq!(store.read(&record.id).unwrap().input, record.input);
+        let retained = store.read(&additional.id).unwrap();
+        assert_eq!(retained.input, additional.input);
+        assert_eq!(retained.context, environment);
+        assert_eq!(send_to_upstream(&client, &additional).unwrap(), 4918);
+        assert_eq!(client.owner_mutation_count(), 2);
+        assert!(client
+            .owner_mutation_call_log()
+            .iter()
+            .all(|call| call.operation == OwnerRepositoryOperation::CreateComment));
     }
 
     #[test]

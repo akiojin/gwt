@@ -499,6 +499,7 @@ pub fn sample_thread() -> PrReviewThread {
 
 pub fn sample_issue_snapshot() -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Coverage gate".to_string(),
         body: "Raise the project coverage gate.\n".to_string(),

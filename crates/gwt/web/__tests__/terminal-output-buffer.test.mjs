@@ -67,6 +67,46 @@ function cursorScheduler() {
   };
 }
 
+test("default output scheduler drains without animation frames and ignores the losing callback", (t) => {
+  const frames = new Map(), timers = new Map(), writes = [];
+  let nextId = 0;
+  for (const [key, value] of Object.entries({
+    requestAnimationFrame: (cb) => { frames.set(++nextId, cb); return nextId; },
+    cancelAnimationFrame: (id) => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (cb, delay) => {
+    timers.set(++nextId, { cb, delay }); return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", (id) => timers.delete(id));
+  const batcher = createTerminalOutputBatcher({ write: (id, text) => writes.push([id, text]) });
+  for (const winner of ["timer", "frame"]) {
+    batcher.enqueue("agent", "a");
+    batcher.enqueue("agent", "b");
+    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1, "output needs a fallback even when rAF exists");
+    const frame = frames.values().next().value;
+    const timer = timers.values().next().value;
+    assert.ok(timer.delay > 0 && timer.delay <= 1000, "fallback is inside AC13's bound");
+    (winner === "timer" ? timer.cb : frame)();
+    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
+    assert.deepEqual(writes.at(-1), ["agent", "ab"]);
+    batcher.enqueue("agent", "next");
+    const count = writes.length;
+    (winner === "timer" ? frame : timer.cb)();
+    assert.equal(writes.length, count, "a stale loser must not drain the next batch");
+    frames.values().next().value();
+    assert.deepEqual(writes.at(-1), ["agent", "next"]);
+  }
+});
+
 test("same-window terminal chunks batch into one ordered xterm write", () => {
   const scheduler = manualScheduler();
   const writes = [];

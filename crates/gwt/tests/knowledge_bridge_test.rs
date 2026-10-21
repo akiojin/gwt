@@ -18,6 +18,7 @@ fn sample_issue(
     state: IssueState,
 ) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: body.to_string(),

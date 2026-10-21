@@ -2588,7 +2588,7 @@ fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
         "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
     );
     assert!(
-        html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+        html.contains("renderUiContent(document, entry.content, \"board-message-body\")"),
         "Board body must render via the shared Markdown renderer",
     );
     assert!(
@@ -4066,7 +4066,7 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("requestPmReports(windowData.id, resync)"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(
