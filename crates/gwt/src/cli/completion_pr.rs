@@ -91,6 +91,15 @@ pub(super) fn admit<E: CliEnv>(
                 })
                 .collect();
         }
+        if matching.is_empty() {
+            matching = candidates
+                .iter()
+                .copied()
+                .filter(|pr| {
+                    verification::preserves_verified_head(&worktree, &pr.head_sha, verified_head)
+                })
+                .collect();
+        }
         if matching.len() != 1 {
             let numbers = candidates
                 .iter()
@@ -119,7 +128,16 @@ pub(super) fn admit<E: CliEnv>(
         if fields.number != pr.number || fields.url != pr.url || fields.head_ref_name != branch {
             return Err(refuse("PR does not belong to the execution branch"));
         }
-        if !verification::preserves_verified_head(&worktree, verified_head, &snapshot.head_sha) {
+        // A fresh run may include the merged PR's later Work receipt.
+        let preserves_head =
+            verification::preserves_verified_head(&worktree, verified_head, &snapshot.head_sha)
+                || (snapshot.state == PrState::Merged
+                    && verification::preserves_verified_head(
+                        &worktree,
+                        &snapshot.head_sha,
+                        verified_head,
+                    ));
+        if !preserves_head {
             return Err(refuse("PR head differs from the verified HEAD"));
         }
         if snapshot.state == PrState::Closed {
@@ -188,6 +206,7 @@ mod tests {
     use crate::cli::{CliEnv, SkillStateAction, TestEnv};
     use chrono::Utc;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+    use gwt_git::pr_status::PrState;
     use std::path::Path;
 
     fn prepare(repo: &Path, session_id: &str) {
@@ -294,6 +313,124 @@ mod tests {
                     .unwrap(),
                 inventory,
             },
+        );
+    }
+
+    fn commit_fixture_change(repo: &Path, path: &str) {
+        for args in [
+            vec!["add", "--", path],
+            vec!["commit", "-qm", "chore(work): record completion receipt"],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+
+    fn commit_and_reverify(repo: &Path, session_id: &str, path: &str) {
+        commit_fixture_change(repo, path);
+        let mut plan = verification::load_plan(repo).unwrap().unwrap();
+        plan.worktree_fingerprint.clear();
+        verification::save_plan(repo, &plan).unwrap();
+        verification::run_verification(repo, session_id, &["git --version".into()]).unwrap();
+        assert_eq!(
+            verification::evaluate_evidence(repo, session_id, Some(5034)),
+            verification::EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn autonomous_completion_accepts_reverified_receipt_only_for_merged_pr() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let session_id = "completion-pr-reverified-receipt";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), session_id);
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, PrState::Open);
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-completion-receipt",
+            Utc::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
+        commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
+        let mut out = String::new();
+        assert!(
+            super::admit(&mut env, session_id, Some(5034), Some(9001), &mut out)
+                .unwrap_err()
+                .contains("PR head differs")
+        );
+
+        env.completion_prs.get_mut(&9001).unwrap().state = PrState::Merged;
+        for explicit_pr in [Some(9001), None] {
+            assert!(
+                super::admit(&mut env, session_id, Some(5034), explicit_pr, &mut out)
+                    .unwrap_or_else(|error| panic!("{explicit_pr:?}: {error}"))
+                    .is_some()
+            );
+        }
+
+        // A forward-preserving candidate must retain priority over this old PR.
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-completion-receipt",
+            Utc::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
+        commit_fixture_change(repo.path(), ".gwt/work/events");
+        let head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let mut newer = env.completion_prs[&9001].clone();
+        newer.head_sha = String::from_utf8(head.stdout).unwrap().trim().to_string();
+        newer.inventory.number = 9002;
+        newer.inventory.url = "https://github.com/o/r/pull/9002".into();
+        env.completion_prs.insert(9002, newer);
+        assert!(
+            super::admit(&mut env, session_id, Some(5034), None, &mut out)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .is_some()
+        );
+        assert_eq!(env.completion_pr_call_log.last(), Some(&9002));
+    }
+
+    #[test]
+    fn autonomous_completion_rejects_reverified_product_after_merged_pr() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let session_id = "completion-pr-reverified-product";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), session_id);
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, PrState::Merged);
+        std::fs::write(
+            repo.path().join("product.rs"),
+            "additional product change\n",
+        )
+        .unwrap();
+        commit_and_reverify(repo.path(), session_id, "product.rs");
+        let mut out = String::new();
+        let error =
+            super::admit(&mut env, session_id, Some(5034), Some(9001), &mut out).unwrap_err();
+        assert!(error.contains("PR head differs"), "{error}");
+        assert_eq!(
+            execution::load(repo.path()).unwrap().unwrap().status,
+            execution::ExecutionControlStatus::Active
         );
     }
 
