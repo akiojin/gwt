@@ -2341,12 +2341,12 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
   );
   // Issue #2698 PR 1 (B7) — the applier defers via
   // `wizardInteractionGuard.defer(...)` before mutating the error
-  // state. SPEC-3064 Phase 3 (E5): the app.js case arm delegates into
-  // the surface applier, which populates `launchWizardOpenError`.
+  // state. The app.js case commits a shared snapshot; its synchronous
+  // subscriber delegates to the surface applier without changing the guard.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;/,
-    "expected launch_wizard_open_error events to delegate into the wizard surface",
+    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenErrorModel\.update\([\s\S]{0,120}?\);\s*break;/,
+    "expected launch_wizard_open_error events to commit shared state",
   );
   assert.match(
     launchWizardSource,
@@ -3836,7 +3836,7 @@ test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with la
   );
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardOpenErrorEvent\(event\);/,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?launchWizardOpenErrorModel\.update\(/,
     "backend wizard open errors must clear stale Kanban placement targets",
   );
   assert.match(
