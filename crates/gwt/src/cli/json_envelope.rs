@@ -3058,6 +3058,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new(repo.path().to_path_buf());
         env.client.seed(gwt_github::client::IssueSnapshot {
+            author_login: None,
             number: gwt_github::client::IssueNumber(42),
             title: "typed resource".into(),
             body: "".into(),

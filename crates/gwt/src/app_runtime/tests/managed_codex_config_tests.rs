@@ -1982,12 +1982,13 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         )],
         Some("tab-1"),
     );
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         ..gwt::IssueMonitorConfig::default()
     });
     monitor.terminal_queue_push(&[42], "operator", "2026-07-28T00:00:00Z");
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Codex trust preflight failure".to_string(),
         labels: Vec::new(),
@@ -2051,8 +2052,7 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
         .failed_issues
         .iter()
         .any(|failure| failure.issue_number == 42 && failure.message == error));
-    let restored =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    let restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), persisted);
     assert_eq!(
         restored.active_count(),
         0,

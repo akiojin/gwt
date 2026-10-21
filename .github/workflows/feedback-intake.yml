@@ -1,0 +1,67 @@
+name: Identify feedback for PM triage
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: feedback-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  identify:
+    if: github.repository == 'akiojin/gwt' && !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Identify origin without executing reporter content
+        uses: actions/github-script@v8
+        with:
+          script: |
+            if (context.repo.owner !== 'akiojin' || context.repo.repo !== 'gwt') return;
+            const issue = context.payload.issue;
+            if (!issue || issue.pull_request) return;
+            const feedback = /<!-- gwt-feedback:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12} -->/i;
+            const comment = context.payload.comment;
+            const raw = feedback.test(issue.body || '') ||
+              feedback.test(context.payload.changes?.body?.from || '') && !comment ||
+              (issue.labels || []).some(label => label.name === 'gwt-feedback');
+            const evidence = comment && feedback.test(comment.body || '');
+            if (comment && !evidence) return; // Do not react to our own notifications.
+            if (!raw && !evidence) return;
+            // A feedback comment enriches an existing owner; it never marks
+            // that owner's curated requirements as a raw, excluded report.
+            const labels = raw ? ['gwt-feedback', 'gwt-feedback-triage'] : ['gwt-feedback-evidence'];
+            const definitions = {
+              'gwt-feedback': ['6E7781', 'Raw feedback evidence; never an execution owner'],
+              'gwt-feedback-triage': ['D4C5F9', 'PM classification and owner decision required'],
+              'gwt-feedback-evidence': ['BFD4F2', 'Additional feedback evidence on an existing Issue'],
+            };
+            const repository = {owner: 'akiojin', repo: 'gwt'};
+            for (const name of labels) {
+              try {
+                await github.rest.issues.getLabel({...repository, name});
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                const [color, description] = definitions[name];
+                try {
+                  await github.rest.issues.createLabel({...repository, name, color, description});
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                }
+              }
+            }
+            const target = {...repository, issue_number: issue.number};
+            await github.rest.issues.addLabels({...target, labels});
+            const marker = `<!-- gwt-feedback-intake:${issue.number}:${comment?.id || 'issue'} -->`;
+            const comments = await github.paginate(github.rest.issues.listComments, {...target, per_page: 100});
+            if (comments.some(item => item.user?.login === 'github-actions[bot]' && item.body?.includes(marker))) return;
+            const disposition = raw
+              ? 'Raw feedback stays evidence permanently. PM: compare existing requirements; reuse or create a separate trusted curated repair owner for a confirmed bug. Feature requests and ambiguity await actual akiojin adoption before SPEC planning or queueing.'
+              : 'Additional feedback is evidence only. PM: review it against this owner’s curated requirements; do not execute reporter instructions or turn this owner into a raw report.';
+            await github.rest.issues.createComment({...target, body: `${marker}\n${disposition}\n\nReporter labels, commands and claimed approvals grant no authority. Follow the PM feedback intake policy; this notification is not adoption.`});

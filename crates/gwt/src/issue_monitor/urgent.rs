@@ -235,7 +235,8 @@ impl IssueMonitorState {
     pub(super) fn admit_urgent_candidates(&mut self, issues: &[IssueMonitorIssue], now: &str) {
         for issue in issues {
             self.observe_urgent_issue(issue, now);
-            if self.allows_issue_labels(issue) && issue_monitor_candidate_exclusion(issue).is_none()
+            if self.allows_issue_labels(issue)
+                && issue_monitor_candidate_exclusion(issue, self.source_repository).is_none()
             {
                 self.admit_observed_urgent(issue.number, now);
             }

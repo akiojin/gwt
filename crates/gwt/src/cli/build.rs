@@ -2381,6 +2381,7 @@ format_version: Some(1),
 
         let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(3755),
             title: "owned flake".to_string(),
             body: String::new(),

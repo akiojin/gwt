@@ -484,7 +484,7 @@ fn scheduled_scan_completion_defers_projection_until_worker_runs() {
         ..gwt::IssueMonitorPrefs::default()
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("prefs");
-    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
@@ -531,8 +531,7 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         ..queued_issue_monitor_prefs(&[43])
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-    let mut scanned =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), initial);
+    let mut scanned = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), initial);
     gwt::scan_issue_monitor_candidates(
         &mut scanned,
         &[pm_wake_inbox_item(43, gwt::MonitorInboxState::Queued).issue],
@@ -618,8 +617,7 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
         enabled: true,
         ..gwt::IssueMonitorPrefs::default()
     };
-    let scanned =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), enabled.clone());
+    let scanned = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), enabled.clone());
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
@@ -1353,7 +1351,7 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1412,7 +1410,7 @@ fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1694,14 +1692,14 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
     gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
 
     for manual in [None, Some(9)] {
-        let mut durable = gwt::IssueMonitorState::with_prefs(
+        let mut durable = test_monitor_with_prefs(
             gwt::IssueMonitorConfig::default(),
             gwt::IssueMonitorPrefs::default(),
         );
         durable.set_max_active_agents_override(manual);
         gwt::save_issue_monitor_prefs(&prefs_path, &durable.prefs()).unwrap();
         let prefs_before = fs::read(&prefs_path).unwrap();
-        let mut monitor = gwt::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             gwt::IssueMonitorConfig::default(),
             gwt::IssueMonitorPrefs::default(),
         );
@@ -1864,7 +1862,7 @@ fn issue_monitor_capacity_overlay_rejects_observations_before_control_or_reopen(
     );
     let (context, revision, ready) = runtime.capacity_observation_contexts().pop().unwrap();
     assert!(ready.is_none());
-    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    let mut initial = test_monitor(gwt::IssueMonitorConfig::default()).status_view();
     initial.max_active_agents = 7;
     initial.max_active_agents_override = None;
     let state = runtime.project_state(&context).unwrap();
@@ -1934,7 +1932,7 @@ fn issue_monitor_capacity_overlay_preserves_newer_daemon_limit_and_accepts_next_
         )],
         Some("tab"),
     );
-    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    let mut initial = test_monitor(gwt::IssueMonitorConfig::default()).status_view();
     initial.max_active_agents = 7;
     initial.max_active_agents_override = None;
     initial.agent_capacity = gwt::agent_capacity::AgentCapacity {
@@ -2033,10 +2031,9 @@ fn issue_monitor_capacity_uses_saved_manual_authority_when_old_daemon_omits_it()
     );
     // A live daemon from before this feature has no override field even when
     // its persisted positive value is an explicit Manual limit.
-    let mut wire = serde_json::to_value(
-        gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view(),
-    )
-    .unwrap();
+    let mut wire =
+        serde_json::to_value(test_monitor(gwt::IssueMonitorConfig::default()).status_view())
+            .unwrap();
     wire.as_object_mut()
         .unwrap()
         .remove("max_active_agents_override");

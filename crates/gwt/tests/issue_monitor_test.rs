@@ -59,6 +59,7 @@ fn scan_queued_candidates_with_provenance(
 
 fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number,
         title: format!("Issue {number}"),
         labels: labels.iter().map(|label| (*label).to_string()).collect(),
@@ -72,6 +73,7 @@ fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
 
 fn github_issue_number(number: u64, comments: Vec<CommentSnapshot>) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Improve monitor {number}"),
         body: String::new(),
@@ -159,7 +161,7 @@ fn legacy_failed_prefs(project_root: &Path, issue_number: u64) -> IssueMonitorPr
 }
 
 fn needs_human_monitor(issue_number: u64) -> IssueMonitorState {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -220,7 +222,7 @@ fn monitor_config_defaults_to_disabled_and_requires_explicit_queue_membership() 
 #[test]
 fn queue_label_inbox_coverage_preserves_the_missing_membership_family() {
     for (total, admitted) in [(50, 28), (204, 89), (287, 48)] {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let issues = (1..=total)
             .map(|number| issue(number, &["bug", "gwt-queued"]))
             .collect::<Vec<_>>();
@@ -257,7 +259,7 @@ fn queue_label_inbox_coverage_preserves_the_missing_membership_family() {
 /// AC-4: a missing observation has its own diagnostic, independent of errors.
 #[test]
 fn queue_label_inbox_coverage_reports_missing_rows_without_last_error() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     scan_issue_monitor_candidates(
         &mut monitor,
         &[issue(42, &["gwt-queued"])],
@@ -277,7 +279,7 @@ fn queue_label_inbox_coverage_reports_missing_rows_without_last_error() {
 #[test]
 fn queue_label_removal_retires_an_observation_without_admitting_it() {
     let repo = tempfile::tempdir().unwrap();
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     scan_issue_monitor_candidates_with_provenance(
         &mut monitor,
         &[issue(42, &["gwt-queued"])],
@@ -306,7 +308,7 @@ fn queue_label_removal_retires_an_observation_without_admitting_it() {
 
 #[test]
 fn queue_label_inbox_coverage_keeps_label_exclusions_observable() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     monitor.set_allowed_labels(vec!["Server".to_string()]);
     scan_issue_monitor_candidates(
         &mut monitor,
@@ -343,7 +345,7 @@ fn queue_label_inbox_coverage_keeps_confirmed_closure_observable() {
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     scan_issue_monitor_candidates(&mut monitor, &[open], "2026-10-07T00:00:00Z");
     monitor.rebase_daemon_driver_prefs(&monitor.prefs());
     let row = monitor.inbox_item(42).expect("closure-held observation");
@@ -368,7 +370,7 @@ fn queue_label_inbox_coverage_keeps_confirmed_closure_observable() {
 
 #[test]
 fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contract() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..IssueMonitorConfig::default()
@@ -429,7 +431,7 @@ fn exclusion_states_are_snake_case_and_non_terminal_for_requeue() {
         (MonitorInboxState::NotReady, "not_ready"),
         (MonitorInboxState::HoldExcluded, "hold_excluded"),
     ] {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -503,7 +505,7 @@ fn legacy_monitor_issue_without_readiness_defaults_to_not_applicable() {
 
 #[test]
 fn monitor_maps_gwt_spec_label_to_spec_launch_kind() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -533,7 +535,7 @@ fn monitor_maps_gwt_spec_label_to_spec_launch_kind() {
 
 #[test]
 fn claimed_issue_waits_in_queue_until_gui_is_connected() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -553,7 +555,7 @@ fn claimed_issue_waits_in_queue_until_gui_is_connected() {
 
 #[test]
 fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -600,7 +602,7 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
 
 #[test]
 fn monitor_allows_active_launches_up_to_configured_max() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 2,
         ..IssueMonitorConfig::default()
@@ -631,7 +633,7 @@ fn monitor_allows_active_launches_up_to_configured_max() {
 
 #[test]
 fn monitor_reorders_queued_issues_without_preempting_active_launches() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -670,7 +672,7 @@ fn monitor_reorders_queued_issues_without_preempting_active_launches() {
 
 #[test]
 fn monitor_reorders_visible_inbox_to_match_queue_priority() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -738,7 +740,7 @@ fn schema_data_errors_are_not_recovered_or_overwritten() {
 
 #[test]
 fn claimed_active_launch_stays_launching_when_scan_refreshes_claim() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -762,7 +764,7 @@ fn claimed_active_launch_stays_launching_when_scan_refreshes_claim() {
 
 #[test]
 fn failed_launch_marks_inbox_failed_and_clears_active_launch() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -800,7 +802,7 @@ fn failed_launch_marks_inbox_failed_and_clears_active_launch() {
 
 #[test]
 fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 2,
         ..IssueMonitorConfig::default()
@@ -845,8 +847,7 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
         }]
     );
 
-    let mut restored =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+    let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
     scan_queued_candidates(
         &mut restored,
         &[issue(42, &["bug"])],
@@ -874,7 +875,7 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
 
 #[test]
 fn agent_runtime_failure_matches_raw_and_combined_window_ids() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 2,
         ..IssueMonitorConfig::default()
@@ -900,7 +901,7 @@ fn agent_runtime_failure_matches_raw_and_combined_window_ids() {
 
 #[test]
 fn max_active_increase_allows_more_queued_launches_without_rescan() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..IssueMonitorConfig::default()
@@ -941,7 +942,7 @@ fn claim_capacity_cap_prevents_multiple_preconfigured_launches() {
     client.seed(github_issue_number(42, vec![]));
     client.seed(github_issue_number(43, vec![]));
     client.seed(github_issue_number(44, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 3,
         ..IssueMonitorConfig::default()
@@ -981,7 +982,7 @@ fn claim_capacity_cap_prevents_multiple_preconfigured_launches() {
 fn claim_capacity_zero_keeps_queue_visible_without_claiming_or_launching() {
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 5,
         ..IssueMonitorConfig::default()
@@ -1011,7 +1012,7 @@ fn claim_capacity_zero_keeps_queue_visible_without_claiming_or_launching() {
 
 #[test]
 fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1040,7 +1041,7 @@ fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
 fn scan_candidates_queues_all_open_issues_without_claiming_at_scan_time() {
     let client = FakeIssueClient::new();
     client.seed(github_issue(vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1064,7 +1065,7 @@ fn scan_candidates_queues_all_open_issues_without_claiming_at_scan_time() {
 
 #[test]
 fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slots() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1133,7 +1134,7 @@ fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slot
 
 #[test]
 fn scan_candidates_requeues_when_readiness_or_hold_exclusion_is_removed() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1195,7 +1196,7 @@ fn scan_candidates_requeues_when_readiness_or_hold_exclusion_is_removed() {
 
 #[test]
 fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1264,7 +1265,7 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
 #[test]
 fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
     for exclusion in ["not-ready", "hold"] {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -1340,7 +1341,7 @@ fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
 fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
     let protection = gwt_git::branch_protection::BranchProtectionStatus::Absent;
     for exclusion in ["not-ready", "hold"] {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -1375,7 +1376,7 @@ fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
 
 #[test]
 fn scan_candidates_ignores_claims_until_launch_time() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1403,7 +1404,7 @@ fn agent_and_gui_status_omit_auto_apply_updates() {
         (true, "2026-07-27T10:00:30Z"),
     ] {
         gwt::update_settings::set(Some(enabled)).unwrap();
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 poll_interval_secs: 10,
                 ..IssueMonitorConfig::default()
@@ -1434,7 +1435,7 @@ fn agent_and_gui_status_omit_auto_apply_updates() {
 
 #[test]
 fn status_view_at_keeps_existing_state_before_three_poll_intervals() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -1450,7 +1451,7 @@ fn status_view_at_keeps_existing_state_before_three_poll_intervals() {
 
 #[test]
 fn status_view_at_marks_scan_stalled_at_three_poll_intervals() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -1476,7 +1477,7 @@ fn status_view_at_marks_scan_stalled_at_three_poll_intervals() {
 
 #[test]
 fn status_view_at_names_stalled_scan_and_preserves_stage_failure_context() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -1516,7 +1517,7 @@ fn status_view_at_names_stalled_scan_and_preserves_stage_failure_context() {
 #[test]
 fn status_view_at_fails_open_for_invalid_or_future_scan_timestamp() {
     for last_scan_at in ["not-a-timestamp", "2026-07-27T10:00:31Z"] {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             poll_interval_secs: 10,
             ..IssueMonitorConfig::default()
@@ -1537,7 +1538,7 @@ fn status_view_at_fails_open_for_invalid_or_future_scan_timestamp() {
 
 #[test]
 fn scan_error_keeps_visible_queue_candidates() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1563,7 +1564,7 @@ fn scan_error_keeps_visible_queue_candidates() {
 
 #[test]
 fn launch_auth_required_keeps_visible_queue_with_auth_wait() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1601,7 +1602,7 @@ fn monitor_claims_queue_head_just_in_time_and_skips_blocked_claims() {
         vec![claim_comment("host-b/session-b")],
     ));
     client.seed(github_issue_number(43, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -1657,7 +1658,7 @@ fn pre_3314_prefs_missing_marker_round_trip_without_losing_existing_state() {
         serde_json::from_str(&serialized).expect("round trip deserialize");
     assert_eq!(round_trip, prefs);
 
-    let state = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+    let state = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
     let state_prefs = state.prefs();
     assert_eq!(state_prefs.legacy_git_launch_failure_migration_version, 0);
     assert_eq!(state_prefs.priority_order, prefs.priority_order);
@@ -1677,7 +1678,7 @@ fn fresh_issue_monitor_state_starts_at_current_legacy_failure_migration_version(
         LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
     );
     assert_eq!(
-        IssueMonitorState::new(IssueMonitorConfig::default())
+        test_monitor(IssueMonitorConfig::default())
             .prefs()
             .legacy_git_launch_failure_migration_version,
         LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
@@ -1725,7 +1726,7 @@ fn legacy_3272_failure_matcher_requires_exact_normalized_project_path() {
 #[test]
 fn live_scan_with_resolvable_git_migrates_exact_failure_and_requeues_open_issue() {
     let repo = init_resolvable_git_repo();
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         legacy_failed_prefs(repo.path(), 42),
     );
@@ -1759,7 +1760,7 @@ fn live_scan_with_resolvable_git_migrates_exact_failure_and_requeues_open_issue(
 fn live_migration_removes_absent_or_closed_failed_rows_without_queueing() {
     let repo = init_resolvable_git_repo();
     for fresh in [None, Some(IssueMonitorIssueState::Closed)] {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             legacy_failed_prefs(repo.path(), 42),
         );
@@ -1792,7 +1793,7 @@ fn live_migration_removes_absent_or_closed_failed_rows_without_queueing() {
 #[test]
 fn cache_fallback_scan_keeps_the_last_observed_queued_row_when_its_cache_entry_is_missing() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     scan_queued_candidates_with_provenance(
         &mut monitor,
         &[issue(4080, &["bug", "auto-merge"])],
@@ -1863,7 +1864,7 @@ fn explicit_closed_candidate_removes_all_current_needs_human_state() {
         "cleanup must preserve unrelated current work"
     );
 
-    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+    let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
     assert!(!restored.agent_status().needs_human.contains(&42));
     assert!(restored.inbox_item(42).is_none());
 }
@@ -1918,7 +1919,7 @@ fn explicit_close_neutralizes_undelivered_handoffs_but_preserves_delivered_histo
 #[test]
 fn complete_live_absence_neutralizes_orphan_undelivered_handoffs() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     monitor.set_autonomous_mode(true);
     monitor.absorb_autonomous_handoffs([
         question_handoff("answered", 42, AutonomousHandoffState::Answered, None),
@@ -2016,7 +2017,7 @@ fn closure_survives_stale_rebase_and_newer_complete_live_reopen() {
     let mut closed_monitor = needs_human_monitor(42);
     let stale_prefs = closed_monitor.prefs();
     let mut stale_monitor =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+        test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
     let mut initial_live = issue(42, &["bug"]);
     initial_live.updated_at = Some("2026-08-01T00:00:00Z".to_string());
     scan_queued_candidates_with_provenance(
@@ -2040,7 +2041,7 @@ fn closure_survives_stale_rebase_and_newer_complete_live_reopen() {
     let closed_prefs = closed_monitor.prefs();
 
     let mut later_live =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+        test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
     let mut concurrently_reopened = issue(42, &["bug"]);
     concurrently_reopened.updated_at = Some("2026-08-03T00:00:00Z".to_string());
     scan_queued_candidates_with_provenance(
@@ -2069,7 +2070,7 @@ fn closure_survives_stale_rebase_and_newer_complete_live_reopen() {
     );
 
     let mut restarted =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), closed_monitor.prefs());
+        test_monitor_with_prefs(IssueMonitorConfig::default(), closed_monitor.prefs());
     scan_queued_candidates_with_provenance(
         &mut restarted,
         &[issue(42, &["bug"])],
@@ -2252,7 +2253,7 @@ fn live_absence_preserves_a_newer_explicit_closed_revision() {
 #[test]
 fn explicit_closed_after_absence_blocks_same_revision_live_open() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let mut open = issue(42, &["bug"]);
     open.updated_at = Some("2026-09-09T12:00:00Z".to_string());
     let mut closed = open.clone();
@@ -2272,7 +2273,7 @@ fn explicit_closed_after_absence_blocks_same_revision_live_open() {
 #[test]
 fn next_live_scan_recovers_same_revision_open_after_inferred_absence() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let mut open = issue(42, &["bug"]);
     open.updated_at = Some("2026-09-09T12:00:00Z".to_string());
     for issues in [vec![open.clone()], vec![]] {
@@ -2371,7 +2372,7 @@ fn rebase_rejects_an_older_explicit_reopen_above_an_absence_revision_floor() {
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), local_prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), local_prefs);
 
     monitor.rebase_daemon_driver_prefs(&disk_prefs);
 
@@ -2413,7 +2414,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), local_prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), local_prefs);
 
     monitor.rebase_daemon_driver_prefs(&disk_prefs);
 
@@ -2438,7 +2439,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
 #[test]
 fn live_open_at_the_absence_floor_revision_returns_the_issue_to_the_inbox() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let open = issue(42, &["bug"]);
     scan_queued_candidates_with_provenance(
         &mut monitor,
@@ -2479,7 +2480,7 @@ fn live_open_at_the_absence_floor_revision_returns_the_issue_to_the_inbox() {
 #[test]
 fn status_names_open_issues_a_closure_record_holds_out_of_the_inbox() {
     let repo = tempfile::tempdir().expect("tempdir");
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let open = issue(42, &["bug"]);
     for (source, observed, at) in [
         (
@@ -2547,7 +2548,7 @@ fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
             ..IssueMonitorPrefs::default()
         };
         let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs(local.clone()));
+            test_monitor_with_prefs(IssueMonitorConfig::default(), prefs(local.clone()));
 
         monitor.rebase_daemon_driver_prefs(&prefs(disk));
 
@@ -2590,7 +2591,7 @@ fn revision_winner_preserves_the_highest_merged_generation() {
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), local_prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), local_prefs);
 
     monitor.rebase_daemon_driver_prefs(&disk_prefs);
 
@@ -2632,7 +2633,7 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), local_prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), local_prefs);
 
     monitor.rebase_daemon_driver_prefs(&disk_prefs);
 
@@ -2659,7 +2660,7 @@ fn explicit_closed_evidence_survives_equivalent_timestamp_absence_rebase() {
         }],
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         prefs(
             3,
@@ -2766,8 +2767,7 @@ fn unseen_live_open_loses_to_concurrent_absence_until_the_next_live_scan() {
     let repo = tempfile::tempdir().expect("tempdir");
     let mut closing_monitor = needs_human_monitor(42);
     let stale_prefs = closing_monitor.prefs();
-    let mut stale_monitor =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+    let mut stale_monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs);
 
     scan_queued_candidates_with_provenance(
         &mut closing_monitor,
@@ -2811,7 +2811,7 @@ fn unseen_live_open_loses_to_concurrent_absence_until_the_next_live_scan() {
 fn cache_or_failed_resolver_does_not_mutate_legacy_migration_state() {
     let repo = init_resolvable_git_repo();
     let candidate = issue(42, &["bug"]);
-    let mut cached = IssueMonitorState::with_prefs(
+    let mut cached = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         legacy_failed_prefs(repo.path(), 42),
     );
@@ -2833,7 +2833,7 @@ fn cache_or_failed_resolver_does_not_mutate_legacy_migration_state() {
     );
 
     let non_repo = tempfile::tempdir().expect("non-repo tempdir");
-    let mut unresolved = IssueMonitorState::with_prefs(
+    let mut unresolved = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         legacy_failed_prefs(non_repo.path(), 42),
     );
@@ -2909,7 +2909,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
         delivering_since: None,
         review_attempts: None,
     });
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     scan_queued_candidates(
         &mut monitor,
         &[
@@ -2982,7 +2982,7 @@ fn migration_rederives_banner_from_unrelated_failure() {
         message: "unrelated failure".to_string(),
         window_id: None,
     });
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     scan_queued_candidates(
         &mut monitor,
         &[issue(42, &["bug"]), issue(99, &["bug"])],
@@ -3011,7 +3011,7 @@ fn legacy_failure_migration_is_one_shot_even_when_no_initial_target_exists() {
         legacy_git_launch_failure_migration_version: 0,
         ..IssueMonitorPrefs::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     scan_queued_candidates_with_provenance(
         &mut monitor,
         &[issue(42, &["bug"])],
@@ -3052,7 +3052,7 @@ fn legacy_failure_migration_is_one_shot_even_when_no_initial_target_exists() {
 #[test]
 fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
     let repo = init_resolvable_git_repo();
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     monitor.set_gui_connected(true);
 
     let loaded = LoadedIssueMonitorCandidates {
@@ -3107,7 +3107,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     prefs.max_active_agents = 2;
     prefs.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual;
     prefs.priority_order = vec![43, 42];
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     monitor.set_gui_connected(true);
 
     let loaded = LoadedIssueMonitorCandidates {
@@ -3191,7 +3191,7 @@ fn newer_disk_migration_is_adopted_but_equal_marker_keeps_fresh_failure() {
     assert!(!outgoing.adopt_newer_legacy_git_launch_failure_migration(&equal_disk));
     assert!(outgoing.failed_issues.contains(&target));
 
-    let mut state = IssueMonitorState::with_prefs(
+    let mut state = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
@@ -3219,7 +3219,7 @@ fn newer_disk_migration_is_adopted_but_equal_marker_keeps_fresh_failure() {
 
 #[test]
 fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox() {
-    let mut state = IssueMonitorState::with_prefs(
+    let mut state = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
@@ -3270,7 +3270,7 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
 
 #[test]
 fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_and_scan() {
-    let mut state = IssueMonitorState::with_prefs(
+    let mut state = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
@@ -3313,7 +3313,7 @@ fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_a
         .all(|failed| failed.issue_number != 42));
     assert_eq!(persisted.launched_issues[0].window_id, "tab::agent-42");
 
-    let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), persisted);
+    let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), persisted);
     scan_queued_candidates(
         &mut restored,
         &[issue(42, &["bug"])],
@@ -3401,7 +3401,7 @@ fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unboun
     let path = dir.path().join("issue-monitor.json");
     save_issue_monitor_prefs(&path, &outgoing).expect("save adopted prefs");
     let loaded = load_issue_monitor_prefs(&path).expect("reload adopted prefs");
-    let mut state = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), loaded);
+    let mut state = test_monitor_with_prefs(IssueMonitorConfig::default(), loaded);
     scan_queued_candidates(
         &mut state,
         &[
@@ -3446,7 +3446,7 @@ fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unboun
 /// PM or an operator asks when the queue stops moving.
 #[test]
 fn the_last_scan_time_survives_a_prefs_roundtrip() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3455,7 +3455,7 @@ fn the_last_scan_time_survives_a_prefs_roundtrip() {
     let prefs = monitor.prefs();
     assert_eq!(prefs.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
 
-    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     assert_eq!(
         restored.status_view().last_scan_at.as_deref(),
         Some("2026-07-27T10:00:00Z"),
@@ -3467,7 +3467,7 @@ fn the_last_scan_time_survives_a_prefs_roundtrip() {
 /// driver has ever scanned. Before this, every field said "healthy".
 #[test]
 fn agent_status_at_flags_a_monitor_that_has_never_scanned() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -3488,7 +3488,7 @@ fn agent_status_at_flags_a_monitor_that_has_never_scanned() {
 
 #[test]
 fn agent_status_at_flags_a_scan_that_stopped_advancing() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -3516,7 +3516,7 @@ fn agent_status_at_flags_a_scan_that_stopped_advancing() {
 /// train readers to ignore the field.
 #[test]
 fn agent_status_at_stays_quiet_for_a_disabled_monitor() {
-    let monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let monitor = test_monitor(IssueMonitorConfig {
         enabled: false,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -3568,7 +3568,7 @@ fn expired_claim_block_requeues_and_launches_on_next_claim_cycle() {
         42,
         vec![claim_comment("host-b/session-b")],
     ));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3609,7 +3609,7 @@ fn expired_claim_block_requeues_and_launches_on_next_claim_cycle() {
 fn claim_diagnostics_distinguish_unclaimed_active_and_expired() {
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         claim_ttl_secs: 30,
         ..IssueMonitorConfig::default()
@@ -3646,7 +3646,7 @@ fn claim_diagnostics_distinguish_unclaimed_active_and_expired() {
 #[test]
 fn claim_identity_rebase_preserves_current_disk_ownership() {
     use gwt::issue_monitor::IssueMonitorClaimIdentity;
-    let mut observer = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut observer = test_monitor(IssueMonitorConfig::default());
     let mut disk = IssueMonitorPrefs {
         enabled: true,
         claim_identities: vec![IssueMonitorClaimIdentity {
@@ -3683,7 +3683,7 @@ fn live_claim_renewal_retains_ttl_without_relaunch_and_reports_failures() {
     };
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         claim_ttl_secs: 30,
         claim_heartbeat_secs: 300,
@@ -3776,7 +3776,7 @@ fn live_claim_renewal_retains_ttl_without_relaunch_and_reports_failures() {
     );
     assert_eq!(monitor.prefs().claim_identities, vec![identity]);
     assert_eq!(monitor.take_pending_launch_requests(), launches);
-    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+    let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
     assert_eq!(
         restored.prefs().claim_diagnostics,
         monitor.prefs().claim_diagnostics
@@ -3819,7 +3819,7 @@ fn issue_3287_expired_old_format_claims_recover_after_current_claim_lapses() {
             ),
         ],
     ));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3875,7 +3875,7 @@ fn expired_pre_identity_migration_claims_do_not_block_launch() {
             "2026-07-27T10:28:27Z",
         )],
     ));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3903,7 +3903,7 @@ fn expired_pre_identity_migration_claims_do_not_block_launch() {
 /// issue returns to the queue even while the foreign claim is still live.
 #[test]
 fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
-    let mut daemon = IssueMonitorState::new(IssueMonitorConfig {
+    let mut daemon = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3923,7 +3923,7 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
     ));
 
     // The CLI process only sees the persisted prefs, never the daemon inbox.
-    let mut cli = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+    let mut cli = test_monitor_with_prefs(IssueMonitorConfig::default(), daemon.prefs());
     let outcome = cli.release_claim_block(
         42,
         "operator: stale claim from a pre-migration owner",
@@ -3959,7 +3959,7 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
 fn claim_block_release_refuses_while_a_launch_is_live() {
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -3979,7 +3979,7 @@ fn claim_block_release_refuses_while_a_launch_is_live() {
 /// projection that only wrote to `last_error` would have stayed invisible.
 #[test]
 fn a_recorded_error_does_not_hide_the_scan_stall() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -4009,7 +4009,7 @@ fn a_recorded_error_does_not_hide_the_scan_stall() {
 fn stop_releases_the_confirmed_github_claim_so_the_next_scan_can_reclaim() {
     let client = FakeIssueClient::new();
     client.seed(github_issue_number(42, vec![]));
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..IssueMonitorConfig::default()
@@ -4069,7 +4069,7 @@ fn stop_releases_the_confirmed_github_claim_so_the_next_scan_can_reclaim() {
         gwt_github::issue_auto_claim::ClaimReleaseOutcome::Released(_)
     ));
 
-    let mut relaunch = IssueMonitorState::new(IssueMonitorConfig {
+    let mut relaunch = test_monitor(IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..IssueMonitorConfig::default()
@@ -4103,7 +4103,7 @@ fn stop_releases_the_confirmed_github_claim_so_the_next_scan_can_reclaim() {
 /// identity rather than the live-launch accounting.
 #[test]
 fn requeue_releases_the_confirmed_github_claim_of_the_failed_launch() {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig {
             enabled: true,
             max_active: 1,
@@ -4154,7 +4154,7 @@ fn requeue_releases_the_confirmed_github_claim_of_the_failed_launch() {
 /// the same snapshot `issue.monitor.status` prints.
 #[test]
 fn status_inbox_reports_claim_expiry_and_exclusion_reason() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -4199,7 +4199,7 @@ fn status_inbox_reports_claim_expiry_and_exclusion_reason() {
 /// on the next scan instead of at `claim_ttl_secs`.
 #[test]
 fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
@@ -4243,7 +4243,7 @@ fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
 /// Build the 2026-08-17 blackout shape: an enabled monitor holding failed work
 /// and running nothing at all.
 fn blacked_out_monitor() -> IssueMonitorState {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig {
             poll_interval_secs: 10,
             ..IssueMonitorConfig::default()
@@ -4376,7 +4376,7 @@ fn a_running_agent_clears_the_blackout_clock() {
 /// train readers to ignore the field.
 #[test]
 fn an_empty_backlog_is_not_a_blackout() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+    let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
@@ -4412,7 +4412,7 @@ fn a_disabled_monitor_never_reports_a_blackout() {
 /// limit and be tuned out before the real outage arrived.
 #[test]
 fn work_parked_until_a_quota_reset_is_not_a_blackout() {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig {
             poll_interval_secs: 10,
             ..IssueMonitorConfig::default()
@@ -4456,7 +4456,7 @@ fn the_blackout_onset_survives_a_prefs_roundtrip() {
         Some("2026-08-17T00:00:00Z")
     );
 
-    let restored = IssueMonitorState::with_prefs(
+    let restored = test_monitor_with_prefs(
         IssueMonitorConfig {
             poll_interval_secs: 10,
             ..IssueMonitorConfig::default()
@@ -4492,4 +4492,19 @@ fn a_recorded_error_does_not_hide_the_agent_blackout() {
         status.agent_blackout.is_some(),
         "the blackout must have a field an existing error cannot occupy"
     );
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor(config: gwt::IssueMonitorConfig) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

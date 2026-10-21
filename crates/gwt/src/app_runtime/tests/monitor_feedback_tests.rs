@@ -17,7 +17,7 @@ fn monitor_scan_recovery_failure_emits_one_attention_notice() {
         )],
         Some("tab-a"),
     );
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.record_control_commit_error("Issue Monitor authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
     let first = runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
     assert_eq!(
@@ -64,7 +64,7 @@ fn git_health_notice_is_shared_by_pm_and_monitor_until_recovery() {
             .count(),
         1
     );
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.record_scan_error(
         "2026-10-14T00:00:00Z",
         diagnostic.replace("rev-parse --git-common-dir", "remote get-url origin"),
@@ -78,7 +78,7 @@ fn git_health_notice_is_shared_by_pm_and_monitor_until_recovery() {
     assert!(repeated
         .iter()
         .all(|event| !matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
-    let healthy = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let healthy = test_monitor(gwt::IssueMonitorConfig::default());
     runtime.issue_monitor_daemon_status_events(&repo, Box::new(healthy.status_view()));
     let unchanged = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
     assert!(
@@ -545,7 +545,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
             gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
         );
     }
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             ..Default::default()
@@ -555,6 +555,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     monitor.terminal_queue_push(&[3166, 3167], "operator", &Utc::now().to_rfc3339());
     for issue_number in [3166, 3167] {
         monitor.record_candidate(gwt::IssueMonitorIssue {
+            author_login: None,
             number: issue_number,
             title: "fix: prefetched Monitor launch".to_string(),
             labels: vec!["bug".to_string()],

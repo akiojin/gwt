@@ -423,6 +423,7 @@ mod tests {
 
     fn seed_open_issue(client: &FakeIssueClient, number: u64, comments: Vec<&str>) {
         client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("Issue {number}"),
             body: "## Acceptance Criteria\n- [x] AC-1: done\n".to_string(),
@@ -708,6 +709,7 @@ mod tests {
         let client = FakeIssueClient::new();
         let repo = delivery_repo();
         client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(42),
             title: "closed".to_string(),
             body: String::new(),

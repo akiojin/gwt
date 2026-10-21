@@ -884,7 +884,7 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
         );
     }
 
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     // The exact park `IssueMonitorState::stop_only` performs: it is what turns
     // an operator stop into a durable `failed_issues` entry.
     monitor.escalate_to_needs_human(
@@ -1186,7 +1186,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
     // AC-2: between the sweep and the drain the PM stops #4276 through the
     // Monitor. The queued restore is re-judged at the spawn boundary and
     // nothing spawns.
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.escalate_to_needs_human(
         4276,
         gwt::NeedsHumanKind::UserChoiceRequired,

@@ -1017,6 +1017,11 @@ and URL; a similar existing Issue may receive a comment. `feedback.retry`
 accepts declined or failed receipts and asks for fresh external-project consent.
 An uncertain delivery is retained for inspection and is not automatically resent.
 
+Reports are evidence for PM triage. A confirmed bug is linked to a separate,
+curated repair Issue; the raw report cannot launch an agent directly. Feature
+requests and ambiguous reports await the repository owner's adoption decision,
+with the decision and repair link recorded on the report.
+
 SPECs and plain Issues share one search index. SPECs are indexed once as heading
 chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
 `scopes:["issues"]` selects plain Issues, and `scopes:["specs","issues"]`

@@ -4936,6 +4936,7 @@ mod tests {
             gwt_core::repo_hash::compute_repo_hash("https://github.com/example/gwt.git");
         let cache_root = temp.path().join("issue-cache");
         let snapshot = gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(2867),
             title: "Recent Projects".to_string(),
             body: "workspace home".to_string(),

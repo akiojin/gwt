@@ -2201,6 +2201,7 @@ mod tests {
 
     fn fixture_issue(number: u64) -> crate::IssueMonitorIssue {
         crate::IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: vec!["auto-merge".to_string()],

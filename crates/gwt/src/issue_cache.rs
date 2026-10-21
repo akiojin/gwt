@@ -412,7 +412,10 @@ fn sync_issue_cache_from_remote_with_page_cache(
             continue;
         }
         let snapshot = if is_spec_issue(listed_snapshot) {
-            if cached.is_some_and(|entry| entry.snapshot.updated_at == listed_snapshot.updated_at) {
+            if cached.is_some_and(|entry| {
+                entry.snapshot.updated_at == listed_snapshot.updated_at
+                    && entry.snapshot.author_login.is_some()
+            }) {
                 continue;
             }
             if let Some(delay) = ledger.burst_wait(GitHubQuota::GraphQl, &policy, Utc::now()) {
@@ -830,6 +833,7 @@ fn fetch_issue_list_snapshots(
     snapshots.extend(queued.issues.into_iter().map(|issue| {
         let snapshot = IssueSnapshot {
             number: IssueNumber(issue.number),
+            author_login: issue.author_login,
             title: issue.title,
             body: issue.body.unwrap_or_default(),
             labels: issue.labels,
@@ -854,7 +858,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
             "view",
             &number.0.to_string(),
             "--json",
-            "number,title,body,labels,state,updatedAt,comments",
+            "number,title,body,labels,state,updatedAt,author,comments",
         ],
         &format!("gh issue view #{number}", number = number.0),
     )?;
@@ -956,6 +960,11 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
 
     Ok(IssueSnapshot {
         number: IssueNumber(actual_number),
+        author_login: issue
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -976,6 +985,7 @@ fn issue_list_snapshots(rows: &[Value]) -> Vec<IssueSnapshot> {
         .into_iter()
         .map(|row| IssueSnapshot {
             number: IssueNumber(row.number),
+            author_login: row.author_login,
             title: row.title,
             body: row.body.unwrap_or_default(),
             labels: row.labels,
@@ -1073,6 +1083,7 @@ mod tests {
             r#"[{
                 "number": 1776,
                 "title": "Launch Agent issue linkage",
+                "author": {"login": "OriginalCreator"},
                 "body": "Body",
                 "labels": [{"name": "ux"}],
                 "state": "OPEN",
@@ -1083,6 +1094,10 @@ mod tests {
         .expect("parse snapshots");
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].number.0, 1776);
+        assert_eq!(
+            snapshots[0].author_login.as_deref(),
+            Some("OriginalCreator")
+        );
         assert_eq!(snapshots[0].title, "Launch Agent issue linkage");
         assert_eq!(snapshots[0].body, "Body");
         assert_eq!(snapshots[0].labels, vec!["ux".to_string()]);
@@ -1190,6 +1205,7 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
             assert!(!issue_cache_refresh_meta_path(&cache_root).exists());
         }
         let authoritative = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(8),
             title: "newer closed issue".into(),
             body: String::new(),
@@ -1642,7 +1658,7 @@ exit 1\n",
         );
         assert_eq!(
             fs::read_to_string(&invocation_log).expect("read invocation log"),
-            "issue view 42 --json number,title,body,labels,state,updatedAt,comments\n"
+            "issue view 42 --json number,title,body,labels,state,updatedAt,author,comments\n"
         );
         let entry = Cache::new(cache_root)
             .load_entry(IssueNumber(42))
@@ -1873,6 +1889,7 @@ exit 1\n",
         let temp = tempdir().expect("tempdir");
         let cache_root = temp.path().join("cache");
         let snapshot = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Cache freshness".to_string(),
             body: "body".to_string(),
@@ -2079,14 +2096,14 @@ updated_43="${{FAKE_UPDATED_43:-{v1}}}"
 case "$1 $2" in
   "issue list" | "api repos/"*)
     if [ "$1" = "api" ]; then printf 'HTTP/2.0 200 OK\n\r\n'; fi
-    printf '[{{"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
+    printf '[{{"author":{{"login":"OriginalCreator"}},"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
     exit 0
     ;;
   "issue view")
     if [ "$3" = "42" ]; then
-      printf '{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
     else
-      printf '{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
     fi
     exit 0
     ;;
@@ -2202,6 +2219,7 @@ esac
         ] {
             cache
                 .write_snapshot(&IssueSnapshot {
+                    author_login: None,
                     number: IssueNumber(number),
                     title: format!("Cached {number}"),
                     body: format!("Cached body {number}"),
@@ -2258,6 +2276,7 @@ esac
         let cache = Cache::new(cache_root.clone());
         cache
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(777),
                 title: "Cached".into(),
                 body: "Keep body".into(),
@@ -2297,6 +2316,7 @@ esac
         let cache = Cache::new(cache_root.clone());
         cache
             .write_snapshot(&IssueSnapshot {
+                author_login: None,
                 number: IssueNumber(777),
                 title: "Cached".into(),
                 body: "Keep body".into(),
@@ -2480,6 +2500,27 @@ esac
             invocations(&log),
             vec![LIST_CALL, QUEUED_LIST_CALL],
             "unchanged SPECs cost two REST list calls and no views"
+        );
+
+        let cache = Cache::new(cache_root.clone());
+        let mut legacy = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+        legacy.author_login = None;
+        cache.write_snapshot(&legacy).unwrap();
+        fs::remove_file(&log).expect("reset log");
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("backfill legacy author");
+        assert_eq!(
+            invocations(&log),
+            vec![LIST_CALL, QUEUED_LIST_CALL, "issue view 42"],
+            "missing author forces one full SPEC read even at the same revision"
+        );
+        assert_eq!(
+            cache
+                .load_entry(IssueNumber(42))
+                .unwrap()
+                .snapshot
+                .author_login
+                .as_deref(),
+            Some("OriginalCreator")
         );
 
         fs::remove_file(&log).expect("reset log");

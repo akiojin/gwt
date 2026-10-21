@@ -1114,6 +1114,7 @@ mod tests {
     fn settlement_env(fx: &NoActionFixture, state: gwt_github::IssueState) -> crate::cli::TestEnv {
         let env = crate::cli::TestEnv::new(fx.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(3290),
             title: "Delivered owner".to_string(),
             body: String::new(),
@@ -1246,6 +1247,7 @@ mod tests {
         // A historical CLOSED cache entry cannot override today's server state.
         gwt_github::Cache::new(env.cache_root.clone())
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(3290),
                 title: "Cached closed".to_string(),
                 body: String::new(),
