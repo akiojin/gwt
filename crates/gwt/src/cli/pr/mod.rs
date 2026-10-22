@@ -6542,16 +6542,15 @@ mod tests {
     // cli.rs. Shared fake-gh harness lives in cli/test_support.rs.
     // -------------------------------------------------------------------
 
-    use crate::cli::test_support::{sample_thread, with_fake_gh, ScopedEnvVar};
+    use crate::cli::test_support::{
+        sample_thread, with_fake_gh, with_fake_gh_capture, ScopedEnvVar,
+    };
     use crate::cli::{CliCommand, PrCreateCall};
     use std::io;
 
     #[test]
     fn issue_3789_review_reply_targets_only_requested_thread() {
-        with_fake_gh("success", |repo_path| {
-            let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
-            let argv_file = repo_path.join("gh-argv");
-            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        with_fake_gh_capture("success", |repo_path, argv_file| {
             let mut env = crate::cli::DefaultCliEnv::new("akiojin", "gwt", repo_path.into());
             let CliCommand::Pr(command) = crate::cli::json_envelope::parse_operation(
                 "pr.review_threads.reply_and_resolve",
@@ -6583,10 +6582,7 @@ mod tests {
 
     #[test]
     fn issue_3789_review_reply_rejects_unknown_thread_without_mutation() {
-        with_fake_gh("success", |repo_path| {
-            let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
-            let argv_file = repo_path.join("gh-argv");
-            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        with_fake_gh_capture("success", |repo_path, argv_file| {
             let mut env = crate::cli::DefaultCliEnv::new("akiojin", "gwt", repo_path.into());
             let CliCommand::Pr(command) = crate::cli::json_envelope::parse_operation(
                 "pr.review_threads.reply_and_resolve",
@@ -6608,9 +6604,7 @@ mod tests {
 
     #[test]
     fn issue_3789_review_reply_rejects_array_body_without_mutation() {
-        with_fake_gh("success", |repo_path| {
-            let argv_file = repo_path.join("gh-argv");
-            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        with_fake_gh_capture("success", |_, argv_file| {
             let error = reply_and_resolve_pr_review_threads_via_gh(
                 "akiojin",
                 "gwt",
