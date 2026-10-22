@@ -3863,6 +3863,9 @@ mod profiles_patch_contract_tests {
 
     #[test]
     fn profiles_control_receipt_converges_without_reapplying_committed_pool() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
         let initial = initial_prefs();
         let patch = patch_control(
