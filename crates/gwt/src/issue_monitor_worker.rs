@@ -19,6 +19,30 @@ use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
 
+pub(crate) fn record_scan_failure_ledger(
+    project_root: &Path,
+    phase: &str,
+    message: &str,
+    continuation: Option<&str>,
+) {
+    let mut context = BTreeMap::from([("stage".into(), phase.into())]);
+    if let Some(continuation) = continuation {
+        context.insert("continuation".into(), continuation.into());
+    }
+    let row = gwt_core::error_ledger::ErrorRecord::new(
+        gwt_core::error_ledger::ErrorKind::ScanFailure,
+        message,
+        gwt_core::error_ledger::ErrorTarget {
+            project_root: Some(project_root.display().to_string()),
+            ..Default::default()
+        },
+    )
+    .with_context(context);
+    if let Err(error) = gwt_core::error_ledger::record(row) {
+        tracing::warn!(error = %error, "error ledger append failed");
+    }
+}
+
 /// Only an exact current, live Active holder can extend an existing claim.
 pub fn live_claim_renewal_generations(
     project_root: &Path,
@@ -1125,6 +1149,7 @@ fn spec_cache_entry_has_no_sections(entry: &CacheEntry) -> bool {
     entry.spec_parse_error.is_none() || body_declares_an_empty_section_index(&entry.snapshot.body)
 }
 
+#[cfg(test)]
 fn issue_monitor_candidates_with_readiness<F>(
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
@@ -1134,6 +1159,7 @@ where
     F: FnMut(IssueNumber) -> Result<(), String>,
 {
     issue_monitor_candidates_with_readiness_and_refresh_limit(
+        None,
         issues,
         cache_root,
         ISSUE_MONITOR_TARGETED_REFRESH_LIMIT,
@@ -1142,6 +1168,7 @@ where
 }
 
 fn issue_monitor_candidates_with_readiness_and_refresh_limit<F>(
+    project_root: Option<&Path>,
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
     refresh_limit: usize,
@@ -1236,6 +1263,14 @@ where
                     }
                 }
                 Err(error) => {
+                    if let Some(project_root) = project_root {
+                        record_scan_failure_ledger(
+                            project_root,
+                            error.stage.as_str(),
+                            &error.to_string(),
+                            Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                        );
+                    }
                     fail(format!("targeted refresh failed: {error}"));
                     None
                 }
@@ -1361,7 +1396,15 @@ fn load_open_pr_launch_observations(
         run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
             gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            record_scan_failure_ledger(
+                repo_path,
+                error.stage.as_str(),
+                &error.to_string(),
+                Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+            );
+            error.to_string()
+        })
     };
     for issue in &candidates {
         if let Some(hold) = prefs
@@ -1390,9 +1433,21 @@ fn load_open_pr_launch_observations(
         )
     });
     if let Err(error) = &branches {
+        record_scan_failure_ledger(
+            repo_path,
+            error.stage.as_str(),
+            &error.to_string(),
+            Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+        );
         tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
     }
     if let Err(error) = &linked_result {
+        record_scan_failure_ledger(
+            repo_path,
+            error.stage.as_str(),
+            &error.to_string(),
+            Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+        );
         tracing::warn!(%error, completed_issues = linked.len(), "linked PR discovery incomplete; preserving unobserved launch holds");
     }
     let related = candidates
@@ -1538,16 +1593,31 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 );
             }
             let (mut issues, readiness_failures) =
-                issue_monitor_candidates_with_readiness(listing.issues, &cache_root, |number| {
-                    crate::issue_cache::refresh_issue_cache_entry_from_remote(
-                        repo_path,
-                        &cache_root,
-                        number,
-                    )
-                });
+                issue_monitor_candidates_with_readiness_and_refresh_limit(
+                    Some(repo_path),
+                    listing.issues,
+                    &cache_root,
+                    ISSUE_MONITOR_TARGETED_REFRESH_LIMIT,
+                    |number| {
+                        crate::issue_cache::refresh_issue_cache_entry_from_remote(
+                            repo_path,
+                            &cache_root,
+                            number,
+                        )
+                    },
+                );
             if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
                 backfill_missing_issue_authors((owner, repo), &mut issues, |issue| {
-                    try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue)
+                    try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue).inspect_err(
+                        |error| {
+                            record_scan_failure_ledger(
+                                repo_path,
+                                error.stage.as_str(),
+                                &error.to_string(),
+                                Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                            );
+                        },
+                    )
                 });
             }
             let prefs = crate::load_issue_monitor_prefs(
@@ -1578,7 +1648,15 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                         .fetch_label_assignment(IssueNumber(number), "urgent")
                         .map_err(|error| error.to_string())
                 })
-                .map_err(|error| error.to_string())
+                .map_err(|error| {
+                    record_scan_failure_ledger(
+                        repo_path,
+                        error.stage.as_str(),
+                        &error.to_string(),
+                        Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                    );
+                    error.to_string()
+                })
             });
             let (open_pr_observations, open_pr_observed_at) =
                 load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
@@ -1616,7 +1694,16 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     let mut loaded = resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)?;
     if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
         backfill_missing_issue_authors((owner, repo), &mut loaded.issues, |issue| {
-            try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue)
+            try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue).inspect_err(
+                |error| {
+                    record_scan_failure_ledger(
+                        repo_path,
+                        error.stage.as_str(),
+                        &error.to_string(),
+                        Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                    );
+                },
+            )
         });
     }
     Ok(loaded)
@@ -2184,6 +2271,7 @@ pub fn reconcile_issue_monitor_merges(
     let untracked = monitor.untracked_merged_branch_candidates(&merged_branches);
     // SPEC #4093 FR-005: one bulk read for every nominated candidate.
     let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter());
+    let mut batch_failure_recorded = false;
     for issue in untracked {
         let issue_number = issue.number;
         // A probe failure keeps the issue launchable, matching the claim-path
@@ -2200,6 +2288,12 @@ pub fn reconcile_issue_monitor_merges(
             }
             Ok(false) => {}
             Err(error) => {
+                record_untracked_completion_failure(
+                    repo_path,
+                    &error,
+                    &batch,
+                    &mut batch_failure_recorded,
+                );
                 tracing::warn!(
                     issue = issue_number,
                     error = %error,
@@ -2209,6 +2303,27 @@ pub fn reconcile_issue_monitor_merges(
         }
     }
     Ok(IssueMonitorMergeReconciliation { merged, deliveries })
+}
+
+/// Record a failed bulk operation once; independent probes retain their events.
+fn record_untracked_completion_failure(
+    repo_path: &Path,
+    error: &IssueMonitorScanFailure,
+    batch: &LinkedPrProbeBatch,
+    batch_failure_recorded: &mut bool,
+) {
+    if batch.failure().is_some() {
+        if *batch_failure_recorded {
+            return;
+        }
+        *batch_failure_recorded = true;
+    }
+    record_scan_failure_ledger(
+        repo_path,
+        error.stage.as_str(),
+        &error.to_string(),
+        Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+    );
 }
 
 /// Result of one merged-branch reconciliation: the Issues whose slots were
@@ -2241,7 +2356,7 @@ pub fn prune_delivered_work_branches(
     if reconciliation.merged.is_empty() {
         return gwt_git::merged_branch_prune::PruneReport::default();
     }
-    run_budgeted_readback_stage(IssueMonitorScanStage::BranchPrune, || {
+    let report = run_budgeted_readback_stage(IssueMonitorScanStage::BranchPrune, || {
         Ok::<_, String>(prune_delivered_work_branches_observed(
             repo_path,
             base_branch,
@@ -2251,7 +2366,29 @@ pub fn prune_delivered_work_branches(
     .unwrap_or_else(|error| gwt_git::merged_branch_prune::PruneReport {
         skipped_reason: Some(error.to_string()),
         ..Default::default()
-    })
+    });
+    record_branch_prune_failures(repo_path, &report);
+    report
+}
+
+fn record_branch_prune_failures(
+    repo_path: &Path,
+    report: &gwt_git::merged_branch_prune::PruneReport,
+) {
+    for message in report.skipped_reason.iter().cloned().chain(
+        report
+            .execution
+            .failed
+            .iter()
+            .map(|failure| format!("{}: {}", failure.branch, failure.reason)),
+    ) {
+        record_scan_failure_ledger(
+            repo_path,
+            IssueMonitorScanStage::BranchPrune.as_str(),
+            &message,
+            Some(IssueMonitorScanContinuation::StaleReadback.as_str()),
+        );
+    }
 }
 
 fn prune_delivered_work_branches_observed(
@@ -3282,6 +3419,32 @@ fn has_supported_github_remote_prefix(remote_url: &str) -> bool {
 mod linked_pr_batch_tests {
     use super::*;
 
+    #[test]
+    fn issue_3924_completion_batch_failure_is_recorded_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], |_| {
+            Err(std::io::Error::other("bulk completion read failed"))
+        });
+        let error = IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::ClaimCompletionReadback,
+            "bulk completion read failed",
+        );
+        let mut recorded = false;
+        for _ in 0..2 {
+            record_untracked_completion_failure(temp.path(), &error, &batch, &mut recorded);
+        }
+        for _ in 0..2 {
+            record_untracked_completion_failure(
+                temp.path(),
+                &error,
+                &LinkedPrProbeBatch::default(),
+                &mut recorded,
+            );
+        }
+        assert_eq!(gwt_core::error_ledger::list_since(None).unwrap().len(), 3);
+    }
+
     fn spec_issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
             author_login: None,
@@ -3365,6 +3528,57 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn issue_3924_readiness_limits_do_not_emit_scan_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (_, failures) = issue_monitor_candidates_with_readiness_and_refresh_limit(
+            Some(temp.path()),
+            vec![
+                live_issue(42, &["gwt-spec"], Some("2026-10-22T00:00:00Z")),
+                live_issue(43, &["gwt-spec"], Some("2026-10-22T00:00:00Z")),
+            ],
+            temp.path(),
+            1,
+            |_| Err("original readiness read failure".into()),
+        );
+        assert_eq!(failures.len(), 2);
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1, "the refresh limit is not a stage failure");
+        assert_eq!(rows[0].context["stage"], "candidate-load");
+        assert!(rows[0].message.contains("original readiness read failure"));
+    }
+
+    #[test]
+    fn issue_3924_prune_failures_are_recorded_but_safety_skips_are_not() {
+        use gwt_git::merged_branch_prune::{
+            PruneFailure, PruneReport, PruneSkipReason, PruneSkipped,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut report = PruneReport::default();
+        report.plan.skip.push(PruneSkipped {
+            branch: "develop".into(),
+            reason: PruneSkipReason::Protected,
+        });
+        super::record_branch_prune_failures(temp.path(), &report);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+        report.skipped_reason = Some("original prune deadline failure".into());
+        report.execution.failed.push(PruneFailure {
+            branch: "work/issue-42".into(),
+            reason: "original remote refusal".into(),
+        });
+        super::record_branch_prune_failures(temp.path(), &report);
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| {
+            row.kind == gwt_core::error_ledger::ErrorKind::ScanFailure
+                && row.context["stage"] == "branch-prune"
+        }));
+        assert_eq!(rows[0].message, "original prune deadline failure");
+        assert!(rows[1].message.contains("original remote refusal"));
     }
 
     #[test]
@@ -4198,6 +4412,7 @@ pub(crate) mod tests {
         let mut refreshed_numbers = Vec::new();
 
         let (issues, errors) = issue_monitor_candidates_with_readiness_and_refresh_limit(
+            None,
             vec![
                 live_issue(42, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),
                 live_issue(43, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),

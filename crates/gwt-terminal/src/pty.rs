@@ -381,6 +381,7 @@ struct SpawnDiagnostic {
 struct PtyInputState {
     protected: bool,
     ordinary_input_revision: u64,
+    protected_transaction_revision: u64,
     queued: VecDeque<Vec<u8>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
     /// cleared. Used so PM wake injection can wait instead of splicing a
@@ -992,10 +993,20 @@ impl PtyHandle {
                 details: "another protected PTY input transaction is active".to_string(),
             });
         }
+        let previous_transaction_revision = state.protected_transaction_revision;
+        let transaction_revision =
+            previous_transaction_revision
+                .checked_add(1)
+                .ok_or_else(|| TerminalError::PtyIoError {
+                    details: "protected PTY input transaction revision exhausted".to_string(),
+                })?;
+        state.protected_transaction_revision = transaction_revision;
         state.protected = true;
         drop(state);
         Ok(PtyInputReservation {
             handle: Arc::clone(self),
+            previous_transaction_revision,
+            transaction_revision,
         })
     }
 
@@ -1675,9 +1686,21 @@ fn decode_start_gate_target(encoded: &str) -> Result<(String, Vec<String>), Term
 /// Owned guard for a protected input sequence that may cross a worker delay.
 pub struct PtyInputReservation {
     handle: Arc<PtyHandle>,
+    previous_transaction_revision: u64,
+    transaction_revision: u64,
 }
 
 impl PtyInputReservation {
+    /// The last protected transaction before this reservation was acquired.
+    pub fn previous_transaction_revision(&self) -> u64 {
+        self.previous_transaction_revision
+    }
+
+    /// The protected transaction assigned to this reservation.
+    pub fn transaction_revision(&self) -> u64 {
+        self.transaction_revision
+    }
+
     /// Run an immediate body commit while ordinary input remains unchanged.
     /// The callback must not acquire the input state again or wait for authority.
     pub fn with_unchanged_ordinary_input<T>(
@@ -2877,6 +2900,21 @@ mod tests {
         reservation.write_input(b"protected body").unwrap();
         reservation.write_input(b"\r").unwrap();
         assert_eq!(handle.ordinary_input_revision(), revision);
+    }
+
+    #[test]
+    fn protected_input_transaction_revision_tracks_each_successful_reservation() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let first = handle.reserve_input_transaction().unwrap();
+        assert_eq!(first.previous_transaction_revision(), 0);
+        assert_eq!(first.transaction_revision(), 1);
+        assert!(handle.reserve_input_transaction().is_err());
+        drop(first);
+
+        let second = handle.reserve_input_transaction().unwrap();
+        assert_eq!(second.previous_transaction_revision(), 1);
+        assert_eq!(second.transaction_revision(), 2);
     }
 
     #[test]

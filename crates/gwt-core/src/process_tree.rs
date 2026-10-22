@@ -1,6 +1,7 @@
 //! Shared operating-system process-tree ownership primitives.
 
 pub mod job_cpu;
+pub mod observation;
 
 /// `CREATE_NO_WINDOW`, retained when a health probe adds suspended creation.
 pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;

@@ -508,7 +508,7 @@ test.describe("Surface rail", () => {
     await right.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
     for (const heading of [preview, right.locator('[data-agent-id="agent-one"] h3')]) {
       const identity = await heading.locator(".agent-title__name").boundingBox();
-      const mode = await heading.locator("..").locator(":scope > span").boundingBox();
+      const mode = await heading.locator("..").locator(":scope > span:not(.status-chip)").boundingBox();
       // Allow subpixel overlap of advance boxes; glyphs retain their side bearings.
       expect(identity!.x + identity!.width).toBeLessThanOrEqual(mode!.x + 0.5);
     }

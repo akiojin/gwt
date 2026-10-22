@@ -9,6 +9,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 import { groupProjectWindowList } from "../window-list-model.js";
 
@@ -98,4 +101,83 @@ test("no tabs yields an empty model", () => {
   assert.deepEqual(model.groups, []);
   assert.equal(model.count, 0);
   assert.equal(model.multiProject, false);
+});
+
+test("Windows list batches catalog and list snapshots while actions stay synchronous", async t => {
+  const { document } = parseHTML(readFileSync(new URL('../index.html', import.meta.url), 'utf8'));
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8')
+    .replace(/from "\/(.*?)"/g, (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
+  const { createProjectShellSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const frames = new Set();
+  const model = createUiStateStore({ catalog: { appState: { active_tab_id: 'alpha', tabs: [{
+    id: 'alpha', title: 'Alpha', workspace: { windows: [{ id: 'a', title: 'Before' }] },
+  }] }, version: 0 }, listEntries: [] }, {
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const sent = [];
+  const focused = [];
+  const controller = createProjectShellSurface({
+    windowCatalogModel: model, send: message => sent.push(message), frameWindow: id => focused.push(id),
+    activeProjectTab: () => ({ id: 'alpha' }), appendRenderKeyPart: (parts, value) => parts.push(JSON.stringify(value)),
+    runtimeStateForWindow: entry => entry.status || 'idle', windowDisplayTitle: entry => entry.title,
+    windowTitleTooltip: entry => entry.title, windowRoleBadgeLabel: () => '', shouldShowRuntimeStatus: () => false,
+  });
+  t.after(() => { controller.dispose(); model.dispose(); });
+  const panel = document.getElementById('window-list-panel');
+  const button = document.getElementById('window-list-button');
+  let rows = 0;
+  const appendChild = panel.appendChild.bind(panel);
+  panel.appendChild = node => { if (node.classList.contains('window-list-row')) rows++; return appendChild(node); };
+  controller.toggleWindowList();
+  assert.equal(panel.hidden, false, 'open synchronously');
+  assert.equal(button.getAttribute('aria-expanded'), 'true');
+  assert.equal(sent.at(-1).kind, 'list_windows', 'request synchronously');
+  flush();
+  rows = 0;
+  const before = panel.innerHTML;
+  const oldSnapshot = model.read();
+  for (let n = 1; n <= 50; n++) {
+    const entry = { id: 'a', title: `Latest ${n}` };
+    model.update(state => ({ ...state,
+      catalog: { version: n, appState: { active_tab_id: 'alpha', tabs: [{
+        id: 'alpha', title: 'Alpha', workspace: { windows: [entry] },
+      }] } }, listEntries: [entry],
+    }));
+  }
+  assert.equal(model.read().catalog.version, 50, 'model commits synchronously');
+  assert.equal(oldSnapshot.catalog.version, 0, 'previous snapshot stays immutable');
+  assert.equal(panel.innerHTML, before, 'receipt waits for the frame');
+  assert.equal(frames.size, 1);
+  flush();
+  assert.equal(rows, 1, 'catalog and list selectors share one DOM rebuild');
+  assert.match(panel.textContent, /Latest 50/);
+  model.update(state => ({ ...state, bounds: { width: 100 } }));
+  assert.equal(frames.size, 0, 'unrelated selector never schedules the list');
+  model.update(state => ({ ...state, catalog: { version: 51, appState: { active_tab_id: 'alpha', tabs: [{
+    id: 'alpha', title: 'Alpha', workspace: { windows: [{ id: 'b', title: 'Replacement' }] },
+  }] } }, listEntries: [] }));
+  panel.querySelector('.window-list-row').click();
+  assert.deepEqual(focused, ['a'], 'the visible row keeps its own target');
+  assert.equal(panel.hidden, true, 'row click closes synchronously');
+  flush();
+  assert.equal(panel.hidden, true, 'pending frame never reopens the list');
+  controller.toggleWindowList();
+  assert.match(panel.textContent, /Replacement/, 'open pulls current catalog synchronously');
+  const openedRows = rows;
+  flush();
+  assert.equal(rows, openedRows, 'render key skips the same synchronous snapshot');
+  model.update(state => ({ ...state, listEntries: [{ id: 'b' }] }));
+  assert.equal(controller.handleWindowListEscape({ key: 'Escape', preventDefault() {} }), true);
+  assert.equal(panel.hidden, true, 'Escape closes synchronously');
+  flush();
+  assert.equal(panel.hidden, true);
+  controller.toggleWindowList();
+  model.update(state => ({ ...state, listEntries: [{ id: 'b' }] }));
+  assert.equal(frames.size, 1);
+  controller.dispose();
+  assert.equal(frames.size, 0, 'dispose cancels the remaining frame');
 });

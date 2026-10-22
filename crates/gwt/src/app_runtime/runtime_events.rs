@@ -75,8 +75,7 @@ const RESUME_WRITER_CONFLICT_OUTER_PREFIX: &str = "Failed to resume session from
 const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI bootstrap:";
 const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
 const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
-const CODEX_DIRECTORY_TRUST_PROMPT_REASON: &str =
-    "Codex requires directory trust confirmation for the managed worktree";
+use gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON;
 
 fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
     match source_event {
@@ -1960,27 +1959,83 @@ impl AppRuntime {
         ) {
             return Vec::new();
         }
+        let auth_agent = screen
+            .and_then(gwt_core::usage::limit_notice::detect_provider_auth_notice)
+            .filter(|provider| Some(*provider) == self.quota_provider_for_window(window_id))
+            .map(|provider| match provider {
+                gwt_core::usage::UsageProvider::Codex => "codex",
+                gwt_core::usage::UsageProvider::ClaudeCode => "claude",
+            });
+        let mut events = Vec::new();
+        if let Some(agent_id) = auth_agent {
+            let detail = gwt::issue_monitor::provider_reauthentication_required_message(agent_id);
+            if let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) {
+                let issue_number = self
+                    .issue_monitor_issue_number_for_window(&project_root, window_id)
+                    .or_else(|| {
+                        let prefs = gwt::load_issue_monitor_prefs(
+                            &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+                        )
+                        .ok()?;
+                        let evidence = prefs.provider_quota_hold_evidence.get(agent_id)?;
+                        evidence
+                            .attempts
+                            .iter()
+                            .rev()
+                            .find(|attempt| attempt.window_id.as_deref() == Some(window_id))
+                            .and_then(|attempt| attempt.issue_number)
+                            .or_else(|| {
+                                (evidence.window_id.as_deref() == Some(window_id))
+                                    .then_some(evidence.issue_number)
+                                    .flatten()
+                            })
+                    });
+                if let Some(issue_number) = issue_number {
+                    events.extend(self.issue_monitor_agent_failed_events_with_failure(
+                        &project_root,
+                        window_id,
+                        &detail,
+                        Some(issue_number),
+                        Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired {
+                            provider: agent_id.to_string(),
+                        }),
+                    ));
+                }
+            }
+            self.provider_quota_holds.remove(window_id);
+            self.provider_quota_candidates.remove(window_id);
+        }
         // Issue #3616 owns this pane already, with a corroborated account and
         // a reset instant this reading does not have. Two holds for one pane
         // would only fight over its detail. An earlier API-error hold is
         // dropped rather than left behind: the quota hold now explains the
         // pane, and a stale entry would outlive it at teardown.
-        if self.provider_quota_holds.contains_key(window_id) {
+        if auth_agent.is_none() && self.provider_quota_holds.contains_key(window_id) {
             self.cancel_provider_capacity_resume(window_id);
             self.provider_api_error_holds.remove(window_id);
             return Vec::new();
         }
-        let detected = screen.and_then(gwt_core::usage::detect_provider_api_error);
+        let detected = auth_agent
+            .map(|agent_id| gwt_core::usage::ProviderApiError {
+                http_status: None,
+                summary: gwt::issue_monitor::provider_reauthentication_required_message(agent_id),
+                transient: false,
+            })
+            .or_else(|| screen.and_then(gwt_core::usage::detect_provider_api_error));
         match detected {
             Some(error) => {
                 if self.provider_api_error_holds.get(window_id) == Some(&error) {
-                    return Vec::new();
+                    return events;
                 }
                 self.cancel_provider_capacity_resume(window_id);
-                let detail = gwt_core::usage::describe_provider_api_error(
-                    &error,
-                    self.pane_agent_id(window_id).as_deref(),
-                );
+                let detail = if auth_agent.is_some() {
+                    error.summary.clone()
+                } else {
+                    gwt_core::usage::describe_provider_api_error(
+                        &error,
+                        self.pane_agent_id(window_id).as_deref(),
+                    )
+                };
                 tracing::warn!(
                     window_id = %window_id,
                     http_status = ?error.http_status,
@@ -1993,7 +2048,6 @@ impl AppRuntime {
                 self.arm_provider_capacity_resume(window_id);
                 self.window_details
                     .insert(window_id.to_string(), detail.clone());
-                let mut events = Vec::new();
                 if let Some(composed) = self.recompute_window_state(window_id) {
                     events.extend(self.status_events(
                         window_id.to_string(),
