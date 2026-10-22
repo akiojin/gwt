@@ -14562,6 +14562,7 @@ impl IssueMonitorState {
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
         let previous_mode = self.autonomous_mode;
+        let pending_claims = self.pending_claim_issue_numbers();
         let epoch = advance_autonomous_effect_authority(
             &mut self.autonomous_mode,
             &mut self.effect_authority_epoch,
@@ -14570,6 +14571,18 @@ impl IssueMonitorState {
         )?;
         if previous_mode != enabled {
             self.capture_legacy_update_drain_origin(previous_mode);
+            // The authority change cancels these acquisitions, not queued work
+            // or deliveries already handed to the materializer.
+            for number in pending_claims {
+                if !self.active_launches.contains(&number)
+                    && !self
+                        .pending_launch_deliveries
+                        .iter()
+                        .any(|delivery| delivery.issue_number == number)
+                {
+                    self.clear_provisional_implementation(number);
+                }
+            }
         }
         Some(epoch)
     }
@@ -36135,6 +36148,83 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_off_clears_cancelled_claim_phases_across_restart_and_rebase() {
+        let now = "2026-10-22T00:00:00Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        let candidates =
+            [42, 43].map(|number| auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        scan_queued_candidates(&mut monitor, &candidates, now);
+        for candidate in &candidates {
+            monitor.record_attempt(candidate.number);
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(candidate, &protection, now),
+                EligibilityDecision::Eligible
+            );
+        }
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            2
+        );
+        let attempting = monitor.pending_effects()[1].clone();
+        assert!(monitor.mark_pending_effect_attempting(&attempting.attempt_key()));
+        let mut stale = monitor.clone();
+        let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+
+        assert_eq!(
+            monitor.set_autonomous_mode_with_effect_revocation(true),
+            Some(0)
+        );
+        assert_eq!(monitor.autonomous_in_flight_issues(), vec![42, 43]);
+        assert_eq!(
+            monitor.set_autonomous_mode_with_effect_revocation(false),
+            Some(1)
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42, 43]);
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(
+            monitor
+                .pending_effects()
+                .iter()
+                .filter(|effect| matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ReleaseClaim { .. }
+                ))
+                .count(),
+            1
+        );
+
+        cold.set_autonomous_mode_with_effect_revocation(false)
+            .unwrap();
+        assert!(cold.autonomous_in_flight_issues().is_empty());
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), prefs);
+        restored
+            .set_autonomous_mode_with_effect_revocation(true)
+            .unwrap();
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(stale.autonomous_in_flight_issues().is_empty());
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        scan_issue_monitor_candidates(&mut restored, &candidates, now);
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidates[0], &protection, now),
+            EligibilityDecision::Eligible
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+    }
+
+    #[test]
     fn autonomous_off_cancels_prepared_arm_and_compensates_attempting_arm_durably() {
         // Prepared means no remote request was submitted, so OFF can cancel it.
         // Attempting is outcome-ambiguous: retain it for result reconciliation
@@ -38175,6 +38265,35 @@ mod tests {
         ));
         monitor.process_held_issues.insert(44);
         monitor.autonomous_record_mut(45).reviewed_sha = Some("reviewed-head".into());
+
+        // A mode control can also encounter an older ambiguous claim alongside
+        // started work. Cancelling that effect must not cancel the work.
+        let mut autonomous = monitor.clone();
+        autonomous.set_autonomous_mode(true);
+        for number in [42, 43, 44, 45] {
+            autonomous
+                .prepare_pending_effect(
+                    format!("old-claim-{number}"),
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: number,
+                        claim_id: format!("old-claim-{number}"),
+                        owner: "host/session".into(),
+                        heartbeat_at: "2026-08-01T00:00:00Z".into(),
+                        expires_at: "2026-08-01T00:30:00Z".into(),
+                        launched_work_id: None,
+                    },
+                )
+                .unwrap();
+        }
+        autonomous
+            .set_autonomous_mode_with_effect_revocation(false)
+            .unwrap();
+        for number in [42, 43, 44, 45, 46] {
+            assert_eq!(
+                autonomous.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+        }
 
         let mut stale = monitor.clone();
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
