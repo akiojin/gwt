@@ -10056,8 +10056,7 @@ impl IssueMonitorState {
             return Some(self.effect_authority_epoch);
         }
         let pending_claims = self.pending_claim_issue_numbers();
-        let next_epoch =
-            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        let next_epoch = self.advance_effect_authority_epoch()?;
 
         self.config.enabled = enabled;
         self.launch_auth_required = false;
@@ -10125,10 +10124,23 @@ impl IssueMonitorState {
         Some(next_epoch)
     }
 
-    /// Advance authority for a control that changes daemon decision state but
-    /// does not itself require a compensation rewrite.
+    /// Revoke pending effects and their pre-spawn eligibility together. Work
+    /// already handed to a launch or materializer keeps its lifecycle state.
     pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
-        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+        let pending_claims = self.pending_claim_issue_numbers();
+        let epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        for number in pending_claims {
+            if !self.active_launches.contains(&number)
+                && !self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == number)
+            {
+                self.clear_provisional_implementation(number);
+            }
+        }
+        Some(epoch)
     }
 
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
@@ -13845,8 +13857,7 @@ impl IssueMonitorState {
         if self.auto_close_merged_issues == value {
             return Some(self.effect_authority_epoch);
         }
-        let next_epoch =
-            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        let next_epoch = self.advance_effect_authority_epoch()?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
     }
@@ -14562,28 +14573,12 @@ impl IssueMonitorState {
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
         let previous_mode = self.autonomous_mode;
-        let pending_claims = self.pending_claim_issue_numbers();
-        let epoch = advance_autonomous_effect_authority(
-            &mut self.autonomous_mode,
-            &mut self.effect_authority_epoch,
-            &mut self.pending_effects,
-            enabled,
-        )?;
-        if previous_mode != enabled {
-            self.capture_legacy_update_drain_origin(previous_mode);
-            // The authority change cancels these acquisitions, not queued work
-            // or deliveries already handed to the materializer.
-            for number in pending_claims {
-                if !self.active_launches.contains(&number)
-                    && !self
-                        .pending_launch_deliveries
-                        .iter()
-                        .any(|delivery| delivery.issue_number == number)
-                {
-                    self.clear_provisional_implementation(number);
-                }
-            }
+        if previous_mode == enabled {
+            return Some(self.effect_authority_epoch);
         }
+        let epoch = self.advance_effect_authority_epoch()?;
+        self.autonomous_mode = enabled;
+        self.capture_legacy_update_drain_origin(previous_mode);
         Some(epoch)
     }
 
@@ -36145,10 +36140,22 @@ mod tests {
         assert_eq!(enabled.prefs(), enabled_before);
         assert_eq!(enabled.set_enabled_with_effect_revocation(false), None);
         assert_eq!(enabled.prefs(), enabled_before, "OFF overflow is atomic");
+        assert_eq!(enabled.advance_effect_authority_epoch(), None);
+        assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(
+            enabled.set_auto_close_merged_issues_with_effect_revocation(None),
+            Some(u64::MAX)
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(
+            enabled.set_auto_close_merged_issues_with_effect_revocation(Some(false)),
+            None
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
     }
 
     #[test]
-    fn autonomous_off_clears_cancelled_claim_phases_across_restart_and_rebase() {
+    fn authority_changes_clear_cancelled_claim_phases_across_restart_and_rebase() {
         let now = "2026-10-22T00:00:00Z";
         let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".into()],
@@ -36176,6 +36183,44 @@ mod tests {
         );
         let attempting = monitor.pending_effects()[1].clone();
         assert!(monitor.mark_pending_effect_attempting(&attempting.attempt_key()));
+        let mut auto_close = monitor.clone();
+        let mut authority = monitor.clone();
+        let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        auto_close
+            .set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        cold.set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        authority.advance_effect_authority_epoch().unwrap();
+        for cancelled in [auto_close, authority, cold] {
+            assert!(cancelled.autonomous_in_flight_issues().is_empty());
+            assert!(cancelled.terminal_queue_contains(42));
+            assert!(cancelled.terminal_queue_contains(43));
+            assert_eq!(cancelled.attempt_count(42), 1);
+            assert_eq!(cancelled.attempt_count(43), 1);
+            assert_eq!(
+                cancelled
+                    .pending_effects()
+                    .iter()
+                    .filter(|effect| matches!(
+                        effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim { .. }
+                    ))
+                    .count(),
+                1
+            );
+            let mut stale = monitor.clone();
+            stale.rebase_daemon_driver_prefs(&cancelled.prefs());
+            assert!(stale.autonomous_in_flight_issues().is_empty());
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), cancelled.prefs());
+            assert!(restored.autonomous_in_flight_issues().is_empty());
+            scan_issue_monitor_candidates(&mut restored, &candidates, now);
+            assert_eq!(
+                restored.prepare_autonomous_candidate(&candidates[0], &protection, now),
+                EligibilityDecision::Eligible
+            );
+            assert_eq!(restored.attempt_count(42), 1);
+        }
         let mut stale = monitor.clone();
         let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
 
@@ -38285,14 +38330,22 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut auto_close = autonomous.clone();
+        auto_close
+            .set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        let mut authority = autonomous.clone();
+        authority.advance_effect_authority_epoch().unwrap();
         autonomous
             .set_autonomous_mode_with_effect_revocation(false)
             .unwrap();
-        for number in [42, 43, 44, 45, 46] {
-            assert_eq!(
-                autonomous.autonomous_record(number).unwrap().phase,
-                AutonomousPhase::Implementing
-            );
+        for controlled in [autonomous, auto_close, authority] {
+            for number in [42, 43, 44, 45, 46] {
+                assert_eq!(
+                    controlled.autonomous_record(number).unwrap().phase,
+                    AutonomousPhase::Implementing
+                );
+            }
         }
 
         let mut stale = monitor.clone();
