@@ -583,6 +583,14 @@ an empty saved queue, `null` is rejected, and omitting the guard keeps existing
 behavior. This compares queue order values, without tracking intervening history,
 urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
+Before changing refill settings, read `saved_config` and `config_token` from
+`issue.monitor.status` and pass that token as `expected_config_token`. The saved
+observation includes `terminal_queue_auto_refill` and `terminal_queue_auto_refill_limit`.
+A mismatch rejects the update without changing preferences; read status again and
+reconsider. A successful reply includes the saved observation and new token for
+readback. Omission retains existing behavior; `null`, empty strings and other types
+are rejected. This value comparison does not track intervening history or protect
+other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
