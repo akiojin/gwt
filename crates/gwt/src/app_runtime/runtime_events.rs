@@ -1607,6 +1607,7 @@ impl AppRuntime {
                 issue_monitor_project_root.clone(),
                 false,
                 None,
+                None,
             );
             let _ = self.persist();
             let mut events = Vec::new();

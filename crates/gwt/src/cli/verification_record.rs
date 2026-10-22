@@ -6073,6 +6073,7 @@ fn snapshot_verification_caller_authority_with_session_loader(
     session_id: &str,
     load_session: impl FnOnce() -> io::Result<gwt_agent::Session>,
 ) -> io::Result<VerificationCallerAuthority> {
+    verify_runtime_not_revoked(worktree, session_id)?;
     let Some(execution) =
         execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
     else {
@@ -6172,6 +6173,86 @@ fn snapshot_verification_caller_authority_with_session_loader(
         execution_binding: Some(current_binding),
         session_binding: Some(session_binding),
     })
+}
+
+/// A stopped runtime cannot borrow a resumed Session's sidecar to regain a slot.
+/// Requests remain scoped to the captured process incarnation, not the ECR.
+fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<()> {
+    let denied = || {
+        io::Error::new(
+            ErrorKind::PermissionDenied,
+            concat!(
+                "verify.* requires current verification authority; this runtime was revoked ",
+                "or its runtime proof is unavailable. Resume the owning Session to create ",
+                "a new runtime incarnation, then retry",
+            ),
+        )
+    };
+    let prefs =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(worktree))
+            .map_err(|_| {
+            io::Error::new(
+                ErrorKind::PermissionDenied,
+                concat!(
+                    "verify.* requires current verification authority; Monitor runtime ",
+                    "stop state is unavailable. Inspect issue.monitor.status and restore ",
+                    "that state before retrying",
+                ),
+            )
+        })?;
+    let requests = prefs
+        .monitor_runtime_stop_requests
+        .iter()
+        .filter(|request| request.session_id == session_id)
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(());
+    }
+    gwt_agent::validate_session_id_path_component(session_id).map_err(|_| denied())?;
+    let path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(denied)?;
+    let host_pid = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(denied)?;
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let expected = gwt_agent::runtime_state_path_for_pid(&sessions_dir, host_pid, session_id);
+    if dunce::canonicalize(&path).map_err(|_| denied())?
+        != dunce::canonicalize(expected).map_err(|_| denied())?
+    {
+        return Err(denied());
+    }
+    let runtime = gwt_agent::SessionRuntimeState::load(&path).map_err(|_| denied())?;
+    let session = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+        .map_err(|_| denied())?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let child_pid = runtime
+        .child_pid
+        .filter(|pid| *pid > 0)
+        .ok_or_else(denied)?;
+    if runtime.execution_identity.as_ref() != Some(&identity)
+        || runtime
+            .runtime_incarnation
+            .is_none_or(|incarnation| incarnation == 0)
+        || runtime.host_started_at.is_none()
+        || runtime.host_started_at != crate::process::host_process_start_time(host_pid)
+        || runtime.child_started_at.is_none()
+        || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
+        || (child_pid != std::process::id()
+            && !crate::process::is_descendant_of(std::process::id(), child_pid))
+        || requests
+            .iter()
+            .any(|request| request.matches_runtime(session_id, host_pid, &runtime))
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 fn revalidate_verification_caller_authority(
@@ -13120,6 +13201,87 @@ fn default_integration_test_builds_a_guarded_binary() {
                 "authority loss must explain verification unavailability and recovery: {probe:?}"
             );
         }
+    }
+
+    #[test]
+    fn revoked_monitor_runtime_cannot_verify_but_a_new_incarnation_can_recover() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-revoked-monitor-runtime";
+        let binding = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, binding, 1);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            17,
+            started,
+            pid,
+            started,
+        );
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, pid, session_id);
+        runtime.save(&path).unwrap();
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &path);
+        assert!(snapshot_verification_caller_authority(dir.path(), session_id).is_ok());
+
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["monitor_runtime_stop_requests"] = serde_json::json!([{
+            "issue_number": generation_scoped_owner().number,
+            "window_id": "gone-window", "session_id": session_id,
+            "execution_identity": identity, "host_pid": pid, "host_started_at": started,
+            "runtime_incarnation": 17, "child_pid": pid, "child_started_at": started,
+            "requested_at": Utc::now().to_rfc3339(),
+        }]);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(dir.path()),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .unwrap();
+        let before = verification_artifact_bytes(dir.path());
+        let error = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Run {
+                commands: vec!["git --version".into()],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .expect_err("revoked runtime must be rejected before lease admission or dispatch");
+        assert!(error.to_string().contains("runtime"));
+        assert!(error.to_string().contains("incarnation"));
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+        assert_eq!(
+            execution_state::load(dir.path()).unwrap().unwrap().status,
+            execution_state::ExecutionControlStatus::Active,
+            "runtime revocation must preserve the ECR recovery contract",
+        );
+
+        runtime.runtime_incarnation = Some(18);
+        runtime.save(&path).unwrap();
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_ok(),
+            "an explicit resume to a new incarnation needs no full-matrix recovery"
+        );
+        let _missing_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "a revoked Session cannot omit runtime evidence to regain admission"
+        );
     }
 
     #[test]

@@ -102,13 +102,8 @@ impl Drop for CloseHandoffReservation {
 
 /// Stop and reap one captured PTY; never targets a successor resolved by name.
 pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> {
-    if pty
-        .try_wait()
-        .map_err(|error| std::io::Error::other(error.to_string()))?
-        .is_some()
-    {
-        return Ok(true);
-    }
+    // The leader may already be reaped while descendants still hold the PTY.
+    // Always terminate the captured group/Job before declaring teardown done.
     tracing::info!(
         target: "gwt.pane.teardown",
         window_id = %window_id,
@@ -117,18 +112,21 @@ pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> 
         "starting detached PTY teardown stage"
     );
     let kill_started = Instant::now();
-    let kill_result = pty.kill();
+    let kill_result = pty.terminate_and_wait_for_tree(Duration::from_secs(2));
+    let tree_exited = matches!(&kill_result, Ok(true));
     let kill_elapsed_ms = u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
         target: "gwt.pane.teardown",
         window_id = %window_id,
         stage = "pty_kill",
         elapsed_ms = kill_elapsed_ms,
-        ok = kill_result.is_ok(),
-        outcome = if kill_result.is_ok() { "completed" } else { "failed" },
+        ok = tree_exited,
+        outcome = if tree_exited { "completed" } else { "failed" },
         "detached PTY teardown stage completed"
     );
-    kill_result.map_err(|error| std::io::Error::other(error.to_string()))?;
+    if !kill_result.map_err(|error| std::io::Error::other(error.to_string()))? {
+        return Ok(false);
+    }
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if pty
@@ -439,6 +437,91 @@ mod tests {
     use gwt_terminal::Pane;
 
     use super::{finalize_legacy_session, kill_and_reap};
+
+    #[test]
+    fn close_terminates_descendants_after_the_pty_leader_exits() {
+        let temp = tempfile::tempdir().unwrap();
+        let child_file = temp.path().join("child.pid");
+        let (command, args) = if cfg!(windows) {
+            (
+                "powershell",
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$child = Start-Process ping -ArgumentList '-n','61','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $env:GWT_TEST_CHILD_PID -Value $child.Id",
+                ],
+            )
+        } else {
+            (
+                "/bin/sh",
+                vec![
+                    "-c",
+                    "trap '' HUP; sleep 60 & printf '%s' \"$!\" > \"$GWT_TEST_CHILD_PID\"",
+                ],
+            )
+        };
+        let pane = Pane::new(
+            "close-descendants".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            HashMap::from([(
+                "GWT_TEST_CHILD_PID".into(),
+                child_file.display().to_string(),
+            )]),
+            Some(temp.path().to_owned()),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        pane.pty().write_input(b"\x1b[1;1R").unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bound actual OS child startup and leader exit; a virtual clock cannot observe them.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let child_pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&child_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Bound the external child's PID publication, not a scheduling-order assertion.
+                std::time::Instant::now() < deadline,
+                "child PID not published"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        while pane.pty().try_wait().unwrap().is_none() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Observe the real PTY leader exit before exercising descendant cleanup.
+                std::time::Instant::now() < deadline,
+                "PTY leader did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let descendant_alive = || {
+            let mut system = sysinfo::System::new();
+            let pid = sysinfo::Pid::from_u32(child_pid);
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            system
+                .process(pid)
+                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        };
+        assert!(descendant_alive());
+        assert!(kill_and_reap(pane.pty(), "close-descendants").unwrap());
+        let descendant_survived = descendant_alive();
+        // Drop still owns the group/Job and cleans up even when the assertion fails.
+        drop(pane);
+        assert!(
+            !descendant_survived,
+            "close left descendant {child_pid} running"
+        );
+    }
 
     #[test]
     fn close_reaps_child_and_finalizes_only_the_captured_session_without_gui() {

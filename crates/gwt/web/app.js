@@ -5004,6 +5004,18 @@ import { createUiStateStore } from "/ui-state-store.js";
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
+        // Repeated launch attempts update one Issue notice until it is dismissed.
+        if (event.level === "info" && !event.notification_transition
+          && event.message === "Issue Monitor launch requested"
+          && Number.isInteger(event.issue_number) && event.issue_number > 0) {
+          notificationCenter.recordSurfaceNotice({
+            key: `issue-monitor:launch-requested:${event.issue_number}`,
+            level: event.level,
+            title: `Issue Monitor #${event.issue_number}`,
+            message: event.message,
+          });
+          return;
+        }
         const monitorNotice = notificationForTransition({
           source: "monitor",
           state: event?.notification_transition,

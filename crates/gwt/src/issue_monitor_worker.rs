@@ -2456,6 +2456,7 @@ pub fn reconcile_issue_monitor_merges(
     let untracked = monitor.untracked_merged_branch_candidates(&merged_branches);
     // SPEC #4093 FR-005: one bulk read for every nominated candidate.
     let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter());
+    let mut batch_failure_recorded = false;
     for issue in untracked {
         let issue_number = issue.number;
         // A probe failure keeps the issue launchable, matching the claim-path
@@ -2472,11 +2473,11 @@ pub fn reconcile_issue_monitor_merges(
             }
             Ok(false) => {}
             Err(error) => {
-                record_scan_failure_ledger(
+                record_untracked_completion_failure(
                     repo_path,
-                    error.stage.as_str(),
-                    &error.to_string(),
-                    Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                    &error,
+                    &batch,
+                    &mut batch_failure_recorded,
                 );
                 tracing::warn!(
                     issue = issue_number,
@@ -2487,6 +2488,27 @@ pub fn reconcile_issue_monitor_merges(
         }
     }
     Ok(IssueMonitorMergeReconciliation { merged, deliveries })
+}
+
+/// Record a failed bulk operation once; independent probes retain their events.
+fn record_untracked_completion_failure(
+    repo_path: &Path,
+    error: &IssueMonitorScanFailure,
+    batch: &LinkedPrProbeBatch,
+    batch_failure_recorded: &mut bool,
+) {
+    if batch.failure().is_some() {
+        if *batch_failure_recorded {
+            return;
+        }
+        *batch_failure_recorded = true;
+    }
+    record_scan_failure_ledger(
+        repo_path,
+        error.stage.as_str(),
+        &error.to_string(),
+        Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+    );
 }
 
 /// Result of one merged-branch reconciliation: the Issues whose slots were
@@ -3581,6 +3603,32 @@ fn has_supported_github_remote_prefix(remote_url: &str) -> bool {
 #[cfg(test)]
 mod linked_pr_batch_tests {
     use super::*;
+
+    #[test]
+    fn issue_3924_completion_batch_failure_is_recorded_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], |_| {
+            Err(std::io::Error::other("bulk completion read failed"))
+        });
+        let error = IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::ClaimCompletionReadback,
+            "bulk completion read failed",
+        );
+        let mut recorded = false;
+        for _ in 0..2 {
+            record_untracked_completion_failure(temp.path(), &error, &batch, &mut recorded);
+        }
+        for _ in 0..2 {
+            record_untracked_completion_failure(
+                temp.path(),
+                &error,
+                &LinkedPrProbeBatch::default(),
+                &mut recorded,
+            );
+        }
+        assert_eq!(gwt_core::error_ledger::list_since(None).unwrap().len(), 3);
+    }
 
     fn spec_issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {

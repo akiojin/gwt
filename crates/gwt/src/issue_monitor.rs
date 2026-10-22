@@ -991,6 +991,10 @@ pub struct IssueMonitorPrefs {
     pub allowed_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    /// Exact runtime revocations remain as fences after the captured child exits.
+    /// Resuming the Session produces a new incarnation, which is not revoked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     /// Exact completed holders retired after a full runtime absence observation.
     /// Fresh canvas snapshots must not turn their retained diagnostic panes into slots.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1249,6 +1253,38 @@ pub struct IssueMonitorRuntimeCounts {
     pub observed_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorRuntimeStopRequest {
+    pub issue_number: u64,
+    pub window_id: String,
+    pub session_id: String,
+    pub execution_identity: gwt_agent::SessionExecutionIdentity,
+    pub host_pid: u32,
+    pub host_started_at: u64,
+    pub runtime_incarnation: u64,
+    pub child_pid: u32,
+    pub child_started_at: u64,
+    pub requested_at: String,
+}
+
+impl IssueMonitorRuntimeStopRequest {
+    pub fn matches_runtime(
+        &self,
+        session_id: &str,
+        host_pid: u32,
+        runtime: &gwt_agent::SessionRuntimeState,
+    ) -> bool {
+        self.session_id == session_id
+            && self.execution_identity.session_id == session_id
+            && self.host_pid == host_pid
+            && runtime.execution_identity.as_ref() == Some(&self.execution_identity)
+            && runtime.host_started_at == Some(self.host_started_at)
+            && runtime.runtime_incarnation == Some(self.runtime_incarnation)
+            && runtime.child_pid == Some(self.child_pid)
+            && runtime.child_started_at == Some(self.child_started_at)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorTerminalQueueEntry {
     pub number: u64,
@@ -1284,6 +1320,7 @@ impl Default for IssueMonitorPrefs {
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
@@ -4873,6 +4910,8 @@ pub struct IssueMonitorState {
     active_launches: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -7674,6 +7713,7 @@ impl IssueMonitorState {
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             process_held_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
@@ -7769,6 +7809,7 @@ impl IssueMonitorState {
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
+        state.monitor_runtime_stop_requests = prefs.monitor_runtime_stop_requests;
         state.retired_completed_sessions = prefs.retired_completed_sessions;
         state.terminal_queues = prefs.terminal_queues;
         state.urgent_queue = prefs.urgent_queue;
@@ -7941,6 +7982,7 @@ impl IssueMonitorState {
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
+            monitor_runtime_stop_requests: self.monitor_runtime_stop_requests.clone(),
             retired_completed_sessions: self.retired_completed_sessions.clone(),
             terminal_queues: self.terminal_queues.clone(),
             urgent_queue: self.urgent_queue.clone(),
@@ -10566,6 +10608,16 @@ impl IssueMonitorState {
             .then_some(self.config.max_active.max(1))
     }
 
+    /// Explicit policy identity, independent of changing machine measurements.
+    pub(crate) fn max_active_agents_policy(
+        &self,
+    ) -> (Option<usize>, Option<IssueMonitorMaxActiveChange>) {
+        (
+            self.max_active_agents_override(),
+            self.max_active_last_change.clone(),
+        )
+    }
+
     pub fn effective_max_active_agents(&self) -> usize {
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
@@ -10692,16 +10744,10 @@ impl IssueMonitorState {
 
     /// Restore durable diagnostics without replacing a local scan's timestamp.
     pub(crate) fn restore_persisted_scan_diagnostics(&mut self, prefs: &IssueMonitorPrefs) {
-        if self
-            .last_scan_error
-            .as_ref()
-            .is_some_and(|error| self.last_error.as_deref() == Some(error.message.as_str()))
-        {
-            self.last_error = None;
-        }
         self.last_scan_error = prefs.last_scan_error.clone();
     }
 
+    /// Replace the prior transient fault with a structured scan failure.
     pub(crate) fn record_scan_failure(
         &mut self,
         now: impl Into<String>,
@@ -10713,7 +10759,9 @@ impl IssueMonitorState {
             phase: phase.into(),
             recorded_at: now.into(),
         };
-        self.record_scan_error(error.recorded_at.clone(), error.message.clone());
+        self.last_scan_at = Some(error.recorded_at.clone());
+        self.last_error = None;
+        self.launch_auth_required = false;
         self.last_scan_error = Some(error);
     }
 
@@ -11996,6 +12044,11 @@ impl IssueMonitorState {
             .collect::<Vec<_>>();
         self.retired_completed_sessions
             .extend(disk.retired_completed_sessions.iter().cloned());
+        for request in &disk.monitor_runtime_stop_requests {
+            if !self.monitor_runtime_stop_requests.contains(request) {
+                self.monitor_runtime_stop_requests.push(request.clone());
+            }
+        }
         if let Some(snapshot) = &mut self.window_snapshot {
             for pane in &mut snapshot.windows {
                 if !pane.review_dispatch
@@ -13487,53 +13540,59 @@ impl IssueMonitorState {
         }
     }
 
-    fn status_view_with_quota_hold(
-        &self,
-        now: &str,
-        quota_hold: Option<IssueMonitorProviderQuotaHold>,
-    ) -> IssueMonitorStatusView {
+    /// Historical Issue banners do not represent a current monitor fault.
+    fn current_monitor_error(&self) -> Option<&String> {
+        self.last_error.as_ref().filter(|message| {
+            !self.is_stop_only_error_banner(message)
+                && !self
+                    .failed_issues
+                    .iter()
+                    .any(|(number, reason)| *message == &format!("issue #{number}: {reason}"))
+        })
+    }
+
+    /// Keep provenance attached to the selected value, even for equal text.
+    fn selected_status_error(&self) -> Option<(String, &'static str)> {
         // A blocked authority lane must remain diagnosable after later scans.
         // Issue #3883 AC-2: a durable-state reset outranks a per-issue failure
         // banner. It is the one condition where the rest of this view is
         // describing state that was destroyed rather than state that happened,
         // so a reader must see it before drawing any conclusion from the queue.
-        let current_error =
-            self.last_error
-                .as_ref()
-                .filter(|message| {
-                    !self.is_stop_only_error_banner(message)
-                        && !self.failed_issues.iter().any(|(number, reason)| {
-                            *message == &format!("issue #{number}: {reason}")
-                        })
-                })
-                .cloned();
-        let last_error = self.scan_recovery_error.clone().or_else(|| self
+        self.scan_recovery_error.clone().map(|message| (message, "monitor")).or_else(|| self
             .last_prefs_reset
             .as_ref()
             .map(|reset| {
-                format!(
+                (format!(
                     "Issue Monitor preferences were reset after unreadable state at {at}: launches, \
                      autonomous mode, and enabled were lost. Quarantined bytes: {quarantine} ({reason})",
                     at = reset.at,
                     quarantine = reset.quarantine_path,
                     reason = reset.reason,
-                )
+                ), "monitor")
             })
-            .or_else(|| current_error.clone())
-            .or_else(|| self.last_scan_error.as_ref().map(|error| error.message.clone()))
+            .or_else(|| self.current_monitor_error().cloned().map(|message| (message, "monitor")))
+            .or_else(|| self.last_scan_error.as_ref().map(|error| (error.message.clone(), "scan_failure")))
             .or_else(|| {
                 self.last_error
                     .as_ref()
                     .filter(|message| !self.is_stop_only_error_banner(message))
-                    .cloned()
+                    .cloned().map(|message| (message, "failed_issues"))
             })
-            .or_else(|| self.first_failed_issue_banner()));
+            .or_else(|| self.first_failed_issue_banner().map(|message| (message, "failed_issues"))))
+    }
+
+    fn status_view_with_quota_hold(
+        &self,
+        now: &str,
+        quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    ) -> IssueMonitorStatusView {
+        let last_error = self.selected_status_error().map(|(message, _)| message);
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
         // only a current monitor fault makes the whole monitor read as Error.
         let has_current_error = self.scan_recovery_error.is_some()
             || self.last_prefs_reset.is_some()
             || (!self.launch_auth_required
-                && (self.last_scan_error.is_some() || current_error.is_some()));
+                && (self.last_scan_error.is_some() || self.current_monitor_error().is_some()));
         let host = crate::process::current_hostname();
         let local_entries = self.terminal_queues.get(&host).map(|queue| {
             queue
@@ -14094,24 +14153,9 @@ impl IssueMonitorState {
                     }
                 }),
             closure_held: self.closure_held.iter().copied().collect(),
-            last_error_source: status.last_error.as_ref().map(|message| {
-                if self
-                    .last_scan_error
-                    .as_ref()
-                    .is_some_and(|error| &error.message == message)
-                {
-                    "scan_failure"
-                } else if self
-                    .failed_issues
-                    .iter()
-                    .any(|(number, reason)| message == &format!("issue #{number}: {reason}"))
-                {
-                    "failed_issues"
-                } else {
-                    "monitor"
-                }
-                .to_string()
-            }),
+            last_error_source: self
+                .selected_status_error()
+                .map(|(_, source)| source.to_string()),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             last_scan_error: self.last_scan_error.clone(),
@@ -22152,6 +22196,24 @@ impl IssueMonitorState {
         let mut previous = previous.prefs();
         current.last_control_receipt = None;
         previous.last_control_receipt = None;
+        // Auto's numeric mirror is an observation. The driver keeps the latest
+        // measurement and bounds new claims again after the durable rebase.
+        // Mode and explicit policy provenance still invalidate the scan.
+        if current.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+            && previous.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+        {
+            current.max_active_agents = 0;
+            previous.max_active_agents = 0;
+        }
+        // Census timestamps order writes; presence has no timestamp-based TTL.
+        // Preserve all host identities, counts, windows and empty tombstones.
+        for observation in current
+            .monitor_runtime_counts
+            .values_mut()
+            .chain(previous.monitor_runtime_counts.values_mut())
+        {
+            observation.observed_at.clear();
+        }
         for record in current
             .autonomous_records
             .iter_mut()
@@ -32531,13 +32593,18 @@ mod tests {
         assert!(driver.prefs().last_scan_error.is_none());
 
         driver.record_scan_failure("2026-10-22T00:00:02Z", "candidate-load", "scan failed");
-        driver.record_control_commit_error("current control fault");
+        driver.record_control_commit_error("scan failed");
         assert_eq!(
             driver.status_view().last_error.as_deref(),
-            Some("current control fault")
+            Some("scan failed")
         );
         let status = serde_json::to_value(driver.agent_status()).unwrap();
         assert_eq!(status["last_error_source"], "monitor");
+        driver.rebase_gui_observer_prefs(&driver.prefs());
+        assert_eq!(
+            serde_json::to_value(driver.agent_status()).unwrap()["last_error_source"],
+            "monitor"
+        );
         driver.config.enabled = true;
         driver.record_launch_auth_required("2026-10-22T00:00:03Z");
         assert_eq!(driver.status_view().state, "auth_required");
@@ -42054,6 +42121,7 @@ mod tests {
                 child_started_at: 1,
                 started_at: "2026-06-29T00:00:00Z".to_string(),
                 launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+                launch_entrypoint: None,
                 restore_source_session_id: None,
             }],
             ..Default::default()
@@ -42369,6 +42437,38 @@ mod tests {
             row.last_activity_at.as_deref(),
             Some("2026-06-29T01:00:00Z")
         );
+    }
+
+    #[test]
+    fn issue_5644_census_refresh_is_compatible_only_while_contents_are_unchanged() {
+        let now = "2026-10-22T00:01:00Z";
+        let mut previous = IssueMonitorState::new(IssueMonitorConfig::default());
+        previous.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("pane".into(), 42)]),
+            "2026-10-22T00:00:00Z",
+        );
+        let mut refreshed = previous.clone();
+        refreshed.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("pane".into(), 42)]),
+            now,
+        );
+        assert!(refreshed.scan_observations_compatible_with(&previous, now));
+        refreshed.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("successor".into(), 42)]),
+            "2026-10-22T00:02:00Z",
+        );
+        assert!(!refreshed.scan_observations_compatible_with(&previous, now));
+        refreshed.record_monitor_runtime_counts(101, 1001, BTreeMap::new(), "2026-10-22T00:03:00Z");
+        assert!(!refreshed.scan_observations_compatible_with(&previous, now));
     }
 
     #[test]

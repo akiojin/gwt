@@ -102,6 +102,7 @@ mod tests {
                 child_started_at: 3,
                 started_at: String::new(),
                 launch_origin: Default::default(),
+                launch_entrypoint: None,
                 restore_source_session_id: None,
             },
             project_root: PathBuf::from(project),

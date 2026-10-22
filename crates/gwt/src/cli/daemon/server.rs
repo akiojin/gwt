@@ -637,6 +637,8 @@ struct IssueMonitorWorkerTestHooks {
     #[cfg(test)]
     effect_override: Option<Arc<IssueMonitorEffectOverride>>,
     #[cfg(test)]
+    capacity_override: Option<Arc<IssueMonitorCapacityOverride>>,
+    #[cfg(test)]
     hold_effects: bool,
     #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
@@ -659,6 +661,9 @@ type IssueMonitorScanOverride = dyn Fn(
 #[cfg(test)]
 type IssueMonitorEffectOverride =
     dyn Fn(&crate::PendingIssueMonitorEffect, &str) -> IssueMonitorEffectOutcome + Send + Sync;
+
+#[cfg(test)]
+type IssueMonitorCapacityOverride = dyn Fn(&mut crate::IssueMonitorState) + Send + Sync;
 
 #[cfg(all(test, unix))]
 #[derive(Default)]
@@ -1098,9 +1103,13 @@ fn spawn_issue_monitor_worker_with_lease(
                                     );
                                     break;
                                 };
-                                let previous_limit = monitor.effective_max_active_agents();
+                                let previous_policy = monitor.max_active_agents_policy();
                                 monitor.refresh_agent_capacity(&scope.project_root);
-                                let capacity_changed = previous_limit != monitor.effective_max_active_agents();
+                                #[cfg(test)]
+                                if let Some(refresh) = &test_hooks.capacity_override {
+                                    refresh(&mut monitor);
+                                }
+                                let capacity_policy_changed = previous_policy != monitor.max_active_agents_policy();
                                 let observation_baseline = observation_kind.map(|_| monitor.clone());
                                 let completed_delivery_stage = match &control {
                                     IssueMonitorControl::LaunchDeliveryMaterialized {
@@ -1156,10 +1165,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                     project_root = %scope.project_root.display(),
                                     control = observation_kind.unwrap_or("state-control"),
                                     captured_revision = revision,
-                                    invalidates_scan = !launch_authority_unchanged || capacity_changed,
+                                    invalidates_scan = !launch_authority_unchanged || capacity_policy_changed,
+                                    capacity_policy_changed,
                                     "Issue Monitor control scan fence"
                                 );
-                                if !launch_authority_unchanged || capacity_changed {
+                                if !launch_authority_unchanged || capacity_policy_changed {
                                     revision = next_revision;
                                 }
                                 if pending_authority_controls
@@ -1646,10 +1656,20 @@ fn spawn_issue_monitor_worker_with_lease(
                 }
                 _ = capacity_interval.tick() => {
                     let previous_limit = monitor.effective_max_active_agents();
+                    let previous_policy = monitor.max_active_agents_policy();
                     monitor.refresh_agent_capacity(&scope.project_root);
-                    if previous_limit != monitor.effective_max_active_agents() {
+                    #[cfg(test)]
+                    if let Some(refresh) = &test_hooks.capacity_override {
+                        refresh(&mut monitor);
+                    }
+                    // A measurement must not repeatedly discard a full scan.
+                    // New claims are bounded by the latest capacity at commit.
+                    // Shared explicit settings retain their revision fence.
+                    if previous_policy != monitor.max_active_agents_policy() {
                         let Some(next_revision) = revision.checked_add(1) else { break; };
                         revision = next_revision;
+                        scan_requested = true;
+                    } else if previous_limit != monitor.effective_max_active_agents() {
                         scan_requested = true;
                     }
                     publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -5404,6 +5424,15 @@ fn commit_issue_monitor_scan_if_current(
                     .iter()
                     .any(|pending| pending.effect_id == effect.effect_id)
                 {
+                    if let crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } =
+                        &effect.payload
+                    {
+                        let (available, candidates) =
+                            scanned.claim_probe_plan(scanned.effective_max_active_agents());
+                        if available == 0 || !candidates.contains(issue_number) {
+                            continue;
+                        }
+                    }
                     let _ = scanned.prepare_effect(effect);
                 }
             }

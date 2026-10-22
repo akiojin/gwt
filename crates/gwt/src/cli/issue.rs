@@ -681,16 +681,17 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) -> serde_json::Value {
-    let escalated = match gwt_core::coordination::load_escalation_store(project_root) {
-        Ok(store) => store.open_owner_issue_numbers(),
+    let escalation_store = match gwt_core::coordination::load_escalation_store(project_root) {
+        Ok(store) => store,
         Err(error) => {
             tracing::warn!(
                 %error,
                 "could not read the Board escalation index for issue.monitor.status"
             );
-            Vec::new()
+            Default::default()
         }
     };
+    let escalated = escalation_store.open_owner_issue_numbers();
     let cache =
         Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root));
     let projected_issue_numbers = status
@@ -783,9 +784,24 @@ pub(crate) fn merge_board_escalations_into_needs_human(
         }
     }
     status.needs_human.sort_unstable();
+    // Issue #4363: an unbound window has no runtime inbox row carrying its
+    // reason. Keep the Board request visible without changing runtime state.
+    let mut board_escalation_details = Vec::new();
+    for escalation in escalation_store.open() {
+        for number in escalation.owner_issue_numbers() {
+            if board_escalations.contains(&number) {
+                board_escalation_details.push(serde_json::json!({
+                    "issue_number": number,
+                    "entry_id": escalation.entry_id,
+                    "error_message": escalation.body,
+                }));
+            }
+        }
+    }
     serde_json::json!({
         "monitor": monitor_needs_human,
         "board_escalations": board_escalations,
+        "board_escalation_details": board_escalation_details,
         "runtime_fields": ["inbox", "active_launches"],
         "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Clear Monitor handoffs with issue.monitor.requeue. Do not requeue an active launch to clear a Board request; resolve its escalation with board.post and params.resolves naming the blocked entry.",
     })
@@ -894,6 +910,8 @@ fn run_monitor_status<E: CliEnv>(
     ))
     .map_err(io_as_api_error)?;
     output["priority_order"] = serde_json::json!(prefs.priority_order);
+    output["monitor_runtime_stop_requests"] =
+        serde_json::json!(prefs.monitor_runtime_stop_requests);
     output["config_token"] = serde_json::json!(prefs.config_token());
     output["saved_config"] = prefs.config_observation();
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
@@ -2228,6 +2246,17 @@ fn run_monitor_launch_now<E: CliEnv>(
         || vec!["monitor_status_unavailable: admission has not been observed".to_string()],
         |status| monitor_admission_exclusions(status, &prefs, number),
     );
+    // The published scan may predate this operation's settings. The prefs
+    // transaction above is authoritative for enabled and pool/Auto bootstrap.
+    admission_exclusions
+        .retain(|reason| !matches!(reason.as_str(), "monitor_disabled" | "no_launch_profile"));
+    if !prefs.enabled {
+        admission_exclusions.push("monitor_disabled".to_string());
+    }
+    if !crate::IssueMonitorState::with_prefs(Default::default(), prefs.clone()).has_launch_profile()
+    {
+        admission_exclusions.push("no_launch_profile".to_string());
+    }
     if admission_hold.is_some()
         && !admission_exclusions
             .iter()
@@ -2238,6 +2267,19 @@ fn run_monitor_launch_now<E: CliEnv>(
     if !github_backoff.is_empty() {
         admission_exclusions.push("github_refusal_window".to_string());
     }
+    // Membership and first-scan observations can still be converging after
+    // enqueue. Only known admission blockers make an accepted scan fail.
+    let admission_blocked = admission_exclusions.iter().any(|reason| {
+        matches!(
+            reason.as_str(),
+            "monitor_disabled"
+                | "no_launch_profile"
+                | "gui_disconnected"
+                | "github_auth_required"
+                | "max_active_saturated"
+                | "github_refusal_window"
+        )
+    });
 
     out.push_str(
         &serde_json::json!({
@@ -2265,7 +2307,11 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(
-        if delivery.scan_requested && admission_hold.is_none() && admission_error.is_none() {
+        if delivery.scan_requested
+            && admission_hold.is_none()
+            && admission_error.is_none()
+            && !admission_blocked
+        {
             0
         } else {
             1
@@ -2328,8 +2374,14 @@ fn monitor_admission_exclusions(
     let occupied = status
         .occupied_slot_count
         .unwrap_or(status.active_launches.len() + status.review_windows.len());
-    if occupied.saturating_add(status.pending_claim_issues.as_ref().map_or(0, Vec::len))
-        >= status.max_active
+    let target_reserved = status.active_launches.contains(&number)
+        || status
+            .pending_claim_issues
+            .as_ref()
+            .is_some_and(|pending| pending.contains(&number));
+    if !target_reserved
+        && occupied.saturating_add(status.pending_claim_issues.as_ref().map_or(0, Vec::len))
+            >= status.max_active
     {
         add("max_active_saturated");
     }
@@ -2945,12 +2997,10 @@ fn issues_held_by_provider(
 /// evaluated the identity, so a scan running concurrently cannot observe a
 /// half-applied stop.
 ///
-/// This operation does not tear the pane down, and deliberately so. Once the
-/// launch is revoked and held, `pane.close` on the returned window is inert —
-/// [`crate::IssueMonitorState::requeue_window_at`] finds no launch to requeue
-/// and the issue is terminal — so the safe teardown the PM already has under
-/// FR-066 composes with this stop instead of needing a second, redundant
-/// daemon→GUI channel that could disagree with it.
+/// A live exact runtime is revoked in the same transaction. Its owning host
+/// stops the captured PTY through the existing runtime worker, including after
+/// the pane has disappeared. The execution generation remains Active so an
+/// explicit Session resume can continue through a new runtime incarnation.
 ///
 /// Issue #4200: the launch row is only one of the two holds a launch takes on
 /// an Issue. The other is its execution generation. Revoking queue intent does
@@ -2981,7 +3031,7 @@ fn run_monitor_stop<E: CliEnv>(
             .launch_identity(number);
     let caller_session =
         crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
-    let (target_session, mut board_warning) = if caller_session.is_some() {
+    let (target_session, mut board_warning) = if observed_identity.active {
         match monitor_target_session(
             &project_root,
             number,
@@ -3034,29 +3084,53 @@ fn run_monitor_stop<E: CliEnv>(
         tracing::warn!(%warning, "Monitor stop Board observation failed open");
     }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (_, (outcome, identity)) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        // Issue #3992 AC-3: read before mutating, so a refusal reports the
-        // identity it disagreed with rather than one a later write changed.
-        let identity = monitor.launch_identity(number);
-        let outcome = monitor.stop_only_with_settlement(
-            &target,
-            reason,
-            &now,
-            monitor_execution_settlement(&project_root, number),
-        );
-        if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
-            if remove_from_queue {
-                monitor.terminal_queue_remove(&[number], &now);
+    let (_, (outcome, identity, runtime_stop_request)) =
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            // Issue #3992 AC-3: read before mutating, so a refusal reports the
+            // identity it disagreed with rather than one a later write changed.
+            let identity = monitor.launch_identity(number);
+            let outcome = monitor.stop_only_with_settlement(
+                &target,
+                reason,
+                &now,
+                monitor_execution_settlement(&project_root, number),
+            );
+            let mut runtime_stop_request = None;
+            if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+                if identity.active {
+                    runtime_stop_request = crate::monitor_duplicate_runtime::capture_stop_request(
+                        &project_root,
+                        number,
+                        identity.window_id.as_deref().unwrap_or_default(),
+                        target_session.as_deref(),
+                        &now,
+                    )?;
+                }
+                if remove_from_queue {
+                    monitor.terminal_queue_remove(&[number], &now);
+                }
+                *prefs = monitor.prefs();
+                if let Some(request) = &runtime_stop_request {
+                    if !prefs.monitor_runtime_stop_requests.iter().any(|existing| {
+                        existing.session_id == request.session_id
+                            && existing.execution_identity == request.execution_identity
+                            && existing.host_pid == request.host_pid
+                            && existing.host_started_at == request.host_started_at
+                            && existing.runtime_incarnation == request.runtime_incarnation
+                            && existing.child_pid == request.child_pid
+                            && existing.child_started_at == request.child_started_at
+                    }) {
+                        prefs.monitor_runtime_stop_requests.push(request.clone());
+                    }
+                }
             }
-            *prefs = monitor.prefs();
-        }
-        Ok((outcome, identity))
-    })
-    .map_err(io_as_api_error)?;
+            Ok((outcome, identity, runtime_stop_request))
+        })
+        .map_err(io_as_api_error)?;
 
     let (status, stopped_window_id) = match &outcome {
         crate::IssueMonitorStopOutcome::Stopped { window_id } => {
@@ -3099,8 +3173,15 @@ fn run_monitor_stop<E: CliEnv>(
             "removed_from_queue": remove_from_queue,
             "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
+            "runtime_stop": if runtime_stop_request.is_some() { "requested" } else { "not_requested" },
+            "runtime_stop_request": runtime_stop_request,
+            "runtime_target_source": if runtime_stop_request.is_some() {
+                if target_session.is_some() { "persisted_window_session" } else { "unique_current_execution_holder" }
+            } else { "none" },
             // Say what is left to do rather than implying the pane is gone.
-            "pane_teardown": if stopped_window_id.is_some() {
+            "pane_teardown": if runtime_stop_request.is_some() {
+                "the owning host will stop the exact captured runtime; the diagnostic pane can be closed separately"
+            } else if stopped_window_id.is_some() {
                 "close the returned window with pane.close — the launch is already revoked, so the close cannot requeue or relaunch it"
             } else {
                 "none"
@@ -3208,6 +3289,35 @@ fn release_revoked_launch_generation(
     number: u64,
     reason: &str,
 ) -> Result<crate::cli::execution_state::LaunchGenerationRelease, String> {
+    // A captured live runtime was revoked, not its execution contract. Keep
+    // this fence after exit so a faster host worker or a repeated stop cannot
+    // reinterpret its Stopped Session as permission to terminalize the ECR.
+    if let Some(hold) =
+        crate::cli::execution_state::owner_generation_hold_for_project(project_root, number)
+            .map_err(|error| error.to_string())?
+    {
+        if hold.status == crate::cli::execution_state::ExecutionControlStatus::Active {
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+            )
+            .map_err(|error| error.to_string())?;
+            if prefs.monitor_runtime_stop_requests.iter().any(|request| {
+                request.issue_number == number
+                    && request.session_id == hold.holder_session_id
+                    && request
+                        .execution_identity
+                        .execution_binding
+                        .identity
+                        .generation_id
+                        == hold.generation_id
+            }) {
+                return Ok(crate::cli::execution_state::LaunchGenerationRelease::Held {
+                    generation_id: hold.generation_id,
+                    detail: "exact runtime revoked; resume its Session with a new runtime incarnation to continue the Active execution",
+                });
+            }
+        }
+    }
     let worktrees = crate::worktree_inventory::enumerate_worktrees(project_root, None)
         .map(|entries| {
             entries
@@ -6969,6 +7079,7 @@ mod tests {
             child_started_at: 0,
             started_at: "2026-10-01T00:00:00Z".to_string(),
             launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+            launch_entrypoint: None,
             restore_source_session_id: None,
         }
     }
@@ -9188,12 +9299,13 @@ mod tests {
                 address_tx
                     .send(listener.local_addr().expect("Windows scan mock address"))
                     .expect("publish Windows scan mock address");
-                let (stream, _) =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                        .await
-                        .expect("Windows launch_now must connect to the GUI scan authority")
-                        .expect("accept scan client");
-                let mut socket = tokio::time::timeout(
+                for _ in 0..3 {
+                    let (stream, _) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                            .await
+                            .expect("Windows launch_now must connect to the GUI scan authority")
+                            .expect("accept scan client");
+                    let mut socket = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     tokio_tungstenite::accept_hdr_async(
                         stream,
@@ -9216,33 +9328,34 @@ mod tests {
                 .await
                 .expect("Windows scan client must complete its WebSocket handshake")
                 .expect("accept authenticated scan WebSocket");
-                let message =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                    let message =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                            .await
+                            .expect("Windows scan client must send its request frame")
+                            .expect("scan request frame")
+                            .expect("valid scan request frame");
+                    let text = message.into_text().expect("text scan request");
+                    let request: serde_json::Value =
+                        serde_json::from_str(text.as_ref()).expect("scan request JSON");
+                    assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
+                    assert_eq!(request["expected_project_scope"], expected_scope);
+                    assert!(
+                        request.get("project_root").is_none(),
+                        "the Windows request must not claim project authority"
+                    );
+                    socket
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "kind": "issue_monitor_scan_request_result",
+                                "accepted": true,
+                                "reason": null,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
                         .await
-                        .expect("Windows scan client must send its request frame")
-                        .expect("scan request frame")
-                        .expect("valid scan request frame");
-                let text = message.into_text().expect("text scan request");
-                let request: serde_json::Value =
-                    serde_json::from_str(text.as_ref()).expect("scan request JSON");
-                assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
-                assert_eq!(request["expected_project_scope"], expected_scope);
-                assert!(
-                    request.get("project_root").is_none(),
-                    "the Windows request must not claim project authority"
-                );
-                socket
-                    .send(Message::Text(
-                        serde_json::json!({
-                            "kind": "issue_monitor_scan_request_result",
-                            "accepted": true,
-                            "reason": null,
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await
-                    .expect("send immediate scan acknowledgement");
+                        .expect("send immediate scan acknowledgement");
+                }
             });
         });
         let address = address_rx
@@ -9257,7 +9370,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
-        let code = run(
+        let without_profile_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
                 expected_priority_order: None,
@@ -9267,9 +9380,50 @@ mod tests {
             &mut out,
         )
         .expect("Windows launch_now result");
+        let without_profile: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("without-profile result");
+        let mut prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.launch_auto = true;
+        prefs.enabled = false;
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        out.clear();
+        let disabled_code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("disabled Monitor result");
+        let disabled: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        prefs.enabled = true;
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("enabled Auto Monitor result");
         server.join().expect("Windows scan mock thread");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
+        assert_eq!(without_profile_code, 1, "{without_profile}");
+        assert!(without_profile["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("no_launch_profile")));
+        assert_eq!(disabled_code, 1, "{disabled}");
+        assert!(disabled["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("monitor_disabled")));
         assert_eq!(code, 0);
         assert_eq!(result["priority_updated"], true);
         assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
@@ -9584,6 +9738,25 @@ mod tests {
         assert!(
             output["inbox"][0].get("exclusion_reason").is_none(),
             "resolved membership reasons must also disappear from status output"
+        );
+        status.max_active = 1;
+        status.occupied_slot_count = Some(1);
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["max_active_saturated"]
+        );
+        status.active_launches = vec![42];
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["runtime_or_launch_reservation_present"],
+            "the target's existing slot is not a refusal to launch the target"
+        );
+        status.active_launches.clear();
+        status.pending_claim_issues = Some(vec![42]);
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["claim_pending"],
+            "a target claim already reserves capacity for this instruction"
         );
     }
 
@@ -11928,6 +12101,14 @@ mod tests {
             authority["admission_fields"],
             serde_json::json!(["occupied_slot_count", "pending_claim_issues"])
         );
+        assert_eq!(
+            status["monitor_runtime_stop_requests"],
+            serde_json::json!([])
+        );
+        status
+            .as_object_mut()
+            .unwrap()
+            .remove("monitor_runtime_stop_requests");
         assert_eq!(
             status,
             serde_json::json!({
