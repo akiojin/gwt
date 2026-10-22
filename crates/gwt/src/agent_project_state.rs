@@ -7301,6 +7301,99 @@ mod tests {
         );
     }
 
+    /// Issue #4363 (AC-3): a trusted worktree keeps the identity gate even
+    /// when its Monitor launch row is missing and a PM marker was inherited.
+    #[test]
+    fn identity_gate_uses_trusted_worktree_binding_independent_of_monitor_launch_row() {
+        with_strict_target_fixture(|repo, session| {
+            use crate::cli::hook::{workflow_policy, HookEvent, HookOutput};
+            use gwt_core::test_support::ScopedEnvVar;
+
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-monitor-independent-identity");
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+            let _review_dispatch = ScopedEnvVar::unset("GWT_REVIEW_DISPATCH");
+            let _pm_marker = ScopedEnvVar::set(
+                crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV,
+                repo.join("inherited-pm-scratch"),
+            );
+            assert!(crate::cli::trusted_store::under_trusted_management(repo));
+
+            let edit = HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": repo.join("fixture.rs"),
+                    "old_string": "old",
+                    "new_string": "new",
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            let blocked = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"identity recovery is unavailable\"}}\nJSON",
+                })),
+                ..edit.clone()
+            };
+            let wait = HookEvent {
+                tool_input: Some(serde_json::json!({
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.monitor.wait\",\"params\":{\"number\":2359,\"reason\":\"recovery pending\",\"resume_condition\":\"binding recovered\"}}\nJSON",
+                })),
+                ..blocked.clone()
+            };
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(repo);
+            let set_monitor_launch_row = |present| {
+                let mut prefs = crate::IssueMonitorPrefs::default();
+                if present {
+                    prefs
+                        .launched_issues
+                        .push(crate::IssueMonitorLaunchedIssue {
+                            issue_number: binding.owner_number,
+                            window_id: "tab-1::identity-gate".to_string(),
+                        });
+                }
+                crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Monitor rows");
+            };
+            for present in [false, true] {
+                set_monitor_launch_row(present);
+                assert!(
+                    matches!(
+                        workflow_policy::evaluate(&edit, repo).expect("evaluate identity gate"),
+                        HookOutput::PreToolUsePermission { .. }
+                    ),
+                    "trusted work without an identity stays gated: Monitor row={present}"
+                );
+                assert_eq!(
+                    workflow_policy::evaluate(&blocked, repo).expect("evaluate stop path"),
+                    HookOutput::Silent,
+                    "execution.blocked stays reachable: Monitor row={present}"
+                );
+                assert_eq!(
+                    workflow_policy::evaluate(&wait, repo).expect("evaluate wait path"),
+                    HookOutput::Silent,
+                    "wait reporting stays reachable: Monitor row={present}"
+                );
+            }
+
+            let mut request = bound_workspace_update_request(&session);
+            request.intent.title_summary = Some("Monitor-independent identity".to_string());
+            apply_bound_authenticated_workspace_update(repo, &session.id, &binding, request)
+                .expect("set purpose and current focus with the trusted binding");
+            for present in [false, true] {
+                set_monitor_launch_row(present);
+                assert_eq!(
+                    workflow_policy::evaluate(&edit, repo).expect("evaluate named Work"),
+                    HookOutput::Silent,
+                    "the configured Work identity lifts the gate: Monitor row={present}"
+                );
+            }
+        });
+    }
+
     /// Issue #5078 (AC-4): restoring the window of a Completed execution
     /// keeps it observation-only (#4783) and its `workspace.update` stays
     /// refused, so the identity gate must not close on it: the window goes to

@@ -681,16 +681,17 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) -> serde_json::Value {
-    let escalated = match gwt_core::coordination::load_escalation_store(project_root) {
-        Ok(store) => store.open_owner_issue_numbers(),
+    let escalation_store = match gwt_core::coordination::load_escalation_store(project_root) {
+        Ok(store) => store,
         Err(error) => {
             tracing::warn!(
                 %error,
                 "could not read the Board escalation index for issue.monitor.status"
             );
-            Vec::new()
+            Default::default()
         }
     };
+    let escalated = escalation_store.open_owner_issue_numbers();
     let cache =
         Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root));
     let projected_issue_numbers = status
@@ -783,9 +784,24 @@ pub(crate) fn merge_board_escalations_into_needs_human(
         }
     }
     status.needs_human.sort_unstable();
+    // Issue #4363: an unbound window has no runtime inbox row carrying its
+    // reason. Keep the Board request visible without changing runtime state.
+    let mut board_escalation_details = Vec::new();
+    for escalation in escalation_store.open() {
+        for number in escalation.owner_issue_numbers() {
+            if board_escalations.contains(&number) {
+                board_escalation_details.push(serde_json::json!({
+                    "issue_number": number,
+                    "entry_id": escalation.entry_id,
+                    "error_message": escalation.body,
+                }));
+            }
+        }
+    }
     serde_json::json!({
         "monitor": monitor_needs_human,
         "board_escalations": board_escalations,
+        "board_escalation_details": board_escalation_details,
         "runtime_fields": ["inbox", "active_launches"],
         "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Clear Monitor handoffs with issue.monitor.requeue. Do not requeue an active launch to clear a Board request; resolve its escalation with board.post and params.resolves naming the blocked entry.",
     })

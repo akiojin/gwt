@@ -685,6 +685,9 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             | "execution.settle_delivered"
             | "pr.create_from_ci"
             | "execution.blocked"
+            // Issue #4363: waiting must remain reportable before identity
+            // recovery; the operation still checks for a live owner itself.
+            | "issue.monitor.wait"
             | "memory.add"
             // Feedback retains its own source identity and native consent.
             // A broken Work assignment must not prevent reporting that fault.
