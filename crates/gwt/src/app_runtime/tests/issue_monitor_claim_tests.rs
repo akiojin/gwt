@@ -2205,6 +2205,8 @@ fn list_issue_monitor_without_daemon_never_scans_remote_for_cold_or_stale_cache(
                 ))
                 .expect("stale cache");
         }
+        // Own this iteration's actual cache rows without timing the Git lookup.
+        let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
         reset_local_issue_monitor_remote_scan_count();
         let events = runtime.completed_issue_monitor_list_for_test("client-1", |_| Ok(None));
         assert_eq!(
@@ -3608,6 +3610,8 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
+
     reset_local_issue_monitor_remote_scan_count();
     let events = runtime.local_issue_monitor_events_with_policy(
         &runtime.test_context(),
@@ -4486,6 +4490,33 @@ fn gui_scan_retries_a_concurrent_control_without_waiting_for_the_next_scan() {
 
 #[test]
 fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gwt_core::operation_deadline::{
+        ScopedNamedLockContentionObserver, ScopedOperationClock, ScopedOperationDeadline,
+    };
+
+    fn expire_on_contention<T>(
+        lock_path: &Path,
+        start: Instant,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let _clock = ScopedOperationClock::set(start);
+        let expiry = start + super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        let expired_clock = Rc::new(RefCell::new(None));
+        let expired_on_contention = expired_clock.clone();
+        let _observer = ScopedNamedLockContentionObserver::set(lock_path, move || {
+            assert_eq!(gwt_core::operation_deadline::current(), Some(expiry));
+            *expired_on_contention.borrow_mut() = Some(ScopedOperationClock::set(expiry));
+        });
+        let result = operation();
+        assert!(
+            expired_clock.borrow().is_some(),
+            "each fallback transaction must observe actual prefs lock contention"
+        );
+        result
+    }
+
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4515,27 +4546,29 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
     runtime.issue_monitor_fallback_commit_timeout =
         super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-    let scan_deadline = Instant::now() + Duration::from_secs(5);
-    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
+    // test-hygiene: allow-wall-clock-deadline Host time only anchors the logical clock; actual lock contention advances it.
+    let start = Instant::now() + Duration::from_secs(3600);
+    let _deadline = ScopedOperationDeadline::enter(start + Duration::from_secs(5));
+    let lock_path = prefs_path.with_extension("lock");
 
-    let started = Instant::now();
-    let rebase_mutated = super::super::rebase_mutate_and_persist_issue_monitor_state(
-        &prefs_path,
-        &mut monitor,
-        |_| true,
-    );
-    let control = runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ());
-    let authorizing = runtime
-        .commit_local_issue_monitor_authorizing_control(&runtime.test_context(), |_| {
+    let rebase_mutated = expire_on_contention(&lock_path, start, || {
+        super::super::rebase_mutate_and_persist_issue_monitor_state(
+            &prefs_path,
+            &mut monitor,
+            |_| true,
+        )
+    });
+    let control = expire_on_contention(&lock_path, start, || {
+        runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ())
+    });
+    let authorizing = expire_on_contention(&lock_path, start, || {
+        runtime.commit_local_issue_monitor_authorizing_control(&runtime.test_context(), |_| {
             Ok::<_, String>(())
-        });
-    let elapsed = started.elapsed();
+        })
+    });
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "GUI fallback transactions outlived their cumulative short lock budget: {elapsed:?}"
-    );
     assert!(
         rebase_mutated.is_err(),
         "timed-out rebase must fail closed without running its mutation"
@@ -5076,6 +5109,8 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
 
     let first = runtime.auto_launch_issue_monitor_delivery_events(
         &runtime.test_context(),

@@ -2708,7 +2708,7 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> std::io::Result<T> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + local_issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     let transaction = (|| {
@@ -9160,7 +9160,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now, source_repository) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + fallback_timeout,
+            gwt_core::operation_deadline::now() + fallback_timeout,
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -9253,6 +9253,22 @@ impl AppRuntime {
         })
     }
 
+    fn local_issue_monitor_source_repository(
+        project_root: &Path,
+    ) -> Result<(String, String), gwt::issue_monitor_worker::GitHubRemoteResolutionError> {
+        #[cfg(test)]
+        if let Some(repository) = LOCAL_FALLBACK_PROJECTION_FIXTURE.with(|fixture| {
+            fixture
+                .borrow()
+                .as_ref()
+                .filter(|(root, _)| root == project_root)
+                .and_then(|(_, projection)| projection.3.clone())
+        }) {
+            return Ok(repository);
+        }
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root)
+    }
+
     fn load_local_issue_monitor_fallback_projection(
         project_root: &Path,
     ) -> LocalIssueMonitorFallbackProjection {
@@ -9276,8 +9292,7 @@ impl AppRuntime {
                 Ok(issues) => (issues, None),
                 Err(error) => (Vec::new(), Some(format!("issue cache failed: {error}"))),
             };
-        let source_repository =
-            gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root);
+        let source_repository = Self::local_issue_monitor_source_repository(project_root);
         let origin_error = source_repository.as_ref().err().map(ToString::to_string);
         (
             cached_issues,
@@ -9551,7 +9566,7 @@ impl AppRuntime {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 std::time::Instant::now() + std::time::Duration::from_secs(1),
             );
-            gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
+            Self::local_issue_monitor_source_repository(&project_root)
         };
         let source = source_repository
             .as_ref()

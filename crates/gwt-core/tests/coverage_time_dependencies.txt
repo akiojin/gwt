@@ -209,8 +209,6 @@ crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_local_
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops|*started_at=Instant::now()-Duration::from_secs(61)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|issue_5289_launch_worker_finishes_while_pm_prefs_lock_is_held|letcompleted_while_locked=completion.recv_timeout(Duration::from_secs(10))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|local_fallback_transaction_preserves_the_background_worker_deadline|letbackground_deadline=Instant::now()+Duration::from_secs(5)|1
-crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline|assert!(elapsed<Duration::from_secs(2),)|1
-crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline|letscan_deadline=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launching|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_scan_tests.rs|issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held|letresult=read_rx.recv_timeout(Duration::from_secs(1))|1
