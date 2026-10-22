@@ -248,13 +248,70 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(panel).toContainText("Loading custom agents…");
       reply({ kind: "custom_agent_list", agents: [agent] });
       await expect(panel).toContainText("Fixture CLI");
+      const tab = settings.getByRole("tab", { name: "Custom Agents", exact: true });
+      await tab.focus();
+      await tab.hover();
+      const burst = await panel.evaluate(async (panel, agent) => {
+        const before = panel.innerHTML;
+        const focused = document.activeElement;
+        let renders = 0;
+        const observer = new MutationObserver(records => {
+          renders += records.flatMap(record => Array.from(record.addedNodes))
+            .filter(node => node instanceof HTMLButtonElement && node.textContent?.startsWith("＋ Add Claude Code backend")).length;
+        });
+        observer.observe(panel, { childList: true });
+        try {
+          for (let index = 1; index <= 50; index++) {
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+              kind: "custom_agent_list", agents: [{ ...agent, display_name: `Custom Agent ${index}` }],
+            } }));
+          }
+          const unchanged = panel.innerHTML === before;
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          return { unchanged, renders, text: panel.textContent, focusPreserved: document.activeElement === focused,
+            hoverPreserved: focused?.matches(":hover") };
+        } finally { observer.disconnect(); }
+      }, agent);
+      expect(burst).toMatchObject({ unchanged: true, renders: 1, focusPreserved: true, hoverPreserved: true });
+      expect(burst.text).toContain("Custom Agent 50");
+      await info.attach("custom-agents-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+      await info.attach(`custom-agents-frame-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      await page.evaluate(agent => {
+        (window as any).__customAgentsFrameRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        (window as any).__customAgentsFrameStart = performance.now();
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "custom_agent_list", agents: [{ ...agent, display_name: "Fallback custom agent" }],
+        } }));
+      }, agent);
+      try {
+        await expect(panel).toContainText("Fallback custom agent", { timeout: 1000 });
+        const elapsed = await page.evaluate(() => performance.now() - (window as any).__customAgentsFrameStart);
+        expect(elapsed).toBeLessThan(1000);
+        await info.attach("custom-agents-frame-fallback", { body: JSON.stringify({ elapsed }), contentType: "application/json" });
+      } finally {
+        await page.evaluate(() => { window.requestAnimationFrame = (window as any).__customAgentsFrameRaf; });
+      }
       await panel.getByLabel("Edit agent environment", { exact: true }).click();
       await expect(panel.getByLabel("Environment value", { exact: true })).toHaveValue("***REDACTED***");
       await panel.getByLabel("Environment value", { exact: true }).fill("fixture-updated-value");
-      await panel.getByLabel("Save environment changes", { exact: true }).click();
+      const savedEditor = await panel.getByLabel("Save environment changes", { exact: true }).evaluate(async button => {
+        const panel = button.closest('[data-settings-panel="custom-agents"]')!;
+        button.click();
+        const closed = !button.isConnected;
+        (panel.querySelector('[aria-label="Edit agent environment"]') as HTMLButtonElement).click();
+        const draft = panel.querySelector('[aria-label="Environment value"]') as HTMLInputElement;
+        draft.value = "fresh-unsaved-draft";
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { closed, draftPreserved: draft.isConnected && draft.value === "fresh-unsaved-draft" };
+      });
+      expect(savedEditor, "save closes synchronously and its pending frame preserves a reopened draft")
+        .toEqual({ closed: true, draftPreserved: true });
+      await panel.getByLabel("Cancel environment editing", { exact: true }).click();
       await expect(panel).toContainText("Saving custom agent…");
       await expect.poll(() => requests.filter(request => request.kind === "update_custom_agent").length).toBe(1);
-      expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...agent, env: { FIXTURE_TOKEN: "fixture-updated-value" } });
+      expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...agent,
+        display_name: "Fallback custom agent", env: { FIXTURE_TOKEN: "fixture-updated-value" } });
       reply({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI" } });
       await expect(panel).toContainText("Updated CLI");
       await expect(panel).toContainText('Saved custom agent "fixture-cli".');

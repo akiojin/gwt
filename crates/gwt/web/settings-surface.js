@@ -909,11 +909,12 @@ export function createSettingsSurface({
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
+      let renderedCustomAgentsState = null;
       const customAgentsModel = createUiStateStore({
         catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
-      });
+      }, { scheduleFrame });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
       // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
@@ -1157,8 +1158,8 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
-      customAgentsModel.subscribe(state => state, state => {
-        renderSettingsAgentList(state);
+      customAgentsModel.subscribeFrame(state => state, state => {
+        if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
       });
       customAgentsModel.subscribe(state => state.catalog, catalog => {
         // Read recovery must not replace candidate inputs while awaiting a reply.
@@ -2478,6 +2479,7 @@ export function createSettingsSurface({
                   onSave: (updatedAgent) => {
                     editingCustomAgentId = null;
                     setSettingsStatus("Saving custom agent…", "info");
+                    renderSettingsAgentList();
                     send({ kind: "update_custom_agent", agent: updatedAgent });
                   },
                   onCancel: () => {
@@ -2490,6 +2492,8 @@ export function createSettingsSurface({
             scroll.appendChild(section);
           }
         }
+        // Local edits can render this snapshot before its scheduled frame.
+        renderedCustomAgentsState = state;
       }
 
 
