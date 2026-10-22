@@ -14,7 +14,7 @@ use crate::process_executor::{
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -82,6 +82,9 @@ pub enum UpdateState {
         message: String,
         /// When the failure was recorded.
         failed_at: DateTime<Utc>,
+        /// Server-directed retry deadline; absent for ordinary failures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at: Option<DateTime<Utc>>,
     },
 }
 
@@ -973,6 +976,115 @@ pub struct UpdateManager {
     cache_path: PathBuf,
     updates_dir: PathBuf,
     client: Client,
+    release_client: Client,
+}
+
+struct ReleaseFetchError {
+    message: String,
+    retry_at: Option<DateTime<Utc>>,
+}
+
+impl From<String> for ReleaseFetchError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retry_at: None,
+        }
+    }
+}
+
+// Resolve lazily, only for the canonical API. Never store secrets in a Debug type
+// or client default headers (the download client follows asset redirects).
+fn release_token_with(
+    mut env: impl FnMut(&str) -> Option<String>,
+    gh: impl FnOnce() -> Option<String>,
+) -> Option<HeaderValue> {
+    let token = ["GH_TOKEN", "GITHUB_TOKEN"]
+        .into_iter()
+        .find_map(|key| env(key).filter(|value| !value.trim().is_empty()))
+        .or_else(gh)
+        .filter(|value| !value.trim().is_empty())?;
+    let mut header = HeaderValue::from_str(&format!("Bearer {}", token.trim())).ok()?;
+    header.set_sensitive(true);
+    Some(header)
+}
+
+fn release_token() -> Option<HeaderValue> {
+    release_token_with(
+        |key| std::env::var(key).ok(),
+        || {
+            use crate::process_console::{
+                global, spawn_logged_blocking_with_deadline, ProcessKind, SpawnOptions,
+            };
+            let output = spawn_logged_blocking_with_deadline(
+                &global(),
+                ProcessKind::Gh,
+                "gh",
+                &["auth", "token", "--hostname", "github.com"],
+                SpawnOptions::new("gh auth token --hostname github.com").forward_output(false),
+                std::time::Instant::now() + CONNECT_TIMEOUT,
+            )
+            .ok()?;
+            output.success().then_some(output.stdout)
+        },
+    )
+}
+
+fn release_http_failure(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    body: &str,
+    now: DateTime<Utc>,
+) -> (&'static str, Option<DateTime<Utc>>) {
+    if status != reqwest::StatusCode::FORBIDDEN && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return ("http_error", None);
+    }
+    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    let primary = header("x-ratelimit-remaining") == Some("0");
+    let limited = primary
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || header("retry-after").is_some()
+        || crate::github_quota::is_rate_limit_stderr(body);
+    if !limited {
+        return ("forbidden", None);
+    }
+    let reset = primary
+        .then(|| {
+            header("x-ratelimit-reset")?
+                .parse::<i64>()
+                .ok()
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        })
+        .flatten();
+    let retry_after = header("retry-after").and_then(|value| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|seconds| *seconds >= 0)
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|delay| now.checked_add_signed(delay))
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(|time| time.with_timezone(&Utc))
+            })
+    });
+    // Honour both lower bounds if GitHub supplies both headers.
+    let deadline = reset
+        .into_iter()
+        .chain(retry_after)
+        .max()
+        .filter(|deadline| *deadline > now)
+        .unwrap_or(now + chrono::Duration::seconds(60));
+    (
+        if primary {
+            "primary_rate_limit"
+        } else {
+            "secondary_rate_limit"
+        },
+        Some(deadline),
+    )
 }
 
 impl Default for UpdateManager {
@@ -1001,6 +1113,13 @@ impl UpdateManager {
             HeaderValue::from_static("application/vnd.github+json"),
         );
 
+        let release_client = Client::builder()
+            .default_headers(headers.clone())
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("valid release HTTP client configuration");
         let client = Client::builder()
             .default_headers(headers)
             .connect_timeout(CONNECT_TIMEOUT)
@@ -1027,6 +1146,7 @@ impl UpdateManager {
             cache_path,
             updates_dir,
             client,
+            release_client,
         }
     }
 
@@ -1078,6 +1198,7 @@ impl UpdateManager {
                             release.tag_name
                         ),
                         failed_at: now,
+                        retry_at: None,
                     };
                 };
 
@@ -1132,8 +1253,9 @@ impl UpdateManager {
                     }
                 }
                 UpdateState::Failed {
-                    message: err,
+                    message: err.message,
                     failed_at: now,
+                    retry_at: err.retry_at,
                 }
             }
         }
@@ -1214,7 +1336,7 @@ impl UpdateManager {
         target_gwt: &Path,
         target_gwtd: &Path,
     ) -> Result<InstalledDockerLinuxBundle, String> {
-        let release = self.fetch_latest_release()?;
+        let release = self.fetch_latest_release().map_err(|error| error.message)?;
         let version = parse_tag_version(&release.tag_name)
             .ok_or_else(|| {
                 format!(
@@ -1519,7 +1641,7 @@ impl UpdateManager {
         &self.updates_dir
     }
 
-    fn fetch_latest_release(&self) -> Result<GitHubRelease, String> {
+    fn fetch_latest_release(&self) -> Result<GitHubRelease, ReleaseFetchError> {
         let url = format!(
             "{}/repos/{}/{}/releases/latest",
             self.api_base_url.trim_end_matches('/'),
@@ -1546,6 +1668,7 @@ impl UpdateManager {
             normalized
         );
         self.fetch_release(&url, &format!("release v{normalized}"))
+            .map_err(|error| error.message)
     }
 
     /// Fetch and parse release notes for a single GitHub Release tag.
@@ -1577,17 +1700,53 @@ impl UpdateManager {
             .and_then(|body| crate::release_notes::parse_release_body(&normalized, body)))
     }
 
-    fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, String> {
+    fn release_request(
+        &self,
+        url: &str,
+        token: impl FnOnce() -> Option<HeaderValue>,
+    ) -> reqwest::blocking::RequestBuilder {
+        let request = self.release_client.get(url);
+        let canonical = reqwest::Url::parse(url).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some("api.github.com")
+                && url.port_or_known_default() == Some(443)
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+        if canonical {
+            if let Some(token) = token() {
+                return request.header(AUTHORIZATION, token);
+            }
+        }
+        request
+    }
+
+    fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, ReleaseFetchError> {
         let res = self
-            .client
-            .get(url)
+            .release_request(url, release_token)
             .send()
             .map_err(|e| format!("Failed to fetch {label}: {e}"))?;
         if !res.status().is_success() {
-            return Err(format!("Failed to fetch {label}: status {}", res.status()));
+            let status = res.status();
+            let headers = res.headers().clone();
+            let body = res.text().unwrap_or_default();
+            let (reason, retry_at) = release_http_failure(status, &headers, &body, Utc::now());
+            let retry = retry_at.map(|time| time.to_rfc3339()).unwrap_or_default();
+            log_update_event(
+                "release_request_failed",
+                &[
+                    ("status", status.as_str()),
+                    ("reason", reason),
+                    ("retry_at", &retry),
+                ],
+            );
+            return Err(ReleaseFetchError {
+                message: format!("Failed to fetch {label}: status {status} ({reason})"),
+                retry_at,
+            });
         }
         res.json::<GitHubRelease>()
-            .map_err(|e| format!("Failed to parse GitHub release JSON: {e}"))
+            .map_err(|e| format!("Failed to parse GitHub release JSON: {e}").into())
     }
 
     /// SPEC #2780 v2 Amendment (FR-012): build an [`UpdateState::Available`]
@@ -3014,6 +3173,148 @@ mod tests {
 
         let state = mgr.check(true);
         assert!(matches!(state, UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn issue_6001_release_failure_preserves_reset_and_logs_cause() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let reset = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let base = serve_once(
+            "",
+            "403 Forbidden",
+            &format!(
+                "application/json\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: {}",
+                reset.timestamp()
+            ),
+            br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["retry_at"],
+            reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        assert!(log.contains("primary_rate_limit"), "{log}");
+
+        let base = serve_once(
+            "",
+            "403 Forbidden",
+            "application/json",
+            br#"{"message":"Resource not accessible"}"#.to_vec(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(value.get("retry_at").is_none());
+        assert!(fs::read_to_string(update_log_path())
+            .unwrap()
+            .contains("forbidden"));
+    }
+
+    #[test]
+    fn issue_6001_auth_selection_is_lazy_and_release_only() {
+        let token = release_token_with(
+            |key| {
+                Some(
+                    if key == "GH_TOKEN" {
+                        "gh-env"
+                    } else {
+                        "github-env"
+                    }
+                    .into(),
+                )
+            },
+            || panic!("env credentials must avoid a gh spawn"),
+        )
+        .unwrap();
+        assert_eq!(token, "Bearer gh-env");
+        assert!(token.is_sensitive());
+        let fallback = release_token_with(
+            |key| (key == "GITHUB_TOKEN").then(|| "github-env".into()),
+            || panic!("GITHUB_TOKEN must avoid a gh spawn"),
+        )
+        .unwrap();
+        assert_eq!(fallback, "Bearer github-env");
+        let gh = release_token_with(|_| Some("  ".into()), || Some("gh-store\n".into())).unwrap();
+        assert_eq!(gh, "Bearer gh-store");
+        assert!(release_token_with(|_| None, || None).is_none());
+        assert!(release_token_with(|_| None, || Some("\n".into())).is_none());
+
+        let mgr = UpdateManager::new();
+        let url = "https://api.github.com/repos/akiojin/gwt/releases/latest";
+        let request = mgr
+            .release_request(url, || Some(token.clone()))
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()[AUTHORIZATION], token);
+        for url in [
+            "http://127.0.0.1/releases/latest",
+            "https://example.com/releases/latest",
+            "http://api.github.com/releases/latest",
+        ] {
+            let request = mgr
+                .release_request(url, || {
+                    panic!("custom origins must not resolve credentials")
+                })
+                .build()
+                .unwrap();
+            assert!(!request.headers().contains_key(AUTHORIZATION));
+        }
+        assert!(!mgr
+            .client
+            .get(url)
+            .build()
+            .unwrap()
+            .headers()
+            .contains_key(AUTHORIZATION));
+        assert!(!format!("{request:?} {mgr:?}").contains("gh-env"));
+    }
+
+    #[test]
+    fn issue_6001_secondary_limit_uses_retry_after_without_waiting_for_core_reset() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("100"));
+        headers.insert(
+            "x-ratelimit-reset",
+            HeaderValue::from_str(&(now.timestamp() + 3600).to_string()).unwrap(),
+        );
+        assert_eq!(
+            release_http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "", now),
+            (
+                "secondary_rate_limit",
+                Some(now + chrono::Duration::seconds(120))
+            )
+        );
+        headers.remove("retry-after");
+        assert_eq!(
+            release_http_failure(
+                reqwest::StatusCode::FORBIDDEN,
+                &headers,
+                "You have exceeded a secondary rate limit",
+                now
+            ),
+            (
+                "secondary_rate_limit",
+                Some(now + chrono::Duration::seconds(60))
+            )
+        );
+    }
+
+    #[test]
+    fn issue_6001_release_requests_do_not_follow_redirects() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let base = serve_once(
+            "",
+            "302 Found",
+            "application/json\r\nLocation: http://127.0.0.1:9/secret",
+            Vec::new(),
+        );
+        let state = UpdateManager::new().with_api_base_url(base).check(true);
+        assert!(matches!(state, UpdateState::Failed { message, .. } if message.contains("302")));
     }
 
     #[test]
@@ -5207,6 +5508,7 @@ mod tests {
     #[test]
     fn fetch_release_by_tag_returns_error_for_404() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
         let base_url = serve_once(
             "/",
             "404 Not Found",
