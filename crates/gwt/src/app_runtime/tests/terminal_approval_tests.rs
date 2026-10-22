@@ -955,6 +955,66 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
 }
 
 #[test]
+fn app_runtime_provider_auth_notice_parks_the_live_owner_from_pty_output() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo_without_origin(&repo);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab.workspace.set_agent_id("agent-1", "codex"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let output = b"\x1b[2J\x1b[H\xe2\x96\xa0 Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\r\n";
+    runtime.runtimes[&window_id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(output);
+    runtime.handle_runtime_output(window_id.clone(), output.to_vec());
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "reauthentication releases the slot"
+    );
+    let record = persisted
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == 42)
+        .unwrap();
+    assert_eq!(record.phase, gwt::AutonomousPhase::NeedsHuman);
+    assert_eq!(record.retry_not_before, None);
+    assert_eq!(record.retry_hold_provider, None);
+    assert!(persisted.failed_issues[0]
+        .message
+        .contains("Codex reauthentication required"));
+    assert!(
+        persisted.provider_quota_holds.is_empty(),
+        "auth never creates a quota hold"
+    );
+}
+
+#[test]
 fn app_runtime_codex_directory_trust_prompt_escalates_only_monitor_owned_live_window() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

@@ -6838,7 +6838,8 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                    | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                     | Some(gwt::IssueMonitorFailure::Termination { .. }) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
@@ -6879,7 +6880,8 @@ impl AppRuntime {
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
-                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                        Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                         | Some(gwt::IssueMonitorFailure::Termination { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
@@ -7960,6 +7962,16 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { provider }) => {
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_provider_auth_notice(issue_number, window_id, provider) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                                 let Some(issue_number) = issue_number else {
                                     return IssueMonitorFailureCommit::Rejected;
@@ -8016,7 +8028,8 @@ impl AppRuntime {
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
                 if matches!(
                     failure,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                 ) =>
             {
                 PreparedIssueMonitorAgentFailure::Rejected
