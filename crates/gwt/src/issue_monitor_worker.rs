@@ -1353,27 +1353,52 @@ fn load_open_pr_launch_observations(
         return (BTreeMap::new(), None);
     }
     let observed_at = chrono::Utc::now().to_rfc3339();
+    // Existing holds must be refreshable even when expensive association
+    // discovery fails. Read them first, and reuse each PR's result this scan.
+    let mut readbacks = BTreeMap::new();
+    let fetch = |number| {
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
+        })
+        .map_err(|error| error.to_string())
+    };
+    for issue in &candidates {
+        if let Some(hold) = prefs
+            .open_pr_observations
+            .get(&issue.number)
+            .and_then(|previous| previous.hold.as_ref())
+        {
+            readbacks
+                .entry(hold.pr_number)
+                .or_insert_with(|| fetch(hold.pr_number));
+        }
+    }
     let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
         gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
     });
     let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
-    let linked = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, &numbers)
+    let mut linked = BTreeMap::new();
+    let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(
+            owner,
+            repo,
+            &numbers,
+            |issue, prs| {
+                linked.insert(issue, prs.to_vec());
+            },
+        )
     });
     if let Err(error) = &branches {
         tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
     }
-    if let Err(error) = &linked {
-        tracing::warn!(%error, "linked PR discovery failed; preserving prior launch holds");
+    if let Err(error) = &linked_result {
+        tracing::warn!(%error, completed_issues = linked.len(), "linked PR discovery incomplete; preserving unobserved launch holds");
     }
     let related = candidates
         .iter()
         .filter_map(|issue| {
-            let prs = linked
-                .as_ref()
-                .ok()
-                .and_then(|linked| linked.get(&issue.number));
-            let complete = branches.is_ok() && prs.is_some();
+            let prs = linked.get(&issue.number);
+            let mut complete = branches.is_ok() && prs.is_some();
             let mut numbers: Vec<_> = prs
                 .into_iter()
                 .flatten()
@@ -1388,6 +1413,19 @@ fn load_open_pr_launch_observations(
                     .and_then(|branches| branches.get(&branch))
                     .copied(),
             );
+            if let Some(hold) = prefs
+                .open_pr_observations
+                .get(&issue.number)
+                .and_then(|previous| previous.hold.as_ref())
+            {
+                let prior = readbacks.get(&hold.pr_number);
+                // A terminal read releases this known hold independently of
+                // discovery. Other known PRs still undergo lifecycle checks.
+                complete |= matches!(prior, Some(Ok((state, _))) if *state != gwt_git::pr_status::PrState::Open);
+                if prior.is_some_and(Result::is_ok) || !complete {
+                    numbers.push(hold.pr_number);
+                }
+            }
             numbers.sort_unstable();
             numbers.dedup();
             // Keep an independently observed branch PR even if the timeline failed.
@@ -1395,10 +1433,10 @@ fn load_open_pr_launch_observations(
         })
         .collect::<BTreeMap<_, _>>();
     let mut observations = collect_open_pr_launch_observations(&related, |number| {
-        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-            gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
-        })
-        .map_err(|error| error.to_string())
+        readbacks
+            .entry(number)
+            .or_insert_with(|| fetch(number))
+            .clone()
     });
     // Discovery proved an open PR exists. A first, failed lifecycle read must
     // not admit a duplicate launch; subsequent failures retain the prior fact.
@@ -1421,8 +1459,8 @@ fn load_open_pr_launch_observations(
 }
 
 fn collect_open_pr_launch_observations(
-    // The bool marks complete association evidence; partial reads prove
-    // presence but can never prove absence.
+    // The bool permits release: complete association evidence or a directly
+    // confirmed terminal prior hold. Other known failed reads remain unknown.
     related: &BTreeMap<u64, (Vec<u64>, bool)>,
     mut fetch: impl FnMut(
         u64,
