@@ -77,7 +77,7 @@ pub struct TestEnv {
     pub pr_update_branch_outcomes: HashMap<u64, crate::cli::PrUpdateBranchResult>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
-    pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
+    pub pr_reply_and_resolve_call_log: Vec<(u64, String, Option<String>)>,
     pub pr_checks_call_log: Vec<u64>,
     pub run_logs: HashMap<u64, String>,
     pub run_log_call_log: Vec<u64>,
@@ -560,15 +560,30 @@ impl CliEnv for TestEnv {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.pr_reply_and_resolve_call_log
-            .push((number, body.to_string()));
-        let count = self
+        self.pr_reply_and_resolve_call_log.push((
+            number,
+            body.to_string(),
+            thread_id.map(str::to_owned),
+        ));
+        let threads = self
             .pr_review_threads
             .get(&number)
-            .map(|threads| threads.iter().filter(|thread| !thread.is_resolved).count())
-            .unwrap_or(0);
-        Ok(count)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(id) = thread_id {
+            if !threads.iter().any(|thread| thread.id == id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("review thread {id} not found on PR #{number}"),
+                ));
+            }
+        }
+        Ok(threads
+            .iter()
+            .filter(|thread| !thread.is_resolved && thread_id.is_none_or(|id| thread.id == id))
+            .count())
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
         self.pr_checks_call_log.push(number);

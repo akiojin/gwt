@@ -474,6 +474,7 @@ pub enum PrCommand {
     ReviewThreadsReplyAndResolveBody {
         number: u64,
         body: String,
+        thread_id: Option<String>,
     },
     Checks {
         number: u64,
