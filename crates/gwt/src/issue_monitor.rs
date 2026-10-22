@@ -1532,14 +1532,8 @@ impl IssueMonitorPrefs {
         // Prefs has no live canvas/process observations. Preserve the exact
         // cancellation evidence until the runtime can safely reconcile it.
         for record in &mut self.autonomous_records {
-            if cancelled.contains(&record.issue_number)
-                && record.phase == AutonomousPhase::Implementing
-                && record.reviewed_sha.is_none()
-            {
-                record.cancelled_claim_phase = Some(CancelledClaimPhase {
-                    authority_epoch: epoch,
-                    reconciled: false,
-                });
+            if cancelled.contains(&record.issue_number) {
+                record.mark_cancelled_claim_phase(epoch);
             }
         }
         Some(epoch)
@@ -5406,7 +5400,7 @@ pub struct AutonomousIssueRecord {
     pub issue_number: u64,
     #[serde(default)]
     pub phase: AutonomousPhase,
-    /// A Prefs-only writer revoked eligibility before runtime absence was known.
+    /// A control revoked eligibility before runtime absence was known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_claim_phase: Option<CancelledClaimPhase>,
     /// Launch / window id binding the CURRENT attempt. `None` between attempts.
@@ -5914,6 +5908,15 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
+    fn mark_cancelled_claim_phase(&mut self, authority_epoch: u64) {
+        if self.phase == AutonomousPhase::Implementing && self.reviewed_sha.is_none() {
+            self.cancelled_claim_phase = Some(CancelledClaimPhase {
+                authority_epoch,
+                reconciled: false,
+            });
+        }
+    }
+
     fn pending_cancelled_claim_phase(&self) -> Option<CancelledClaimPhase> {
         self.cancelled_claim_phase.filter(|phase| !phase.reconciled)
     }
@@ -10306,7 +10309,9 @@ impl IssueMonitorState {
                 })
                 .collect::<BTreeSet<_>>();
             for number in cancelled {
-                self.clear_provisional_implementation(number);
+                if let Some(record) = self.autonomous_records.get_mut(&number) {
+                    record.mark_cancelled_claim_phase(next_epoch);
+                }
             }
             for delivery in &self.pending_launch_deliveries {
                 let already_pending = self.pending_effects.iter().any(|effect| {
@@ -10343,8 +10348,8 @@ impl IssueMonitorState {
         Some(next_epoch)
     }
 
-    /// Revoke pending effects and their pre-spawn eligibility together. Work
-    /// already handed to a launch or materializer keeps its lifecycle state.
+    /// Revoke pending effects and retain pre-spawn cancellation evidence until
+    /// runtime reconciliation. A restored State has no absence observations.
     pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
         let pending_claims = self.pending_claim_issue_numbers();
         let epoch =
@@ -10356,7 +10361,9 @@ impl IssueMonitorState {
                     .iter()
                     .any(|delivery| delivery.issue_number == number)
             {
-                self.clear_provisional_implementation(number);
+                if let Some(record) = self.autonomous_records.get_mut(&number) {
+                    record.mark_cancelled_claim_phase(epoch);
+                }
             }
         }
         Some(epoch)
@@ -15050,7 +15057,7 @@ impl IssueMonitorState {
             .is_some_and(|record| record.pending_cancelled_claim_phase().is_some())
     }
 
-    /// Consume Prefs cancellation evidence only after explicit runtime reads.
+    /// Reconcile cancellation evidence only after explicit runtime reads.
     pub(crate) fn reconcile_cancelled_claim_phases(
         &mut self,
         observations: &BTreeMap<u64, IssueMonitorExecutionObservation>,
@@ -36971,7 +36978,14 @@ mod tests {
         cold.set_auto_close_merged_issues_with_effect_revocation(Some(false))
             .unwrap();
         authority.advance_effect_authority_epoch().unwrap();
-        for cancelled in [auto_close, authority, cold] {
+        for mut cancelled in [auto_close, authority, cold] {
+            assert_eq!(
+                cancelled.autonomous_record(42).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "authority cancellation must await explicit runtime absence"
+            );
+            assert!(cancelled.cancelled_claim_awaits_runtime(42));
+            observe_cancelled_claims(&mut cancelled);
             assert!(cancelled.autonomous_in_flight_issues().is_empty());
             assert!(cancelled.terminal_queue_contains(42));
             assert!(cancelled.terminal_queue_contains(43));
@@ -37012,6 +37026,7 @@ mod tests {
             monitor.set_autonomous_mode_with_effect_revocation(false),
             Some(1)
         );
+        observe_cancelled_claims(&mut monitor);
         assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert_eq!(monitor.queued_issue_numbers(), vec![42, 43]);
         assert_eq!(monitor.attempt_count(42), 1);
@@ -37030,6 +37045,7 @@ mod tests {
 
         cold.set_autonomous_mode_with_effect_revocation(false)
             .unwrap();
+        observe_cancelled_claims(&mut cold);
         assert!(cold.autonomous_in_flight_issues().is_empty());
         let prefs =
             serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
@@ -39004,10 +39020,13 @@ mod tests {
         assert_eq!(cold.set_enabled_with_effect_revocation(false), Some(1));
         assert_eq!(
             cold.autonomous_record(43).unwrap().phase,
-            AutonomousPhase::Idle,
-            "cold OFF must cancel the durable queue's pre-claim eligibility"
+            AutonomousPhase::Implementing,
+            "cold OFF must preserve unobserved pre-claim work"
         );
+        assert!(cold.cancelled_claim_awaits_runtime(43));
+        observe_cancelled_claims(&mut cold);
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        observe_cancelled_claims(&mut monitor);
         for number in [42, 43] {
             assert_eq!(
                 monitor.autonomous_record(number).unwrap().phase,
@@ -39973,10 +39992,20 @@ mod tests {
 
     #[test]
     fn prefs_cancelled_claims_wait_for_runtime_and_do_not_revive_after_rebase() {
-        let now = "2026-10-22T00:00:01Z";
         let original = provisional_claim_monitor();
         let mut prefs = original.prefs();
         prefs.advance_effect_authority_epoch().unwrap();
+        assert_cancelled_claims_wait_for_runtime(original.clone(), prefs);
+        let mut cold = test_monitor_with_prefs(original.config.clone(), original.prefs());
+        cold.advance_effect_authority_epoch().unwrap();
+        assert_cancelled_claims_wait_for_runtime(original, cold.prefs());
+    }
+
+    fn assert_cancelled_claims_wait_for_runtime(
+        original: IssueMonitorState,
+        prefs: IssueMonitorPrefs,
+    ) {
+        let now = "2026-10-22T00:00:01Z";
         let mut cold = test_monitor_with_prefs(original.config.clone(), prefs.clone());
         assert!(cold.execution_settlement_issue_numbers().contains(&42));
         assert_eq!(
