@@ -10566,6 +10566,16 @@ impl IssueMonitorState {
             .then_some(self.config.max_active.max(1))
     }
 
+    /// Explicit policy identity, independent of changing machine measurements.
+    pub(crate) fn max_active_agents_policy(
+        &self,
+    ) -> (Option<usize>, Option<IssueMonitorMaxActiveChange>) {
+        (
+            self.max_active_agents_override(),
+            self.max_active_last_change.clone(),
+        )
+    }
+
     pub fn effective_max_active_agents(&self) -> usize {
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
@@ -22139,6 +22149,24 @@ impl IssueMonitorState {
         let mut previous = previous.prefs();
         current.last_control_receipt = None;
         previous.last_control_receipt = None;
+        // Auto's numeric mirror is an observation. The driver keeps the latest
+        // measurement and bounds new claims again after the durable rebase.
+        // Mode and explicit policy provenance still invalidate the scan.
+        if current.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+            && previous.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+        {
+            current.max_active_agents = 0;
+            previous.max_active_agents = 0;
+        }
+        // Census timestamps order writes; presence has no timestamp-based TTL.
+        // Preserve all host identities, counts, windows and empty tombstones.
+        for observation in current
+            .monitor_runtime_counts
+            .values_mut()
+            .chain(previous.monitor_runtime_counts.values_mut())
+        {
+            observation.observed_at.clear();
+        }
         for record in current
             .autonomous_records
             .iter_mut()
@@ -42263,6 +42291,38 @@ mod tests {
                 session_id: None,
             }],
         }
+    }
+
+    #[test]
+    fn issue_5644_census_refresh_is_compatible_only_while_contents_are_unchanged() {
+        let now = "2026-10-22T00:01:00Z";
+        let mut previous = IssueMonitorState::new(IssueMonitorConfig::default());
+        previous.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("pane".into(), 42)]),
+            "2026-10-22T00:00:00Z",
+        );
+        let mut refreshed = previous.clone();
+        refreshed.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("pane".into(), 42)]),
+            now,
+        );
+        assert!(refreshed.scan_observations_compatible_with(&previous, now));
+        refreshed.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("successor".into(), 42)]),
+            "2026-10-22T00:02:00Z",
+        );
+        assert!(!refreshed.scan_observations_compatible_with(&previous, now));
+        refreshed.record_monitor_runtime_counts(101, 1001, BTreeMap::new(), "2026-10-22T00:03:00Z");
+        assert!(!refreshed.scan_observations_compatible_with(&previous, now));
     }
 
     #[test]
