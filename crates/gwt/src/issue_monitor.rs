@@ -16591,7 +16591,7 @@ impl IssueMonitorState {
                 )
             });
         // Issue #4783 AC-R2: execution settlement ends one delivery, not the
-        // Issue's remaining acceptance criteria. Reconsider the fresh payload
+        // Issue's remaining work. Reconsider the fresh payload
         // on the next scan without charging or resetting its retry budget.
         if existing.as_ref().is_some_and(|item| {
             item.state == MonitorInboxState::Launched && item.launched_window_id.is_none()
@@ -16617,11 +16617,18 @@ impl IssueMonitorState {
             let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                 issue.body.as_deref().unwrap_or(""),
             );
-            if criteria.machine_checkable && !criteria.unchecked.is_empty() {
+            // SPEC task readiness owns slice completion, even when the
+            // recognized acceptance block describes an already delivered slice.
+            let remaining_work = if has_gwt_spec_label(&issue.labels) {
+                Self::issue_completion_decision(&issue) == IssueCompletionDecision::Incomplete
+            } else {
+                !criteria.unchecked.is_empty()
+            };
+            if criteria.machine_checkable && remaining_work {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
                 self.fence_automatic_relaunch(
                     issue_number,
-                    "settled delivery; remaining acceptance criteria",
+                    "settled delivery; remaining work",
                     &format_rfc3339_utc(chrono::Utc::now()),
                 );
                 existing = self.inbox_item(issue_number).cloned();
@@ -22107,8 +22114,8 @@ impl IssueMonitorState {
     /// again" — a settled delivery is a success: the active slot is released
     /// in this mutation, no retry attempt is spent, and the row initially stays
     /// `Launched` out of the queue. The next scan reconsiders an Open Issue with
-    /// unchecked acceptance criteria; otherwise the ordinary completion probe
-    /// (merged PR / closed Issue) ends it. The window is unbound so the later
+    /// unfinished SPEC tasks or unchecked Issue acceptance; otherwise the ordinary
+    /// completion probe (merged PR / closed Issue) ends it. The window is unbound so the later
     /// vanished-window reconciliation cannot mistake the runtime's own close
     /// for a failed attempt.
     ///
@@ -23163,7 +23170,7 @@ impl IssueMonitorState {
                         let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                             issue.body.as_deref().unwrap_or(""),
                         );
-                        criteria.machine_checkable && !criteria.unchecked.is_empty()
+                        criteria.machine_checkable
                     }
             });
         if next_slice {
@@ -43543,7 +43550,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
+    fn issue_5876_next_scan_requeues_settled_spec_with_open_tasks() {
         let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
@@ -43555,8 +43562,18 @@ mod tests {
 
         assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
         assert!(monitor.queued_issue_numbers().is_empty());
-        let mut candidate = issue(42);
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into());
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-06-26T00:01:00Z",
+        );
+        // Issue #5016: the recognized block is checked, while later SPEC
+        // amendments and the task artifact still contain unfinished work.
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: remaining work\n"
+                .into(),
+        );
         scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
 
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
@@ -43635,18 +43652,28 @@ mod tests {
 
     #[test]
     fn issue_4783_next_scan_does_not_requeue_checked_settled_delivery() {
-        let candidate = checked_issue(42);
-        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
-        let target = stop_target(&monitor, 42);
-        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
-
-        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
-
-        assert!(monitor.queued_issue_numbers().is_empty());
-        assert_eq!(
-            monitor.inbox_item(42).unwrap().state,
-            MonitorInboxState::Launched
+        let mut completed_spec = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-06-26T00:00:00Z",
         );
+        completed_spec.body = checked_issue(42).body;
+        let mut unknown_spec = completed_spec.clone();
+        unknown_spec.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        unknown_spec.updated_at = None;
+        for candidate in [checked_issue(42), completed_spec, unknown_spec] {
+            let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+            let target = stop_target(&monitor, 42);
+            assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+            scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Launched
+            );
+        }
     }
 
     #[test]
@@ -47580,7 +47607,11 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-09-07T03:00:00Z",
         );
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: next slice\n"
+                .into(),
+        );
         let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
         observed.get_mut(&42).unwrap().holder_host_dead = true;

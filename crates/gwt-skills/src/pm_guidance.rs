@@ -892,6 +892,14 @@ body cannot hold `plan` / `tasks` sections.
   without admitting work to the exhausted account. Never pair the switch
   with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
   for a false hold only.
+- For `issue.monitor.tiers.set`, read fresh saved configuration from status.
+  `issue.monitor.tiers` also returns `saved_config` and `config_token`.
+  Pass that observation's `config_token` as `expected_config_token`; the saved
+  `launch_auto` and `launch_tiers` are already included. On conflict, preferences
+  and the authority epoch remain unchanged. Re-read status and reconsider the
+  change, then read back success. Omitting the guard retains legacy behavior;
+  null, blank and non-string guards are invalid. This value comparison does not
+  detect ABA history or guard individual `issue.monitor.tier.set` writes.
 - Provider switching is automatic. `issue.monitor.profiles` returns the launch
   candidate pool (ordered providers with their holds);
   `issue.monitor.profiles.set` replaces the whole pool with
@@ -4288,6 +4296,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "For `issue.monitor.tiers.set`, read fresh saved configuration",
+            "`issue.monitor.tiers` also returns `saved_config` and `config_token`",
             "For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list`",
             "`urgent_queue_token` as `expected_urgent_queue_token`",
             "saved urgent limit, grants and demotions",

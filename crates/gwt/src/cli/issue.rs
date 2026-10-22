@@ -507,9 +507,17 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::MonitorTiersSet {
             project_root,
+            expected_config_token,
             auto,
             tiers,
-        } => run_monitor_tiers_set(env, project_root.as_deref(), auto, tiers, out)?,
+        } => run_monitor_tiers_set(
+            env,
+            project_root.as_deref(),
+            expected_config_token.as_deref(),
+            auto,
+            tiers,
+            out,
+        )?,
         IssueCommand::MonitorTierSet {
             project_root,
             number,
@@ -4569,6 +4577,8 @@ fn monitor_tiers_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::Val
         "tier_overrides": prefs.tier_overrides,
         "issue_tiers": prefs.issue_tiers,
         "landing_stats": prefs.tier_landing_stats(),
+        "saved_config": prefs.config_observation(),
+        "config_token": prefs.config_token(),
     })
 }
 
@@ -4613,6 +4623,7 @@ fn apply_monitor_tiers_set(
 fn run_monitor_tiers_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_config_token: Option<&str>,
     auto: bool,
     tiers: Option<Vec<Vec<crate::IssueMonitorLaunchProfile>>>,
     out: &mut String,
@@ -4620,6 +4631,10 @@ fn run_monitor_tiers_set<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            prefs,
+            expected_config_token,
+        )?;
         apply_monitor_tiers_set(prefs, auto, tiers)
     })
     .map_err(io_as_api_error)?;
@@ -13751,6 +13766,7 @@ mod tests {
         run_monitor_tiers_set(
             &env,
             None,
+            None,
             true,
             Some(vec![
                 vec![pool_profile("codex", &[])],
@@ -13768,15 +13784,17 @@ mod tests {
         assert_eq!(prefs.effective_launch_tiers().len(), 2);
         let before = fs::read(&path).unwrap();
         assert!(run_monitor_tier_set(&env, None, 4774, 2, &mut out).is_err());
-        assert!(run_monitor_tiers_set(&env, None, true, Some(vec![]), &mut out).is_err());
-        assert!(run_monitor_tiers_set(&env, None, true, Some(vec![vec![]]), &mut out).is_err());
+        assert!(run_monitor_tiers_set(&env, None, None, true, Some(vec![]), &mut out).is_err());
+        assert!(
+            run_monitor_tiers_set(&env, None, None, true, Some(vec![vec![]]), &mut out).is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
         out.clear();
         run_monitor_tiers(&env, None, &mut out).unwrap();
         let projection: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(projection["tier_overrides"]["4774"], 1);
         assert!(projection.get("landing_stats").is_some());
-        run_monitor_tiers_set(&env, None, true, None, &mut out).unwrap();
+        run_monitor_tiers_set(&env, None, None, true, None, &mut out).unwrap();
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);

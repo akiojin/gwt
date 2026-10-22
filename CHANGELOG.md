@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.138.0] - 2026-10-22
+
+### Bug Fixes
+
+- **monitor:** Stop repeating resolved remediation notices
+- **workspace:** ローカル拒否と通信障害の分類を分ける
+- **monitor:** 無出力の子プロセス活動で実行中ペインの誤回収を防ぐ
+- **workspace:** Host障害と結果前切断を通信障害に分類する
+- **monitor:** Tier 設定の競合更新を防止する
+- **execution:** Settle receipts across audited takeovers
+- **monitor:** 未完SPECを完了slice後に起動待ちへ戻す
+- **fleet:** 整理直前の権限とプロセス終了証明を保護する
+
+### Features
+
+- **fleet:** Checkpoint inventory and guarded cleanup
+
+### Miscellaneous Tasks
+
+- **work:** Record tier CAS PR handoff
+- **work:** Reconcile delivered issue 5876 slice
+- **work:** Record Issue #3623 delivery reconciliation
+- **work:** Reconcile successor evidence delivery
+- **work:** Reconcile delivered tier configuration CAS slice
+- **work:** Record tier CAS reconciliation PR
+- **work:** PR #6092 の配送記録を保存する
+
+### Refactor
+
+- **runtime:** Session復元をGUI非依存の共有処理へ移す
+
+### Styling
+
+- **docs:** Fix fleet usage spacing for checkpoint push
+
+### Testing
+
+- **pane:** Windows health fixtureをconsoleから切り離す
+- **monitor:** 子プロセス検証を標準の起動ヘルパーへ統一する
+- **monitor:** 既存スキャンの Git 観測予算を fixture に合わせる
+- **ui:** 画面更新と競合する E2E fixture を修復
+- **fleet:** Live backend が無い環境では起動前に E2E を skip する
+
 ## [9.137.1] - 2026-10-22
 
 ### Bug Fixes
