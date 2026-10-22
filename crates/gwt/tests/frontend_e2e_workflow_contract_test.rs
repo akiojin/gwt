@@ -83,6 +83,10 @@ const VERSION_FILE: &str = "scripts/playwright-version.txt";
 #[test]
 fn frontend_uses_the_official_noble_image_at_the_pinned_playwright_version() {
     let job = frontend_job();
+    assert!(
+        !job.contains("oven-sh/setup-bun@"),
+        "the image lacks unzip; frontend scripts must use their existing Node/npm fallback"
+    );
     let version = read(VERSION_FILE);
     let image = format!(
         "image: mcr.microsoft.com/playwright:v{}-noble",

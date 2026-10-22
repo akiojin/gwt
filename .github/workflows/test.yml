@@ -1041,7 +1041,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
       - name: Run frontend unit tests
