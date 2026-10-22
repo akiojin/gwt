@@ -321,6 +321,21 @@ gwtd <<'JSON'
 JSON
 ```
 
+
+`fleet.inventory` returns project agent processes, panes, and Monitor rows in one
+JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
+and partial-source diagnostics. `fleet.orphans` lists processes without an
+observed pane. A missing pane source means an orphan is unconfirmed.
+
+The registered PM can use `fleet.disposition` with a nonempty `targets` array.
+Copy each selected row's `id`, `session_id`, and observed pane `child_pid` /
+`child_started_at`; process-only targets instead need `pid` / `started_at`.
+Unknown delivery rejects the batch unless `allow_unknown:true` is explicit.
+Current claim/execution holders and undelivered work remain protected.
+`fleet.orphan.terminate` accepts only process targets. Every target receives a
+receipt; generation changes, unsupported backends, and incomplete process
+termination are reported instead of falling back to an ordinary close.
+
 `actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
 is disabled by default. Allow individual workflow filenames for a repository
 in `~/.gwt/config.toml`:

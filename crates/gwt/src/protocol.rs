@@ -554,6 +554,8 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
+    /// Read live pane identities without inferring generations from Session metadata.
+    ListFleetPanes,
     /// Fetch the gwt-assigned identity; the principal supplies all scope.
     PaneName {
         #[serde(default)]
@@ -572,6 +574,14 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         request_id: Option<String>,
+    },
+    /// A fleet close never treats an absent runtime generation as a wildcard.
+    CloseFleetPane {
+        request_id: String,
+        id: String,
+        session_id: String,
+        child_pid: Option<u32>,
+        child_started_at: Option<u64>,
     },
     RecoverRestoredWindow {
         id: String,
@@ -1995,6 +2005,24 @@ pub struct WorkspaceStateNoticeView {
     pub kind: WorkspaceStateNoticeKind,
 }
 
+/// Project-scoped, receiver-observed identity used for one fleet plan/apply cycle.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetPaneView {
+    pub window_id: String,
+    pub project_root: String,
+    pub session_id: Option<String>,
+    pub runtime_present: bool,
+    pub child_pid: Option<u32>,
+    pub child_started_at: Option<u64>,
+    pub title: String,
+    pub state: WindowProcessStatus,
+    pub agent_name: Option<String>,
+    pub preset: WindowPreset,
+    pub worktree_path: String,
+    pub linked_issue_number: Option<u64>,
+    pub is_pm: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -2045,6 +2073,9 @@ pub enum BackendEvent {
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
+    },
+    FleetPaneList {
+        panes: Vec<FleetPaneView>,
     },
     RecoveryCenterState {
         request_id: String,
@@ -2163,6 +2194,14 @@ pub enum BackendEvent {
     /// refusal, or a window record that could not be removed — answers
     /// explicitly instead of silently producing no events.
     PaneCloseResult {
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
+    },
+    /// Correlated acceptance/refusal of the exact fleet target. `ok` confirms
+    /// window removal and finalizer ownership, not completion of detached cleanup.
+    FleetPaneCloseResult {
+        request_id: String,
         ok: bool,
         window_id: String,
         reason: Option<String>,
@@ -2978,6 +3017,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "fleet_pane_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3039,6 +3083,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "fleet_pane_close_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -3475,6 +3524,7 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::FleetPaneList { .. } => "fleet_pane_list",
             BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
             BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
@@ -3494,6 +3544,7 @@ impl BackendEvent {
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::FleetPaneCloseResult { .. } => "fleet_pane_close_result",
             BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
@@ -4071,6 +4122,41 @@ mod tests {
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
+    }
+
+    #[test]
+    fn fleet_pane_inventory_request_is_distinct_from_legacy_listing() {
+        serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "list_fleet_panes"
+        }))
+        .expect("fleet inventory has a dedicated generation-aware request");
+    }
+
+    #[test]
+    fn fleet_pane_close_request_requires_correlated_generation() {
+        let request = serde_json::json!({
+            "kind": "close_fleet_pane",
+            "request_id": "84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+            "id": "tab-1::agent-1",
+            "session_id": "expected-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(request.clone())
+            .expect("fleet close carries the observed Session and runtime generation");
+        let mut stopped = request.clone();
+        stopped["child_pid"] = serde_json::Value::Null;
+        stopped["child_started_at"] = serde_json::Value::Null;
+        serde_json::from_value::<FrontendEvent>(stopped)
+            .expect("a stopped pane has an explicitly absent runtime generation");
+        for field in ["request_id", "session_id"] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<FrontendEvent>(incomplete).is_err(),
+                "fleet close requires {field}"
+            );
+        }
     }
 
     #[test]

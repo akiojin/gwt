@@ -231,8 +231,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("update_terminal_grid", "terminal").window(id)
         }
         FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
+        FrontendEvent::ListFleetPanes => FrontendUserActionLog::new("list_fleet_panes", "window"),
         FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
+        }
+        FrontendEvent::CloseFleetPane { id, .. } => {
+            FrontendUserActionLog::new("close_fleet_pane", "window").window(id)
         }
         FrontendEvent::RecoverRestoredWindow { id, .. } => {
             FrontendUserActionLog::new("recover_restored_window", "window").window(id)

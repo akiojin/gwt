@@ -12087,6 +12087,7 @@ impl AppRuntime {
             | FrontendEvent::UpdateTerminalGrid { id, .. }
             | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
+            | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
@@ -12441,6 +12442,7 @@ impl AppRuntime {
             | FrontendEvent::UpdateTerminalGrid { id, .. }
             | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
+            | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
@@ -12733,6 +12735,7 @@ impl AppRuntime {
                     self.list_windows_event_for_project(context),
                 )]
             }
+            FrontendEvent::ListFleetPanes => Vec::new(),
             FrontendEvent::UpdateWindowGeometry {
                 id,
                 geometry,
@@ -12747,6 +12750,18 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
+            FrontendEvent::CloseFleetPane { request_id, id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::FleetPaneCloseResult {
+                    request_id,
+                    ok: false,
+                    window_id: id,
+                    reason: Some(
+                        "fleet close requires an authenticated agent WebSocket principal"
+                            .to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::RecoverRestoredWindow { id, .. } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneCloseResult {
@@ -13723,7 +13738,8 @@ impl AppRuntime {
                     },
                 ))
             }
-            request @ AgentFrontendRequest::RecoverRestoredWindow { .. } => {
+            request @ (AgentFrontendRequest::RecoverRestoredWindow { .. }
+            | AgentFrontendRequest::CloseFleetPane { .. }) => {
                 // Recovery uses peer teardown too: release the capability
                 // registry read lock before closing the target window.
                 let Some(principal) = issuer.accept_current_grant(&grant) else {
@@ -13777,6 +13793,12 @@ impl AppRuntime {
                     WorktreeFormProjection::Persisted,
                 )]
             }
+            AgentFrontendRequest::ListFleetPanes => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::FleetPaneList {
+                    panes: self.agent_fleet_pane_inventory(&principal),
+                },
+            )],
             AgentFrontendRequest::CloseWork {
                 work_id,
                 close_kind,
@@ -13860,6 +13882,85 @@ impl AppRuntime {
                         ok: outcome.closed,
                         window_id: id,
                         reason,
+                    },
+                )];
+                events.extend(outcome.events);
+                events
+            }
+            AgentFrontendRequest::CloseFleetPane {
+                request_id,
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } => {
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::FleetPaneCloseResult {
+                            request_id: request_id.clone(),
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    return refusal("window is outside the authenticated project scope");
+                }
+                let prefs = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(
+                        principal.canonical_project_root(),
+                    ),
+                );
+                let registered_pm = prefs.is_ok_and(|prefs| {
+                    prefs.registration.is_some_and(|registration| {
+                        registration.session_id == principal.session_id()
+                            && self.live_pm_window_id(principal.session_id()).is_some()
+                    })
+                });
+                if !registered_pm {
+                    return refusal("fleet close requires the live registered PM");
+                }
+                let actual_session = self
+                    .window_lookup
+                    .get(&id)
+                    .and_then(|address| self.tab(&address.tab_id).map(|tab| (tab, address)))
+                    .and_then(|(tab, address)| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.session_id.as_deref());
+                if session_id.is_empty() || actual_session != Some(session_id.as_str()) {
+                    return refusal("window session changed since fleet planning");
+                }
+                let runtime_matches = match (self.runtimes.get(&id), child_pid, child_started_at) {
+                    (None, None, None) => true,
+                    (Some(runtime), Some(pid), Some(started_at)) => {
+                        runtime.pty.process_id() == Some(pid)
+                            && gwt::process::host_process_start_time(pid) == Some(started_at)
+                    }
+                    _ => false,
+                };
+                if !runtime_matches {
+                    return refusal(
+                        "window runtime changed or is unavailable; refresh fleet inventory",
+                    );
+                }
+                if session_id == principal.session_id() {
+                    return refusal("fleet close cannot close the calling PM session");
+                }
+                if let Some(reason) = self.agent_close_board_check(&principal, &id) {
+                    return refusal(&reason);
+                }
+                // The event loop cannot replace the Session or runtime between
+                // this exact match and the finalizer capturing their ownership.
+                let outcome = self.close_window_outcome(&id);
+                let mut events = vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::FleetPaneCloseResult {
+                        request_id,
+                        ok: outcome.closed,
+                        window_id: id,
+                        reason: (!outcome.closed)
+                            .then(|| "the backend did not remove the window record".to_string()),
                     },
                 )];
                 events.extend(outcome.events);
@@ -14349,6 +14450,64 @@ impl AppRuntime {
             },
         ));
         events
+    }
+
+    fn agent_fleet_pane_inventory(
+        &self,
+        principal: &AgentSessionPrincipal,
+    ) -> Vec<gwt::protocol::FleetPaneView> {
+        self.tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset.requires_process())
+                    .map(move |window| {
+                        let window_id = combined_window_id(&tab.id, &window.id);
+                        let child_pid = self
+                            .runtimes
+                            .get(&window_id)
+                            .and_then(|runtime| runtime.pty.process_id());
+                        let child_started_at =
+                            child_pid.and_then(gwt::process::host_process_start_time);
+                        let session = window
+                            .session_id
+                            .as_deref()
+                            .and_then(|id| self.launch_wizard_cache.session_by_id(id));
+                        let worktree_path = self
+                            .active_agent_sessions
+                            .get(&window_id)
+                            .filter(|active| {
+                                Some(active.session_id.as_str()) == window.session_id.as_deref()
+                            })
+                            .map(|active| &active.worktree_path)
+                            .or_else(|| session.map(|session| &session.worktree_path))
+                            .unwrap_or(&tab.project_root);
+                        gwt::protocol::FleetPaneView {
+                            project_root: tab.project_root.display().to_string(),
+                            runtime_present: self.runtimes.contains_key(&window_id),
+                            child_pid,
+                            child_started_at,
+                            title: window.title.clone(),
+                            state: self.window_status(&window_id).unwrap_or(window.status),
+                            agent_name: window.agent_name.clone(),
+                            preset: window.preset,
+                            worktree_path: worktree_path.display().to_string(),
+                            linked_issue_number: window.linked_issue_number.or_else(|| {
+                                session.and_then(|session| session.linked_issue_number)
+                            }),
+                            is_pm: self
+                                .pm_session_for_root(&tab.project_root)
+                                .is_some_and(|pm| window.session_id.as_ref() == Some(pm)),
+                            session_id: window.session_id.clone(),
+                            window_id,
+                        }
+                    })
+            })
+            .collect()
     }
 
     fn agent_workspace_state_reply(

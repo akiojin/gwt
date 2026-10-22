@@ -1662,6 +1662,35 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 min_reset_wait_secs: optional_u64(params, "min_reset_wait_secs")?.unwrap_or(86400),
             })
         }
+        "fleet.inventory" | "fleet.orphans" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::Fleet(if envelope.operation == "fleet.orphans" {
+                super::fleet_disposition::FleetCommand::Orphans
+            } else {
+                super::fleet_disposition::FleetCommand::Inventory
+            })
+        }
+        "fleet.disposition" | "fleet.orphan.terminate" => {
+            reject_unknown_params(params, &["targets", "allow_unknown"], &envelope.operation)?;
+            let targets =
+                super::fleet_disposition::parse_targets(lookup(params, "targets").ok_or_else(
+                    || CliParseError::InvalidJson("fleet targets are required".into()),
+                )?)?;
+            if envelope.operation == "fleet.orphan.terminate"
+                && targets
+                    .iter()
+                    .any(|target| !target.id.starts_with("process:"))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "orphan termination accepts only explicit process targets".into(),
+                ));
+            }
+            CliCommand::Fleet(super::fleet_disposition::FleetCommand::Disposition {
+                targets,
+                allow_unknown: optional_bool(params, "allow_unknown")?.unwrap_or(false),
+                orphan_only: envelope.operation == "fleet.orphan.terminate",
+            })
+        }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
@@ -6380,6 +6409,22 @@ mod tests {
             ok("issue.comment", json!({"number": 1, "body": "b"})),
             CliCommand::Issue(IssueCommand::CommentBody { .. })
         ));
+    }
+
+    #[test]
+    fn fleet_operations_accept_only_explicit_generation_targets() {
+        let inventory = ok("fleet.inventory", json!({}));
+        assert!(!format!("{inventory:?}").is_empty());
+        let target = json!({"id":"pane:agent-1","session_id":"session-1",
+            "child_pid":123,"child_started_at":456});
+        let disposition = ok("fleet.disposition", json!({"targets":[target]}));
+        assert!(!format!("{disposition:?}").is_empty());
+        assert!(err("fleet.disposition", json!({"state":"delivered"}))
+            .to_string()
+            .contains("state"));
+        assert!(err("fleet.disposition", json!({"targets":[]}))
+            .to_string()
+            .contains("target"));
     }
 
     #[test]

@@ -2032,6 +2032,7 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::ListFleetPanes => Some(AgentFrontendRequest::ListFleetPanes),
             FrontendEvent::CloseWork {
                 work_id,
                 close_kind,
@@ -2061,6 +2062,21 @@ impl AgentPaneSessionScope {
                     id,
                     request_id,
                     responder: None,
+                })
+            }
+            FrontendEvent::CloseFleetPane {
+                request_id,
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::CloseFleetPane {
+                    request_id,
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
                 })
             }
             FrontendEvent::PaneSendInput { session_id, text }
@@ -2112,6 +2128,26 @@ impl AgentPaneSessionScope {
                 self.filter_workspace_state(&mut value)?;
                 serde_json::to_string(&value).ok()
             }
+            "fleet_pane_list" => {
+                // Fleet inventory is independently scoped and may be the
+                // first response on this socket, without workspace hydration.
+                let panes = value.get_mut("panes")?.as_array_mut()?;
+                panes.retain(|pane| {
+                    pane.get("window_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                        && self.authorizes_tab(pane)
+                });
+                self.allowed_window_ids = panes
+                    .iter()
+                    .filter_map(|pane| {
+                        pane.get("window_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect();
+                serde_json::to_string(&value).ok()
+            }
             "terminal_snapshot" => value
                 .get("id")
                 .and_then(serde_json::Value::as_str)
@@ -2142,6 +2178,7 @@ impl AgentPaneSessionScope {
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
             "pane_close_result" => Some(payload),
+            "fleet_pane_close_result" => Some(payload),
             "work_close_result" => Some(payload),
             _ => None,
         }
@@ -3333,10 +3370,75 @@ mod tests {
         assert_eq!(bearer_token(&headers), Some("capability"));
     }
 
-    /// Issue #3629 AC-9/AC-12: an authenticated observation grant (the PM has
-    /// no Active execution binding) must be able to request close of a peer
-    /// pane inside its own project scope, and the close reply kind must pass
-    /// the outbound filter so the caller hears the outcome.
+    /// Fleet inventory is the first message on a lightweight socket. Its
+    /// authoritative project scope also seeds the following exact close.
+    #[test]
+    fn agent_pane_scope_limits_fleet_inventory_and_generation_close() {
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(
+            scope.allowed_window_ids.is_empty(),
+            "a fresh fleet socket has no workspace projection"
+        );
+        let list = serde_json::from_value(serde_json::json!({"kind":"list_fleet_panes"})).unwrap();
+        assert!(scope
+            .filter_inbound(list)
+            .is_some_and(|request| !request.mutates_host_state()));
+        let close = |id| {
+            serde_json::from_value(serde_json::json!({
+                "kind":"close_fleet_pane", "request_id":"84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+                "id":id, "session_id":"target-session", "child_pid":123, "child_started_at":456
+            }))
+            .unwrap()
+        };
+        let inventory = scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind":"fleet_pane_list", "panes":[
+                        {"window_id":"owned-window", "session_id":"owned-session", "project_root":project.path()},
+                        {"window_id":"foreign-window", "session_id":"foreign-session", "project_root":foreign.path()},
+                        {"window_id":"unscoped-window", "session_id":"unscoped-session"}
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("fleet inventory reaches its client");
+        let inventory: serde_json::Value = serde_json::from_str(&inventory).unwrap();
+        assert_eq!(inventory["panes"].as_array().unwrap().len(), 1);
+        assert_eq!(inventory["panes"][0]["window_id"], "owned-window");
+        assert!(scope
+            .filter_inbound(close("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(close("foreign-window")).is_none());
+        assert!(scope.filter_inbound(close("unscoped-window")).is_none());
+        scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind":"fleet_pane_list", "panes":[
+                        {"window_id":"new-owned-window", "project_root":project.path()}
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("a fresh atomic inventory replaces stale membership");
+        assert!(scope.filter_inbound(close("new-owned-window")).is_some());
+        assert!(scope.filter_inbound(close("owned-window")).is_none());
+        let result = serde_json::json!({
+            "kind":"fleet_pane_close_result", "request_id":"84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+            "window_id":"owned-window", "ok":false, "reason":"runtime changed"
+        })
+        .to_string();
+        assert_eq!(scope.filter_outbound(result.clone()), Some(result));
+    }
+
     #[test]
     fn agent_pane_scope_limits_recovery_to_project_windows() {
         let project = tempfile::tempdir().expect("project");

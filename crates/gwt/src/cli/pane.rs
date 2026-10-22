@@ -564,6 +564,104 @@ async fn request_window_list(
     request_window_list_with_timeout(ws_url, project_root, BACKEND_RESPONSE_TIMEOUT).await
 }
 
+/// Fleet requests have one short absolute budget and never fall back to a
+/// legacy listing or close, whose runtime identity is not strong enough.
+pub(super) fn fleet_windows(_project_root: &str) -> Result<Vec<Value>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            send_frontend_event(&mut socket, json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] == "fleet_pane_list" {
+                    return value["panes"]
+                        .as_array()
+                        .cloned()
+                        .ok_or_else(|| "invalid fleet pane snapshot".to_string());
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            "fleet pane snapshot unavailable: backend timed out or lacks fleet support".to_string()
+        })?
+    })
+}
+
+pub(super) fn fleet_close(
+    id: &str,
+    session_id: &str,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+) -> Result<Value, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            // The scoped fleet snapshot primes this connection's target
+            // allowlist. A new socket has no authorized peer window IDs.
+            send_frontend_event(&mut socket,json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] != "fleet_pane_list" { continue; }
+                if !value["panes"].as_array().is_some_and(|panes| panes.iter().any(|pane| pane["window_id"]==id)) {
+                    return Err("fleet target is absent from the authenticated project snapshot".into());
+                }
+                break;
+            }
+            let request_id = uuid::Uuid::new_v4().to_string();
+            send_frontend_event(&mut socket,json!({
+                "kind":"close_fleet_pane","request_id":request_id,"id":id,
+                "session_id":session_id,"child_pid":child_pid,"child_started_at":child_started_at,
+            })).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if let Some(result) = fleet_close_reply(&value,&request_id,id) {
+                    let mut receipt = result?;
+                    if let (Some(pid),Some(started_at)) = (child_pid,child_started_at) {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        while crate::process::exact_pty_process_tree_is_alive(pid,started_at) {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err("pane removed, but process-tree termination is unconfirmed; re-inventory before retry".into());
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        receipt["process_tree_terminated"] = json!(true);
+                    }
+                    return Ok(receipt);
+                }
+            }
+        }).await.map_err(|_| "fleet close receipt unavailable: outcome unknown; re-inventory before retry (no legacy fallback)".to_string())?
+    })
+}
+
+fn fleet_close_reply(value: &Value, request_id: &str, id: &str) -> Option<Result<Value, String>> {
+    if value["kind"] != "fleet_pane_close_result"
+        || value["request_id"] != request_id
+        || value["window_id"] != id
+    {
+        return None;
+    }
+    Some(if value["ok"].as_bool() == Some(true) {
+        Ok(value.clone())
+    } else {
+        Err(value["reason"]
+            .as_str()
+            .or_else(|| value["error"].as_str())
+            .unwrap_or("fleet close refused without a reason")
+            .to_string())
+    })
+}
+
 async fn request_window_list_with_timeout(
     ws_url: &str,
     project_root: &str,
@@ -3868,6 +3966,23 @@ mod tests {
             assert_eq!(close_work_async(&url, "work-1", "discarded").await.unwrap()["changed"], false);
             server.await.unwrap();
         });
+    }
+
+    #[test]
+    fn fleet_close_accepts_only_matching_correlated_receipts() {
+        let unrelated = json!({"kind":"pane_close_result","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&unrelated, "request-a", "pane-a").is_none());
+        let mismatch = json!({"kind":"fleet_pane_close_result","request_id":"request-b","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&mismatch, "request-a", "pane-a").is_none());
+        let refusal = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":false,"error":"runtime changed"});
+        assert!(fleet_close_reply(&refusal, "request-a", "pane-a")
+            .unwrap()
+            .unwrap_err()
+            .contains("runtime changed"));
+        let success = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&success, "request-a", "pane-a")
+            .unwrap()
+            .is_ok());
     }
 
     #[test]

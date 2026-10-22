@@ -306,6 +306,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+
+`fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
+JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
+一部の観測元が使えない場合の診断も含みます。`fleet.orphans` はpaneが観測されない
+プロセスを列挙します。pane情報の取得失敗時はorphanと断定しません。
+
+登録済みPMは `fleet.disposition` に空でない `targets` 配列を渡して整理できます。
+選んだ行の `id`、`session_id`、paneの `child_pid` / `child_started_at` を指定します。
+プロセスのみの対象には代わりに `pid` / `started_at` が必要です。
+配信状態がunknownの集合は `allow_unknown:true` を明示しない限り拒否されます。
+現在のclaim/execution保持者と未配信の作業は保護されます。
+`fleet.orphan.terminate` はプロセス対象のみ受け付けます。対象ごとにreceiptを返し、
+世代変更、未対応backend、プロセス終端未確認を報告します。通常closeへはfallbackしません。
+
 `actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
 既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
 workflow のファイル名を許可します。
