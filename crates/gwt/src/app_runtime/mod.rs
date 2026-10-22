@@ -2177,10 +2177,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
-    /// Issue #4378 AC-2: Issue Monitor launch deliveries held while the
-    /// startup generation reaper runs on the blocking worker. `Some` until the
-    /// reaper reports back; the held deliveries then replay in arrival order.
+    /// Issue #4378 / Issue #4804: hold deliveries until the generation reaper
+    /// finishes and canvas-ready registers the startup restore inventory.
     pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
+    pub(crate) startup_generation_reaper_pending: bool,
     /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
     /// until the startup index status probe takes the active project's one.
     pub(crate) startup_worktree_inventories:
@@ -5148,6 +5148,7 @@ impl AppRuntime {
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
+            startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
             update_resume_tab_ids: HashSet::new(),
             update_drain_released_projects: Vec::new(),
@@ -5482,10 +5483,19 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #4378 AC-2: the startup generation reaper finished on the
-    /// blocking worker. Replay the Issue Monitor launch deliveries that arrived
-    /// while it ran, in arrival order.
+    /// Issue #4378 AC-2: the startup generation reaper finished on the worker.
     pub(crate) fn handle_startup_generation_reaper_completed(&mut self) -> Vec<OutboundEvent> {
+        self.startup_generation_reaper_pending = false;
+        self.drain_startup_issue_monitor_launches()
+    }
+
+    /// Issue #4804 AC-7: either startup event may arrive first. A current
+    /// canvas census is complete only after pending restores are registered
+    /// (or refused); waiting for their PTYs is unnecessary.
+    fn drain_startup_issue_monitor_launches(&mut self) -> Vec<OutboundEvent> {
+        if self.startup_generation_reaper_pending || self.pending_startup_restore_log.is_some() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         for launch in self
             .deferred_issue_monitor_launches
@@ -10092,6 +10102,14 @@ impl AppRuntime {
                             let (session_issue, monitor_owned) = window
                                 .session_id
                                 .as_deref()
+                                // Issue #4804: a restored pane has no new Session
+                                // until launch preparation applies, but its source
+                                // carries the Issue and autonomous launch route.
+                                .or_else(|| {
+                                    self.restore_launch_windows
+                                        .get(&window_id)
+                                        .and_then(Option::as_deref)
+                                })
                                 .map(session_metadata)
                                 .unwrap_or_default();
                             let issue_number = pending
