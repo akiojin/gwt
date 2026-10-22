@@ -2319,6 +2319,9 @@ enum IssueMonitorControl {
         profiles: Vec<crate::IssueMonitorLaunchProfile>,
         usage_threshold_percent: Option<u8>,
     },
+    /// Sparse pool edits carry their read set so resolution and comparison
+    /// happen in the same prefs transaction as the replacement.
+    ProfilesPatch(crate::issue_monitor::IssueMonitorProfilesSetRequest),
     ClaimLaunchDelivery {
         issue_number: u64,
         delivery_id: String,
@@ -2833,6 +2836,8 @@ fn try_apply_issue_monitor_control(
             *monitor = candidate;
             Some(true)
         }
+        // Only the locked transaction can compare the raw saved read set.
+        IssueMonitorControl::ProfilesPatch(_) => None,
         IssueMonitorControl::WaitDeclared {
             issue_number,
             reason,
@@ -3000,6 +3005,7 @@ fn apply_routine_issue_monitor_control(
         | IssueMonitorControl::AutonomousMode(_)
         | IssueMonitorControl::ConfigSet { .. }
         | IssueMonitorControl::ProfilesSet { .. }
+        | IssueMonitorControl::ProfilesPatch(_)
         | IssueMonitorControl::WaitDeclared { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
@@ -3472,6 +3478,10 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         accepted.control,
         IssueMonitorControl::LaunchFailed { .. } | IssueMonitorControl::AgentFailed { .. }
     );
+    let profiles_control = matches!(
+        accepted.control,
+        IssueMonitorControl::ProfilesSet { .. } | IssueMonitorControl::ProfilesPatch(_)
+    );
     let monitor_has_exact_receipt = monitor
         .last_control_receipt()
         .is_some_and(|receipt| receipt.control_id == accepted.control_id);
@@ -3492,7 +3502,19 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 .filter(|receipt| receipt.control_id == accepted.control_id)
                 .cloned()
             {
-                if !monitor_has_exact_receipt {
+                if !monitor_has_exact_receipt && profiles_control {
+                    // Rebase already restored the complete disk-owned pool,
+                    // authority epoch and revoked effects. Reapplying would
+                    // advance the epoch twice or reject the committed CAS.
+                    if !crate::issue_monitor::monitor_project_prefs_equal(
+                        prefs_path,
+                        &candidate.prefs(),
+                        disk,
+                    ) {
+                        receipt_convergence_failed = true;
+                        return Ok(());
+                    }
+                } else if !monitor_has_exact_receipt {
                     // The rename may have become visible while the prior
                     // parent-directory sync (and the lock-free confirmation
                     // reread) failed. Converge the stale volatile projection by
@@ -3606,10 +3628,23 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     return Ok(());
                 }
             }
+            let control = match &accepted.control {
+                IssueMonitorControl::ProfilesPatch(request) => {
+                    let Ok((profiles, _)) = request.resolve(disk) else {
+                        rejected = Some(IssueMonitorControlCommit::Rejected);
+                        return Ok(());
+                    };
+                    IssueMonitorControl::ProfilesSet {
+                        profiles,
+                        usage_threshold_percent: None,
+                    }
+                }
+                control => control.clone(),
+            };
             let authority_epoch_before = candidate.effect_authority_epoch();
             applied = Some(try_apply_issue_monitor_control(
                 &mut candidate,
-                accepted.control.clone(),
+                control,
                 &accepted.processed_at,
             ));
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
@@ -3745,6 +3780,167 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 "issue monitor control commit failed at prefs-lock stage: {error}"
             ));
             IssueMonitorControlCommit::RetryableFailure
+        }
+    }
+}
+
+#[cfg(test)]
+mod profiles_patch_contract_tests {
+    use super::*;
+
+    fn initial_prefs() -> crate::IssueMonitorPrefs {
+        let profile = serde_json::from_value(serde_json::json!({
+            "agent_id": "codex", "model": "original", "skip_permissions": false,
+        }))
+        .expect("profile");
+        let mut prefs = crate::IssueMonitorPrefs {
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        prefs.set_launch_profile_pool(vec![profile]);
+        prefs
+    }
+
+    fn patch_control(
+        prefs: &crate::IssueMonitorPrefs,
+        patches: serde_json::Value,
+    ) -> IssueMonitorControl {
+        decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({"profiles_patch": {
+                "patches": patches,
+                "expected_pool": prefs.launch_profile_pool(),
+                "expected_head": prefs.launch_profile,
+            }}),
+            u32::MAX,
+        ))
+        .expect("sparse profile control")
+    }
+
+    #[test]
+    fn profiles_patch_serializes_concurrent_writers_and_retries_from_latest_pool() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        let initial = initial_prefs();
+        crate::save_issue_monitor_prefs(&path, &initial).expect("seed prefs");
+        let patches = [
+            serde_json::json!([{"agent_id": "codex", "model": "updated"}]),
+            serde_json::json!([{"agent_id": "codex", "skip_permissions": true}]),
+        ];
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let writers = patches.clone().map(|patches| {
+            let control = patch_control(&initial, patches.clone());
+            let path = path.clone();
+            let initial = initial.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let _prefs_budget = pin_prefs_hang_guard();
+                let mut monitor = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    initial,
+                );
+                barrier.wait();
+                let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    &path,
+                    &mut monitor,
+                    AcceptedIssueMonitorControl::new(control),
+                );
+                (result, patches)
+            })
+        });
+        barrier.wait();
+        let outcomes = writers.map(|writer| writer.join().expect("profile writer"));
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(result, _)| matches!(result, IssueMonitorControlCommit::Committed { .. }))
+                .count(),
+            1,
+            "only one proposal based on the original pool may commit"
+        );
+        let rejected = outcomes
+            .into_iter()
+            .find(|(result, _)| *result == IssueMonitorControlCommit::Rejected)
+            .expect("the stale writer is rejected without closing the control lane")
+            .1;
+        let latest = crate::load_issue_monitor_prefs(&path).expect("first commit");
+        assert_eq!(latest.effect_authority_epoch, 8);
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let _prefs_budget = pin_prefs_hang_guard();
+        assert!(matches!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut monitor,
+                AcceptedIssueMonitorControl::new(patch_control(&latest, rejected)),
+            ),
+            IssueMonitorControlCommit::Committed { .. }
+        ));
+        let committed = crate::load_issue_monitor_prefs(&path).expect("retry commit");
+        let pool = committed.launch_profile_pool();
+        assert_eq!(pool[0].model.as_deref(), Some("updated"));
+        assert!(pool[0].skip_permissions);
+        assert_eq!(committed.effect_authority_epoch, 9);
+        assert_eq!(monitor.prefs(), committed);
+    }
+
+    #[test]
+    fn profiles_control_receipt_converges_without_reapplying_committed_pool() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = pin_prefs_hang_guard();
+        let initial = initial_prefs();
+        let patch = patch_control(
+            &initial,
+            serde_json::json!([{"agent_id": "codex", "skip_permissions": true}]),
+        );
+        let mut replacement = initial.launch_profile_pool();
+        replacement[0].skip_permissions = true;
+        let legacy = IssueMonitorControl::ProfilesSet {
+            profiles: replacement,
+            usage_threshold_percent: None,
+        };
+        for control in [legacy, patch] {
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let path = temp.path().join("issue-monitor.json");
+            crate::save_issue_monitor_prefs(&path, &initial).expect("seed prefs");
+            let stale = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                initial.clone(),
+            );
+            let mut monitor = stale.clone();
+            let accepted = AcceptedIssueMonitorControl::new(control);
+            fs::write(path.with_extension("parent-sync-fail-once"), b"fail once")
+                .expect("sync failure trigger");
+            let _failure = gwt_core::test_support::ScopedEnvVar::set(
+                "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+                &path,
+            );
+            assert_eq!(
+                try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    &path,
+                    &mut monitor,
+                    accepted.clone(),
+                ),
+                IssueMonitorControlCommit::RetryableFailure
+            );
+            let visible = crate::load_issue_monitor_prefs(&path).expect("visible renamed commit");
+            assert_eq!(visible.effect_authority_epoch, 8);
+            monitor = stale;
+            assert!(matches!(
+                try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    &path,
+                    &mut monitor,
+                    accepted,
+                ),
+                IssueMonitorControlCommit::Committed { .. }
+            ));
+            assert_eq!(monitor.prefs(), visible);
+            assert_eq!(
+                crate::load_issue_monitor_prefs(&path).expect("receipt replay"),
+                visible
+            );
         }
     }
 }
@@ -4245,6 +4441,13 @@ fn decode_issue_monitor_control_in_repo(
                     launch_agent,
                     update_drain,
                 });
+            }
+            if let Some(request) = payload.get("profiles_patch") {
+                return serde_json::from_value::<
+                    crate::issue_monitor::IssueMonitorProfilesSetRequest,
+                >(request.clone())
+                .ok()
+                .map(IssueMonitorControl::ProfilesPatch);
             }
             if let Some(profiles_set) = payload
                 .get("profiles_set")

@@ -1737,6 +1737,28 @@ where
     validate_session_id_path_component(&expected.id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let expected_content = serialize_session_toml(expected)?;
+    update_session_if_matches_with(
+        sessions_dir,
+        expected,
+        |current, _| Ok(serialize_session_toml(current)? == expected_content),
+        mutate,
+    )
+}
+
+/// Update the latest Session under the same bounded, atomic snapshot transaction
+/// as [`update_session_if_unchanged_with`], using an operation-specific comparison.
+/// The predicate runs before mutation under the lease; rejected or unreadable
+/// snapshots never invoke `mutate`, and semantic no-ops preserve durable bytes.
+pub fn update_session_if_matches_with<T, P, F>(
+    sessions_dir: &Path,
+    expected: &Session,
+    matches: P,
+    mutate: F,
+) -> io::Result<SessionSnapshotUpdateOutcome<T>>
+where
+    P: FnOnce(&Session, &Session) -> io::Result<bool>,
+    F: FnOnce(&mut Session) -> io::Result<T>,
+{
     with_session_path_lease(sessions_dir, &expected.id, |state| {
         let path = session_file_path(sessions_dir, &expected.id);
         let mut session = match state {
@@ -1746,7 +1768,7 @@ where
                 return Ok(SessionSnapshotUpdateOutcome::SnapshotUnreadable(error))
             }
         };
-        if serialize_session_toml(&session)? != expected_content {
+        if !matches(&session, expected)? {
             return Ok(SessionSnapshotUpdateOutcome::SnapshotChanged);
         }
         let before = serialize_session_toml(&session)?;

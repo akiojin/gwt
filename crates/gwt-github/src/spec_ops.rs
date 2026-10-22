@@ -37,6 +37,9 @@ pub enum SpecOpsError {
     IndexIntegrity(String),
     #[error("issue body changed during section write; refusing to overwrite a newer index")]
     ConcurrentWrite,
+    /// A targeted cache read could not validate a stable generation after retries.
+    #[error("issue {0} cache conflict: concurrent writers prevented a stable validated read; retry the operation")]
+    CacheConflict(IssueNumber),
     /// Pre-write content validation refused the operation (Issue #3873). No
     /// remote mutation happened; the caller must fix the body and retry.
     #[error("validation failed: {0}")]

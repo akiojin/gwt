@@ -66,11 +66,19 @@ const POLL_INTERVAL_LADDER: &[Duration] = &[
 pub struct PollState {
     failure_count: usize,
     last_seen: Option<String>,
+    retry_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl PollState {
     /// Current sleep interval before the next poll attempt.
     pub fn current_interval(&self) -> Duration {
+        self.interval_at(chrono::Utc::now())
+    }
+
+    fn interval_at(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+        if let Some(deadline) = self.retry_at {
+            return (deadline - now).to_std().unwrap_or_default();
+        }
         let idx = self.failure_count.min(POLL_INTERVAL_LADDER.len() - 1);
         POLL_INTERVAL_LADDER[idx]
     }
@@ -86,6 +94,7 @@ impl PollState {
     /// the next sleep duration.
     pub fn on_success_uptodate(&mut self) -> Duration {
         self.failure_count = 0;
+        self.retry_at = None;
         self.current_interval()
     }
 
@@ -99,6 +108,7 @@ impl PollState {
             self.last_seen = Some(latest.to_string());
         }
         self.failure_count = 0;
+        self.retry_at = None;
         (should_broadcast, self.current_interval())
     }
 
@@ -106,6 +116,13 @@ impl PollState {
     /// backoff one step (capped at 60 min) and returns the next sleep duration.
     pub fn on_failure(&mut self) -> Duration {
         self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = None;
+        self.current_interval()
+    }
+
+    fn on_rate_limit(&mut self, retry_at: chrono::DateTime<chrono::Utc>) -> Duration {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.retry_at = Some(retry_at);
         self.current_interval()
     }
 }
@@ -115,6 +132,7 @@ pub enum StartupUpdateAction {
     Publish,
     Stop,
     Retry,
+    RetryAt(chrono::DateTime<chrono::Utc>),
 }
 
 pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> StartupUpdateAction {
@@ -126,6 +144,10 @@ pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> S
             asset_url: None, ..
         }
         | gwt_core::update::UpdateState::UpToDate { .. } => StartupUpdateAction::Stop,
+        gwt_core::update::UpdateState::Failed {
+            retry_at: Some(deadline),
+            ..
+        } => StartupUpdateAction::RetryAt(*deadline),
         gwt_core::update::UpdateState::Failed { .. } => StartupUpdateAction::Retry,
     }
 }
@@ -172,6 +194,7 @@ pub fn spawn_startup_update_check(
                 Err(error) => gwt_core::update::UpdateState::Failed {
                     message: format!("update check worker failed: {error}"),
                     failed_at: chrono::Utc::now(),
+                    retry_at: None,
                 },
             };
             match classify_startup_update_state(&update_state) {
@@ -215,6 +238,7 @@ pub fn spawn_startup_update_check(
                         &gwt_core::update::UpdateState::Failed {
                             message: format!("update check worker failed: {error}"),
                             failed_at: chrono::Utc::now(),
+                            retry_at: None,
                         },
                         "retry",
                         next,
@@ -253,6 +277,9 @@ fn handle_poll_outcome(
         }
         StartupUpdateAction::Stop => (state.on_success_uptodate(), "no_applicable_update"),
         StartupUpdateAction::Retry => (state.on_failure(), "retry"),
+        StartupUpdateAction::RetryAt(deadline) => {
+            (state.on_rate_limit(deadline), "rate_limit_retry")
+        }
     };
     log_poll_outcome(&outcome, decision, next);
     next
@@ -856,6 +883,36 @@ mod poll_state_tests {
     }
 
     #[test]
+    fn issue_6001_server_deadline_bypasses_startup_fast_retry() {
+        let outcome = serde_json::from_value(serde_json::json!({
+            "state": "failed", "message": "rate limited",
+            "failed_at": "2026-10-22T00:00:00Z",
+            "retry_at": "2099-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_ne!(
+            super::classify_startup_update_state(&outcome),
+            super::StartupUpdateAction::Retry
+        );
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (proxy, events) = crate::AppEventProxy::stub();
+        let mut poll = PollState::default();
+        super::handle_poll_outcome(&mut poll, outcome, &proxy);
+        let deadline = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            poll.interval_at(deadline - chrono::Duration::seconds(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(poll.interval_at(deadline), Duration::ZERO);
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(poll.on_success_uptodate(), FIVE_MIN);
+        assert_eq!(poll.on_failure(), TEN_MIN);
+    }
+
+    #[test]
     fn first_available_detection_broadcasts_and_records_latest() {
         let mut state = PollState::default();
         let (should, next) = state.on_success_available("9.19.0");
@@ -947,6 +1004,7 @@ mod poll_state_tests {
                 gwt_core::update::UpdateState::Failed {
                     message: "fixture network failure".into(),
                     failed_at: chrono::Utc::now(),
+                    retry_at: None,
                 },
                 &proxy
             ),

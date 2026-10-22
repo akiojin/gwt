@@ -312,6 +312,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Read-only health census, independent of GUI dispatch.
+    Health { id: Option<String> },
     /// Assign the authenticated producing Session's own stable Agent name.
     Name { candidate: String },
     /// `pane.read`.

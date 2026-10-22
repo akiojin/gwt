@@ -5815,6 +5815,7 @@ mod tests {
             super::classify_startup_update_state(&UpdateState::Failed {
                 message: "network".to_string(),
                 failed_at: checked_at,
+                retry_at: None,
             }),
             super::StartupUpdateAction::Retry
         ));

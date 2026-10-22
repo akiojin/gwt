@@ -490,7 +490,7 @@ impl AppRuntime {
         );
     }
 
-    fn sanitize_launch_log_error(error: &str) -> String {
+    pub(super) fn sanitize_launch_log_error(error: &str) -> String {
         let sensitive_env_keys = [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",

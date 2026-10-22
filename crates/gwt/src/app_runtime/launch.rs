@@ -7271,13 +7271,9 @@ impl AppRuntime {
         // compose ps/up incl. image build, exec probes), mirror docker-kind
         // Process Console lines into the agent terminal. Host launches keep
         // their immediate-PTY behavior untouched (FR-142).
-        let docker_output_mirror =
-            (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
-                launch_output_mirror::DockerLaunchOutputMirror::start(
-                    proxy.clone(),
-                    window_id.clone(),
-                )
-            });
+        let docker_output_mirror = (config.runtime_target
+            == gwt_agent::LaunchRuntimeTarget::Docker)
+            .then(|| launch_output_mirror::start(proxy.clone(), window_id.clone()));
         let mut issued_capability_token = None;
         let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
         // Issue #4283 AC-5: attribute the pane-create route to its phases so
@@ -7430,6 +7426,9 @@ impl AppRuntime {
             let agent_id = config.agent_id.clone();
             let mut session =
                 initialize_launch_session(&worktree_path, Path::new(&project_root), &config);
+            // Keep a separate observation identity if the resumed authority
+            // cannot be installed. Never overwrite the coordinator's Session.
+            let unbound_session_id = session.id.clone();
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
             // coordinator before spawn. Failure degrades to an unbound,
@@ -7540,8 +7539,8 @@ impl AppRuntime {
                 )?;
             }
 
-            let session_id = session.id.clone();
-            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            let mut session_id = session.id.clone();
+            let mut runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 session_id.clone(),
@@ -7555,10 +7554,9 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_binding(
-                &mut config,
-                docker_launch_binding.as_ref(),
-            )?;
+            let docker_runtime_worktree = docker_launch_binding
+                .as_ref()
+                .map(|binding| binding.container_cwd().to_string());
             let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
                     .env_vars
@@ -7654,13 +7652,113 @@ impl AppRuntime {
                 .env_vars
                 .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                 .cloned();
-            active_launch_handshake_cleanup = capability_install?;
+            active_launch_handshake_cleanup = match capability_install {
+                Ok(handshake) => handshake,
+                Err(error) if rebound_continuation.is_some() => {
+                    // Issue #3626: only automatic Resume/Continue recovered
+                    // through the coordinator may degrade. Fresh and explicitly
+                    // prepared launches retain their fail-closed contract.
+                    // ActiveContinuationInstall already released its own claim;
+                    // a competing Session's handshake must remain untouched.
+                    session.set_execution_binding(None)?;
+                    session.id = unbound_session_id;
+                    session_id = session.id.clone();
+                    runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+                    config.env_vars.insert(
+                        gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                        session_id.clone(),
+                    );
+                    config.env_vars.insert(
+                        gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+                        runtime_path.display().to_string(),
+                    );
+                    // Also mask inherited credentials if issuing an inspection
+                    // capability fails. An input-capable PTY needs no bearer.
+                    let capability_env_keys = [
+                        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                        gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+                        gwt_agent::GWT_PANE_WS_URL_ENV,
+                        gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+                    ];
+                    for key in capability_env_keys {
+                        config.env_vars.remove(key);
+                        config.remove_env.push(key.to_string());
+                    }
+                    if let Err(unbound_error) = install_agent_capability_env(
+                        &mut config.env_vars,
+                        agent_capability_issuer.as_ref(),
+                        Path::new(&project_root),
+                        &session_id,
+                        runtime_target,
+                        docker_launch_binding
+                            .as_ref()
+                            .map(DockerLaunchBinding::runtime),
+                    ) {
+                        tracing::warn!(%unbound_error, "resume inspection capability unavailable");
+                    }
+                    // Windows applies removals after explicit env assignments.
+                    // Keep only missing keys masked after inspection issuance.
+                    for key in capability_env_keys {
+                        if config.env_vars.contains_key(key) {
+                            config.remove_env.retain(|removed| removed != key);
+                        }
+                    }
+                    issued_capability_token = config
+                        .env_vars
+                        .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                        .cloned();
+                    let reason = gwt_core::error_ledger::sanitize_error_message(
+                        &Self::sanitize_launch_log_error(&error.to_string()),
+                    );
+                    let message = format!(
+                        "Resume degraded to unbound (no execution authority). Reason: {reason}. \
+                         Input remains available. Use Start Work / Launch to obtain execution \
+                         authority before delivering changes."
+                    );
+                    proxy.send(UserEvent::LaunchTerminalOutput {
+                        window_id: window_id.clone(),
+                        data: format!("\r\n[gwt] {message}\r\n").into_bytes(),
+                    });
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::project(
+                        gwt_core::paths::resolve_project_scope(Path::new(&project_root)).hash,
+                        gwt::protocol::BackendEvent::IssueMonitorToast {
+                            level: "warn".to_string(),
+                            message: message.clone(),
+                            issue_number: config.linked_issue_number,
+                            notification_transition: None,
+                            notification_transition_id: None,
+                        },
+                    )]));
+                    let _ = gwt::error_report::report_error_and_publish_with_context(
+                        gwt_core::error_ledger::ErrorKind::LaunchFailure,
+                        message,
+                        gwt_core::error_ledger::ErrorTarget {
+                            issue: config.linked_issue_number,
+                            window_id: Some(window_id.clone()),
+                            session_id: Some(session_id.clone()),
+                            project_root: Some(project_root.clone()),
+                        },
+                        std::collections::BTreeMap::from([(
+                            "disposition".to_string(),
+                            "degraded_unbound".to_string(),
+                        )]),
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            };
             if manual_successor_prepared {
                 config.env_vars.insert(
                     gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
                     uuid::Uuid::new_v4().to_string(),
                 );
             }
+            // Docker fixes env keys into its argv: finalize only after the
+            // capability and any degraded Session identity are final.
+            finalize_docker_agent_launch_config_with_binding(
+                &mut config,
+                docker_launch_binding.as_ref(),
+            )?;
             let carries_fresh_execution_readiness = config
                 .env_vars
                 .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);

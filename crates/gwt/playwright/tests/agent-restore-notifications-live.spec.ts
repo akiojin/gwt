@@ -144,3 +144,66 @@ test("Issue Monitor fresh-session notifications retain each native conversation 
     expect(errors, "console and page errors").toEqual([]);
   });
 });
+
+// Issue #3626: this receive contract covers warning presentation only. The
+// Rust launch regression injects installer failure and proves PTY/input reachability;
+// injecting a toast here does not prove a full degraded launch.
+test("degraded resume warnings retain the reason and Start Work recovery without blocking workspace controls", async ({ page }, testInfo) => {
+  test.skip(!BASE || !process.env.GWT_PLAYWRIGHT_CHECK_HOME,
+    "requires browser-check checkout binaries and a fresh HOME");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+
+  await withLiveGwtBackendLock(BASE, testInfo, async () => {
+    await gotoLiveGwt(page, BASE);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const bell = page.locator("#op-notifications-button");
+    const drawer = page.locator("#notification-center");
+    const rows = drawer.locator('.notification-center__item[data-kind="issue-monitor"]');
+    await bell.click();
+    await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+    await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
+
+    const reason = "injected resume capability installation failure";
+    const warning = `Resume degraded to unbound (no execution authority). Reason: ${reason}. Input remains available. Use Start Work / Launch to obtain execution authority before delivering changes.`;
+    await page.evaluate(message => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: {
+          kind: "issue_monitor_toast", level: "warn", message,
+          issue_number: 3626, notification_transition: null,
+        },
+      }));
+    }, warning);
+    await expect(bell.locator(".op-rail__badge")).toHaveText("1");
+    await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
+    await expect(page.locator("#wizard-modal")).toBeHidden();
+
+    // Ordinary notification controls remain usable after the warning. Closing
+    // and reopening the drawer must retain its Issue, reason, and recovery path.
+    await bell.click();
+    await expect(drawer).toBeVisible();
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toHaveAttribute("data-level", "warn");
+    await expect(rows.first().locator(".notification-center__title")).toHaveText("Issue Monitor #3626");
+    await expect(rows.first().locator(".notification-center__message")).toHaveText(warning);
+    await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
+    await expect(drawer).toBeHidden();
+    await bell.click();
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText(reason);
+    await expect(rows.first()).toContainText("Start Work / Launch");
+    const screenshot = testInfo.outputPath(`degraded-resume-notification-${theme}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    await testInfo.attach(`degraded-resume-notification-${theme}`, {
+      path: screenshot, contentType: "image/png",
+    });
+    await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
+    await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
+    expect(errors, "console and page errors").toEqual([]);
+  });
+});
