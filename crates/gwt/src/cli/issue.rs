@@ -3815,11 +3815,55 @@ fn run_monitor_release_stranded_launch(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
+        if let Some(windows) = &live_windows {
+            let mut tabs = windows
+                .iter()
+                .filter_map(|window| window.id.split_once("::").map(|(tab, _)| tab.to_string()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let bound = monitor.launched_window_id(number).or_else(|| {
+                projection.and_then(|status| {
+                    status
+                        .inbox
+                        .iter()
+                        .find(|row| row.issue_number == number)
+                        .and_then(|row| row.launched_window_id.clone())
+                })
+            });
+            if let Some((tab, raw)) = bound.as_deref().and_then(|bound| bound.split_once("::")) {
+                if !tab.is_empty() && !raw.is_empty() {
+                    tabs.insert(tab.to_string());
+                }
+            }
+            monitor.record_window_snapshot_for_tabs(
+                crate::IssueMonitorWindowSnapshot {
+                    project_tab_id: tabs.first().cloned().unwrap_or_default(),
+                    observed_at: now.to_string(),
+                    windows: windows
+                        .iter()
+                        .map(|window| crate::IssueMonitorWindowObservation {
+                            monitor_owned: true,
+                            window_id: window.id.clone(),
+                            issue_number: window.linked_issue_number,
+                            status: window.status,
+                            review_dispatch: false,
+                            hold_reason: None,
+                            last_output_at: None,
+                            session_id: window.session_id.clone(),
+                        })
+                        .collect(),
+                },
+                tabs,
+            );
+        }
+        let exited = observations.get(&number).is_some_and(|observation| {
+            monitor.retire_exited_completed_holder(number, observation, now)
+        });
         // The driver may still count a slot its durable prefs no longer hold.
         // That shape caused stop=unknown_issue plus requeue=not_held. Require
         // current positive canvas evidence before releasing its projected slot.
         if projection.is_some_and(|status| status.active_launches.contains(&number))
             && monitor.launched_window_id(number).is_none()
+            && !exited
         {
             let bound = projection.and_then(|status| {
                 status
@@ -3848,30 +3892,6 @@ fn run_monitor_release_stranded_launch(
                 .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
                 .collect(),
         );
-        if let (Some(bound), Some(windows)) = (monitor.launched_window_id(number), &live_windows) {
-            if let Some((tab, _)) = bound
-                .split_once("::")
-                .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
-            {
-                monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
-                    project_tab_id: tab.to_string(),
-                    observed_at: now.to_string(),
-                    windows: windows
-                        .iter()
-                        .map(|window| crate::IssueMonitorWindowObservation {
-                            monitor_owned: false,
-                            window_id: window.id.clone(),
-                            issue_number: window.linked_issue_number,
-                            status: window.status,
-                            review_dispatch: false,
-                            hold_reason: None,
-                            last_output_at: None,
-                            session_id: window.session_id.clone(),
-                        })
-                        .collect(),
-                });
-            }
-        }
         let outcome = monitor.release_stranded_launch(number, reason, now);
         if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
             monitor.terminal_queue_push(&[number], "operator", now);
@@ -7329,6 +7349,57 @@ mod tests {
             before,
             "a refused release must be zero-mutation"
         );
+    }
+
+    #[test]
+    fn issue_5876_requeue_recovers_an_exited_completed_projection_without_a_launch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        crate::issue_monitor_worker::tests::completed_child_exit_fixture(&repo);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        assert!(matches!(
+            monitor.launch_identity(42),
+            crate::IssueMonitorLaunchIdentity {
+                active: false,
+                window_id: None,
+                ..
+            }
+        ));
+        let mut projection = monitor.agent_status_at("2026-09-07T04:00:01Z");
+        projection.active_launches = vec![42];
+        let mut out = String::new();
+        let code = run_monitor_release_stranded_launch(
+            &prefs_path,
+            &repo,
+            42,
+            "completed child recovery",
+            "2026-09-07T04:00:01Z",
+            Some(&projection),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            code, 0,
+            "stop has no launch to revoke, so exact exited runtime must permit requeue: {out}"
+        );
+        let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(response["status"], "requeued");
+        assert_eq!(response["released_hold"], "stranded_launch");
     }
 
     /// Issue #3992 AC-5 / AC-7: and the row nothing owns is published as a
