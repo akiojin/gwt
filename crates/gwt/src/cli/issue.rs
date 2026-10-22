@@ -2226,6 +2226,7 @@ fn run_monitor_launch_now<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
 
+    let scan_requested_at = chrono::Utc::now();
     let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
     // SPEC #4093 FR-006 (Issue #3737 AC-4): inside a GitHub refusal window the
     // requested scan runs but its GitHub reads are refused until the window
@@ -2239,7 +2240,10 @@ fn run_monitor_launch_now<E: CliEnv>(
         Ok(hold) => (hold, None),
         Err(error) => (None, Some(error.to_string())),
     };
-    let projection = monitor_status_projection(&project_root);
+    let publication = monitor_status_publication(&project_root);
+    let projection = publication.as_ref().and_then(|status| {
+        serde_json::from_value::<crate::IssueMonitorAgentStatus>(status.clone()).ok()
+    });
     let mut admission_exclusions = projection.as_ref().map_or_else(
         || vec!["monitor_status_unavailable: admission has not been observed".to_string()],
         |status| monitor_admission_exclusions(status, &prefs, number),
@@ -2265,19 +2269,13 @@ fn run_monitor_launch_now<E: CliEnv>(
     if !github_backoff.is_empty() {
         admission_exclusions.push("github_refusal_window".to_string());
     }
-    // Membership and first-scan observations can still be converging after
-    // enqueue. Only known admission blockers make an accepted scan fail.
-    let admission_blocked = admission_exclusions.iter().any(|reason| {
-        matches!(
-            reason.as_str(),
-            "monitor_disabled"
-                | "no_launch_profile"
-                | "gui_disconnected"
-                | "github_auth_required"
-                | "max_active_saturated"
-                | "github_refusal_window"
-        )
-    });
+    // Cached runtime blockers need a current, explicitly non-aborted
+    // publication. Current authoritative holds still refuse immediately.
+    let admission_blocked = monitor_launch_now_admission_blocked(
+        &admission_exclusions,
+        publication.as_ref(),
+        scan_requested_at,
+    );
 
     out.push_str(
         &serde_json::json!({
@@ -2315,6 +2313,29 @@ fn run_monitor_launch_now<E: CliEnv>(
             1
         },
     )
+}
+
+fn monitor_launch_now_admission_blocked(
+    exclusions: &[String],
+    snapshot: Option<&serde_json::Value>,
+    requested_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let snapshot_is_fresh = snapshot
+        .filter(|status| {
+            status
+                .get("scan_aborted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        })
+        .and_then(|status| status.get("last_scan_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|scanned_at| scanned_at.with_timezone(&chrono::Utc) > requested_at);
+    exclusions.iter().any(|reason| match reason.as_str() {
+        "monitor_disabled" | "no_launch_profile" | "github_refusal_window" => true,
+        "gui_disconnected" | "github_auth_required" | "max_active_saturated" => snapshot_is_fresh,
+        _ => false,
+    })
 }
 
 /// Explain observed admission without treating a delivery annotation as a hold.
@@ -3765,10 +3786,13 @@ impl MonitorBlockedClaim {
 fn monitor_status_projection(
     project_root: &std::path::Path,
 ) -> Option<crate::IssueMonitorAgentStatus> {
-    let Ok(Some(status)) = crate::daemon_publisher::read_issue_monitor_status(project_root) else {
-        return None;
-    };
-    serde_json::from_value::<crate::IssueMonitorAgentStatus>(status).ok()
+    serde_json::from_value(monitor_status_publication(project_root)?).ok()
+}
+
+fn monitor_status_publication(project_root: &std::path::Path) -> Option<serde_json::Value> {
+    crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .ok()
+        .flatten()
 }
 
 /// A launched row is a recovery candidate, including a slot retained after
@@ -9185,6 +9209,118 @@ mod tests {
             Some("gui_command_unavailable")
         );
         assert_ne!(unavailable.scan_delivery, "next-scheduled-scan");
+    }
+
+    #[test]
+    fn launch_now_uses_only_post_request_snapshot_blockers() {
+        let requested_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T00:00:10Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut snapshot = serde_json::json!({"scan_aborted": false});
+        for reason in [
+            "gui_disconnected",
+            "github_auth_required",
+            "max_active_saturated",
+        ] {
+            let exclusions = vec![reason.to_string()];
+            for last_scan_at in [
+                Some("2026-10-22T00:00:09Z"),
+                None,
+                Some("invalid"),
+                Some("2026-10-22T00:00:10Z"),
+            ] {
+                snapshot["last_scan_at"] = serde_json::to_value(last_scan_at).unwrap();
+                assert!(
+                    !monitor_launch_now_admission_blocked(
+                        &exclusions,
+                        Some(&snapshot),
+                        requested_at
+                    ),
+                    "{reason}: an unproven or older snapshot is diagnostic only: {last_scan_at:?}"
+                );
+            }
+            snapshot["last_scan_at"] = serde_json::json!("2026-10-22T00:00:11Z");
+            assert!(
+                monitor_launch_now_admission_blocked(&exclusions, Some(&snapshot), requested_at),
+                "{reason}: a scan after the request can prove the blocker"
+            );
+        }
+        for reason in [
+            "monitor_disabled",
+            "no_launch_profile",
+            "github_refusal_window",
+        ] {
+            assert!(
+                monitor_launch_now_admission_blocked(&[reason.to_string()], None, requested_at),
+                "{reason}: current authoritative blockers do not depend on snapshot freshness"
+            );
+        }
+        assert!(
+            !monitor_launch_now_admission_blocked(
+                &["gui_disconnected".to_string()],
+                Some(&serde_json::json!({"last_scan_at": "2026-10-22T00:00:11Z"})),
+                requested_at,
+            ),
+            "an older producer without an explicit health marker is diagnostic only"
+        );
+    }
+
+    #[test]
+    fn launch_now_ignores_runtime_blockers_from_aborted_scans() {
+        let requested_at = chrono::DateTime::parse_from_rfc3339("2026-10-22T00:00:10Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            launch_auto: true,
+            ..Default::default()
+        };
+        let mut monitor = crate::IssueMonitorState::with_prefs(Default::default(), prefs.clone());
+        monitor.record_scan_failure("2026-10-22T00:00:11Z", "candidate-load", "scan failed");
+        let failed = monitor.agent_status();
+        assert!(failed.scan_aborted);
+        assert_eq!(failed.last_scan_at.as_deref(), Some("2026-10-22T00:00:11Z"));
+        let exclusions = monitor_admission_exclusions(&failed, &prefs, 42);
+        assert!(exclusions.iter().any(|reason| reason == "gui_disconnected"));
+        let publication = serde_json::to_value(&failed).unwrap();
+        assert!(
+            !monitor_launch_now_admission_blocked(&exclusions, Some(&publication), requested_at),
+            "a failed scan can refresh its timestamp without refreshing runtime evidence"
+        );
+
+        crate::scan_issue_monitor_candidates(&mut monitor, &[], "2026-10-22T00:00:12Z");
+        let scanned = monitor.agent_status();
+        assert!(!scanned.scan_aborted);
+        assert_eq!(
+            scanned.last_scan_at.as_deref(),
+            Some("2026-10-22T00:00:12Z")
+        );
+        let publication = serde_json::to_value(&scanned).unwrap();
+        assert!(monitor_launch_now_admission_blocked(
+            &monitor_admission_exclusions(&scanned, &prefs, 42),
+            Some(&publication),
+            requested_at,
+        ));
+
+        let mut auth_monitor = crate::IssueMonitorState::with_prefs(Default::default(), prefs);
+        auth_monitor.set_gui_connected(true);
+        auth_monitor.record_launch_auth_required("2026-10-22T00:00:11Z");
+        let auth = auth_monitor.agent_status();
+        assert!(!auth.scan_aborted);
+        assert!(
+            auth.last_error.is_some(),
+            "a general error is not a scan abort"
+        );
+        assert_eq!(
+            auth.stall_reason,
+            Some(crate::IssueMonitorStallReason::GithubAuthRequired)
+        );
+        let publication = serde_json::to_value(&auth).unwrap();
+        assert!(monitor_launch_now_admission_blocked(
+            &["github_auth_required".to_string()],
+            Some(&publication),
+            requested_at,
+        ));
     }
 
     #[test]
