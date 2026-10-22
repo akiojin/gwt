@@ -8,6 +8,11 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

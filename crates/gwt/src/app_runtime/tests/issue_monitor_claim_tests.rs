@@ -5627,6 +5627,11 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     for (label, pane_status, expect_adoption, pending_identity) in [
         ("running pane", WindowProcessStatus::Running, true, false),
         ("idle pane", WindowProcessStatus::Idle, true, false),
@@ -6050,6 +6055,11 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
