@@ -7053,6 +7053,20 @@ pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_4193_monitor_status_rejects_unknown_inbox_state() {
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut value = serde_json::to_value(monitor.agent_status()).unwrap();
+        value["inbox"] =
+            serde_json::json!([mismatch_row(4193, crate::MonitorInboxState::Queued, None)]);
+        let known: crate::IssueMonitorAgentStatus = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(known.inbox.len(), 1);
+        value["inbox"][0]["state"] = serde_json::json!("future_state");
+        let error = serde_json::from_value::<crate::IssueMonitorAgentStatus>(value)
+            .expect_err("the status decoder must not discard an unknown inbox row");
+        assert!(error.to_string().contains("future_state"), "{error}");
+    }
+
     // ---- Issue #4862: inbox row vs live sessions ----
 
     /// Build one inbox row with only the fields this mismatch check reads.
