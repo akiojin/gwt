@@ -1262,8 +1262,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
@@ -1468,8 +1467,7 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
@@ -1612,8 +1610,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work event");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
     }
     let mut empty_agent_event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -1634,7 +1631,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
+    record_legacy_workspace_work_event_for_test(&repo, empty_agent_event)
         .expect("record empty agent work event");
 
     let immediate = runtime.load_knowledge_bridge_events(
@@ -1757,7 +1754,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, issue_event)
+    record_legacy_workspace_work_event_for_test(&repo, issue_event)
         .expect("record issue work event");
 
     let ambiguous_id = "legacy-ambiguous-branch-only";
@@ -1791,7 +1788,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        record_legacy_workspace_work_event_for_test(&repo, event)
             .expect("record ambiguous work event");
     }
 

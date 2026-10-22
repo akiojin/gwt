@@ -665,8 +665,7 @@ fn paused_work_does_not_inherit_shared_projection_owner() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));

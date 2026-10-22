@@ -19683,24 +19683,48 @@ mod tests {
                     pr_state: None,
                 },
             );
-            let staged = gwt_core::workspace_projection::transact_workspace_state_with_commit(
-                dir.path(),
-                &request.operation_id,
-                |_, _, _| Ok(((), vec![event])),
-                || {
-                    if activated {
-                        activate_successor(&worktree, owner, &request).unwrap();
-                    } else {
-                        abort_successor(&worktree, owner, &request, "launch failed").unwrap();
-                    }
-                    Err(gwt_core::GwtError::Other("lost external response".into()))
-                },
+            // Model the v4 marker left by the old writer after losing an
+            // external response. Its main-root store contains an absolute
+            // linked-worktree path that new portable writes must reject.
+            let current_path =
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(dir.path());
+            let work_items_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path());
+            let mut work_items =
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(dir.path())
+                    .unwrap();
+            work_items.apply_event(event.clone());
+            let fingerprint = |path: &Path| match std::fs::read(path) {
+                Ok(bytes) => format!("sha256:{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+                Err(error) if error.kind() == ErrorKind::NotFound => "missing".to_string(),
+                Err(error) => panic!("read fixture precondition: {error}"),
+            };
+            let marker = serde_json::json!({
+                "version": 4,
+                "transaction_id": uuid::Uuid::new_v4().to_string(),
+                "current_path": current_path,
+                "work_items_path": work_items_path,
+                "current_precondition": fingerprint(&current_path),
+                "work_items_precondition": fingerprint(&work_items_path),
+                "projection": projection,
+                "work_items": work_items,
+                "events_path": gwt_core::paths::gwt_repo_local_work_events_dir(dir.path()),
+                "events": [event],
+                "external_commit": {
+                    "operation_id": request.operation_id,
+                    "phase": "prepared"
+                }
+            });
+            std::fs::write(
+                current_path.with_file_name("pending-state-transaction.json"),
+                serde_json::to_vec_pretty(&marker).unwrap(),
             )
-            .unwrap_err();
-            assert!(
-                staged.to_string().contains("lost external response"),
-                "{staged}"
-            );
+            .unwrap();
+            if activated {
+                activate_successor(&worktree, owner, &request).unwrap();
+            } else {
+                abort_successor(&worktree, owner, &request, "launch failed").unwrap();
+            }
             let authority_before = generation_authority_bytes(&worktree, owner);
             let sessions_dir = gwt_core::paths::gwt_sessions_dir();
             assert!(!sessions_dir

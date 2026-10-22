@@ -3880,6 +3880,79 @@ fn marker_path_contract_transaction(
 }
 
 #[test]
+fn legacy_v4_recovery_publishes_unwritten_foreign_container_without_blocking_writers() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let events_dir = gwt_repo_local_work_events_dir(&repo);
+    let (mut pending, _) = marker_path_contract_transaction(temp.path(), 4, events_dir.clone());
+    pending.events[0].execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/legacy-foreign".to_string()),
+        worktree_path: Some(temp.path().join("legacy-foreign-worktree")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let event = &pending.events[0];
+    let shard = gwt_work_event_shard_path(&events_dir, &event.id);
+    let original = serialized_workspace_work_event_bytes(event).expect("legacy bytes");
+    write_pending_transaction_markers(&pending);
+    assert!(
+        !shard.exists(),
+        "interrupted v4 publication has no shard yet"
+    );
+
+    mutate_workspace_projection_at(&pending.current_path, &repo, |projection| {
+        projection.summary = Some("ordinary writer after v4 recovery".to_string());
+        Ok(())
+    })
+    .expect("historical v4 event must not strand the pending transaction");
+
+    assert_eq!(fs::read(&shard).expect("recovered legacy shard"), original);
+    assert!(pending_workspace_state_transaction_paths(&pending)
+        .iter()
+        .all(|path| !path.exists()));
+    assert_eq!(
+        load_workspace_projection_from_path(&pending.current_path)
+            .unwrap()
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("ordinary writer after v4 recovery")
+    );
+}
+
+#[test]
+fn new_transaction_refuses_foreign_container_before_writing_recovery_markers() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let events_dir = gwt_repo_local_work_events_dir(&repo);
+    let (mut transaction, _) = marker_path_contract_transaction(temp.path(), 4, events_dir.clone());
+    transaction.events[0].execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/new-foreign".to_string()),
+        worktree_path: Some(temp.path().join("new-foreign-worktree")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+
+    persist_workspace_state_transaction_locked(&transaction.current_path, &transaction)
+        .expect_err("new transactions must retain the exact-root writer contract");
+
+    assert!(pending_workspace_state_transaction_paths(&transaction)
+        .iter()
+        .all(|path| !path.exists()));
+    assert!(!transaction.current_path.exists());
+    assert!(!transaction.work_items_path.exists());
+    assert!(!events_dir.exists());
+}
+
+#[test]
 fn transaction_marker_versions_fail_closed_on_mismatched_event_storage() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

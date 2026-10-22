@@ -543,7 +543,7 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    let worktree = temp.path().join("repo-work-20260504-1234");
+    let worktree = repo.clone();
     fs::create_dir_all(&repo).expect("create repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab = sample_project_tab(
@@ -668,7 +668,7 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    let worktree = temp.path().join("repo-work-20260504-1234");
+    let worktree = repo.clone();
     fs::create_dir_all(&repo).expect("create repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab = sample_project_tab(
@@ -739,7 +739,7 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    let worktree = temp.path().join("repo-work-20260504-1234");
+    let worktree = repo.clone();
     fs::create_dir_all(&repo).expect("create repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     let tab = sample_project_tab(
