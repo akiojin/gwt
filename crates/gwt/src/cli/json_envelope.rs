@@ -949,6 +949,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.queue.demote" => CliCommand::Issue(IssueCommand::MonitorQueueDemote {
             project_root: optional_path(params, "project_root")?,
+            expected_urgent_queue_token: lookup(params, "expected_urgent_queue_token")
+                .map(|_| required_string(params, "expected_urgent_queue_token"))
+                .transpose()?,
             number: required_u64(params, "number")?,
         }),
         "discussion.create"
@@ -5273,6 +5276,29 @@ mod tests {
                 "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
+    }
+
+    #[test]
+    fn issue_monitor_queue_demote_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueDemote { .. }) = ok(
+            "issue.monitor.queue.demote",
+            json!({"number": 2, "expected_urgent_queue_token": "observed-urgent"}),
+        ) else {
+            panic!("demote command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.demote",
+                json!({"number": 2, "expected_urgent_queue_token": invalid}),
+            );
+        }
     }
 
     #[test]

@@ -850,6 +850,14 @@ body cannot hold `plan` / `tasks` sections.
   Omitting the guard retains legacy behavior; `null`, empty strings and other
   types are invalid. This value comparison does not detect ABA history or
   protect urgent membership, demotions or other control operations.
+- For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list` and pass
+  its `urgent_queue_token` as `expected_urgent_queue_token`. The token covers the
+  saved urgent limit, grants and demotions, independently of normal queue order
+  and runtime observations. Comparison and demotion share the prefs lock. On
+  conflict, re-read the list and reconsider the demotion; read back the reply's
+  queue fields and token from the same saved snapshot after success. Omitting
+  the guard retains legacy behavior; `null`, empty strings and other types are
+  invalid. This value comparison does not detect ABA history or guard other controls.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
@@ -4212,6 +4220,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list`",
+            "`urgent_queue_token` as `expected_urgent_queue_token`",
+            "saved urgent limit, grants and demotions",
             "For `issue.monitor.queue.urgent_limit`, use the same fresh status",
             "`urgent_queue_limit` is the saved urgent head limit",
             "For `issue.monitor.queue.auto_refill`, use the same fresh status",
