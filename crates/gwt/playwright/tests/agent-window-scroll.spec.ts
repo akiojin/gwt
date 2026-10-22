@@ -128,7 +128,8 @@ async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: s
   await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
     .toBe(selection.text);
   await page.evaluate(() => navigator.clipboard.writeText("clipboard reset"));
-  await page.keyboard.press("Control+c");
+  // Windows copies the selection with Ctrl+C; Linux CI keeps Ctrl+C for the PTY.
+  await page.keyboard.press(process.platform === "win32" ? "Control+c" : "Control+Shift+c");
   await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
     .toBe(selection.text);
 }
