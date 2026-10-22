@@ -850,6 +850,14 @@ body cannot hold `plan` / `tasks` sections.
   Omitting the guard retains legacy behavior; `null`, empty strings and other
   types are invalid. This value comparison does not detect ABA history or
   protect urgent membership, demotions or other control operations.
+- For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list` and pass
+  its `urgent_queue_token` as `expected_urgent_queue_token`. The token covers the
+  saved urgent limit, grants and demotions, independently of normal queue order
+  and runtime observations. Comparison and demotion share the prefs lock. On
+  conflict, re-read the list and reconsider the demotion; read back the reply's
+  queue fields and token from the same saved snapshot after success. Omitting
+  the guard retains legacy behavior; `null`, empty strings and other types are
+  invalid. This value comparison does not detect ABA history or guard other controls.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
@@ -1014,6 +1022,12 @@ drive them.
   to list only the blocked entries whose escalation is still open; each
   blocked entry carries `escalation.resolved`.
 - `pane.list` enumerates the live agent panes in this project.
+- `pane.health` returns a read-only project health snapshot; read `panes` in
+  the JSON decoded from the response's `output` string.
+  Omit `params.id` for all panes, or select one using the same ID as `pane.list`
+  or its raw pane ID. It reads existing project workspace/runtime sidecar state
+  without depending on the GUI event loop. The health operation does not execute
+  mutations; its recommendations do not grant authority to act.
 - `pane.read` with `params.id` and `params.lines` returns that pane's
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
@@ -1054,13 +1068,31 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
-- A `pm.message.send` that reports the delivery as **unverified** is not a
-  message that failed to arrive. The line was written into the pane and
-  submitted; only the target's acknowledgement did not land inside the
-  operation's window, which is ordinary when that pane is mid-turn. Do not
-  resend it, do not look for another way to reach the pane, and do not tell
-  the user the instruction was not delivered. Observe the pane instead. Only
-  a **failed** result means the input never reached it.
+- Every `pm.message.send` result retains its operation id. Save it with the
+  exact target window id from `pane.list` and the original text for recovery.
+  An error before target resolution labels the input as a requested target.
+  **delivered** means the exact target Session's own UserPromptSubmit hook
+  acknowledged that prompt; a successful PTY write alone does not prove it.
+- **unconfirmed** means no exact acknowledgement arrived. Do not claim the
+  instruction was delivered, lost, or acted on. Read the pane and recover
+  with the same `params.operation_id`, the same exact `params.id`, and the
+  same `params.text`; never start a fresh operation for that instruction.
+  Include the same `operation_id` in the inner `params` when using
+  `pm.operation.execute`. Applicable scoped authority is still required;
+  consumed one-off authority is never reused.
+  The runtime retries only the submit key when it can prove the complete
+  body still belongs to that unchanged target input; it never writes the
+  body again. Older receipts, partial writes, restart, or any intervening
+  input make the operation readback-only. If it remains unresolved, make a
+  Board handoff naming the instruction and operation instead of leaving
+  an idle agent without a recovery path.
+- **lost** means the original target or safe replay is unavailable. It
+  does not prove the instruction never ran: a later exact acknowledgement
+  still takes precedence. Read back the target's state and use a Board
+  handoff to reconcile the obligation. **refused** means authorization
+  rejected the input; **failed** means the operation could not finish.
+  Preserve their reason and receipt, including any partial-write uncertainty,
+  before choosing recovery.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -1302,14 +1334,19 @@ you whether it is still going anywhere, and the user reads an idle
 window as your neglect. Steering is a cycle duty, not a discretionary
 act.
 
-- For every active launch in `issue.monitor.status`, and every idle or
-  waiting project Agent pane in `pane.list`, read `last_activity_at`
-  and the agent's latest Board posts and decide whether it needs a
-  directive. Three findings require one:
-  - **stalled** — no activity for more than twice the monitor scan
-    interval (`last_activity_at` more than two scan intervals behind
-    `last_scan_at`) with no lease wait, quota hold, or human prompt
-    explaining it;
+- Read `pane.health` once per resident cycle for all project Agent panes.
+  Use `classification`, `reason_code` and `recommended_action` as the primary
+  disposition evidence for every active launch and idle or waiting pane.
+  Read the agent's latest Board posts alongside that snapshot.
+  `healthy` with `recommended_action: none` is not stalled, even when terminal
+  output or `last_activity_at` has not changed; a running build or verification
+  may be quiet. Do not manufacture a directive from silence alone.
+- Read bounded `pane.read` only when the health snapshot and Board evidence do
+  not explain the disposition; never scan all panes' scrollback each cycle.
+  Keep at most one bounded diagnostic read per candidate, subject to the
+  waiting-episode rule above. Three findings require a directive:
+  - **stalled** — the health classification and reason support intervention,
+    without a lease wait, quota hold, or human prompt explaining it;
   - **scope drift** — its Board posts or Work focus have left the owner
     Issue's acceptance criteria, or it is changing surfaces the Issue
     never named;
@@ -1317,8 +1354,8 @@ act.
     the routine "ready for the next instruction" notice, or its pane
     sits idle at the prompt with an open obligation and nobody has told
     it what to do.
-- Classify an idle launch before you act, with at most one bounded
-  `pane.read`, and take the default action of its class:
+- Classify an idle launch from the health snapshot before you act, and take
+  the default action of its class:
   - **finished and settled** — the execution record is settled and the
     PR is handed off: confirm the Issue's delivery. The runtime closes
     that window itself after the configured close grace (Issue #3927,
@@ -1329,8 +1366,14 @@ act.
     escalation or a mention for a handoff;
   - **waiting for the user** — present the window title and the exact
     action required in the digest, every cycle until it is resolved;
-  - **stopped for no visible reason** — read the pane, then send one
-    line through `pm.message.send` saying what to resume and why.
+  - **stopped for no visible reason** — use the bounded diagnostic fallback
+    if needed, then send one line through `pm.message.send` saying what to
+    resume and why.
+- Route `waiting_for_human` / `report_to_human` through the existing digest
+  and human-input path; the observation does not create a Monitor NeedsHuman row.
+  For `close_or_relaunch` and `stop_and_requeue`, preserve the existing authority,
+  canonical settlement checks, the configured close grace, and the Issue Monitor's
+  launch path. A recommendation never authorizes an immediate close or relaunch.
 - The directive goes through the ruling channels only: `board.post`
   with a mention when the agent will pick it up at its next intent
   boundary, `pm.message.send` when the pane is idle and must move now.
@@ -1343,7 +1386,8 @@ act.
   keep the rules above; do not steer them into a wrong answer.
 - The steering judgment precedes the no-change judgment. No cycle is a
   no-change cycle until every running launch has passed it, and a
-  launch left idle without a directive is never a no-change cycle.
+  launch requiring intervention left idle without a directive is never a
+  no-change cycle.
   Record each directive in your session notes so the same launch is
   not re-sent the same line every cycle.
 
@@ -1575,12 +1619,12 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   A previous cycle's fetch is not current evidence. The advisory is warning-only;
   a failed fetch or provider payload without an explicit successful exit status
   leaves freshness unknown.
-- Every cycle, also check the agents that are running. Read the Board
-  for what they reported themselves, and use `pane.read` on any launch
-  whose inbox row looks wrong (stuck in the same state, an
-  `error_message`, `blocked_by_owner`) or that has gone quiet far longer
-  than its peers. Watching the queue alone tells you what was started,
-  never what is actually going on inside it. Then steer them (see
+- Every cycle, also check the agents that are running with the single
+  `pane.health` snapshot described in *Steering the running agents*.
+  Read the Board for what they reported themselves; bounded `pane.read` is
+  a fallback only when that evidence does not explain the disposition.
+  Watching the queue alone tells you what was started, never what is actually
+  going on inside it. Then steer them (see
   *Steering the running agents*): a stalled, drifting, or
   next-action-waiting launch gets its directive in the same cycle,
   before you decide the cycle changed nothing.
@@ -2590,10 +2634,16 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
-            // Issue #3608: an unverified delivery is not an undelivered one.
-            "reports the delivery as **unverified**",
-            "message that failed to arrive",
-            "resend it, do not look for another way to reach the pane",
+            // Issue #3897: uncertainty must have a safe recovery path.
+            "**unconfirmed**",
+            "**lost**",
+            "same `params.operation_id`",
+            "same `operation_id` in the inner `params`",
+            "consumed one-off authority is never reused",
+            "never writes the body again",
+            "readback-only",
+            "Board handoff",
+            "does not prove the instruction never ran",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
@@ -3246,6 +3296,32 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    /// Issue #3834 AC-9: both generated providers supervise from one health
+    /// snapshot, while keeping disposition behind the existing authority gates.
+    #[test]
+    fn generated_health_supervision_contract_is_shared_by_both_providers() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let contract = unwrapped(
+                &read_contract(dir.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap(),
+            );
+            for required in [
+                "Read `pane.health` once per resident cycle",
+                "Use `classification`, `reason_code` and `recommended_action` as the primary disposition evidence",
+                "`healthy` with `recommended_action: none` is not stalled",
+                "Read bounded `pane.read` only when the health snapshot and Board evidence do not explain the disposition",
+                "`waiting_for_human` / `report_to_human`",
+                "`close_or_relaunch` and `stop_and_requeue`",
+                "The health operation does not execute mutations",
+                "the configured close grace",
+                "Issue Monitor's launch path",
+            ] {
+                assert!(contract.contains(required), "{provider}: missing {required}");
+            }
+        }
+    }
+
     /// Bounded body of one `## heading` section, whitespace-collapsed.
     fn section(heading: &str) -> String {
         let text = SKILL_BODY_EN
@@ -3266,7 +3342,7 @@ mod tests {
         for phrase in [
             "`last_activity_at`",
             "latest Board posts",
-            "more than twice the monitor scan interval",
+            "Use `classification`, `reason_code` and `recommended_action` as the primary disposition evidence",
             "scope drift",
             "waiting for its next action",
             "finished and settled",
@@ -3278,7 +3354,7 @@ mod tests {
             "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
             "never `pane.send`",
             "The steering judgment precedes the no-change judgment",
-            "a launch left idle without a directive is never a no-change cycle",
+            "a launch requiring intervention left idle without a directive is never a no-change cycle",
         ] {
             assert!(
                 steering.contains(phrase),
@@ -4212,6 +4288,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list`",
+            "`urgent_queue_token` as `expected_urgent_queue_token`",
+            "saved urgent limit, grants and demotions",
             "For `issue.monitor.queue.urgent_limit`, use the same fresh status",
             "`urgent_queue_limit` is the saved urgent head limit",
             "For `issue.monitor.queue.auto_refill`, use the same fresh status",

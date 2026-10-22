@@ -226,11 +226,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         case,
         MonitorProviderConversationFixture::Present,
         MonitorNativeHolderFixture::None,
-        case != "completed-done",
+        !matches!(case, "completed-done" | "blocked-discarded"),
         LinkedIssueKind::Spec,
         settlement,
     );
-    if case == "completed-done" {
+    let mut launch_strategy = if case == "completed-done" {
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+    } else {
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+    };
+    if matches!(case, "completed-done" | "blocked-discarded") {
         // Issue #4783 AC-R4: derive this delivery from a reopened owner,
         // rather than only seeding a fresh delivery over terminal history.
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
@@ -238,28 +243,93 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             gwt::IssueMonitorConfig::default(),
             gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
         );
+        monitor.set_enabled(true);
+        monitor.set_gui_connected(true);
         let number = fixture.execution_owner.number;
-        monitor.record_closed(number, Some("2026-08-13T00:00:00Z".into()));
-        assert!(monitor.record_reopened(number, Some("2026-08-13T00:01:00Z".into())));
+        let mut issue = gwt::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: "SPEC: Monitor owner with remaining work".into(),
+            labels: vec!["gwt-spec".into()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into()),
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::ReadyWithOpenTasks,
+            updated_at: Some("2026-08-13T00:01:00Z".into()),
+        };
+        if case == "completed-done" {
+            monitor.record_closed(number, Some("2026-08-13T00:00:00Z".into()));
+            assert!(monitor.record_reopened(number, Some("2026-08-13T00:01:00Z".into())));
+        }
         monitor.terminal_queue_push(&[number], "operator", "2026-08-13T00:01:00Z");
+        if case == "blocked-discarded" {
+            // SPEC #4074 AC-6: the PM holds a dependency-blocked owner until
+            // the prerequisite merges. Admission must not prepare its successor.
+            let predecessor = gwt::cli::execution_state::load_generation_ledger(
+                &fixture.worktree,
+                fixture.execution_owner,
+            )
+            .unwrap();
+            issue.labels.push("hold".into());
+            gwt::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                std::slice::from_ref(&issue),
+                gwt::IssueMonitorCandidateSource::Live,
+                &fixture.project_root,
+                "2026-08-13T00:01:00Z",
+            );
+            assert_eq!(
+                monitor.inbox_item(number).unwrap().state,
+                gwt::MonitorInboxState::HoldExcluded
+            );
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert!(monitor.claim_probe_plan(1).1.is_empty());
+            assert!(monitor
+                .next_launch_request("2026-08-13T00:01:00Z")
+                .is_none());
+            assert!(monitor.pending_launch_delivery_id(number).is_none());
+            assert_eq!(
+                gwt::cli::execution_state::load_generation_ledger(
+                    &fixture.worktree,
+                    fixture.execution_owner,
+                )
+                .unwrap(),
+                predecessor,
+                "hold must preserve the Blocked generation without a Prepared successor"
+            );
+            // The PM confirms the dependency merged, removes hold and
+            // requeues the same owner; dependency interpretation stays in PM.
+            issue.labels.retain(|label| label != "hold");
+            issue.updated_at = Some("2026-08-13T00:01:01Z".into());
+            monitor.record_launch_failed(number, "dependency-blocked predecessor stopped");
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            let mut env = gwt::cli::TestEnv::new(fixture.project_root.clone());
+            let code = gwt::cli::run(
+                &mut env,
+                gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorRequeue {
+                    project_root: Some(fixture.project_root.clone()),
+                    number,
+                    reason: "dependency merged".into(),
+                    force: false,
+                }),
+            )
+            .expect("PM requeues the dependency-blocked owner");
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+            monitor = test_monitor_with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            monitor.set_gui_connected(true);
+        }
         gwt::scan_issue_monitor_candidates_with_provenance(
             &mut monitor,
-            &[gwt::IssueMonitorIssue {
-                author_login: None,
-                number,
-                title: "SPEC: reopened Monitor owner".into(),
-                labels: vec!["gwt-spec".into()],
-                state: gwt::IssueMonitorIssueState::Open,
-                body: Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into()),
-                url: None,
-                readiness: gwt::IssueMonitorReadiness::ReadyWithOpenTasks,
-                updated_at: Some("2026-08-13T00:01:00Z".into()),
-            }],
+            &[issue],
             gwt::IssueMonitorCandidateSource::Live,
             &fixture.project_root,
             "2026-08-13T00:01:01Z",
         );
         assert_eq!(monitor.queued_issue_numbers(), vec![number]);
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![number]));
         assert!(monitor.apply_confirmed_claim(
             number,
             "claim-reopened",
@@ -268,6 +338,19 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             &Utc::now().to_rfc3339(),
         ));
         fixture.delivery_id = monitor.pending_launch_delivery_id(number);
+        if case == "blocked-discarded" {
+            launch_strategy = monitor
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+                .expect("requeue produces a durable launch delivery")
+                .launch_session_strategy;
+            assert_eq!(
+                launch_strategy,
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+        }
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
     }
     let unique_head = if case.contains("ownerless") {
@@ -647,14 +730,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         "{case}: {before:?}"
     );
 
-    prepare_monitor_relaunch(
-        &mut fixture,
-        if case == "completed-done" {
-            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
-        } else {
-            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
-        },
-    );
+    prepare_monitor_relaunch(&mut fixture, launch_strategy);
     let (window_id, result) = take_monitor_launch_complete_event(case, &fixture.recorded_events);
     let completion = result.expect("Monitor fresh launch preparation");
     let session_id = completion.1.clone();
@@ -1021,7 +1097,7 @@ fn app_runtime_monitor_fresh_terminal_predecessor_blocked_discarded() {
     assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         "blocked-discarded",
         gwt::cli::execution_state::ExecutionSettlement::Blocked {
-            reason: "Monitor predecessor failed".to_string(),
+            reason: "waiting for dependency Issue #3906 to merge".to_string(),
             missing_verification: None,
         },
         gwt_core::workspace_projection::WorkEventKind::Discard,
@@ -3640,6 +3716,12 @@ fn app_runtime_issue_monitor_profiles_set_waits_for_durable_worker() {
         "dispatch must leave persisted profiles and unknown saved values untouched"
     );
     assert_eq!(queued.lock().expect("queued tasks").len(), 1);
+    assert!(
+        runtime
+            .handle_frontend_event("client-2".into(), FrontendEvent::GetIssueMonitorProfiles)
+            .is_empty(),
+        "a reconnected client must wait for the pending durable profile save"
+    );
     assert!(runtime
         .handle_frontend_event(
             "client-1".into(),
@@ -3664,6 +3746,16 @@ fn app_runtime_issue_monitor_profiles_set_waits_for_durable_worker() {
         .get("choices")
         .is_none());
 
+    let readback =
+        replay_next_issue_monitor_profile_frontend(&mut runtime).expect("reconnected profile read");
+    assert!(readback.iter().any(|event| {
+        matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-2")
+            && matches!(
+                &event.event,
+                BackendEvent::IssueMonitorProfiles { profiles, request_id: None, .. }
+                    if profiles == &vec![profile.clone()]
+            )
+    }));
     replay_next_issue_monitor_profile_frontend(&mut runtime).expect("current Enable request");
     let enabled = gwt::load_issue_monitor_prefs(&prefs_path).expect("enabled after save");
     assert!(enabled.enabled);

@@ -5047,6 +5047,8 @@ where
         {
             tail.push_str("verification wrapper defect: the reporter drive path was split before Playwright started; repair argument forwarding and rerun canonical verification.\n");
         }
+        let relink_hint = driver::relink_failure_hint(exit_code, &tail);
+        tail.push_str(relink_hint);
         transcript.push_str(&tail);
         match terminated_by_signal {
             Some(signal) => transcript.push_str(&format!(

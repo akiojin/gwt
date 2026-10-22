@@ -290,6 +290,9 @@ pub(super) fn drive_verified_pane_submit(
 
     // Give the TUI composer time to consume the body before the first submit.
     settle(PANE_SUBMIT_SETTLE);
+    if body.is_empty() && is_verified()? {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    }
     for submit_attempts in 1..=max_submit_attempts {
         if submit_attempts > 1 && is_verified()? {
             return Ok(VerifiedPaneSubmitOutcome::Verified {
@@ -669,6 +672,7 @@ impl AppRuntime {
                         project_key,
                         handle: Arc::clone(&pty),
                         monitor_runtime,
+                        pm_delivery_replay: Mutex::new(None),
                     }),
                 );
                 drop(guard);
@@ -1859,6 +1863,61 @@ mod submit_split_tests {
     #[test]
     fn bare_terminator_has_an_empty_body() {
         assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
+    }
+
+    #[test]
+    fn same_operation_recovery_writes_only_submit_and_honors_a_late_ack() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let first = drive_verified_pane_submit(
+            "protected body\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(false),
+        )
+        .unwrap();
+        assert!(matches!(
+            first,
+            VerifiedPaneSubmitOutcome::Unverified { .. }
+        ));
+        let recovered = drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 4),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+        assert_eq!(
+            *writes.borrow(),
+            [
+                b"protected body".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec()
+            ]
+        );
+        drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |_| panic!("late acknowledged replay must not write"),
+            |_| {},
+            || Ok(true),
+        )
+        .unwrap();
     }
 
     #[test]

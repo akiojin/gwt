@@ -321,6 +321,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`pane.health` reads project pane health from existing workspace and runtime
+sidecar state without depending on the GUI event loop. Decode the response's
+`output` string as JSON; its `panes` array contains each pane's `classification`,
+`reason_code`, and `recommended_action`.
+Omit `params.id` for all panes, or pass an ID from `pane.list` (a raw pane ID
+also works) to select one. Recommendations are advisory: this operation never
+closes, relaunches, stops, or requeues a pane.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
 is disabled by default. Allow individual workflow filenames for a repository
 in `~/.gwt/config.toml`:
@@ -577,7 +591,14 @@ saved snapshot. Omitting the guard retains legacy behavior; this value compariso
 does not detect ABA history.
 Overflow follows normal order. `issue.monitor.queue.demote` (`number`) persistently
 returns an Issue to normal priority, overriding its urgent label across scans and
-restarts. Queue cards and details distinguish urgent, overflow, and demotion;
+restarts. Before demoting, read `issue.monitor.queue.list` and pass its
+`urgent_queue_token` as `expected_urgent_queue_token`. This token covers the saved
+urgent limit, grants, and demotions, independently of normal queue order and runtime.
+A mismatch leaves preferences unchanged: re-read the list and reconsider the change.
+The successful reply's queue fields and new token describe the same saved snapshot.
+Omitting the guard retains legacy behavior; `null`, empty strings, and other types
+are invalid. This value comparison does not detect ABA history or guard other controls.
+Queue cards and details distinguish urgent, overflow, and demotion;
 `issue.monitor.queue.list` and `issue.monitor.status` include the reason and
 observed GitHub label actor/time. Missing audit data is shown as unknown.
 

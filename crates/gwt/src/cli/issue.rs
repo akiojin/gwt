@@ -342,18 +342,29 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::MonitorQueueDemote {
             project_root,
+            expected_urgent_queue_token,
             number,
         } => {
             let root = issue_monitor_project_root(env, project_root.as_deref())?;
-            crate::try_mutate_issue_monitor_prefs(
+            let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
                 &crate::issue_monitor_prefs_path_for_repo_path(&root),
                 |prefs| {
+                    if expected_urgent_queue_token.as_ref().is_some_and(|expected| {
+                        *expected != prefs.urgent_queue.observation_token()
+                    }) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "urgent queue changed since observation; re-read issue.monitor.queue.list and reconsider the demotion before retrying",
+                        ));
+                    }
                     prefs.urgent_queue.demoted.insert(number);
                     Ok(())
                 },
             )
             .map_err(io_as_api_error)?;
-            run_monitor_queue_list(env, Some(&root), None, out)?
+            out.push_str(&monitor_queue_reply(&prefs, None).to_string());
+            out.push('\n');
+            0
         }
         IssueCommand::MonitorLaunchNow {
             project_root,
@@ -1182,7 +1193,6 @@ pub(crate) fn load_monitor_agent_status(
     }
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
-    let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor = authority.clone();
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
@@ -1194,7 +1204,8 @@ pub(crate) fn load_monitor_agent_status(
     // (this used to report the literal string `gwtd-status`) told every reader
     // the monitor had just run, which is exactly how a permanently stopped
     // monitor kept looking healthy.
-    monitor.restore_persisted_last_scan_at(persisted_last_scan_at);
+    monitor.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
+    monitor.restore_persisted_scan_diagnostics(&prefs);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
@@ -1599,6 +1610,7 @@ fn monitor_queue_reply(
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
     let mut projection =
         serde_json::to_value(prefs.urgent_queue.projection(&queue)).expect("queue serializes");
+    projection["urgent_queue_token"] = prefs.urgent_queue.observation_token().into();
     projection["queue_order"] = serde_json::json!(queue
         .entries
         .iter()
@@ -4647,40 +4659,58 @@ fn run_monitor_profiles_set<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-    // Issue #4079 AC-3/AC-4: resolve the sparse elements against the pool that
-    // is saved right now, so a reorder cannot reset the settings it reorders.
-    // The wire payload stays a fully-resolved pool, so no daemon change is
-    // needed and the reported `changes` describe exactly what is committed.
+    set_monitor_profiles(
+        &project_root,
+        profiles,
+        usage_threshold_percent,
+        out,
+        publish_monitor_config_set,
+    )
+}
+
+fn set_monitor_profiles(
+    project_root: &std::path::Path,
+    profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+    usage_threshold_percent: Option<u8>,
+    out: &mut String,
+    publish: impl FnOnce(
+        &std::path::Path,
+        serde_json::Value,
+    )
+        -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError>,
+) -> Result<i32, SpecOpsError> {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let saved = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let saved_pool = saved.launch_profile_pool();
-    let (profiles, changes) = crate::merge_issue_monitor_profiles_set(
-        &saved_pool,
-        saved.launch_profile.as_ref().or(saved_pool.first()),
-        &profiles,
-    );
-    validate_monitor_profiles_set(&profiles, usage_threshold_percent).map_err(io_as_api_error)?;
+    let request = crate::issue_monitor::IssueMonitorProfilesSetRequest::capture(&saved, profiles)
+        .map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
-        serde_json::json!({
-            "profiles_set": {
-                "profiles": profiles,
-            }
-        }),
+        serde_json::json!({"profiles_patch": request}),
         std::process::id(),
     );
-    let publication = publish_monitor_config_set(&project_root, payload);
-    if let Err(error) = publication {
-        if !error.allows_local_fallback() {
+    let (prefs, changes) = match publish(project_root, payload) {
+        Ok(()) => {
+            // The ACK proves this read set was checked and merged inside the
+            // daemon transaction. Reconstruct that exact committed pool for
+            // the response; a later disk read could mix two different writes.
+            let (profiles, changes) = request.resolve(&saved).map_err(io_as_api_error)?;
+            let mut committed = saved;
+            committed.set_launch_profile_pool(profiles);
+            (committed, changes)
+        }
+        Err(error) if error.allows_local_fallback() => {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+                let (profiles, changes) = request.resolve(prefs)?;
+                apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)?;
+                Ok(changes)
+            })
+            .map_err(io_as_api_error)?
+        }
+        Err(error) => {
             return Err(io_as_api_error(io::Error::other(error.to_string())));
         }
-        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)
-        })
-        .map_err(io_as_api_error)?;
-    }
-    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    };
     let mut projection = monitor_profiles_projection(&prefs);
     if let Some(object) = projection.as_object_mut() {
         // Issue #4079 AC-5: say which omitted fields were carried over and
@@ -6083,6 +6113,59 @@ where
     E: CliEnv,
     F: FnMut(&std::path::Path) -> Result<(), String>,
 {
+    let mut result = refresh_issue_cache_attempt(
+        env,
+        number,
+        since,
+        expected_generation,
+        not_modified_snapshot,
+        force_rebuild,
+        &mut rebuild_issue_index,
+    );
+    // Keep the CAS fail-closed, but resolve a concurrent writer internally.
+    // Each retry derives both its conditional fetch and receipt from the new
+    // generation. A bulk refresh has no receipt and needs a full fetch.
+    for _ in 1..3 {
+        if !matches!(result, Err(SpecOpsError::CacheConflict(_))) {
+            break;
+        }
+        let (generation, snapshot) = match Cache::new(env.cache_root())
+            .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
+        {
+            // A concurrent reader may publish a pre-mutation snapshot with a
+            // fresh receipt. Authoritative refresh callers still need a fetch.
+            ValidatedCacheEntry::Fresh(entry) | ValidatedCacheEntry::Stale(entry) => {
+                (entry.generation, Some(entry.entry.snapshot))
+            }
+            ValidatedCacheEntry::Unvalidated(entry) => (entry.generation, None),
+            ValidatedCacheEntry::Missing { generation } => (generation, None),
+        };
+        result = refresh_issue_cache_attempt(
+            env,
+            number,
+            snapshot.as_ref().map(|snapshot| &snapshot.updated_at),
+            generation.as_ref(),
+            snapshot.as_ref(),
+            snapshot.is_none(),
+            &mut rebuild_issue_index,
+        );
+    }
+    result
+}
+
+fn refresh_issue_cache_attempt<E, F>(
+    env: &mut E,
+    number: IssueNumber,
+    since: Option<&gwt_github::UpdatedAt>,
+    expected_generation: Option<&CacheGeneration>,
+    not_modified_snapshot: Option<&IssueSnapshot>,
+    force_rebuild: bool,
+    mut rebuild_issue_index: F,
+) -> Result<gwt_github::CacheEntry, SpecOpsError>
+where
+    E: CliEnv,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
+{
     let cache_root = env.cache_root();
     let before = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
@@ -6099,22 +6182,16 @@ where
             let renewal =
                 cache.renew_validation_receipt_if_generation(expected, expected_generation)?;
             if !renewal.renewed() {
-                return Err(SpecOpsError::from(ApiError::Network(
-                    validation_receipt_refusal(number, renewal),
-                )));
+                return Err(validation_receipt_refusal(number, renewal));
             }
-            return load_fresh_validated_entry(&cache, number);
+            return load_fresh_validated_entry(&cache, number, expected_generation);
         }
     };
     let cache = Cache::new(cache_root.clone());
     let Some(committed_generation) =
         cache.write_snapshot_if_generation(&snapshot, expected_generation)?
     else {
-        return Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache changed while fetching remote snapshot: another cache writer \
-             committed a newer generation; retry the operation",
-            number.0
-        ))));
+        return Err(SpecOpsError::CacheConflict(number));
     };
     let after = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
@@ -6145,11 +6222,9 @@ where
     let renewal =
         cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))?;
     if !renewal.renewed() {
-        return Err(SpecOpsError::from(ApiError::Network(
-            validation_receipt_refusal(number, renewal),
-        )));
+        return Err(validation_receipt_refusal(number, renewal));
     }
-    load_fresh_validated_entry(&cache, number)
+    load_fresh_validated_entry(&cache, number, Some(&committed_generation))
 }
 
 /// Issue #4436 AC-4: name the outcome that actually refused the read.
@@ -6164,39 +6239,49 @@ where
 /// Issue #4392 AC-4 extends that with what to do next. Saying "a retry cannot
 /// resolve it" told an operator only that the door was shut; the message now
 /// names the operation that opens it.
-fn validation_receipt_refusal(number: IssueNumber, renewal: ValidationReceiptRenewal) -> String {
+fn validation_receipt_refusal(
+    number: IssueNumber,
+    renewal: ValidationReceiptRenewal,
+) -> SpecOpsError {
     if renewal.cache_changed() {
-        return format!(
-            "issue #{} cache changed before validation receipt publication: {}; {}",
-            number.0,
-            renewal.reason(),
-            renewal.remedy()
-        );
+        return SpecOpsError::CacheConflict(number);
     }
-    format!(
+    SpecOpsError::from(ApiError::Network(format!(
         "issue #{} validation receipt could not be published: {}; the cached Issue did not \
          change under this operation, so a retry cannot resolve it — {}",
         number.0,
         renewal.reason(),
         renewal.remedy()
-    )
+    )))
 }
 
 fn load_fresh_validated_entry(
     cache: &Cache,
     number: IssueNumber,
+    expected_generation: Option<&CacheGeneration>,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    match cache.load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)? {
-        ValidatedCacheEntry::Fresh(entry) => Ok(entry.entry),
-        // Issue #4392 AC-4: this is where an Issue became permanently
-        // unreadable, and the message said nothing about how to leave that
-        // state. Name the operation that rewrites the entry and its receipt.
-        _ => Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache validation receipt is unstable: the receipt this read just \
-             published did not survive; run issue.cache.repair for this Issue",
-            number.0
-        )))),
+    let generation = match cache
+        .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
+    {
+        ValidatedCacheEntry::Fresh(entry) if entry.generation.as_ref() == expected_generation => {
+            return Ok(entry.entry);
+        }
+        ValidatedCacheEntry::Fresh(entry)
+        | ValidatedCacheEntry::Stale(entry)
+        | ValidatedCacheEntry::Unvalidated(entry) => entry.generation,
+        ValidatedCacheEntry::Missing { generation } => generation,
+    };
+    if generation.as_ref() != expected_generation {
+        return Err(SpecOpsError::CacheConflict(number));
     }
+    // Issue #4392 AC-4: this is where an Issue became permanently
+    // unreadable, and the message said nothing about how to leave that
+    // state. Name the operation that rewrites the entry and its receipt.
+    Err(SpecOpsError::from(ApiError::Network(format!(
+        "issue #{} cache validation receipt is unstable: the receipt this read just \
+             published did not survive; run issue.cache.repair for this Issue",
+        number.0
+    ))))
 }
 
 /// Report an `issue.create` whose cache receipt could not be published.
@@ -9604,6 +9689,32 @@ mod tests {
                 assert_eq!(listed["entries"][0]["number"], 3);
             }
         }
+        let saved =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let token = monitor_queue_reply(&saved, None)["urgent_queue_token"].clone();
+        assert!(token.as_str().is_some_and(|value| !value.is_empty()));
+        for (field, value) in [
+            ("limit", serde_json::json!(4)),
+            ("demoted", serde_json::json!([3])),
+            ("grants", serde_json::json!({})),
+        ] {
+            let mut changed = serde_json::to_value(&saved).unwrap();
+            changed["urgent_queue"][field] = value;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert_ne!(
+                monitor_queue_reply(&changed, None)["urgent_queue_token"],
+                token
+            );
+        }
+        let mut unrelated = saved;
+        unrelated.terminal_queues.clear();
+        unrelated.priority_order = vec![42];
+        unrelated.last_scan_at = Some("2026-10-22T00:01:00Z".into());
+        assert_eq!(
+            monitor_queue_reply(&unrelated, Some("another-host"))["urgent_queue_token"],
+            token
+        );
     }
 
     #[test]
@@ -9763,6 +9874,49 @@ mod tests {
         assert_eq!(reply["entries"][1]["kind"], "issue");
         assert_eq!(reply["saved_config"], saved.config_observation());
         assert_eq!(reply["config_token"], saved.config_token());
+        let demote_token = reply["urgent_queue_token"].clone();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.urgent_queue.grants.get_mut(&2).unwrap().assigned_by = Some("new-actor".into());
+            Ok(())
+        })
+        .unwrap();
+        let before_demote = std::fs::read(&prefs_path).unwrap();
+        let mut demote = |token: serde_json::Value| {
+            let crate::cli::CliCommand::Issue(command) =
+                crate::cli::json_envelope::parse_operation(
+                    "issue.monitor.queue.demote",
+                    &serde_json::json!({"number": 2, "expected_urgent_queue_token": token}),
+                )
+                .unwrap()
+            else {
+                panic!("demote command")
+            };
+            let mut out = String::new();
+            (run(&mut env, command, &mut out), out)
+        };
+        let (result, out) = demote(demote_token);
+        let error = result.expect_err("unseen urgent assignment must refuse demotion");
+        assert!(
+            error.to_string().contains("urgent queue changed"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("issue.monitor.queue.list"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before_demote);
+        let fresh = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let (result, out) = demote(monitor_queue_reply(&fresh, None)["urgent_queue_token"].clone());
+        assert_eq!(result.unwrap(), 0);
+        let demoted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(demoted.urgent_queue.demoted.contains(&2));
+        assert_eq!(demoted.terminal_queues, fresh.terminal_queues);
+        assert_eq!(demoted.urgent_queue.grants, fresh.urgent_queue.grants);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            monitor_queue_reply(&demoted, None)
+        );
         for (operation, params) in [
             (
                 "issue.monitor.queue.urgent_limit",
@@ -9925,6 +10079,7 @@ mod tests {
         assert_eq!(listed["entries"][0]["assigned_by"], "alice");
         assert_eq!(listed["entries"][1]["assigned_at"], "2026-10-03T00:01:00Z");
         listed.as_object_mut().unwrap().remove("queue_order");
+        listed.as_object_mut().unwrap().remove("urgent_queue_token");
         out.clear();
         run_monitor_status(&env, None, &mut out).unwrap();
         let status: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -11124,6 +11279,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11221,6 +11379,9 @@ mod tests {
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11370,6 +11531,9 @@ mod tests {
                 }],
                 inbox_coverage: None,
                 closure_held: Vec::new(),
+                last_scan_error: None,
+                scan_aborted: false,
+                last_error_source: None,
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
@@ -11457,6 +11621,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
@@ -11744,6 +11911,8 @@ mod tests {
             .remove("max_active_agents_override");
         assert_eq!(status["released"], serde_json::json!([]));
         status.as_object_mut().unwrap().remove("released");
+        assert_eq!(status["scan_aborted"], false);
+        status.as_object_mut().unwrap().remove("scan_aborted");
         for pointer in ["/inbox", "/urgent_queue/entries"] {
             for row in status.pointer_mut(pointer).unwrap().as_array_mut().unwrap() {
                 assert_eq!(row["kind"], "issue");
@@ -11770,7 +11939,7 @@ mod tests {
                 "label_excluded_count": 0,
                 "label_excluded_issues": [],
                 "stall_reason": "unknown",
-                "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
+                "project_root": dunce::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
                 "queue": [2, 1],
                 "urgent_queue": {
@@ -11913,6 +12082,44 @@ mod tests {
                 .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
             "a scan that last ran in 2020 must read as stalled: {status}"
         );
+    }
+
+    #[test]
+    fn issue_3924_status_restores_scan_failure_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let scan_error = serde_json::json!({
+            "phase": "candidate-load", "message": "original candidate load failure",
+            "recorded_at": now,
+        });
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["enabled"] = serde_json::json!(true);
+        prefs["last_scan_at"] = serde_json::json!(now);
+        prefs["last_scan_error"] = scan_error.clone();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .unwrap();
+        let status: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(status["last_scan_error"], scan_error);
+        assert_eq!(status["last_error_source"], "scan_failure");
+        assert_eq!(status["scan_aborted"], true);
+        assert!(status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("original candidate load failure"));
     }
 
     /// Issue #4087 AC-1: the PM reads from the status snapshot that the full
@@ -13465,6 +13672,107 @@ command = "my-agent-cli"
     }
 
     #[test]
+    fn issue_monitor_profiles_set_rejects_a_competing_fallback_write() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let result = set_monitor_profiles(&repo, patches, None, &mut String::new(), |_, _| {
+            // A second writer commits after the first request captured its base,
+            // before the transport fails and the first enters local fallback.
+            let path = path.clone();
+            std::thread::spawn(move || {
+                crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                    let mut pool = prefs.launch_profile_pool();
+                    pool[0].model = Some("competing-model".into());
+                    apply_monitor_profiles_set(prefs, &pool, None)
+                })
+                .unwrap();
+            })
+            .join()
+            .unwrap();
+            Err(
+                crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                    "offline".into(),
+                ),
+            )
+        });
+        assert!(
+            result.is_err(),
+            "stale fallback must explicitly refuse the competing write"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .launch_profile_pool()[0]
+                .model
+                .as_deref(),
+            Some("competing-model")
+        );
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_changes_describe_its_acknowledged_commit() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        let mut profile = pool_profile("codex", &[]);
+        profile.model = Some("acknowledged-model".into());
+        initial.set_launch_profile_pool(vec![profile]);
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let mut out = String::new();
+        set_monitor_profiles(&repo, patches, None, &mut out, |_, _| {
+            // Emulate the durable ACK, followed by a later independent commit
+            // before the original caller resumes to render its response.
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                let pool = prefs.launch_profile_pool();
+                apply_monitor_profiles_set(prefs, &pool, None)
+            })
+            .unwrap();
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                let mut pool = prefs.launch_profile_pool();
+                pool[0].model = Some("later-model".into());
+                apply_monitor_profiles_set(prefs, &pool, None)
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let model_change = response["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["field"] == "model")
+            .unwrap();
+        assert_eq!(
+            response["launch_profiles"][0]["model"],
+            "acknowledged-model"
+        );
+        assert_eq!(
+            model_change["value"],
+            response["launch_profiles"][0]["model"]
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .launch_profile_pool()[0]
+                .model
+                .as_deref(),
+            Some("later-model")
+        );
+    }
+
+    #[test]
     fn issue_monitor_profiles_set_rejects_invalid_pools_without_writing() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -13480,7 +13788,6 @@ command = "my-agent-cli"
         )
         .expect("save prefs");
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
-        let mut env = crate::cli::TestEnv::new(repo.clone());
 
         let rejected: Vec<(&str, Vec<crate::IssueMonitorLaunchProfilePatch>, Option<u8>)> = vec![
             ("empty pool", Vec::new(), None),
@@ -13509,14 +13816,12 @@ command = "my-agent-cli"
         ];
         for (case, profiles, usage_threshold_percent) in rejected {
             let mut out = String::new();
-            let result = run(
-                &mut env,
-                IssueCommand::MonitorProfilesSet {
-                    project_root: Some(repo.clone()),
-                    profiles,
-                    usage_threshold_percent,
-                },
+            let result = set_monitor_profiles(
+                &repo,
+                profiles,
+                usage_threshold_percent,
                 &mut out,
+                |_, _| panic!("{case} must be rejected before publication"),
             );
             assert!(result.is_err(), "{case} must be rejected");
             assert_eq!(
@@ -15245,6 +15550,9 @@ command = "my-agent-cli"
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,
@@ -16376,7 +16684,169 @@ command = "my-agent-cli"
     }
 
     #[test]
-    fn generation_change_during_rebuild_prevents_receipt_publication() {
+    fn final_validated_read_rejects_a_different_fresh_generation() {
+        let temp = TempDir::new().unwrap();
+        let cache = Cache::new(temp.path().to_path_buf());
+        let snapshot = sample_issue_snapshot();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+        let generation = cache.current_generation(snapshot.number).unwrap();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+
+        let error = load_fresh_validated_entry(&cache, snapshot.number, generation.as_ref())
+            .expect_err("a new validated generation must be revalidated by this reader");
+
+        assert!(matches!(error, SpecOpsError::CacheConflict(_)), "{error}");
+    }
+
+    #[test]
+    fn authoritative_refresh_revalidates_a_concurrent_fresh_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let old = sample_issue_snapshot();
+        let mut remote = old.clone();
+        remote.state = IssueState::Closed;
+        remote.updated_at = UpdatedAt::new("2026-10-22T00:00:00Z");
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        env.client.after_next_fetch(move || {
+            // Another targeted reader fetched before the mutation, but only
+            // publishes its snapshot and fresh receipt during our readback.
+            let cache = Cache::new(cache_root);
+            cache.write_snapshot(&old).unwrap();
+            assert!(cache
+                .renew_validation_receipt_if_current(&old)
+                .unwrap()
+                .renewed());
+        });
+
+        let entry = refresh_issue_cache_with_index_rebuild(&mut env, remote.number, |_| Ok(()))
+            .expect("authoritative retry must fetch the post-mutation state");
+
+        assert_eq!(entry.snapshot.state, IssueState::Closed);
+        assert_eq!(entry.snapshot.updated_at, remote.updated_at);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
+    }
+
+    #[test]
+    fn issue_view_recovers_from_full_refresh_during_fetch() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let old = sample_issue_snapshot();
+        env.client.seed(old.clone());
+        let mut updated = old.clone();
+        updated.title = "full refresh generation".into();
+        updated.updated_at = UpdatedAt::new("2026-10-22T00:00:00Z");
+        let writer = env.client.clone();
+        let cache_root = env.cache_root();
+        env.client.after_next_fetch(move || {
+            std::thread::spawn(move || {
+                let cache = Cache::new(cache_root);
+                let generation = cache.current_generation(updated.number).unwrap();
+                cache
+                    .write_snapshot_if_generation(&updated, generation.as_ref())
+                    .unwrap()
+                    .unwrap();
+                writer.seed(updated);
+            })
+            .join()
+            .unwrap();
+        });
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::View {
+                    number: old.number.0,
+                    refresh: false
+                },
+                &mut out
+            )
+            .expect("a full refresh must not refuse the targeted read"),
+            0
+        );
+        assert!(out.contains("full refresh generation"), "{out}");
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
+    }
+
+    #[test]
+    fn issue_comments_recovers_from_full_refresh_after_not_modified() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let old = sample_issue_snapshot();
+        let cache = Cache::new(env.cache_root());
+        cache.write_snapshot(&old).unwrap();
+        write_issue_validation_receipt(temp.path(), &old, "2020-01-01T00:00:00Z");
+        env.client.seed(old.clone());
+        let mut updated = old.clone();
+        updated.comments[0].body = "new comments from full refresh".into();
+        let writer = env.client.clone();
+        let cache_root = env.cache_root();
+        env.client.after_next_fetch(move || {
+            std::thread::spawn(move || {
+                // Bulk list publication omits comments and carries no receipt.
+                // Even with the same updated_at, recovery needs a full fetch.
+                let mut listed = updated.clone();
+                listed.comments.clear();
+                let cache = Cache::new(cache_root);
+                let generation = cache.current_generation(listed.number).unwrap();
+                cache
+                    .write_snapshot_if_generation(&listed, generation.as_ref())
+                    .unwrap()
+                    .unwrap();
+                writer.seed(updated);
+            })
+            .join()
+            .unwrap();
+        });
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::Comments {
+                    number: old.number.0,
+                    refresh: false
+                },
+                &mut out
+            )
+            .expect("NotModified for the old generation must be retried"),
+            0
+        );
+        assert!(out.contains("new comments from full refresh"), "{out}");
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
+    }
+
+    #[test]
+    fn repeated_generation_changes_return_cache_conflict() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let remote = sample_issue_snapshot();
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        let concurrent = remote.clone();
+        let error =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
+                Cache::new(cache_root.clone())
+                    .write_snapshot(&concurrent)
+                    .map_err(|error| error.to_string())
+            })
+            .expect_err("continuous contention must fail closed after bounded retries");
+        assert!(
+            error.to_string().starts_with("issue #42 cache conflict:"),
+            "{error}"
+        );
+        assert_eq!(env.client.call_log().len(), 3, "retry count is bounded");
+    }
+
+    #[test]
+    fn generation_change_during_rebuild_retries_receipt_publication() {
         let temp = TempDir::new().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
         let cached = sample_issue_snapshot();
@@ -16390,18 +16860,23 @@ command = "my-agent-cli"
         let cache_root = env.cache_root();
         let mut concurrent = remote.clone();
         concurrent.title = "concurrent writer wins".to_string();
+        let writer = env.client.clone();
+        let mut replaced = false;
 
-        let error =
+        let entry =
             load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
-                Cache::new(cache_root.clone())
-                    .write_snapshot(&concurrent)
-                    .map_err(|error| error.to_string())
+                if !replaced {
+                    Cache::new(cache_root.clone())
+                        .write_snapshot(&concurrent)
+                        .map_err(|error| error.to_string())?;
+                    writer.seed(concurrent.clone());
+                    replaced = true;
+                }
+                Ok(())
             })
-            .expect_err("changed generation must reject receipt publication");
+            .expect("changed generation must be read and validated again");
 
-        assert!(error
-            .to_string()
-            .contains("changed before validation receipt"));
+        assert_eq!(entry.snapshot.title, "concurrent writer wins");
         let cache = Cache::new(env.cache_root());
         assert_eq!(
             cache
@@ -16411,11 +16886,11 @@ command = "my-agent-cli"
                 .title,
             "concurrent writer wins"
         );
-        assert!(!cache.validation_receipt_path(remote.number).exists());
+        assert!(cache.validation_receipt_path(remote.number).exists());
     }
 
     #[test]
-    fn identical_snapshot_aba_during_rebuild_rejects_original_generation() {
+    fn identical_snapshot_aba_during_rebuild_revalidates_new_generation() {
         let temp = TempDir::new().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
         let cached = sample_issue_snapshot();
@@ -16428,25 +16903,29 @@ command = "my-agent-cli"
         env.client.seed(remote.clone());
         let cache_root = env.cache_root();
         let concurrent = remote.clone();
+        let mut replaced = false;
 
-        let error =
+        let entry =
             load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
-                Cache::new(cache_root.clone())
-                    .write_snapshot(&concurrent)
-                    .map_err(|error| error.to_string())
+                if !replaced {
+                    Cache::new(cache_root.clone())
+                        .write_snapshot(&concurrent)
+                        .map_err(|error| error.to_string())?;
+                    replaced = true;
+                }
+                Ok(())
             })
-            .expect_err("identical bytes with a different UUID must fail generation CAS");
+            .expect("ABA must be detected and the new generation revalidated");
 
-        assert!(error
-            .to_string()
-            .contains("changed before validation receipt"));
+        assert_eq!(entry.snapshot.title, remote.title);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
         let cache = Cache::new(env.cache_root());
         let persisted = cache.load_entry(remote.number).unwrap().snapshot;
         assert_eq!(persisted.title, remote.title);
         assert_eq!(persisted.body, remote.body);
         assert_eq!(persisted.updated_at, remote.updated_at);
         assert_eq!(persisted.comments[0].body, remote.comments[0].body);
-        assert!(!cache.validation_receipt_path(remote.number).exists());
+        assert!(cache.validation_receipt_path(remote.number).exists());
     }
 
     /// Issue #4436 AC-4: a refusal that no retry can resolve must not be

@@ -81,6 +81,109 @@ test("live backend replays fresh index health after reconnect and completes offl
     await expect(reconnected.root.locator(".index-search-status")).toHaveText("No indexed results");
     await expect(reconnected.root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
     await expect(reconnected.root.locator(".index-run-button")).toBeEnabled();
+    // Only search response bodies are controlled; the page and transport above
+    // still come from the isolated checkout and exercise a real reconnect.
+    controlledHealth = true;
+    await page.evaluate(() => {
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function(data) {
+        if (typeof data === "string") {
+          const request = JSON.parse(data);
+          if ((window as any).__captureIndexActivation && request.kind === "create_window") {
+            (window as any).__capturedIndexActivation = request;
+            return;
+          }
+          if (request.kind === "search_project_index") {
+            const root = document.querySelector(`[data-id="${CSS.escape(request.id)}"] .index-search-root`)!;
+            (window as any).__indexFrameRequest = { ...request,
+              disabledBeforeSend: (root.querySelector(".index-run-button") as HTMLButtonElement).disabled,
+              busyBeforeSend: root.querySelector(".index-search-layout")?.getAttribute("aria-busy") };
+            return;
+          }
+        }
+        return send.call(this, data);
+      };
+    });
+    await reconnected.root.locator(".index-search-input").hover();
+    await reconnected.root.locator(".index-search-input").focus();
+    const searchFrame = async (fallback: boolean) => reconnected.root.evaluate(async (root, fallback) => {
+      const input = root.querySelector(".index-search-input") as HTMLInputElement;
+      const list = root.querySelector(".index-result-list")!;
+      const status = root.querySelector(".index-search-status")!;
+      const focused = document.activeElement;
+      const originalRaf = window.requestAnimationFrame;
+      let renders = 0;
+      let observer: MutationObserver | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      if (fallback) window.requestAnimationFrame = () => 0;
+      try {
+        input.value = fallback ? "frame error" : "frame result";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        (root.querySelector("form") as HTMLFormElement).requestSubmit();
+        const request = (window as any).__indexFrameRequest;
+        const previousNode = list.firstChild;
+        const expected = fallback ? "Controlled search unavailable" : "Frame result";
+        const started = performance.now();
+        const rendered = new Promise<void>((resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error("search response render exceeded one second")), 1000);
+          observer = new MutationObserver(records => {
+            renders += records.filter(record => record.target === list)
+              .flatMap(record => Array.from(record.addedNodes)).length;
+            if (fallback ? status.textContent === expected : list.textContent?.includes(expected)) resolve();
+          });
+          observer.observe(root, { childList: true, subtree: true, characterData: true });
+        });
+        const event = fallback
+          ? { kind: "project_index_search_error", id: request.id, request_id: request.request_id, message: expected }
+          : { kind: "project_index_search_results", id: request.id, request_id: request.request_id,
+            results: [{ scope: "issues", title: expected, preview: "Committed frame response", target: { kind: "memory" } }], suggestions: [] };
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event }));
+        // Duplicate responses are stale after the first accepted response.
+        for (let count = 0; count < 49; count++) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event }));
+        const unchanged = list.firstChild === previousNode;
+        await rendered;
+        return { unchanged, renders, elapsedMs: performance.now() - started,
+          disabledBeforeSend: request.disabledBeforeSend, busyBeforeSend: request.busyBeforeSend,
+          busyAfter: root.querySelector(".index-search-layout")?.getAttribute("aria-busy"),
+          focusPreserved: document.activeElement === focused, hoverPreserved: root.matches(":hover") };
+      } finally {
+        clearTimeout(deadline);
+        observer?.disconnect();
+        window.requestAnimationFrame = originalRaf;
+      }
+    }, fallback);
+    for (const fallback of [false, true]) {
+      const measured = await searchFrame(fallback);
+      expect(measured).toMatchObject({ unchanged: true, renders: 1, disabledBeforeSend: true,
+        busyBeforeSend: "true", busyAfter: "false", focusPreserved: true, hoverPreserved: true });
+      expect(measured.elapsedMs).toBeLessThan(1000);
+      await testInfo.attach(`index-search-frame-${fallback ? "fallback" : "normal"}`, {
+        body: JSON.stringify(measured), contentType: "application/json" });
+      await testInfo.attach(`Index search ${fallback ? "error" : "results"}`, {
+        body: await reconnected.root.screenshot(), contentType: "image/png" });
+      if (!fallback) {
+        const activation = await reconnected.root.evaluate(root => {
+          const input = root.querySelector(".index-search-input") as HTMLInputElement;
+          input.value = "pending activation";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          (root.querySelector("form") as HTMLFormElement).requestSubmit();
+          const request = (window as any).__indexFrameRequest;
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "project_index_search_results", id: request.id, request_id: request.request_id,
+            results: [{ title: "Unseen Board", target: { kind: "board" } }], suggestions: [],
+          } }));
+          const shown = root.querySelector(".index-detail-title")?.textContent;
+          (window as any).__captureIndexActivation = true;
+          (window as any).__capturedIndexActivation = null;
+          try {
+            (root.querySelector("[data-action='open-index-result']") as HTMLButtonElement).click();
+            return { shown, attemptedCreate: (window as any).__capturedIndexActivation };
+          } finally { (window as any).__captureIndexActivation = false; }
+        });
+        expect(activation).toEqual({ shown: "Frame result", attemptedCreate: null });
+        await expect(reconnected.root.locator(".index-detail-title")).toHaveText("Unseen Board");
+      }
+    }
     await reconnected.root.locator(".index-search-health-summary").hover();
     await reconnected.root.locator(".index-search-input").focus();
     controlledHealth = true;

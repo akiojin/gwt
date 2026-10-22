@@ -306,6 +306,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`pane.health` は既存の workspace と runtime sidecar の状態から、GUI event loop に
+依存せずプロジェクトの pane health を読み取ります。応答の `output` 文字列を JSON として
+読んだ `panes` 配列に、各 pane の `classification`、`reason_code`、`recommended_action`
+を返します。`params.id` を省略すると全 pane、`pane.list` の ID（raw pane ID も可）を
+渡すと単一 pane が対象です。
+推奨 action は判断材料であり、この operation 自体は close・relaunch・stop・requeue
+を実行しません。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
 既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
 workflow のファイル名を許可します。
@@ -539,6 +553,12 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 guard 省略時は従来の挙動を保ちます。この値比較は ABA 履歴を検知しません。
 超過分は通常順序に従います。`issue.monitor.queue.demote` の `number` で指定した Issue は
 永続的に通常優先度へ戻り、scan・再起動後も urgent ラベルより降格が優先されます。
+降格前に `issue.monitor.queue.list` を読み、`urgent_queue_token` を
+`expected_urgent_queue_token` として渡します。保存された urgent 上限・付与情報・降格を
+比較対象とし、通常のキュー順序と runtime は含みません。不一致なら設定を変更せず、
+list を再読して降格を再評価します。成功応答のキュー項目と新 token は同じ保存 snapshot を表します。
+guard 省略時は従来互換で、`null`・空文字・異なる型は拒否します。
+この値比較は ABA 履歴や他の control 操作を保護しません。
 カードと詳細では urgent・上限超過・降格を区別し、`issue.monitor.queue.list` と
 `issue.monitor.status` からも理由と観測済みの GitHub ラベル付与者・時刻を確認できます。
 未取得の履歴は不明として表示します。

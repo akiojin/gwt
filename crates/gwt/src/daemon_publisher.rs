@@ -207,6 +207,7 @@ pub fn publish_issue_monitor_control_with_timeout(
 enum EndpointAbsenceEvidence {
     Missing,
     DefinitelyDead,
+    Unavailable(String),
     Uncertain(String),
 }
 
@@ -460,10 +461,12 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     project_root: &Path,
     is_process_alive: &impl Fn(u32) -> bool,
 ) -> Result<Option<DaemonEndpoint>, IssueMonitorControlPublishError> {
-    use IssueMonitorControlPublishError::OutcomeUnknown;
+    use IssueMonitorControlPublishError::{OutcomeUnknown, TransportUnavailable};
 
+    // Discovery failures have not sent a control. The local writer must still
+    // recheck the authority fence under the prefs lock before committing.
     let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
-        .map_err(|error| OutcomeUnknown(format!("scope resolution failed: {error}")))?;
+        .map_err(|error| TransportUnavailable(format!("scope resolution failed: {error}")))?;
     let gwt_home = paths::gwt_home();
     if let Some(endpoint) = resolve_live_project_authority(&gwt_home, &scope, is_process_alive)
         .map_err(OutcomeUnknown)?
@@ -476,7 +479,7 @@ fn resolve_issue_monitor_endpoint_with_liveness(
     let action = resolve_bootstrap_action(&gwt_home, &scope, DAEMON_PROTOCOL_VERSION, |pid| {
         is_process_alive(pid)
     })
-    .map_err(|error| OutcomeUnknown(format!("bootstrap resolve failed: {error}")))?;
+    .map_err(|error| TransportUnavailable(format!("bootstrap resolve failed: {error}")))?;
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => Ok(Some(endpoint)),
         // Issue #4038: version-agnostic resolution never yields this arm; a
@@ -486,6 +489,7 @@ fn resolve_issue_monitor_endpoint_with_liveness(
         )),
         DaemonBootstrapAction::Spawn { .. } => match absence_evidence {
             EndpointAbsenceEvidence::Missing | EndpointAbsenceEvidence::DefinitelyDead => Ok(None),
+            EndpointAbsenceEvidence::Unavailable(reason) => Err(TransportUnavailable(reason)),
             EndpointAbsenceEvidence::Uncertain(reason) => Err(OutcomeUnknown(reason)),
         },
     }
@@ -501,7 +505,7 @@ fn endpoint_absence_evidence(
             return EndpointAbsenceEvidence::Missing;
         }
         Err(error) => {
-            return EndpointAbsenceEvidence::Uncertain(format!(
+            return EndpointAbsenceEvidence::Unavailable(format!(
                 "endpoint evidence is unreadable: {error}"
             ));
         }
@@ -509,7 +513,7 @@ fn endpoint_absence_evidence(
     let endpoint = match serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&payload) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            return EndpointAbsenceEvidence::Uncertain(format!(
+            return EndpointAbsenceEvidence::Unavailable(format!(
                 "endpoint evidence is malformed: {error}"
             ));
         }
@@ -1239,24 +1243,24 @@ mod tests {
     }
 
     #[test]
-    fn scope_resolution_failure_is_outcome_unknown_not_fallback() {
+    fn scope_resolution_failure_allows_local_fallback() {
         let error = publish_issue_monitor_control_with_timeout(
             Path::new("relative-project-root"),
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("relative project root cannot establish daemon absence");
+        .expect_err("scope failure prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("scope resolution failed")
         ));
     }
 
     #[test]
-    fn bootstrap_resolution_failure_is_outcome_unknown_not_fallback() {
+    fn bootstrap_resolution_failure_allows_local_fallback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1274,18 +1278,18 @@ mod tests {
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("unreadable endpoint cannot establish daemon absence");
+        .expect_err("unreadable endpoint prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("bootstrap resolve failed")
         ));
     }
 
     #[test]
-    fn malformed_endpoint_spawn_is_outcome_unknown_not_fallback() {
+    fn malformed_endpoint_spawn_allows_local_fallback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1305,12 +1309,12 @@ mod tests {
             json!({"enabled": false}),
             Duration::from_millis(100),
         )
-        .expect_err("malformed endpoint cannot prove daemon absence");
+        .expect_err("malformed endpoint prevents sending the control");
 
-        assert!(!error.allows_local_fallback());
+        assert!(error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
+            crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(message)
                 if message.contains("endpoint evidence")
         ));
     }

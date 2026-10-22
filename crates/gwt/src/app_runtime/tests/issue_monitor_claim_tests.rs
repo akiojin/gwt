@@ -6353,6 +6353,16 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     restarted.blocking_tasks = ack_spawner;
 
+    // Issue #3642: replay must ACK the exact saved pane despite endpoint corruption.
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        &repo,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .expect("runtime scope");
+    let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+    fs::create_dir_all(endpoint_path.parent().expect("endpoint parent")).unwrap();
+    fs::write(endpoint_path, b"{\"pid\":").expect("inject malformed endpoint");
+
     let events = restarted.auto_launch_issue_monitor_delivery_events(
         &restarted.test_context(),
         3165,
@@ -6373,7 +6383,14 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
             .count(),
         1
     );
-    restarted.finish_queued_delivery_acks(&ack_tasks);
+    let ack_events = restarted.finish_queued_delivery_acks(&ack_tasks);
+    assert!(
+        !events.iter().chain(&ack_events).any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error"
+        )),
+        "error events cannot prove delivery ACK success: {events:?} {ack_events:?}"
+    );
     let acknowledged = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload ACKed prefs");
     assert!(
         acknowledged.pending_launch_deliveries.is_empty(),

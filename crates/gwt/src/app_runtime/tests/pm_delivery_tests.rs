@@ -331,12 +331,10 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
     );
 }
 
-/// Issue #3608 (AC-2/AC-3): a delivery whose acknowledgement never arrives is
-/// reported as its own outcome, distinct from a submit that failed, and it
-/// never claims the body is staged — both the body and its submit terminator
-/// were written to the pane on this path.
+/// Issue #3897: successful body/submit writes without an exact hook ACK do
+/// not prove delivery. Report uncertainty and preserve a later human draft.
 #[test]
-fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
+fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -385,20 +383,240 @@ fn authenticated_pm_send_reports_unverified_without_target_hook_ack() {
                 status,
                 reason: Some(reason),
                 ..
-            } if status == "unverified"
+            } if status == "unconfirmed"
                 && reason.contains("not acknowledged")
-                && reason.contains("do not retry")
-                && !reason.contains("staged")
+                && reason.contains("same operation")
         ),
-        "an unacknowledged submit is its own outcome and was never staged: {result:?}"
+        "missing acknowledgement must not claim delivery: {result:?}"
     );
     assert!(gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
         .expect("delivery receipts")
         .iter()
         .any(|receipt| {
             receipt.operation_id == operation_id
-                && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Ambiguous
+                && receipt.status == gwt::pm_registry::PmDeliveryReceiptStatus::Unconfirmed
         }));
+
+    // An intervening human draft revokes submit recovery, even if the old
+    // operation has a full-body guard. No new input transaction may start.
+    let entry = Arc::clone(
+        runtime
+            .pty_writers
+            .read()
+            .unwrap()
+            .get(&target_window)
+            .unwrap(),
+    );
+    let original_transaction = entry
+        .pm_delivery_replay
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("full body recovery guard")
+        .transaction_revision;
+    entry.handle.write_input(b"human draft").unwrap();
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "origin-client".into(),
+        issuer.grant_for_test(&capability.token).unwrap(),
+        operation_id,
+        &target_window,
+        "unacknowledged body\r",
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "unconfirmed" && reason.contains("readback-only")));
+    assert!(entry.handle.has_unsent_user_input());
+    let reservation = entry.handle.reserve_input_transaction().unwrap();
+    assert_eq!(
+        reservation.previous_transaction_revision(),
+        original_transaction,
+        "same-operation retry must not submit a later human draft"
+    );
+}
+
+#[test]
+fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    runtime.register_pty_writer(&pm_window_id, None);
+    let target = "tab-1::other-window";
+    insert_test_pane_runtime(&mut runtime, target);
+    runtime.register_pty_writer(target, None);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer.issue(&repo, "pm-session-live").unwrap();
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135763898";
+    let body = "recover an idle composer";
+    let (responder, result, _cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+    runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client".into(),
+        issuer.grant_for_test(&capability.token).unwrap(),
+        operation_id,
+        target,
+        &format!("{body}\r"),
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
+    let entry = Arc::clone(runtime.pty_writers.read().unwrap().get(target).unwrap());
+    let original_transaction = entry
+        .pm_delivery_replay
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .transaction_revision;
+    let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let (responder, result, recovery_cancellation) = AgentPmSendResponder::channel();
+    runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client".into(),
+        issuer.grant_for_test(&capability.token).unwrap(),
+        operation_id,
+        target,
+        &format!("{body}\r"),
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "unconfirmed" && reason.contains("Further calls are readback-only")));
+    assert!(
+        recovery_cancellation.cancel(),
+        "the bounded recovery must reach its input commit"
+    );
+    assert!(entry.pm_delivery_replay.lock().unwrap().is_none());
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &path,
+        operation_id,
+        "other-session",
+        &gwt::pm_registry::pm_delivery_prompt_sha256(body),
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .unwrap();
+    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
+    runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client".into(),
+        issuer.grant_for_test(&capability.token).unwrap(),
+        operation_id,
+        target,
+        &format!("{body}\r"),
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, .. } if status == "delivered"));
+    assert_eq!(
+        entry
+            .handle
+            .reserve_input_transaction()
+            .unwrap()
+            .previous_transaction_revision(),
+        original_transaction + 1,
+        "only one bounded replay may claim the original composer"
+    );
+}
+
+#[test]
+fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    runtime.register_pty_writer(&pm_window_id, None);
+    let target = "tab-1::other-window";
+    insert_test_pane_runtime(&mut runtime, target);
+    runtime.register_pty_writer(target, None);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135763897";
+    let body = "recover the same operation";
+    let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let prepared = gwt::pm_registry::PmDeliveryReceipt {
+        operation_id: operation_id.into(),
+        recorded_at: "2026-10-22T00:00:00Z".into(),
+        status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+        principal_session_id: "pm-session-live".into(),
+        target_window_id: target.into(),
+        target_session_id: "other-session".into(),
+        body_sha256: gwt::pm_registry::pm_delivery_prompt_sha256(body),
+        reason: None,
+    };
+    gwt::pm_registry::prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &path,
+        operation_id,
+        "other-session",
+        &prepared.body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+        Some("body_staged_or_unknown"),
+    )
+    .unwrap();
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer.issue(&repo, "pm-session-live").unwrap();
+    let send = |runtime: &mut AppRuntime| {
+        let (responder, result, _cancellation) =
+            AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(1));
+        runtime.authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client".into(),
+            issuer.grant_for_test(&capability.token).unwrap(),
+            operation_id,
+            target,
+            &format!("{body}\r"),
+            Some(responder),
+        );
+        result.blocking_recv().unwrap()
+    };
+    assert!(
+        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult {
+        status, reason: Some(reason), .. } if status == "unconfirmed" && reason.contains("readback-only"))
+    );
+    let entry = Arc::clone(runtime.pty_writers.read().unwrap().get(target).unwrap());
+    let reservation = entry.handle.reserve_input_transaction().unwrap();
+    assert_eq!(
+        reservation.previous_transaction_revision(),
+        0,
+        "a legacy/partial-write receipt alone must never authorize submit"
+    );
+    drop(reservation);
+    runtime.deregister_pty_writer(target);
+    assert!(
+        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult { status, .. } if status == "lost")
+    );
+    assert_eq!(
+        gwt::pm_registry::finish_pm_delivery_receipt(
+            &path,
+            operation_id,
+            "other-session",
+            &prepared.body_sha256,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .unwrap(),
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+    );
+    assert!(
+        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult { status, .. } if status == "delivered")
+    );
 }
 
 #[test]
