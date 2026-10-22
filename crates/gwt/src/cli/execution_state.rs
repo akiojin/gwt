@@ -34112,6 +34112,49 @@ exit 1
             );
         }
 
+        /// Issue #4363 AC-1: Monitor membership is not execution authority.
+        #[test]
+        fn monitor_unbound_session_can_block_its_current_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "monitor-unbound");
+            let repo = tempfile::tempdir().unwrap();
+            prepare_generation_bound_execution_for_owner(
+                repo.path(),
+                "monitor-unbound",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 4363,
+                },
+                ExecutionControlStatus::Active,
+            );
+            assert!(crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path())
+            )
+            .unwrap()
+            .launched_issues
+            .is_empty());
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "trusted execution lost its Monitor row".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let record = load(repo.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
+            assert_eq!(
+                record.blocked_reason.as_deref(),
+                Some("trusted execution lost its Monitor row")
+            );
+        }
+
         #[test]
         fn settlement_refuses_other_sessions_record() {
             let _env_lock = crate::env_test_lock()
