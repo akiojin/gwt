@@ -11369,7 +11369,9 @@ impl IssueMonitorState {
             .is_some_and(|current| {
                 parse_rfc3339_utc(&current.observed_at).is_some_and(|current_at| {
                     incoming_at < current_at
-                        || (incoming_at == current_at && observation.hold.is_some())
+                        // Ambiguous equal-time evidence must retain a proven hold.
+                        || (incoming_at == current_at
+                            && (current.hold.is_some() || observation.hold.is_none()))
                 })
             })
         {
@@ -13738,7 +13740,7 @@ impl IssueMonitorState {
 
     /// Issues this project could be running right now.
     ///
-    /// Queued work whose retry floor has not passed is deliberately parked
+    /// Work waiting on an open PR or whose retry floor has not passed is parked
     /// (Issue #3616 quota holds live here), and an issue already escalated to
     /// `NeedsHuman` is on a human's desk rather than the fleet's. Counting
     /// either would raise a blackout for a fleet that is behaving correctly.
@@ -13746,11 +13748,13 @@ impl IssueMonitorState {
         let queued = self
             .queue
             .iter()
+            .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
             .filter(|issue_number| self.retry_ready_for_saved_profile(**issue_number, now))
             .count();
         let held = self
             .failed_issues
             .keys()
+            .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
             .filter(|issue_number| {
                 self.autonomous_records
                     .get(issue_number)
@@ -41211,6 +41215,8 @@ mod tests {
             );
             scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
             assert!(monitor.open_pr_launch_held(42));
+            assert_eq!(monitor.runnable_backlog_len(now), 0);
+            assert!(monitor.agent_status_at(now).agent_blackout.is_none());
             assert_eq!(
                 monitor.inbox_item(42).unwrap().state,
                 MonitorInboxState::Queued
@@ -41245,6 +41251,7 @@ mod tests {
         monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), now);
         scan_issue_monitor_candidates(&mut monitor, &[candidate], now);
         assert!(!monitor.open_pr_launch_held(42));
+        assert_eq!(monitor.runnable_backlog_len(now), 1);
         assert_eq!(
             monitor
                 .clone()
@@ -41256,6 +41263,26 @@ mod tests {
                 .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false);
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0].issue_number, 42);
+    }
+
+    #[test]
+    fn issue_4157_equal_timestamp_release_cannot_override_a_hold_in_either_order() {
+        let hold = Some(IssueMonitorOpenPrHold {
+            pr_number: 7,
+            lifecycle: "MERGE-CANDIDATE".into(),
+        });
+        for observations in [[hold.clone(), None], [None, hold.clone()]] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            for observation in observations {
+                monitor.reconcile_open_pr_holds(
+                    &BTreeMap::from([(42, observation)]),
+                    "2026-06-26T00:01:00Z",
+                );
+            }
+            assert!(monitor.open_pr_launch_held(42));
+            monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:02:00Z");
+            assert!(!monitor.open_pr_launch_held(42));
+        }
     }
 
     #[test]
