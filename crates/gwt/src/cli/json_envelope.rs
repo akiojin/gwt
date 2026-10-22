@@ -1254,6 +1254,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody {
                 number: required_u64(params, "number")?,
                 body: required_string(params, "body")?,
+                thread_id: lookup(params, "thread_id")
+                    .map(|_| required_string(params, "thread_id"))
+                    .transpose()?,
             })
         }
         "actions.dispatch" => {
@@ -7999,6 +8002,29 @@ mod tests {
                 "pr.head_check"
             )
         );
+    }
+
+    #[test]
+    fn issue_3789_review_reply_preserves_thread_id() {
+        let command = ok(
+            "pr.review_threads.reply_and_resolve",
+            json!({"number": 1, "thread_id": "PRRT_target", "body": "Fixed"}),
+        );
+        assert!(format!("{command:?}").contains("PRRT_target"));
+    }
+
+    #[test]
+    fn issue_3789_review_reply_rejects_invalid_thread_selector() {
+        for thread_id in [json!(""), json!("  "), Value::Null, json!(42)] {
+            assert!(
+                super::parse_operation(
+                    "pr.review_threads.reply_and_resolve",
+                    &json!({"number": 1, "thread_id": thread_id, "body": "Fixed"}),
+                )
+                .is_err(),
+                "invalid selector must never fall back to bulk mode"
+            );
+        }
     }
 
     #[test]

@@ -360,6 +360,218 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
     assert_eq!(observed_status.flatten().as_deref(), Some("Process exited"));
 }
 
+#[cfg(windows)]
+fn wait_for_native_conpty_output(
+    runtime: &mut AppRuntime,
+    receiver: &mpsc::Receiver<gwt::pane_runtime::PaneRuntimeEvent>,
+    marker: &str,
+    expected_state: Option<WindowProcessStatus>,
+    timeout: Duration,
+) -> Vec<OutboundEvent> {
+    use gwt::pane_runtime::PaneRuntimeEvent;
+
+    // test-hygiene: allow-wall-clock-deadline Real ConPTY IO must reach the observable push within the acceptance deadline.
+    let deadline = Instant::now() + timeout;
+    let mut output = String::new();
+    let mut pushed = Vec::new();
+    let mut process_exited = false;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "ConPTY timed out: {output:?}");
+        // test-hygiene: allow-wall-clock-deadline Bound kernel IO and service the production output batching deadline between reads.
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(PaneRuntimeEvent::Output {
+                id,
+                incarnation,
+                data,
+                seq,
+                screen,
+            }) => {
+                output.push_str(&String::from_utf8_lossy(&data));
+                pushed.extend(runtime.handle_runtime_output_event(
+                    id,
+                    incarnation,
+                    data,
+                    seq,
+                    screen,
+                ));
+            }
+            Ok(PaneRuntimeEvent::Status {
+                id,
+                incarnation,
+                status,
+                detail,
+                exit_confirmed,
+            }) => {
+                process_exited |= exit_confirmed;
+                pushed.extend(runtime.handle_runtime_status_event(
+                    id,
+                    incarnation,
+                    status,
+                    detail,
+                    exit_confirmed,
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("ConPTY worker disconnected: {error}"),
+        }
+        pushed.extend(runtime.flush_runtime_output_batches(Instant::now()));
+        if output.contains(marker)
+            && (process_exited
+                || !matches!(
+                    expected_state,
+                    Some(WindowProcessStatus::Stopped | WindowProcessStatus::Error)
+                ))
+            && expected_state.is_none_or(|expected| {
+                pushed.iter().any(|event| {
+                    matches!(
+                        event.event,
+                        BackendEvent::WindowState { state, .. } if state == expected
+                    )
+                })
+            })
+        {
+            return pushed;
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn app_runtime_native_conpty_pushes_running_waiting_idle_and_process_exit() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    // Each real stdin read is an observable barrier, so startup time is not
+    // charged to the one-second state-push acceptance requirement.
+    let fixture = concat!(
+        "@echo off & echo GWT_NATIVE_READY & set /p phase= & ",
+        "echo GWT_NATIVE_TOKEN & set /p phase= & ",
+        "echo Would you like to run the following command? & echo. & ",
+        "echo cargo test -p gwt & echo. & echo ^> 1. Yes, proceed & ",
+        "echo   2. No, and tell Codex what to do differently & echo. & ",
+        "echo Press enter to confirm or esc to cancel & set /p phase= & exit /B 7"
+    );
+    let pane = Pane::new(
+        window_id.clone(),
+        "cmd".to_string(),
+        vec!["/D".into(), "/S".into(), "/C".into(), fixture.into()],
+        120,
+        30,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("native ConPTY pane");
+    insert_test_pane_runtime_with_pane(&mut runtime, &window_id, pane);
+    let pane = runtime.runtimes[&window_id].pane.clone();
+    let incarnation = runtime.runtimes[&window_id].incarnation;
+    let pty = runtime.runtimes[&window_id].pty.clone();
+    struct ConptyCleanup(Arc<gwt_terminal::PtyHandle>);
+    impl Drop for ConptyCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            self.0.release_descriptors();
+        }
+    }
+    let _cleanup = ConptyCleanup(pty.clone());
+    let (sender, receiver) = mpsc::channel();
+    let output_sender = sender.clone();
+    let output_thread = gwt::pane_runtime::spawn_output_thread(
+        window_id.clone(),
+        incarnation,
+        pane.clone(),
+        move |event| {
+            let _ = output_sender.send(event);
+        },
+    );
+    let status_thread = gwt::pane_runtime::spawn_status_thread(
+        window_id.clone(),
+        incarnation,
+        pane,
+        move |event| {
+            let _ = sender.send(event);
+        },
+    );
+    // Match the existing Windows process-exit fixture's startup CPR response.
+    pty.write_input(b"\x1b[1;1R").expect("ConPTY cursor reply");
+    wait_for_native_conpty_output(
+        &mut runtime,
+        &receiver,
+        "GWT_NATIVE_READY",
+        None,
+        Duration::from_secs(5),
+    );
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "waiting",
+        "SessionStart",
+        "session-1",
+    ));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Idle)
+    );
+
+    for (source, status, expected) in [
+        ("UserPromptSubmit", "running", WindowProcessStatus::Running),
+        ("Stop", "waiting", WindowProcessStatus::Idle),
+    ] {
+        let started = Instant::now();
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+            status,
+            source,
+            "session-1",
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::WindowState { state, .. } if state == expected
+        )));
+        // test-hygiene: allow-wall-clock-deadline Issue #3809 requires each runtime hook state push within one second.
+        assert!(started.elapsed() <= Duration::from_secs(1));
+        if expected == WindowProcessStatus::Running {
+            pty.write_input(b"tokens\r").expect("start token output");
+            wait_for_native_conpty_output(
+                &mut runtime,
+                &receiver,
+                "GWT_NATIVE_TOKEN",
+                None,
+                Duration::from_secs(5),
+            );
+            assert_eq!(runtime.window_status(&window_id), Some(expected));
+            pty.write_input(b"approval\r").expect("emit approval");
+            wait_for_native_conpty_output(
+                &mut runtime,
+                &receiver,
+                "Press enter to confirm or esc to cancel",
+                Some(WindowProcessStatus::Waiting),
+                Duration::from_secs(1),
+            );
+        }
+    }
+    pty.write_input(b"exit\r").expect("exit provider fixture");
+    wait_for_native_conpty_output(
+        &mut runtime,
+        &receiver,
+        "",
+        Some(WindowProcessStatus::Error),
+        Duration::from_secs(1),
+    );
+    pty.release_descriptors();
+    output_thread.join().expect("ConPTY output worker");
+    status_thread.join().expect("ConPTY status worker");
+    runtime.stop_all_runtimes();
+}
+
 #[test]
 fn app_runtime_runtime_hook_stopped_keeps_active_agent_window_for_host_close() {
     let _env_lock = env_test_lock()

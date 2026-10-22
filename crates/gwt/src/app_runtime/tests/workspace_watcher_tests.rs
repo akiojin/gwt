@@ -1848,6 +1848,7 @@ fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_w
         context: runtime.project_context("tab-1"),
         events: Vec::new(),
         milestone: Some((repo.clone(), projection)),
+        ..Default::default()
     });
 
     assert_eq!(

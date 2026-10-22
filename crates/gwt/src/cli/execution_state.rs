@@ -856,7 +856,7 @@ pub struct OwnerGenerationHold {
 
 /// Project the current generation of `ledger` and its holder Session, read
 /// from `sessions_dir`, into [`OwnerGenerationHold`]. `None` when the ledger
-/// has no current generation.
+/// has no current generation or parseable effective execution projection.
 #[must_use]
 pub fn owner_generation_hold_from_ledger(
     sessions_dir: &Path,
@@ -864,7 +864,10 @@ pub fn owner_generation_hold_from_ledger(
 ) -> Option<OwnerGenerationHold> {
     let current = ledger.current_generation()?;
     let status = ledger.effective_status_for(current);
-    let holder_session_id = current.identity.initial_session_id.clone();
+    let holder_session_id =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .ok()?
+            .primary_session_id;
     let holder_path = sessions_dir.join(format!("{holder_session_id}.toml"));
     let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
         gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
@@ -1985,6 +1988,21 @@ pub fn reap_startup_defunct_active_generation(
             if protected_exact_sessions
                 .iter()
                 .any(|protected| protected == &exact_session)
+            {
+                return Ok(StartupActiveGenerationReapOutcome::Protected);
+            }
+            // An operator stop revokes its runtime, not the recoverable owner.
+            // Keep that authority while the exact stop's operator hold remains,
+            // including the interval before the host finishes tree teardown.
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(&candidate.worktree),
+            )?;
+            if prefs.monitor_runtime_stop_requests.iter().any(|request| {
+                request.issue_number == candidate.owner.number
+                    && request.execution_identity == exact_session
+            }) && crate::IssueMonitorState::with_prefs(Default::default(), prefs)
+                .stop_only_reason(candidate.owner.number)
+                .is_some()
             {
                 return Ok(StartupActiveGenerationReapOutcome::Protected);
             }
@@ -5038,6 +5056,9 @@ pub(crate) fn snapshot_pr_mutation_execution_binding(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CurrentExecutionBindingAuthority {
     ActiveMutation,
+    /// Retire a captured runtime without granting producing authority or
+    /// changing its owner's execution lifecycle.
+    RuntimeCleanup,
     BlockedBuildAbort,
     PrMutation,
     /// Exact GitHub CI admits only Ready creation, without reopening Blocked.
@@ -5054,6 +5075,12 @@ impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::RuntimeCleanup => matches!(
+                status,
+                ExecutionControlStatus::Active
+                    | ExecutionControlStatus::Completed
+                    | ExecutionControlStatus::Blocked
+            ),
             Self::ProjectionUpdate => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
@@ -5383,6 +5410,22 @@ pub fn with_current_active_session_execution_identity_lease<T>(
         sessions_dir,
         expected,
         CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// The caller must recheck its captured runtime proof under this lease before
+/// signalling the PTY. This authority never permits producing operations.
+pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::RuntimeCleanup,
         operation,
     )
 }
@@ -6119,6 +6162,7 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                 }
                 CurrentExecutionBindingAuthority::PrMutation
                 | CurrentExecutionBindingAuthority::CiPrCreation
+                | CurrentExecutionBindingAuthority::RuntimeCleanup
                 | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6212,6 +6256,7 @@ fn with_current_session_execution_identity_global_lease<T>(
                         }
                         CurrentExecutionBindingAuthority::PrMutation
                         | CurrentExecutionBindingAuthority::CiPrCreation
+                        | CurrentExecutionBindingAuthority::RuntimeCleanup
                         | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -20265,7 +20310,54 @@ mod tests {
             generation_authority_bytes(worktree.path(), owner),
             authority_before
         );
-        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(&session_path).unwrap(), session_before);
+
+        // Runtime revocation preserves the same recovery contract after stop,
+        // even when startup has no selected restore window or runtime sidecar.
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree.path());
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs
+            .failed_issues
+            .push(crate::issue_monitor::IssueMonitorFailedIssue {
+                issue_number: owner.number,
+                message: "stopped: operator pause".into(),
+                window_id: None,
+            });
+        prefs.monitor_runtime_stop_requests.push(
+            crate::issue_monitor::IssueMonitorRuntimeStopRequest {
+                issue_number: owner.number,
+                window_id: "gone-window".into(),
+                session_id: session_id.into(),
+                execution_identity: identity.clone(),
+                host_pid: 10,
+                host_started_at: 11,
+                runtime_incarnation: 12,
+                child_pid: 13,
+                child_started_at: 14,
+                requested_at: Utc::now().to_rfc3339(),
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(matches!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Protected,
+        ));
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before
+        );
+        assert_eq!(fs::read(&session_path).unwrap(), session_before);
+
+        // Releasing the operator hold restores ordinary recovery even though
+        // its historical receipt remains on disk.
+        prefs.failed_issues.clear();
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(matches!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+        ));
     }
 
     /// Ledger-first and projection-first crash points are durable commits. The
@@ -22195,6 +22287,14 @@ mod tests {
             .unwrap()
             .unwrap();
         write_live_runtime(&current_identity);
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .unwrap()
+                .holder_session_id,
+            record.primary_session_id,
+            "the current generation hold must name the takeover holder"
+        );
 
         assert_eq!(
             live_active_owner_generation(worktree.path(), owner.number),
@@ -34109,6 +34209,49 @@ exit 1
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Blocked
+            );
+        }
+
+        /// Issue #4363 AC-1: Monitor membership is not execution authority.
+        #[test]
+        fn monitor_unbound_session_can_block_its_current_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "monitor-unbound");
+            let repo = tempfile::tempdir().unwrap();
+            prepare_generation_bound_execution_for_owner(
+                repo.path(),
+                "monitor-unbound",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 4363,
+                },
+                ExecutionControlStatus::Active,
+            );
+            assert!(crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path())
+            )
+            .unwrap()
+            .launched_issues
+            .is_empty());
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "trusted execution lost its Monitor row".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let record = load(repo.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
+            assert_eq!(
+                record.blocked_reason.as_deref(),
+                Some("trusted execution lost its Monitor row")
             );
         }
 

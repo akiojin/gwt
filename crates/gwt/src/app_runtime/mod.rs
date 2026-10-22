@@ -13867,17 +13867,20 @@ impl AppRuntime {
                 if let Some(reason) = self.agent_close_board_check(&principal, &id) {
                     return refusal(&reason);
                 }
-                let outcome = self.close_window_outcome(&id);
+                let outcome = self.close_peer_window_outcome(&id, client_id.clone());
                 let reason = (!outcome.closed)
                     .then(|| "the backend did not remove the window record".to_string());
-                let mut events = vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::PaneCloseResult {
-                        ok: outcome.closed,
-                        window_id: id,
-                        reason,
-                    },
-                )];
+                let mut events = Vec::new();
+                if !outcome.reply_deferred {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneCloseResult {
+                            ok: outcome.closed,
+                            window_id: id,
+                            reason,
+                        },
+                    ));
+                }
                 events.extend(outcome.events);
                 events
             }

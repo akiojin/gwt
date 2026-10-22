@@ -470,6 +470,17 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     }
 }
 
+/// Capture fake-gh calls without inheriting a managed Session. Both overrides
+/// stay inside `with_fake_gh`'s environment lock for the entire callback.
+pub fn with_fake_gh_capture<T>(mode: &str, test: impl FnOnce(&Path, &Path) -> T) -> T {
+    with_fake_gh(mode, |repo_path| {
+        let argv_file = repo_path.join("gh-argv");
+        let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+        let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+        test(repo_path, &argv_file)
+    })
+}
+
 #[test]
 fn fake_gh_helper_restores_process_env_when_callback_panics() {
     let outcome = std::panic::catch_unwind(|| {

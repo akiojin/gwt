@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.137.1] - 2026-10-22
+
+### Bug Fixes
+
+- **gui:** エージェント状態とMonitor活動時刻を実ペインに追従させる
+- **execution:** Preserve blockers without monitor bindings
+- **monitor:** Report launch blockers and deduplicate retry notices
+- **launch:** Quota 復帰時に終了済みペインから同じ会話を再開する
+- **issue-monitor:** Retain error provenance and record bulk faults once
+- **monitor:** Preserve scans across capacity observations
+- **launch:** Clamp unsupported Astra reasoning overrides
+- **runtime:** Stop exact agent process trees after revocation
+- **pane:** Confirm captured process trees before close success
+- **agents:** Continue autonomous work after board decisions
+- **agents:** Preserve skill and environment test contracts
+- **process-tree:** Exclude exited windows processes from census
+- **monitor:** Require fresh healthy launch snapshots
+- **launch:** 再起動準備中は旧ペインの終了後も会話を予約する
+- **gwtd:** レビュー返信を指定スレッドのみに適用する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4363 pull request
+- **work:** Record review follow-up pull request
+- **work:** Record replacement pull request
+- **work:** Link scan observation fix to PR 6051
+- **work:** Associate issue 4168 with pr 6029
+- **work:** Refresh issue 4168 pr delivery link
+- **work:** Associate issue 4168 with pr 6054
+
+### Testing
+
+- **gui:** プレビューのモード表示と状態チップを区別して検証する
+- **monitor:** Name capacity observation hook type
+- **runtime:** Remove redundant stop fixture borrows
+- **pane:** Align close checks with deferred completion
+- **gwtd:** レビュー返信テストの環境設定を共通 fixture にまとめる
+
 ## [9.137.0] - 2026-10-22
 
 ### Bug Fixes

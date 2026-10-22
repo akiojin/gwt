@@ -74,6 +74,57 @@ test("Agents title styles keep one line and constrain only the purpose scroll ar
   assert.match(css, /\.agent-tile__header\s*\{[^}]*flex-shrink:\s*0/);
 });
 
+test("provider runtime pushes update separate header, tab and preview chips without replacing terminals", async () => {
+  const { surface, setWindows, document } = await fixture();
+  const providers = agents.slice(0, 2);
+  setWindows(providers);
+  const host = document.createElement("div");
+  document.querySelector("main").appendChild(host);
+  surface.setPreviewHost(host);
+  const terminal = surface.element.querySelector("textarea");
+  for (const status of ["running", "waiting", "idle"]) {
+    setWindows(providers.map(data => ({ ...data, status })));
+    for (const data of providers) {
+      const tile = surface.element.querySelector(`[data-agent-id="${data.id}"]`);
+      const tab = document.getElementById(`agents-tab-${data.id}`);
+      const preview = host.querySelector(`[data-agent-id="${data.id}"]`);
+      for (const container of [tile.querySelector("header"), tab.parentElement, preview.querySelector("header")]) {
+        const chip = container.querySelector(".status-chip");
+        assert.ok(chip, `${data.preset} ${status} has a visible runtime chip`);
+        assert.equal(chip.querySelector(".status-label").textContent, status[0].toUpperCase() + status.slice(1));
+        assert.ok(chip.classList.contains(status));
+        assert.equal(chip.closest(".agent-title"), null, "state and agent name remain separate elements");
+      }
+      assert.equal(tab.textContent, data.agent_name);
+      assert.equal(tile.querySelector("h3").textContent, data.agent_name);
+    }
+    assert.equal(surface.element.querySelector("textarea"), terminal);
+  }
+  surface.dispose();
+});
+
+test("fleet counts keep live pane states authoritative over stale Work activity", async () => {
+  const { mapAgentTelemetryState, normalizeWindowRuntimeState, presetSupportsWaitingStatus } = await import("../window-runtime-state.js");
+  const body = appSource.match(/function recomputeOperatorTelemetry\(\)\s*\{([\s\S]*?)\n      \}/)[1];
+  const windows = [{ ...agents[0], status: "idle" }, { ...agents[1], status: "waiting" },
+    { id: "shell", preset: "shell", status: "running" }];
+  const panes = new Map(windows.map(data => [data.id, { dataset: { agentState: mapAgentTelemetryState(data.status) } }]));
+  const projection = { active_agents: 2, status_category: "active", active_works: [
+    { active_agents: 2, agents: windows.slice(0, 2).map(data => ({ window_id: data.id })) },
+  ] };
+  let counts;
+  new Function("window", "windowMap", "workspaceWindowById", "presetSupportsWaitingStatus", "activeWorkProjection",
+    "activeWorkItemsFromProjection", "allProjectWindowIds", "applyOperatorTelemetryCounts", "runtimeStateForWindow",
+    "mapAgentTelemetryState", body)(
+    { __operatorShell: { applyTelemetryCounts() {} } }, panes, id => windows.find(data => data.id === id),
+    presetSupportsWaitingStatus, projection, () => projection.active_works, () => windows.map(data => data.id),
+    value => { counts = value; }, data => normalizeWindowRuntimeState(data.status, data.preset), mapAgentTelemetryState,
+  );
+  assert.deepEqual({ running: counts.running, idle: counts.idle, waiting: counts.waiting, agents: counts.agents },
+    { running: 0, idle: 1, waiting: 1, agents: 2 });
+  assert.equal(counts.branches, 1, "Work projection still supplies its branch count");
+});
+
 test("Agents tiles, tabs and readonly preview acquire a late assigned name", async () => {
   const { surface, setWindows, document } = await fixture();
   const data = { ...agents[0], agent_name: null, dynamic_title: "Fix cache" };

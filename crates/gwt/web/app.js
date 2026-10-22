@@ -2645,22 +2645,26 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (activeWorkProjection) {
           const activeWorks = activeWorkItemsFromProjection();
           if (activeWorks.length > 0) {
-            const activeAgents = activeWorks.reduce(
-              (total, work) => total + Number(work.active_agents || 0),
-              0,
-            );
-            const blockedAgents = activeWorks.reduce(
-              (total, work) => total + Number(work.blocked_agents || 0),
-              0,
-            );
-            const totalAgents = activeWorks.reduce(
-              (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
-              0,
-            );
-            counts.running = Math.max(counts.running, activeAgents || activeWorks.length);
-            counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
             counts.branches = Math.max(Number(counts.branches || 0), activeWorks.length);
-          } else {
+            // Pane transitions are the live authority. Work activity may arrive
+            // later and must not turn an idle or waiting pane back into running.
+            if (counts.agents === 0) {
+              const activeAgents = activeWorks.reduce(
+                (total, work) => total + Number(work.active_agents || 0),
+                0,
+              );
+              const blockedAgents = activeWorks.reduce(
+                (total, work) => total + Number(work.blocked_agents || 0),
+                0,
+              );
+              const totalAgents = activeWorks.reduce(
+                (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
+                0,
+              );
+              counts.running = Math.max(counts.running, activeAgents || activeWorks.length);
+              counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
+            }
+          } else if (counts.agents === 0) {
             const category = activeWorkProjection.status_category || "unknown";
             const activeAgents = Number(activeWorkProjection.active_agents || 0);
             const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
@@ -5000,6 +5004,18 @@ import { createUiStateStore } from "/ui-state-store.js";
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
+        // Repeated launch attempts update one Issue notice until it is dismissed.
+        if (event.level === "info" && !event.notification_transition
+          && event.message === "Issue Monitor launch requested"
+          && Number.isInteger(event.issue_number) && event.issue_number > 0) {
+          notificationCenter.recordSurfaceNotice({
+            key: `issue-monitor:launch-requested:${event.issue_number}`,
+            level: event.level,
+            title: `Issue Monitor #${event.issue_number}`,
+            message: event.message,
+          });
+          return;
+        }
         const monitorNotice = notificationForTransition({
           source: "monitor",
           state: event?.notification_transition,
