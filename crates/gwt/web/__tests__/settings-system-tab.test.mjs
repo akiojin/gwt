@@ -57,7 +57,7 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-function createSettingsHarness({ scheduleFrame } = {}) {
+function createSettingsHarness({ scheduleFrame, onSend } = {}) {
   const { document, window } = parseHTML("<html><body><main></main></body></html>");
   const sent = [];
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
@@ -68,7 +68,7 @@ function createSettingsHarness({ scheduleFrame } = {}) {
   );
   const surface = factory({
     scheduleFrame,
-    send: message => sent.push(message),
+    send: message => { onSend?.(message); sent.push(message); },
     createNode(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -706,7 +706,9 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   retry.checked = true;
   const rendersBeforeRetry = renders;
   retry.dispatchEvent(new Event("change"));
-  assert.equal(renders, rendersBeforeRetry, "a local toggle waits for an authoritative reply before rendering");
+  assert.equal(renders, rendersBeforeRetry + 1, "synchronous model subscribers see the local draft");
+  assert.equal(supportedAgentsModel.read().autoUpdate, false, "confirmed settings wait for the backend");
+  assert.equal(supportedAgentsModel.read().autoUpdateDraft, true);
   assert.equal(retry.checked, true);
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
@@ -721,6 +723,89 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
   assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
+});
+
+test("Supported Agents batches catalogs while local operations and authoritative recovery stay current", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, window, sent } = createSettingsHarness({
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+    onSend(message) {
+      if (message.kind === "maintain_supported_agent") {
+        for (const host of [body, second]) {
+          assert.equal(host.querySelector('[aria-label="Install OpenCode"]').disabled, true,
+            "all mounts disable maintenance actions before sending");
+        }
+      }
+    },
+  });
+  surface.renderSettingsWindow(body, { id: "supported-first", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "supported-second", title: "Settings" });
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  const agents = [{ id: "opencode", name: "OpenCode", installed: false, install_supported: true }];
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  flush();
+  const panels = [body, second].map(host => host.querySelector('[data-settings-panel="supported-agents"]'));
+  const tables = panels.map(panel => panel.querySelector("table"));
+  const draws = [0, 0];
+  panels.forEach((panel, index) => {
+    const append = panel.appendChild.bind(panel);
+    panel.appendChild = node => { if (node.tagName === "TABLE") draws[index]++; return append(node); };
+  });
+  for (let index = 0; index < 50; index++) {
+    surface.applySupportedAgentList({ agents: [{ ...agents[0], name: `OpenCode ${index}` }], auto_update: false });
+  }
+  assert.deepEqual(draws, [0, 0], "catalog burst leaves DOM unchanged until the frame");
+  assert.equal(panels[0].querySelector("table"), tables[0]);
+  assert.equal(frames.size, 1);
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /OpenCode 49/,
+    "candidate catalog remains synchronous");
+  // The pending snapshot must not overwrite a later local checkbox edit.
+  const automatic = panels[0].querySelector('[aria-label="Automatically update agents"]');
+  automatic.checked = true;
+  automatic.dispatchEvent(new window.Event("change"));
+  assert.deepEqual(draws, [0, 0], "local toggle commits without synchronous DOM reconstruction");
+  flush();
+  assert.deepEqual(draws, [1, 1]);
+  for (const panel of panels) {
+    assert.match(panel.textContent, /OpenCode 49/);
+    assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
+  }
+  assert.equal(panels[0].querySelector('[aria-label="Automatically update agents"]'), automatic);
+  surface.applySupportedAgentMaintenance({ agent_id: "", pending: false, success: false, message: "Save denied" });
+  flush();
+  assert.equal(automatic.checked, false, "global failure alone rolls back the unconfirmed toggle");
+  assert.match(panels[0].querySelector('[role="alert"]').textContent, /Save denied/);
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  // A late mount draws current state synchronously and does not skip pending siblings.
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "supported-late", title: "Settings" });
+  const lateTable = late.querySelector('[data-settings-panel="supported-agents"] table');
+  assert.match(lateTable.textContent, /OpenCode/);
+  flush();
+  assert.equal(late.querySelector('[data-settings-panel="supported-agents"] table'), lateTable);
+  assert.equal(panels[0].querySelector('[role="alert"]'), null);
+  panels[0].querySelector('[aria-label="Install OpenCode"]').click();
+  const before = [...draws];
+  flush();
+  assert.deepEqual(draws, before, "the frame skips the snapshot already rendered before maintenance send");
+  assert.deepEqual(sent.filter(message => message.kind === "maintain_supported_agent"), [
+    { kind: "maintain_supported_agent", agent_id: "opencode", action: "install" },
+  ]);
+  second.remove();
+  const detachedDraws = draws[1];
+  surface.applySupportedAgentList({ agents, auto_update: true });
+  flush();
+  assert.equal(draws[1], detachedDraws);
+  assert.equal(automatic.checked, true);
+  const beforeUnrelated = [...draws];
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
+  flush();
+  assert.deepEqual(draws, beforeUnrelated);
 });
 
 test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {
