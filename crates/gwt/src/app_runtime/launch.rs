@@ -7271,13 +7271,9 @@ impl AppRuntime {
         // compose ps/up incl. image build, exec probes), mirror docker-kind
         // Process Console lines into the agent terminal. Host launches keep
         // their immediate-PTY behavior untouched (FR-142).
-        let docker_output_mirror =
-            (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
-                launch_output_mirror::DockerLaunchOutputMirror::start(
-                    proxy.clone(),
-                    window_id.clone(),
-                )
-            });
+        let docker_output_mirror = (config.runtime_target
+            == gwt_agent::LaunchRuntimeTarget::Docker)
+            .then(|| launch_output_mirror::start(proxy.clone(), window_id.clone()));
         let mut issued_capability_token = None;
         let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
         // Issue #4283 AC-5: attribute the pane-create route to its phases so
