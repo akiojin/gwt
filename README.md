@@ -321,7 +321,6 @@ gwtd <<'JSON'
 JSON
 ```
 
-
 `fleet.inventory` returns project agent processes, panes, and Monitor rows in one
 JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
 and partial-source diagnostics. `fleet.orphans` lists processes without an

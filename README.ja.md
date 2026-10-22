@@ -306,7 +306,6 @@ gwtd <<'JSON'
 JSON
 ```
 
-
 `fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
 JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
 一部の観測元が使えない場合の診断も含みます。`fleet.orphans` はpaneが観測されない
