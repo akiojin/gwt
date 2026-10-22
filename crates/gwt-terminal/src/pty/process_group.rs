@@ -107,7 +107,8 @@ mod imp {
             Ok(())
         }
 
-        /// Keep the exact Job until the kernel confirms it has no members.
+        /// Keep the exact Job and process handles until every captured member
+        /// has signaled completion, beyond the Job's active-count decrement.
         pub fn terminate_and_wait(&mut self, timeout: Duration) -> Result<bool, String> {
             let started = Instant::now();
             self.terminate()?;
@@ -116,9 +117,8 @@ mod imp {
                     return Ok(true);
                 };
                 if job
-                    .active_process_count()
+                    .termination_confirmed()
                     .map_err(|error| format!("query PTY process Job: {error}"))?
-                    == 0
                 {
                     self.job = None;
                     return Ok(true);

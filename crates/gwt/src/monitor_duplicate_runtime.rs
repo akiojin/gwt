@@ -956,16 +956,24 @@ mod stop_tests {
     }
 
     fn is_process_alive(pid: u32) -> bool {
-        let mut system = sysinfo::System::new();
-        let pid = sysinfo::Pid::from_u32(pid);
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[pid]),
-            true,
-            sysinfo::ProcessRefreshKind::nothing(),
-        );
-        system
-            .process(pid)
-            .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        #[cfg(windows)]
+        {
+            crate::process::host_process_liveness(pid)
+                .expect("native child liveness must be observable")
+        }
+        #[cfg(unix)]
+        {
+            let mut system = sysinfo::System::new();
+            let pid = sysinfo::Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            system
+                .process(pid)
+                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        }
     }
 
     fn with_stop_fixture(test: impl FnOnce(&mut StopFixture)) {

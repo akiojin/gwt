@@ -501,16 +501,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let descendant_alive = || {
-            let mut system = sysinfo::System::new();
-            let pid = sysinfo::Pid::from_u32(child_pid);
-            system.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::Some(&[pid]),
-                true,
-                sysinfo::ProcessRefreshKind::nothing(),
-            );
-            system
-                .process(pid)
-                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+            #[cfg(windows)]
+            {
+                crate::process::host_process_liveness(child_pid)
+                    .expect("native descendant liveness must be observable")
+            }
+            #[cfg(unix)]
+            {
+                let mut system = sysinfo::System::new();
+                let pid = sysinfo::Pid::from_u32(child_pid);
+                system.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing(),
+                );
+                system
+                    .process(pid)
+                    .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+            }
         };
         assert!(descendant_alive());
         assert!(kill_and_reap(pane.pty(), "close-descendants").unwrap());
