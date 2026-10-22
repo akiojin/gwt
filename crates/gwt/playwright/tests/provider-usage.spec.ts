@@ -301,7 +301,12 @@ test.describe("Provider usage status summary", () => {
       utilization: 80.5, currency: "USD", disabled_reason: null };
     await emitProviderUsage(page, [{ ...account, extra_usage: extraUsage }]);
     await expect(strip).toContainText("CC 0%");
-    await strip.hover();
+    // Keep the detail open through updates without depending on the native
+    // pointer staying over the trigger in a headed browser.
+    await page.mouse.move(0, 0);
+    await strip.focus();
+    await strip.press("ArrowDown");
+    await expect(page.locator("#provider-usage-popover")).toBeFocused();
     const card = page.locator('.op-usage-card[data-provider="claude_code"]');
     const fable = card.locator(".op-usage-win").filter({ hasText: "Fable weekly" });
     await expect(fable.locator(".op-usage-win__lbl")).toHaveText("Fable weekly");
