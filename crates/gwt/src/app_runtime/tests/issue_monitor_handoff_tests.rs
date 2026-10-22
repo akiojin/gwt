@@ -86,10 +86,21 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             responder: None,
         },
     );
-    drain_queued_blocking_tasks(&close_tasks);
-    assert!(closed
+    assert!(!closed
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. })));
+        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
+    drain_queued_blocking_tasks(&close_tasks);
+    assert!(fixture.recorded_events.lock().unwrap().iter().any(|event| {
+        match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => events.iter().any(|event| {
+                event.target == DispatchTarget::Client("operator".into())
+                    && matches!(&event.event,
+                        BackendEvent::PaneCloseResult { window_id: closed, ok: true, reason: None, .. }
+                            if closed == &window_id)
+            }),
+            _ => false,
+        }
+    }));
     assert!(!fixture.runtime.runtimes.contains_key(&window_id));
 
     // Reuse the production authenticated bridge. Its scan ACK and the Host

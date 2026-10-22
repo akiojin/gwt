@@ -3832,7 +3832,9 @@ impl AppRuntime {
             });
             record_issue_monitor_worker_phase("monitor_launch_facts", &mut phase_started);
             if let Ok(IssueMonitorLaunchPreparation::Launch(facts)) = result.as_ref() {
-                if let Some(tier) = facts.choice.tier {
+                // Adoption does not launch the selected profile. Keep the
+                // tier facts established by the delivery claim instead.
+                if let Some(tier) = facts.choice.tier.filter(|_| live_window_id.is_none()) {
                     if claim.as_ref().is_none_or(|(_, claim)| matches!(claim, Ok(true)))
                     {
                         if let Err(error) = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
