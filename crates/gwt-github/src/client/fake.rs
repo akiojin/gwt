@@ -24,6 +24,8 @@ use crate::client::{
     UpdatedAt,
 };
 
+type FetchHook = Box<dyn FnOnce() + Send>;
+
 /// In-memory fake [`IssueClient`].
 #[derive(Clone)]
 pub struct FakeIssueClient {
@@ -43,7 +45,7 @@ pub struct FakeIssueClient {
     /// `patch_title`, `set_labels`): the next such call fails with the stored
     /// error and writes nothing (Issue #3865 AC-5).
     fail_next_issue_patch: Arc<Mutex<Option<ApiError>>>,
-    after_next_fetch: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    after_next_fetch: Arc<Mutex<Option<FetchHook>>>,
 }
 
 struct FakeState {
