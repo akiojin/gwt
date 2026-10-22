@@ -982,7 +982,7 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
 `gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
 報告できます。JSON operation `feedback.create` の宛先は常に
-`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+`akiojin/gwt` で、診断コンテキストをローカルで自動収集します。
 ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
 即座に返るため、本来のプロジェクト作業を続けられます。送信には native
 dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
@@ -990,8 +990,11 @@ dialog でユーザーが **Send feedback** を選ぶ必要があります。取
 Issue 番号と URL を返します。
 
 ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
-環境変数の代入値、URL を含むパス形式、Markdown のコード片を自動で伏せ、
-native preview と送信に同じ内容を使います。伏せ字以外の拒否文は切り詰めません。
+環境変数の代入値、プロジェクト識別情報、URL を含むパス、ソースコードを自動で伏せます。
+公開する環境情報は gwt/gwtd 版数と OS・アーキテクチャのみとし、報告元のメタデータと
+任意の追加本文は含めません。スクロールできる承認画面は両方の選択肢を常に表示し、
+除去項目とマスク率、過半数が伏せ字の場合の警告を示します。
+preview と送信に同じ内容を使い、伏せ字以外の拒否文は切り詰めません。
 判定は保守的ですが任意の秘密をすべて検出する保証はなく、原文 receipt は公開しないでください。
 
 返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
