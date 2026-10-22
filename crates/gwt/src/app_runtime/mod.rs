@@ -2451,13 +2451,11 @@ impl ProjectTabRuntime {
     }
 }
 
-/// Whether a GUI-local Issue Monitor pass may refresh the read-only cache.
-/// Successful daemon controls do not run a local pass at all: the daemon is the
-/// sole writer and broadcasts the committed projection. When publication is
-/// unavailable, `Scan` preserves the GUI's read model without granting Unix
-/// GUI code authority to execute remote effects.
+/// GUI-local controls project cached state; background workers own scans.
+/// Tests retain the legacy full pass to exercise scan/commit reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueMonitorScanPolicy {
+    #[cfg(test)]
     Scan,
     CacheOnly,
 }
@@ -4430,6 +4428,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         latest.refresh_agent_capacity(project_root);
+        // The disk-authoritative rebase precedes this background preparation.
+        // Observe here so recovery uses the sample that will actually persist.
+        gwt::issue_monitor_worker::refresh_issue_monitor_child_activity(latest, project_root, now);
         latest.expire_stale_unbound_launches(now);
         // Retire exact dead terminal holders before duplicate-binding repair
         // can mistake their displaced projections for unfinished work.
@@ -8777,12 +8778,38 @@ impl AppRuntime {
         client_id: Option<&str>,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
-        let policy = if cfg!(unix) {
-            IssueMonitorScanPolicy::CacheOnly
-        } else {
-            IssueMonitorScanPolicy::Scan
-        };
-        self.local_issue_monitor_events_with_policy(context, client_id, policy, apply)
+        let mut events = self.local_issue_monitor_events_with_policy(
+            context,
+            client_id,
+            IssueMonitorScanPolicy::CacheOnly,
+            apply,
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
+        let window_snapshot = self.issue_monitor_window_snapshot_for_tab(&context.tab_id, &now);
+        match self.enqueue_issue_monitor_scan_worker(
+            &context.project_root,
+            &prefs_path,
+            &context.tab_id,
+            &now,
+            Vec::new(),
+            window_snapshot,
+        ) {
+            Ok(()) | Err(IssueMonitorScanEnqueueError::AlreadyInFlight) => {}
+            Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error)) => {
+                events.extend(self.issue_monitor_project_notification(
+                    Some(&context.project_root),
+                    BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
+                        notification_transition_id: None,
+                        level: "error".to_string(),
+                        message: format!("Issue Monitor scheduled worker could not start: {error}"),
+                        issue_number: None,
+                    },
+                ));
+            }
+        }
+        events
     }
 
     fn enqueue_issue_monitor_max_active(

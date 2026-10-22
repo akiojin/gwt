@@ -885,6 +885,190 @@ pub fn read_verified_live_launch_owners(
     )
 }
 
+/// Authenticate the current producing Session, including its capability epoch.
+pub(crate) fn load_current_activity_session(
+    identity: &gwt_agent::SessionExecutionIdentity,
+) -> Option<gwt_agent::Session> {
+    use crate::cli::execution_state::{
+        current_active_execution_binding_matches, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    gwt_agent::validate_session_id_path_component(&identity.session_id).ok()?;
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", identity.session_id)),
+    )
+    .ok()?;
+    let binding = &identity.execution_binding;
+    let kind = match binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => return None,
+    };
+    let worktree = dunce::canonicalize(&session.worktree_path).ok()?;
+    if session.review_dispatch
+        || identity.linked_issue_number != Some(binding.owner_number)
+        || gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .ok()?
+            .as_ref()
+            != Some(identity)
+        || crate::index_worker::detect_repo_hash(&worktree).map(|hash| hash.to_string())
+            != identity.repo_hash
+        || !current_active_execution_binding_matches(
+            &worktree,
+            ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            },
+            &identity.session_id,
+            &binding.identity,
+        )
+        .ok()?
+    {
+        return None;
+    }
+    Some(session)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ActivitySessionRoot {
+    process: (u32, u64),
+    host: (u32, u64),
+    incarnation: u64,
+}
+
+pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<ActivitySessionRoot> {
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(session).ok()??;
+    let inventory =
+        crate::session_inventory::observe_session(session, &gwt_core::paths::gwt_sessions_dir());
+    let [observed] = inventory.sessions.as_slice() else {
+        return None;
+    };
+    if !inventory.uncertainties.is_empty()
+        || observed.execution_binding_missing
+        || observed.session_id != session.id
+        || observed.issue_number != session.linked_issue_number
+    {
+        return None;
+    }
+    // Census liveness includes legacy hints; only this exact sidecar can
+    // attribute measured CPU to the current Session and PTY incarnation.
+    let runtime = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path_for_pid(
+        &gwt_core::paths::gwt_sessions_dir(),
+        observed.host_pid,
+        &session.id,
+    ))
+    .ok()?;
+    let host_started = runtime.host_started_at.filter(|started| *started > 0)?;
+    let incarnation = runtime
+        .runtime_incarnation
+        .filter(|incarnation| *incarnation > 0)?;
+    let process = (observed.child_pid, observed.child_started_at);
+    if runtime.execution_identity.as_ref() != Some(&identity)
+        || runtime.child_pid.zip(runtime.child_started_at) != Some(process)
+        || crate::process::host_process_liveness(observed.host_pid) != Some(true)
+        || crate::process::host_process_start_time(observed.host_pid) != Some(host_started)
+        || crate::process::host_process_start_time(process.0) != Some(process.1)
+    {
+        return None;
+    }
+    Some(ActivitySessionRoot {
+        process,
+        host: (observed.host_pid, host_started),
+        incarnation,
+    })
+}
+
+/// Background scan only: measure owned child work once for all bound panes.
+/// Root-agent CPU/liveness and unrelated Host panes cannot extend this clock.
+pub fn refresh_issue_monitor_child_activity(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) {
+    let Some(repo_hash) =
+        crate::index_worker::detect_repo_hash(project_root).map(|hash| hash.to_string())
+    else {
+        return;
+    };
+    let (owners, _) = read_verified_live_launch_owners(monitor, project_root, now);
+    let Some(snapshot) = monitor.fresh_window_snapshot(now) else {
+        return;
+    };
+    let mut roots = BTreeMap::new();
+    for pane in &snapshot.windows {
+        let Some((issue, session_id)) = pane.issue_number.zip(pane.session_id.as_deref()) else {
+            continue;
+        };
+        let launch = monitor.launch_identity(issue);
+        if !pane.monitor_owned
+            || pane.review_dispatch
+            || !crate::issue_monitor::idle_window_is_alive(pane.status)
+            || pane.status == crate::WindowState::Interrupted
+            || !launch.active
+            || launch.window_id.as_deref() != Some(pane.window_id.as_str())
+            || owners.get(&pane.window_id) != Some(&issue)
+        {
+            continue;
+        }
+        let Some(identity) = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .ok()
+        .and_then(|session| {
+            gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .ok()
+                .flatten()
+        }) else {
+            continue;
+        };
+        // Recheck the pane context after reloading the Session: the initial
+        // owner proof may precede a cross-owner/cross-project rebind.
+        if identity.session_id != session_id
+            || identity.execution_binding.owner_number != issue
+            || identity.linked_issue_number != Some(issue)
+            || identity.repo_hash.as_deref() != Some(repo_hash.as_str())
+        {
+            continue;
+        }
+        let Some(session) = load_current_activity_session(&identity) else {
+            continue;
+        };
+        let Some(root) = activity_session_root(&session) else {
+            continue;
+        };
+        // An ambiguous shared provider root cannot lend progress to two owners.
+        roots
+            .entry(root.process)
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some((issue, identity, root)));
+    }
+    if gwt_core::operation_deadline::ensure_remaining("child progress observation").is_err() {
+        return;
+    }
+    let advancing = crate::cli::verification_lease::holder_activity::progressing_descendants(
+        &roots
+            .iter()
+            .filter_map(|(root, owner)| owner.as_ref().map(|_| *root))
+            .collect::<Vec<_>>(),
+    );
+    let sampled_at = chrono::Utc::now().to_rfc3339();
+    for root in advancing {
+        let Some(Some((issue, identity, observed))) = roots.get(&root) else {
+            continue;
+        };
+        let Some(session) = load_current_activity_session(identity) else {
+            continue;
+        };
+        if activity_session_root(&session) == Some(*observed) {
+            monitor.record_bound_process_activity(
+                *issue,
+                &identity.session_id,
+                &sampled_at,
+                &chrono::Utc::now().to_rfc3339(),
+            );
+        }
+    }
+}
+
 /// Recover stuck launches and classify windows using the same live Session observations.
 pub fn reconcile_issue_monitor_windows(
     monitor: &mut IssueMonitorState,
@@ -892,6 +1076,7 @@ pub fn reconcile_issue_monitor_windows(
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
     let settlements = refresh_issue_monitor_execution_observations(monitor, project_root);
+    refresh_issue_monitor_child_activity(monitor, project_root, now);
     // Dead terminal predecessors must retire before verified duplicate repair
     // can interpret their displaced binding as unfinished work.
     let terminal = monitor.reconcile_dead_terminal_launches(&settlements, now);
@@ -3585,6 +3770,192 @@ pub(crate) mod tests {
         UpdatedAt,
     };
     use std::path::PathBuf;
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn issue_3809_production_reconciliation_retains_silent_owned_child_work() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, now) = issue_3809_bound_activity_fixture(repo.path());
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        let runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        let mut legacy = runtime.clone();
+        legacy.execution_identity = None;
+        legacy.save(&runtime_path).unwrap();
+        assert!(
+            activity_session_root(&session).is_none(),
+            "a census root without exact runtime identity cannot supply current progress"
+        );
+        runtime.save(&runtime_path).unwrap();
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[cfg(windows)]
+        let mut command = gwt_core::process::hidden_command("powershell.exe");
+        #[cfg(windows)]
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+        ]);
+        #[cfg(unix)]
+        let mut command = gwt_core::process::hidden_command("sh");
+        #[cfg(unix)]
+        command.args(["-c", "while :; do :; done"]);
+        let _child = OwnedChild(
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let outcome = reconcile_issue_monitor_windows(&mut monitor, repo.path(), &now);
+        assert!(
+            outcome.released.is_empty(),
+            "progressing owned work must keep its pane"
+        );
+        assert!(outcome.requeued.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(monitor.active_issue_numbers(), vec![3809]);
+        assert_eq!(
+            monitor.inbox_item(3809).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        let activity = monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .last_heartbeat
+            .clone()
+            .unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&activity).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+        );
+
+        let settled = crate::cli::execution_state::settle(
+            repo.path(),
+            &session.id,
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "stop the original holder".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            settled,
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        refresh_issue_monitor_child_activity(
+            &mut monitor,
+            repo.path(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(activity.as_str()),
+            "a settled holder's still-live child cannot refresh the activity clock"
+        );
+    }
+
+    pub(crate) fn issue_3809_bound_activity_fixture(
+        root: &Path,
+    ) -> (gwt_agent::Session, IssueMonitorState, String) {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        crate::cli::trusted_store::init_git_repo_with_origin(root);
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3809,
+        };
+        let session_id = "issue-3809-current-holder";
+        execution_state::materialize_at_launch(
+            root,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            root,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(root, "work/issue-3809", gwt_agent::AgentId::Codex);
+        session.id = session_id.into();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: execution_state::current_execution_binding(root, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            started,
+            std::process::id(),
+            started,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let now = now.to_rfc3339();
+        let mut monitor = test_monitor(Default::default());
+        monitor.set_autonomous_mode(true);
+        monitor.terminal_queue_push(&[3809], "test", &old);
+        monitor.record_candidate(issue(3809));
+        monitor.complete_active_launch_at(3809, "tab-1::agent-1", &old);
+        monitor.set_autonomous_phase(3809, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(3809, &old);
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.clone(),
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::agent-1".into(),
+                issue_number: Some(3809),
+                status: crate::WindowState::Running,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: Some(old),
+                session_id: Some(session.id.clone()),
+            }],
+        });
+        (session, monitor, now)
+    }
 
     #[test]
     fn issue_4783_verified_readoption_preserves_takeover_and_rejects_foreign_worktree() {
