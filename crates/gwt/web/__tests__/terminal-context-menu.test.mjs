@@ -4,6 +4,30 @@ import { parseHTML } from "linkedom";
 
 import { createTerminalContextMenuController } from "../terminal-context-menu.js";
 
+test("terminal context menu copies only an existing selection and restores terminal focus", async () => {
+  let selected = false;
+  let copies = 0;
+  const fixture = mountFixture({
+    hasSelection: () => selected,
+    copySelection: async () => { copies += 1; return true; },
+  });
+  const copyButton = () => [...fixture.menu().querySelectorAll("button")]
+    .find(button => button.textContent === "Copy");
+  fixture.openContextMenu();
+  assert.ok(copyButton(), "Copy action is available");
+  assert.equal(copyButton().disabled, true);
+  selected = true;
+  fixture.openContextMenu();
+  assert.equal(copyButton().disabled, false);
+  copyButton().dispatchEvent(new fixture.window.Event("click", { bubbles: true, cancelable: true }));
+  await flushPromises();
+  assert.equal(copies, 1);
+  assert.equal(fixture.menu().hidden, true);
+  assert.equal(fixture.focusCount, 1);
+  fixture.dispose();
+  assert.equal(fixture.menu(), null);
+});
+
 test("terminal context menu pastes clipboard text through xterm paste", async () => {
   const fixture = mountFixture({
     readClipboardText: async () => "printf 'hello'\n",
@@ -144,7 +168,8 @@ function mountFixture(overrides = {}) {
       return focusCount;
     },
     menu: () => document.querySelector(".terminal-context-menu"),
-    pasteButton: () => document.querySelector(".terminal-context-menu__item"),
+    pasteButton: () => [...document.querySelectorAll(".terminal-context-menu__item")]
+      .find(button => button.textContent === "Paste"),
     openContextMenu({ x = 10, y = 12 } = {}) {
       const event = contextMenuEvent(window, x, y);
       terminalRoot.dispatchEvent(event);
