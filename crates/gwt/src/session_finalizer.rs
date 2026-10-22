@@ -112,18 +112,21 @@ pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> 
         "starting detached PTY teardown stage"
     );
     let kill_started = Instant::now();
-    let kill_result = pty.kill();
+    let kill_result = pty.terminate_and_wait_for_tree(Duration::from_secs(2));
+    let tree_exited = matches!(&kill_result, Ok(true));
     let kill_elapsed_ms = u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
         target: "gwt.pane.teardown",
         window_id = %window_id,
         stage = "pty_kill",
         elapsed_ms = kill_elapsed_ms,
-        ok = kill_result.is_ok(),
-        outcome = if kill_result.is_ok() { "completed" } else { "failed" },
+        ok = tree_exited,
+        outcome = if tree_exited { "completed" } else { "failed" },
         "detached PTY teardown stage completed"
     );
-    kill_result.map_err(|error| std::io::Error::other(error.to_string()))?;
+    if !kill_result.map_err(|error| std::io::Error::other(error.to_string()))? {
+        return Ok(false);
+    }
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if pty
@@ -511,12 +514,6 @@ mod tests {
         };
         assert!(descendant_alive());
         assert!(kill_and_reap(pane.pty(), "close-descendants").unwrap());
-        // test-hygiene: allow-wall-clock-deadline Bound the real OS descendant-exit contract after captured group termination.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        // test-hygiene: allow-wall-clock-deadline Poll actual process liveness until exit; time only limits a failed teardown.
-        while descendant_alive() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
         let descendant_survived = descendant_alive();
         // Drop still owns the group/Job and cleans up even when the assertion fails.
         drop(pane);

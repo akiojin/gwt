@@ -164,13 +164,14 @@ mod windows_job {
     use windows::{
         core::{Error as WindowsError, HRESULT, PCWSTR},
         Win32::{
-            Foundation::{CloseHandle, HANDLE},
+            Foundation::{CloseHandle, ERROR_INVALID_HANDLE, HANDLE},
             System::{
                 JobObjects::{
                     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-                    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
-                    QueryInformationJobObject, SetInformationJobObject,
-                    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+                    JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
+                    JobObjectExtendedLimitInformation, QueryInformationJobObject,
+                    SetInformationJobObject, TerminateJobObject,
+                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                     JOB_OBJECT_CPU_RATE_CONTROL, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
                     JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -474,6 +475,45 @@ mod windows_job {
                 info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                     == JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             )
+        }
+
+        /// Request termination of every member while retaining the Job handle
+        /// so completion can be observed with [`Self::active_process_count`].
+        pub fn request_termination(&self) -> Result<(), WindowsJobError> {
+            let job = self.handle.ok_or_else(|| {
+                operation_error(
+                    "TerminateJobObject",
+                    WindowsError::from_hresult(HRESULT::from_win32(ERROR_INVALID_HANDLE.0)),
+                )
+            })?;
+            // SAFETY: `job` is the captured owned handle and remains live for
+            // this call. The termination request leaves its limits unchanged.
+            unsafe { TerminateJobObject(job, 1) }
+                .map_err(|source| operation_error("TerminateJobObject", source))
+        }
+
+        /// Observe the number of processes still active in this captured Job.
+        pub fn active_process_count(&self) -> Result<u32, WindowsJobError> {
+            let job = self.handle.ok_or_else(|| {
+                operation_error(
+                    "QueryInformationJobObject",
+                    WindowsError::from_hresult(HRESULT::from_win32(ERROR_INVALID_HANDLE.0)),
+                )
+            })?;
+            let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // SAFETY: `info` is the exact buffer required by the selected
+            // information class and is writable for the duration of the call.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(job),
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as _,
+                    std::mem::size_of_val(&info) as u32,
+                    None,
+                )
+            }
+            .map_err(|source| operation_error("QueryInformationJobObject", source))?;
+            Ok(info.ActiveProcesses)
         }
 
         /// Close the Job handle synchronously. With

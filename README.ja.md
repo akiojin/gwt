@@ -534,6 +534,10 @@ live な launch の停止では、pane が消えていても、その host に�
 関係なく生存 PID・worktree・既知の `launch_entrypoint` を返します。
 停止した runtime は検証を開始できません。既存の作業を続けるには、Session を明示的に
 再開して新しい runtime を起動します。対象を安全に特定できない場合は、停止を拒否します。
+別の pane に対する `pane.close` は、プロセスツリーの終了後に `closed` を返します。
+タイムアウト時や、復元した Session の PTY を捕捉できない場合は終了未確認のエラーと
+なります。自分の pane を閉じる場合は、呼び出した agent が終了する前に
+`close requested` を返します。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が

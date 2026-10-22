@@ -317,7 +317,7 @@ impl SpawnedChildGuard {
 
     fn terminate(&mut self) {
         if let Some(group) = self.process_group.as_mut() {
-            group.terminate();
+            let _ = group.terminate();
         }
         let Some(mut child) = self.child.take() else {
             return;
@@ -1209,11 +1209,13 @@ impl PtyHandle {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        group.terminate();
+        let group_result = group
+            .terminate()
+            .map_err(|details| TerminalError::PtyIoError { details });
         drop(group);
 
         if self.child.kill()? {
-            return Ok(());
+            return group_result;
         }
         #[cfg(target_os = "macos")]
         self.reap_requested.store(true, Ordering::Release);
@@ -1228,7 +1230,22 @@ impl PtyHandle {
                 Some(self.unread_output()),
             );
         }
-        Ok(())
+        group_result
+    }
+
+    /// Terminate the captured tree and confirm all its members have exited.
+    ///
+    /// This bounded wait belongs on a background finalizer, never the GUI loop.
+    /// Returns false when the timeout expires and propagates OS observation errors.
+    pub fn terminate_and_wait_for_tree(&self, timeout: Duration) -> Result<bool, TerminalError> {
+        self.kill()?;
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .terminate_and_wait(timeout)
+            .map_err(|details| TerminalError::PtyIoError { details })
     }
 
     /// Returns the OS process id of the spawned child, if available.

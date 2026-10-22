@@ -5046,6 +5046,9 @@ pub(crate) fn snapshot_pr_mutation_execution_binding(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CurrentExecutionBindingAuthority {
     ActiveMutation,
+    /// Retire a captured runtime without granting producing authority or
+    /// changing its owner's execution lifecycle.
+    RuntimeCleanup,
     BlockedBuildAbort,
     PrMutation,
     /// Exact GitHub CI admits only Ready creation, without reopening Blocked.
@@ -5062,6 +5065,12 @@ impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::RuntimeCleanup => matches!(
+                status,
+                ExecutionControlStatus::Active
+                    | ExecutionControlStatus::Completed
+                    | ExecutionControlStatus::Blocked
+            ),
             Self::ProjectionUpdate => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
@@ -5391,6 +5400,22 @@ pub fn with_current_active_session_execution_identity_lease<T>(
         sessions_dir,
         expected,
         CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// The caller must recheck its captured runtime proof under this lease before
+/// signalling the PTY. This authority never permits producing operations.
+pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::RuntimeCleanup,
         operation,
     )
 }
@@ -6127,6 +6152,7 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                 }
                 CurrentExecutionBindingAuthority::PrMutation
                 | CurrentExecutionBindingAuthority::CiPrCreation
+                | CurrentExecutionBindingAuthority::RuntimeCleanup
                 | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6220,6 +6246,7 @@ fn with_current_session_execution_identity_global_lease<T>(
                         }
                         CurrentExecutionBindingAuthority::PrMutation
                         | CurrentExecutionBindingAuthority::CiPrCreation
+                        | CurrentExecutionBindingAuthority::RuntimeCleanup
                         | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)

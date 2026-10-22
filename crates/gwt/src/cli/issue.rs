@@ -11903,6 +11903,14 @@ mod tests {
             serde_json::json!(["occupied_slot_count", "pending_claim_issues"])
         );
         assert_eq!(
+            status["monitor_runtime_stop_requests"],
+            serde_json::json!([])
+        );
+        status
+            .as_object_mut()
+            .unwrap()
+            .remove("monitor_runtime_stop_requests");
+        assert_eq!(
             status,
             serde_json::json!({
                 // Issue #4413 AC-1/AC-3: this fallback is the rebuilt
@@ -11913,7 +11921,7 @@ mod tests {
                 "label_excluded_count": 0,
                 "label_excluded_issues": [],
                 "stall_reason": "unknown",
-                "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
+                "project_root": dunce::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
                 "queue": [2, 1],
                 "urgent_queue": {

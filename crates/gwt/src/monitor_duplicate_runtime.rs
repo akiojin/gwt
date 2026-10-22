@@ -47,9 +47,6 @@ pub(crate) fn capture_stop_request(
     else {
         return Ok(None);
     };
-    if hold.status != ExecutionControlStatus::Active {
-        return Ok(None);
-    }
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let session = match gwt_agent::Session::load(
         &sessions_dir.join(format!("{}.toml", hold.holder_session_id)),
@@ -73,15 +70,15 @@ pub(crate) fn capture_stop_request(
         || binding.owner_number != issue_number
         || binding.identity.generation_id != hold.generation_id
         || expected_session_id.is_some_and(|expected| expected != session.id)
-        || crate::cli::execution_state::current_execution_binding(
+        || !crate::cli::execution_state::session_binding_authorizes_current_lifecycle_descendant(
             &session.worktree_path,
             ExecutionOwnerKey {
                 kind,
                 number: issue_number,
             },
+            &session.id,
+            &binding.identity,
         )?
-        .as_ref()
-            != Some(&binding.identity)
     {
         return Err(io::Error::other(
             "current holder execution binding changed before stop",
@@ -411,7 +408,7 @@ fn stop_requested_runtimes(
             // A terminal sidecar proves only that the leader ended. Recheck
             // the full captured identity under the owner/Session lease before
             // cleaning its tree, including when the leader was already reaped.
-            let result = crate::cli::execution_state::with_current_active_session_execution_identity_lease(
+            let result = crate::cli::execution_state::with_current_runtime_cleanup_session_execution_identity_lease(
                 &registration.sessions_dir,
                 &request.execution_identity,
                 || {
@@ -941,8 +938,31 @@ mod stop_tests {
     use gwt_agent::{AgentStatus, Session, SessionExecutionBinding, SessionExecutionIdentity};
     use gwt_core::test_support::ScopedEnvVar;
 
-    #[test]
-    fn retained_runtime_stop_reaps_tree_and_preserves_active_execution() {
+    struct StopFixture {
+        project: tempfile::TempDir,
+        sessions: PathBuf,
+        owner: ExecutionOwnerKey,
+        session: Session,
+        runtime: gwt_agent::SessionRuntimeState,
+        entry: RegisteredMonitorRuntime,
+        child_pid: u32,
+        root_exit_file: PathBuf,
+    }
+
+    fn is_process_alive(pid: u32) -> bool {
+        let mut system = sysinfo::System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        system
+            .process(pid)
+            .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+    }
+
+    fn with_stop_fixture(test: impl FnOnce(&mut StopFixture)) {
         let _env = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1074,167 +1094,297 @@ mod stop_tests {
             },
             handle,
         };
-        let path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
-        // A live launch can lose its canvas/ACK binding before an operator stop.
-        let initial = crate::IssueMonitorPrefs {
-            launching_issues: vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
-                issue_number: 4168,
-                claimed_at: None,
-            }],
-            ..Default::default()
-        };
-        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
-        let mut stale =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
-        let before = execution_state::load_owner_generation_ledger(project.path(), owner).unwrap();
-        let mut env = crate::cli::TestEnv::new(project.path().into());
-        let stop = || {
-            crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStop {
-                project_root: Some(project.path().into()),
-                number: 4168,
-                reason: "stop the detached runtime".into(),
-                remove_from_queue: true,
-                claim_id: None,
-                delivery_id: None,
-                window_id: None,
-            })
-        };
-        let (code, output) = crate::cli::run_collect(&mut env, stop()).unwrap();
-        assert_eq!(code, 0, "{output}");
-        let output: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-        assert_eq!(output["runtime_stop"], "requested");
-        assert_eq!(
-            output["runtime_target_source"],
-            "unique_current_execution_holder"
-        );
-        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
-        assert_eq!(prefs.monitor_runtime_stop_requests.len(), 1);
-        let request = prefs.monitor_runtime_stop_requests[0].clone();
-        assert!(
-            request.window_id.is_empty(),
-            "window identity is diagnostic only"
-        );
-        stale.rebase_daemon_driver_prefs(&prefs);
-        crate::save_issue_monitor_prefs(&path, &stale.prefs()).unwrap();
-        assert_eq!(
-            crate::load_issue_monitor_prefs(&path)
-                .unwrap()
-                .monitor_runtime_stop_requests,
-            vec![request.clone()]
-        );
-        let reconcile = |entry: &RegisteredMonitorRuntime| {
-            let inventory = crate::session_inventory::ProjectSessionCensus::capture(&sessions)
-                .observe(project.path());
-            super::reconcile_project(
-                project.path(),
-                &sessions,
-                std::slice::from_ref(entry),
-                &inventory,
-            )
-            .unwrap();
-        };
-        // An old request never targets a different registration incarnation.
-        let mut successor = entry.clone();
-        successor.registration.incarnation = 8;
-        reconcile(&successor);
-        assert!(entry.handle.try_wait().unwrap().is_none());
-        for mismatch in ["child", "host", "identity", "incarnation"] {
-            let mut changed = request.clone();
-            match mismatch {
-                "child" => changed.child_started_at += 1,
-                "host" => changed.host_started_at += 1,
-                "identity" => {
-                    changed
-                        .execution_identity
-                        .execution_binding
-                        .capability_generation += 1
+        test(&mut StopFixture {
+            project,
+            sessions,
+            owner,
+            session,
+            runtime,
+            entry,
+            child_pid,
+            root_exit_file,
+        });
+    }
+
+    #[test]
+    fn retained_runtime_stop_reaps_tree_and_preserves_active_execution() {
+        with_stop_fixture(|fixture| {
+            let StopFixture {
+                project,
+                sessions,
+                owner,
+                session,
+                runtime,
+                entry,
+                child_pid,
+                root_exit_file,
+            } = fixture;
+            let owner = *owner;
+            let path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+            // A live launch can lose its canvas/ACK binding before an operator stop.
+            let initial = crate::IssueMonitorPrefs {
+                launching_issues: vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
+                    issue_number: 4168,
+                    claimed_at: None,
+                }],
+                ..Default::default()
+            };
+            crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+            let mut stale =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+            let before =
+                execution_state::load_owner_generation_ledger(project.path(), owner).unwrap();
+            let mut env = crate::cli::TestEnv::new(project.path().into());
+            let stop = || {
+                crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStop {
+                    project_root: Some(project.path().into()),
+                    number: 4168,
+                    reason: "stop the detached runtime".into(),
+                    remove_from_queue: true,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                })
+            };
+            let (code, output) = crate::cli::run_collect(&mut env, stop()).unwrap();
+            assert_eq!(code, 0, "{output}");
+            let output: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+            assert_eq!(output["runtime_stop"], "requested");
+            assert_eq!(
+                output["runtime_target_source"],
+                "unique_current_execution_holder"
+            );
+            let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+            assert_eq!(prefs.monitor_runtime_stop_requests.len(), 1);
+            let request = prefs.monitor_runtime_stop_requests[0].clone();
+            assert!(
+                request.window_id.is_empty(),
+                "window identity is diagnostic only"
+            );
+            stale.rebase_daemon_driver_prefs(&prefs);
+            crate::save_issue_monitor_prefs(&path, &stale.prefs()).unwrap();
+            assert_eq!(
+                crate::load_issue_monitor_prefs(&path)
+                    .unwrap()
+                    .monitor_runtime_stop_requests,
+                vec![request.clone()]
+            );
+            let reconcile = |entry: &RegisteredMonitorRuntime| {
+                let inventory = crate::session_inventory::ProjectSessionCensus::capture(&sessions)
+                    .observe(project.path());
+                super::reconcile_project(
+                    project.path(),
+                    &sessions,
+                    std::slice::from_ref(entry),
+                    &inventory,
+                )
+                .unwrap();
+            };
+            // An old request never targets a different registration incarnation.
+            let mut successor = entry.clone();
+            successor.registration.incarnation = 8;
+            reconcile(&successor);
+            assert!(entry.handle.try_wait().unwrap().is_none());
+            for mismatch in ["child", "host", "identity", "incarnation"] {
+                let mut changed = request.clone();
+                match mismatch {
+                    "child" => changed.child_started_at += 1,
+                    "host" => changed.host_started_at += 1,
+                    "identity" => {
+                        changed
+                            .execution_identity
+                            .execution_binding
+                            .capability_generation += 1
+                    }
+                    _ => changed.runtime_incarnation += 1,
                 }
-                _ => changed.runtime_incarnation += 1,
+                let mut prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+                prefs.monitor_runtime_stop_requests = vec![changed];
+                crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+                reconcile(&entry);
+                assert!(
+                    entry.handle.try_wait().unwrap().is_none(),
+                    "{mismatch} mismatch killed PTY"
+                );
             }
             let mut prefs = crate::load_issue_monitor_prefs(&path).unwrap();
-            prefs.monitor_runtime_stop_requests = vec![changed];
+            prefs.monitor_runtime_stop_requests = vec![request];
             crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
-            reconcile(&entry);
+            let process_alive = || is_process_alive(*child_pid);
+            // The leader can exit, and its exit observer can persist Stopped, before
+            // the next host worker tick. Its child still belongs to the captured PTY.
+            std::fs::write(root_exit_file, b"exit").unwrap();
+            // test-hygiene: allow-wall-clock-deadline Bound actual PTY leader exit before driving the retained-host tick.
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while entry.handle.try_wait().unwrap().is_none() {
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline Real leader exit is the process-lifecycle contract under test.
+                    std::time::Instant::now() < deadline,
+                    "PTY leader did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(process_alive(), "fixture child exited with its leader");
+            runtime.status = AgentStatus::Stopped;
+            runtime
+                .save(&gwt_agent::runtime_state_path(&sessions, &session.id))
+                .unwrap();
+            session.status = AgentStatus::Stopped;
+            session.save(&sessions).unwrap();
+            // No window or GUI registry is available: drive the actual retained tick.
+            let mut retained =
+                BTreeMap::from([((entry.registration.window_id.clone(), 7), entry.clone())]);
+            reconcile_retained_projects(
+                &BTreeMap::from([(project.path().into(), sessions.clone())]),
+                &mut retained,
+            );
+            // test-hygiene: allow-wall-clock-deadline Bound the real OS descendant exit after the host's captured-tree cleanup.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // test-hygiene: allow-wall-clock-deadline Observe process exit directly; elapsed time only caps a failed fixture.
+            while process_alive() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
             assert!(
-                entry.handle.try_wait().unwrap().is_none(),
-                "{mismatch} mismatch killed PTY"
+                !process_alive(),
+                "retained stop left descendant {child_pid} alive"
             );
-        }
-        let mut prefs = crate::load_issue_monitor_prefs(&path).unwrap();
-        prefs.monitor_runtime_stop_requests = vec![request];
-        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
-        let process_alive = || {
-            let mut system = sysinfo::System::new();
-            let pid = sysinfo::Pid::from_u32(child_pid);
-            system.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::Some(&[pid]),
-                true,
-                sysinfo::ProcessRefreshKind::nothing(),
+            assert_eq!(
+                Session::load(&sessions.join("holder.toml")).unwrap().status,
+                AgentStatus::Stopped
             );
-            system
-                .process(pid)
-                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
-        };
-        // The leader can exit, and its exit observer can persist Stopped, before
-        // the next host worker tick. Its child still belongs to the captured PTY.
-        std::fs::write(root_exit_file, b"exit").unwrap();
-        // test-hygiene: allow-wall-clock-deadline Bound actual PTY leader exit before driving the retained-host tick.
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        while entry.handle.try_wait().unwrap().is_none() {
-            assert!(
-                // test-hygiene: allow-wall-clock-deadline Real leader exit is the process-lifecycle contract under test.
-                std::time::Instant::now() < deadline,
-                "PTY leader did not exit"
+            let (code, output) = crate::cli::run_collect(&mut env, stop()).unwrap();
+            assert_eq!(code, 0, "{output}");
+            let output: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+            assert_eq!(
+                output["generation_release"], "held",
+                "repeated stop must retain the Active contract"
             );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(process_alive(), "fixture child exited with its leader");
-        runtime.status = AgentStatus::Stopped;
-        runtime
-            .save(&gwt_agent::runtime_state_path(&sessions, &session.id))
-            .unwrap();
-        session.status = AgentStatus::Stopped;
-        session.save(&sessions).unwrap();
-        // No window or GUI registry is available: drive the actual retained tick.
-        let mut retained =
-            BTreeMap::from([((entry.registration.window_id.clone(), 7), entry.clone())]);
-        reconcile_retained_projects(
-            &BTreeMap::from([(project.path().into(), sessions.clone())]),
-            &mut retained,
-        );
-        // test-hygiene: allow-wall-clock-deadline Bound the real OS descendant exit after the host's captured-tree cleanup.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        // test-hygiene: allow-wall-clock-deadline Observe process exit directly; elapsed time only caps a failed fixture.
-        while process_alive() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(
-            !process_alive(),
-            "retained stop left descendant {child_pid} alive"
-        );
-        assert_eq!(
-            Session::load(&sessions.join("holder.toml")).unwrap().status,
-            AgentStatus::Stopped
-        );
-        let (code, output) = crate::cli::run_collect(&mut env, stop()).unwrap();
-        assert_eq!(code, 0, "{output}");
-        let output: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-        assert_eq!(
-            output["generation_release"], "held",
-            "repeated stop must retain the Active contract"
-        );
-        assert_eq!(
-            execution_state::load_owner_generation_ledger(project.path(), owner).unwrap(),
-            before,
-            "runtime stop must leave Active ECR unchanged"
-        );
-        assert_eq!(
-            crate::IssueMonitorState::with_prefs(
-                crate::IssueMonitorConfig::default(),
-                crate::load_issue_monitor_prefs(&path).unwrap()
+            assert_eq!(
+                execution_state::load_owner_generation_ledger(project.path(), owner).unwrap(),
+                before,
+                "runtime stop must leave Active ECR unchanged"
+            );
+            assert_eq!(
+                crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    crate::load_issue_monitor_prefs(&path).unwrap()
+                )
+                .active_count(),
+                0
+            );
+        });
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CompletionTiming {
+        Never,
+        BeforeStop,
+        AfterStop,
+    }
+
+    fn assert_stop_request_kills_live_tree(timing: CompletionTiming) {
+        with_stop_fixture(|fixture| {
+            let StopFixture {
+                project,
+                sessions,
+                owner,
+                session,
+                entry,
+                child_pid,
+                root_exit_file,
+                ..
+            } = fixture;
+            let complete = || {
+                assert!(matches!(
+                    execution_state::settle(
+                        project.path(),
+                        &session.id,
+                        execution_state::ExecutionSettlement::Completed
+                    )
+                    .unwrap(),
+                    execution_state::SettleResult::Settled(_)
+                ));
+            };
+            if timing == CompletionTiming::BeforeStop {
+                complete();
+            }
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                        issue_number: owner.number,
+                        window_id: entry.registration.window_id.clone(),
+                    }],
+                    ..Default::default()
+                },
             )
-            .active_count(),
-            0
-        );
+            .unwrap();
+            let mut env = crate::cli::TestEnv::new(project.path().into());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStop {
+                    project_root: Some(project.path().into()),
+                    number: owner.number,
+                    reason: "stop the live tree".into(),
+                    remove_from_queue: true,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: Some(entry.registration.window_id.clone()),
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let output: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+            assert_eq!(
+                output["runtime_stop"], "requested",
+                "a Completed execution can still own a live launch"
+            );
+            if timing == CompletionTiming::AfterStop {
+                complete();
+            }
+            let before =
+                execution_state::load_owner_generation_ledger(project.path(), *owner).unwrap();
+            assert!(!root_exit_file.exists(), "the leader must not exit itself");
+            assert!(entry.handle.try_wait().unwrap().is_none());
+            assert!(is_process_alive(*child_pid));
+            // Call the request handler directly: the ordinary exited-leader
+            // prune path cannot make this test pass in place of request dispatch.
+            assert!(
+                stop_requested_runtimes(project.path(), std::slice::from_ref(entry)).unwrap(),
+                "the accepted request must stop its still-live leader"
+            );
+            assert!(
+                entry.handle.try_wait().unwrap().is_some(),
+                "stop left its leader alive"
+            );
+            assert!(
+                !is_process_alive(*child_pid),
+                "stop left its descendant alive"
+            );
+            let stopped = Session::load(&sessions.join(format!("{}.toml", session.id))).unwrap();
+            assert_eq!(stopped.status, AgentStatus::Stopped);
+            assert!(!stopped.restore_window_on_startup);
+            assert_eq!(
+                execution_state::load_owner_generation_ledger(project.path(), *owner).unwrap(),
+                before,
+                "runtime cleanup must preserve execution lifecycle"
+            );
+        });
+    }
+
+    #[test]
+    fn monitor_stop_request_kills_a_live_leader_and_child() {
+        assert_stop_request_kills_live_tree(CompletionTiming::Never);
+    }
+
+    #[test]
+    fn monitor_stop_captures_a_completed_launch_with_a_live_tree() {
+        assert_stop_request_kills_live_tree(CompletionTiming::BeforeStop);
+    }
+
+    #[test]
+    fn monitor_stop_request_survives_execution_completion() {
+        assert_stop_request_kills_live_tree(CompletionTiming::AfterStop);
     }
 }
