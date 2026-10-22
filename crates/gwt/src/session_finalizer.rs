@@ -349,6 +349,41 @@ pub fn finalize_legacy_session(
     }
 }
 
+/// Disable restore for an exact historical view, without asserting process exit.
+/// Current-Host registration and live/uncertain observations reject this path.
+pub fn remove_restored_stopped_view(
+    sessions_dir: &Path,
+    expected: &gwt_agent::Session,
+) -> std::io::Result<bool> {
+    let expected_snapshot = serde_json::to_value(expected)?;
+    let mut refused = false;
+    let result = gwt_agent::update_session_if_changed(sessions_dir, &expected.id, |current| {
+        let current_runtime =
+            gwt_agent::runtime_state_path_for_pid(sessions_dir, std::process::id(), &expected.id);
+        let no_local_runtime = match std::fs::symlink_metadata(current_runtime) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+            Ok(_) => false,
+        };
+        let observations = crate::session_inventory::observe_session(current, sessions_dir);
+        if serde_json::to_value(&*current)? != expected_snapshot
+            || !no_local_runtime
+            || !observations.sessions.is_empty()
+            || !observations.uncertainties.is_empty()
+        {
+            refused = true;
+            return Err(std::io::Error::other("stopped view removal is unconfirmed"));
+        }
+        current.restore_window_on_startup = false;
+        Ok(())
+    });
+    if refused {
+        Ok(false)
+    } else {
+        result.map(|_| true)
+    }
+}
+
 /// How long a pane close keeps waiting for its PTY child to exit before it
 /// stops trying to record the terminal status (Issue #4643 AC-1).
 const PANE_CLOSE_EXIT_PROOF_WAIT: Duration = Duration::from_secs(30);

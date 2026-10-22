@@ -2167,6 +2167,11 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    /// Only the stopped placeholder was removed. This is not process-tree
+    /// exit evidence for its historical runtime (Issue #4168 AC-7).
+    PaneHuskRemoved {
+        window_id: String,
+    },
     WorkCloseResult {
         work_id: String,
         close_kind: String,
@@ -3043,6 +3048,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_husk_removed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "work_close_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3494,6 +3504,7 @@ impl BackendEvent {
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::PaneHuskRemoved { .. } => "pane_husk_removed",
             BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",

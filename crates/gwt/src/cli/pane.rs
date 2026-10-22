@@ -1179,6 +1179,7 @@ async fn close_pane(
 struct PaneCloseReply {
     ok: bool,
     reason: Option<String>,
+    husk_removed: bool,
 }
 
 /// Wait up to `deadline_after` for the `pane_close_result` frame that matches
@@ -1201,11 +1202,13 @@ async fn wait_for_pane_close_result(
             Ok(Err(error)) => return Err(error),
             Ok(Ok(value)) => value,
         };
-        if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+        let result_kind = value.get("kind").and_then(Value::as_str);
+        if matches!(result_kind, Some("pane_close_result" | "pane_husk_removed"))
             && value.get("window_id").and_then(Value::as_str) == Some(window_id)
         {
             return Ok(Some(PaneCloseReply {
                 ok: value.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                husk_removed: result_kind == Some("pane_husk_removed"),
                 reason: value
                     .get("reason")
                     .and_then(Value::as_str)
@@ -1216,6 +1219,11 @@ async fn wait_for_pane_close_result(
 }
 
 fn pane_close_verdict(requested_id: &str, reply: PaneCloseReply) -> Result<String, String> {
+    if reply.husk_removed {
+        return Ok(format!(
+            "removed stopped pane view {requested_id} (process-tree exit unconfirmed)\n"
+        ));
+    }
     if reply.ok {
         return Ok(format!("closed {requested_id}\n"));
     }
@@ -4289,6 +4297,7 @@ mod tests {
         target: PersistedWindowState,
         ok: bool,
         reason: Option<&'static str>,
+        result_kind: &'static str,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let initial_state = workspace_state_for_test(project_root, vec![target]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4318,7 +4327,7 @@ mod tests {
                             .to_string(),
                     );
                     let result = json!({
-                        "kind": "pane_close_result",
+                        "kind": result_kind,
                         "ok": ok,
                         "window_id": close["id"],
                         "reason": reason,
@@ -4415,21 +4424,29 @@ mod tests {
             .expect("build pane test runtime");
 
         runtime.block_on(async {
-            let project_root = "/repo/peer";
-            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
-            peer.session_id = Some("session-peer".to_string());
-            let (ws_url, server) =
-                spawn_close_pane_result_mock(project_root, peer, true, None).await;
+            for (result_kind, expected) in [
+                ("pane_close_result", "closed agent-peer\n"),
+                (
+                    "pane_husk_removed",
+                    "removed stopped pane view agent-peer (process-tree exit unconfirmed)\n",
+                ),
+            ] {
+                let project_root = "/repo/peer";
+                let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+                peer.session_id = Some("session-peer".to_string());
+                let (ws_url, server) =
+                    spawn_close_pane_result_mock(project_root, peer, true, None, result_kind).await;
 
-            let result = close_pane(&ws_url, project_root, "agent-peer").await;
-            let received_kinds = server.await.expect("pane result mock task");
+                let result = close_pane(&ws_url, project_root, "agent-peer").await;
+                let received_kinds = server.await.expect("pane result mock task");
 
-            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
-            assert_eq!(
-                received_kinds,
-                vec!["list_windows", "frontend_ready", "close_window"],
-                "an explicit close result must settle without a readback round"
-            );
+                assert_eq!(result, Ok(expected.to_string()));
+                assert_eq!(
+                    received_kinds,
+                    vec!["list_windows", "frontend_ready", "close_window"],
+                    "an explicit close result must settle without a readback round"
+                );
+            }
         });
     }
 
@@ -4460,6 +4477,7 @@ mod tests {
                 peer,
                 false,
                 Some("window is outside the authenticated project scope"),
+                "pane_close_result",
             )
             .await;
 
@@ -4548,6 +4566,7 @@ mod tests {
                 own,
                 false,
                 Some("unread owner evidence; run board.show all:true"),
+                "pane_close_result",
             )
             .await;
             let error = close_pane(&url, "/repo/self", "own")
