@@ -689,6 +689,13 @@ existing manual pool. `issue.monitor.tier.set` with `number` and `tier` raises
 an Issue's persistent minimum tier. `issue.monitor.tiers` reports the
 configuration, Issue history and lowest-tier landing rate (`null` until a
 landing is observed), plus the count of unclassified terminations.
+For a conditional `tiers.set`, read fresh `saved_config` and `config_token`
+from `issue.monitor.status` or `issue.monitor.tiers`, then pass the token as
+`expected_config_token`. A mismatch leaves all preferences unchanged; re-read
+status and reconsider the change, then read back success. The token includes
+saved `launch_auto` and `launch_tiers`. Omitting the guard keeps existing behavior;
+null, blank and non-string guards are rejected. This value comparison does not
+track ABA history or guard individual `tier.set` writes.
 `issue.monitor.status` exposes `launch_tier`, `landing_tier`, total `attempts`,
 excluded `non_agent_attempts`, and their difference `tier_input` on each
 observed Issue row.

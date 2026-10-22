@@ -631,6 +631,12 @@ backoffに使う総試行回数には数えます。
 `issue.monitor.tier.set` の `number` と `tier` でIssueの段の下限を引き上げ、
 次回起動にも保持できます。`issue.monitor.tiers` は設定・Issue履歴・最下段での
 着地率を返します（着地の観測がなければ `null`）。判定不能な終了の累計も確認できます。
+条件付きで `tiers.set` を実行する場合は、`issue.monitor.status` または
+`issue.monitor.tiers` の fresh な `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。不一致なら設定ファイル全体を
+変更せず拒否するため、status を再読して変更を再判断し、成功後も読み戻して確認します。
+token は保存された `launch_auto` と `launch_tiers` を含みます。guard の省略は従来互換を保ち、
+null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴や個別の `tier.set` は保護しません。
 `issue.monitor.status` の各行には `launch_tier` と `landing_tier` に加え、総試行回数の
 `attempts`、段に数えなかった `non_agent_attempts`、差分の `tier_input` が表示されます。
 着地は、担当Issueとセッションが一致するWorkの `done` 更新成功を指します。
