@@ -1365,6 +1365,36 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Saved inputs observed by guarded config writes, excluding runtime state.
+    pub fn config_observation(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "autonomous_mode": self.autonomous_mode,
+            "allowed_labels": self.allowed_labels,
+            "max_active_mode": self.max_active_agents_mode,
+            "max_active_agents_override":
+                (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
+                    .then_some(self.max_active_agents),
+            "auto_close_merged_issues": self.auto_close_merged_issues,
+            "launch_profiles": self.launch_profile_pool(),
+            "launch_auto": self.launch_auto,
+            "launch_tiers": self.launch_tiers,
+            "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
+                "version": drain.version,
+                "since": drain.since,
+                "reason": drain.reason,
+                "automatic": drain.automatic,
+            })),
+        })
+    }
+
+    /// Value-CAS token for exactly [`Self::config_observation`], not history.
+    pub fn config_token(&self) -> String {
+        let observation = serde_json::to_vec(&self.config_observation())
+            .expect("saved Issue Monitor configuration serializes");
+        format!("config-v1:{:x}", Sha256::digest(observation))
+    }
+
     /// SPEC #3914 FR-001: the ordered launch candidate pool. A pre-#3914 file
     /// carrying only `launch_profile` reads as a one-element pool.
     pub fn launch_profile_pool(&self) -> Vec<IssueMonitorLaunchProfile> {
@@ -1508,6 +1538,31 @@ impl IssueMonitorPrefs {
             enabled,
         )
     }
+}
+
+pub(crate) const ISSUE_MONITOR_CONFIG_CONFLICT_ERROR: &str =
+    "Issue Monitor config changed since observation; re-read issue.monitor.status and reconsider the saved configuration before retrying";
+
+/// Call only under the prefs writer lock, before applying any config change.
+pub(crate) fn check_expected_issue_monitor_config_token(
+    prefs: &IssueMonitorPrefs,
+    expected: Option<&str>,
+) -> io::Result<()> {
+    if let Some(expected) = expected {
+        if expected.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected_config_token must be a nonempty string",
+            ));
+        }
+        if expected != prefs.config_token() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6820,6 +6875,22 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
     on_first_contention: impl FnMut(),
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
+    try_mutate_issue_monitor_prefs_recovering_observed(
+        path,
+        recovery_baseline,
+        on_first_contention,
+        |prefs| Ok(mutation(prefs)),
+    )
+}
+
+/// Preserve recovery semantics while allowing validation to refuse before save.
+#[track_caller]
+pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
+    path: &Path,
+    recovery_baseline: &IssueMonitorPrefs,
+    on_first_contention: impl FnMut(),
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
     with_issue_monitor_prefs_lock_observed(path, on_first_contention, || {
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
@@ -6853,7 +6924,7 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
             }
             Err(error) => return Err(error),
         };
-        let result = mutation(&mut prefs);
+        let result = mutation(&mut prefs)?;
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
@@ -39426,6 +39497,49 @@ mod tests {
 
         super::sync_parent_directory(&missing_parent)
             .expect("non-Unix durable writers do not open directory handles");
+    }
+
+    #[test]
+    fn config_token_excludes_auto_capacity_and_drain_blocker_observations() {
+        let mut prefs = IssueMonitorPrefs {
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
+            update_drain: Some(IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: "2026-10-22T00:00:00Z".to_string(),
+                reason: IssueMonitorUpdateDrainReason::Manual,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..IssueMonitorPrefs::default()
+        };
+        let observation = prefs.config_observation();
+        let token = prefs.config_token();
+        assert_eq!(
+            observation["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert!(observation["update_drain"].get("blocking").is_none());
+        prefs.max_active_agents += 1;
+        prefs.priority_order.push(42);
+        prefs.last_scan_at = Some("2026-10-22T00:01:00Z".to_string());
+        prefs
+            .update_drain
+            .as_mut()
+            .unwrap()
+            .blocking
+            .push(crate::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 });
+        assert_eq!(prefs.config_observation(), observation);
+        assert_eq!(prefs.config_token(), token);
+
+        prefs.max_active_agents_mode = IssueMonitorMaxActiveMode::Manual;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["max_active_agents_override"],
+            serde_json::json!(prefs.max_active_agents)
+        );
+        let manual_token = prefs.config_token();
+        prefs.max_active_agents += 1;
+        assert_ne!(prefs.config_token(), manual_token);
     }
 
     #[test]
