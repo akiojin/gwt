@@ -2319,7 +2319,7 @@ mod tests {
         assert_eq!(result["panes"][0]["classification"], "waiting_for_human");
         assert_eq!(result["panes"][0]["prompt_kind"], "directory_trust");
         assert_eq!(result["panes"][0]["recommended_action"], "report_to_human");
-        runtime.child_started_at = Some(started + 1);
+        runtime.child_started_at = runtime.child_started_at.map(|value| value + 1);
         runtime.save(&runtime_path).unwrap();
         let result = run(&mut env);
         assert_eq!(result["panes"][0]["reason_code"], "observation_unavailable");
