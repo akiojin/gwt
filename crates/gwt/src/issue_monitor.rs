@@ -10557,16 +10557,10 @@ impl IssueMonitorState {
 
     /// Restore durable diagnostics without replacing a local scan's timestamp.
     pub(crate) fn restore_persisted_scan_diagnostics(&mut self, prefs: &IssueMonitorPrefs) {
-        if self
-            .last_scan_error
-            .as_ref()
-            .is_some_and(|error| self.last_error.as_deref() == Some(error.message.as_str()))
-        {
-            self.last_error = None;
-        }
         self.last_scan_error = prefs.last_scan_error.clone();
     }
 
+    /// Replace the prior transient fault with a structured scan failure.
     pub(crate) fn record_scan_failure(
         &mut self,
         now: impl Into<String>,
@@ -10578,7 +10572,9 @@ impl IssueMonitorState {
             phase: phase.into(),
             recorded_at: now.into(),
         };
-        self.record_scan_error(error.recorded_at.clone(), error.message.clone());
+        self.last_scan_at = Some(error.recorded_at.clone());
+        self.last_error = None;
+        self.launch_auth_required = false;
         self.last_scan_error = Some(error);
     }
 
@@ -13352,53 +13348,59 @@ impl IssueMonitorState {
         }
     }
 
-    fn status_view_with_quota_hold(
-        &self,
-        now: &str,
-        quota_hold: Option<IssueMonitorProviderQuotaHold>,
-    ) -> IssueMonitorStatusView {
+    /// Historical Issue banners do not represent a current monitor fault.
+    fn current_monitor_error(&self) -> Option<&String> {
+        self.last_error.as_ref().filter(|message| {
+            !self.is_stop_only_error_banner(message)
+                && !self
+                    .failed_issues
+                    .iter()
+                    .any(|(number, reason)| *message == &format!("issue #{number}: {reason}"))
+        })
+    }
+
+    /// Keep provenance attached to the selected value, even for equal text.
+    fn selected_status_error(&self) -> Option<(String, &'static str)> {
         // A blocked authority lane must remain diagnosable after later scans.
         // Issue #3883 AC-2: a durable-state reset outranks a per-issue failure
         // banner. It is the one condition where the rest of this view is
         // describing state that was destroyed rather than state that happened,
         // so a reader must see it before drawing any conclusion from the queue.
-        let current_error =
-            self.last_error
-                .as_ref()
-                .filter(|message| {
-                    !self.is_stop_only_error_banner(message)
-                        && !self.failed_issues.iter().any(|(number, reason)| {
-                            *message == &format!("issue #{number}: {reason}")
-                        })
-                })
-                .cloned();
-        let last_error = self.scan_recovery_error.clone().or_else(|| self
+        self.scan_recovery_error.clone().map(|message| (message, "monitor")).or_else(|| self
             .last_prefs_reset
             .as_ref()
             .map(|reset| {
-                format!(
+                (format!(
                     "Issue Monitor preferences were reset after unreadable state at {at}: launches, \
                      autonomous mode, and enabled were lost. Quarantined bytes: {quarantine} ({reason})",
                     at = reset.at,
                     quarantine = reset.quarantine_path,
                     reason = reset.reason,
-                )
+                ), "monitor")
             })
-            .or_else(|| current_error.clone())
-            .or_else(|| self.last_scan_error.as_ref().map(|error| error.message.clone()))
+            .or_else(|| self.current_monitor_error().cloned().map(|message| (message, "monitor")))
+            .or_else(|| self.last_scan_error.as_ref().map(|error| (error.message.clone(), "scan_failure")))
             .or_else(|| {
                 self.last_error
                     .as_ref()
                     .filter(|message| !self.is_stop_only_error_banner(message))
-                    .cloned()
+                    .cloned().map(|message| (message, "failed_issues"))
             })
-            .or_else(|| self.first_failed_issue_banner()));
+            .or_else(|| self.first_failed_issue_banner().map(|message| (message, "failed_issues"))))
+    }
+
+    fn status_view_with_quota_hold(
+        &self,
+        now: &str,
+        quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    ) -> IssueMonitorStatusView {
+        let last_error = self.selected_status_error().map(|(message, _)| message);
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
         // only a current monitor fault makes the whole monitor read as Error.
         let has_current_error = self.scan_recovery_error.is_some()
             || self.last_prefs_reset.is_some()
             || (!self.launch_auth_required
-                && (self.last_scan_error.is_some() || current_error.is_some()));
+                && (self.last_scan_error.is_some() || self.current_monitor_error().is_some()));
         let host = crate::process::current_hostname();
         let local_entries = self.terminal_queues.get(&host).map(|queue| {
             queue
@@ -13959,24 +13961,9 @@ impl IssueMonitorState {
                     }
                 }),
             closure_held: self.closure_held.iter().copied().collect(),
-            last_error_source: status.last_error.as_ref().map(|message| {
-                if self
-                    .last_scan_error
-                    .as_ref()
-                    .is_some_and(|error| &error.message == message)
-                {
-                    "scan_failure"
-                } else if self
-                    .failed_issues
-                    .iter()
-                    .any(|(number, reason)| message == &format!("issue #{number}: {reason}"))
-                {
-                    "failed_issues"
-                } else {
-                    "monitor"
-                }
-                .to_string()
-            }),
+            last_error_source: self
+                .selected_status_error()
+                .map(|(_, source)| source.to_string()),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
             last_scan_error: self.last_scan_error.clone(),
@@ -32299,13 +32286,18 @@ mod tests {
         assert!(driver.prefs().last_scan_error.is_none());
 
         driver.record_scan_failure("2026-10-22T00:00:02Z", "candidate-load", "scan failed");
-        driver.record_control_commit_error("current control fault");
+        driver.record_control_commit_error("scan failed");
         assert_eq!(
             driver.status_view().last_error.as_deref(),
-            Some("current control fault")
+            Some("scan failed")
         );
         let status = serde_json::to_value(driver.agent_status()).unwrap();
         assert_eq!(status["last_error_source"], "monitor");
+        driver.rebase_gui_observer_prefs(&driver.prefs());
+        assert_eq!(
+            serde_json::to_value(driver.agent_status()).unwrap()["last_error_source"],
+            "monitor"
+        );
         driver.config.enabled = true;
         driver.record_launch_auth_required("2026-10-22T00:00:03Z");
         assert_eq!(driver.status_view().state, "auth_required");
