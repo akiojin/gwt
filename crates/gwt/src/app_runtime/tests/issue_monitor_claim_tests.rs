@@ -6038,6 +6038,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
