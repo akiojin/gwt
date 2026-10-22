@@ -77,15 +77,71 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(target).toBeVisible();
   });
 
-  test("Windows list updates inactive agent telemetry without activating it", async ({ page }) => {
+  test("Windows list batches inactive telemetry without delaying navigation", async ({ page }, info) => {
     await page.locator("#window-list-button").click();
+    const trigger = page.locator("#window-list-button");
+    await trigger.focus();
+    await trigger.hover();
+    const panel = page.locator("#window-list-panel");
     const chip = rowFor(page, "Birch").locator(".status-chip");
     await expect(chip).toHaveClass(/running/);
     await expect(chip.locator(".status-label")).toHaveText("Running");
-    await page.evaluate(() => window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle"));
+    const burst = await panel.evaluate(async panel => {
+      const before = panel.innerHTML;
+      const focused = document.activeElement;
+      let rebuilds = 0;
+      const observer = new MutationObserver(records => {
+        rebuilds += records.filter(record => record.type === "childList" && record.removedNodes.length > 0).length;
+      });
+      observer.observe(panel, { childList: true });
+      try {
+        for (let n = 1; n <= 50; n++) window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", n % 2 ? "running" : "idle", true);
+        const unchanged = panel.innerHTML === before;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { unchanged, rebuilds, focusPreserved: document.activeElement === focused,
+          hoverPreserved: focused?.matches(":hover") };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ unchanged: true, rebuilds: 1, focusPreserved: true, hoverPreserved: true });
     await expect(chip).toHaveClass(/idle/);
     await expect(chip.locator(".status-label")).toHaveText("Idle");
     await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveAttribute("aria-selected", "true");
+    const fallback = await panel.evaluate(async panel => {
+      const originalRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      const started = performance.now();
+      const before = panel.innerHTML;
+      try {
+        return await new Promise<{ unchanged: boolean; latency: number }>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            if (!panel.textContent?.includes("Running")) return;
+            observer.disconnect(); clearTimeout(timeout);
+            resolve({ unchanged, latency: performance.now() - started });
+          });
+          const timeout = setTimeout(() => { observer.disconnect(); reject(new Error("Windows list fallback exceeded 1 second")); }, 1000);
+          observer.observe(panel, { childList: true });
+          window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "running", true);
+          const unchanged = panel.innerHTML === before;
+        });
+      } finally { window.requestAnimationFrame = originalRaf; }
+    });
+    expect(fallback.unchanged).toBe(true);
+    expect(fallback.latency).toBeLessThan(1000);
+    await expect(chip).toHaveClass(/running/);
+    await info.attach("windows-list-frame", { body: JSON.stringify({ burst, fallback }), contentType: "application/json" });
+    await page.screenshot({ path: info.outputPath("windows-list-frame.png") });
+    // A receipt waiting for paint must not retarget the row already displayed.
+    await rowFor(page, "Birch").evaluate(row => {
+      window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle", true);
+      (row as HTMLButtonElement).click();
+    });
+    await expect(panel).toBeHidden();
+    await expect(page.getByRole("tab", { name: "Birch", exact: true })).toHaveAttribute("aria-selected", "true");
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
   });
 });
 
@@ -228,10 +284,16 @@ async function installTabbedAgentsBackend(page) {
         });
         FixtureWebSocket.instances.forEach(socket => socket.emit(workspaceState));
       },
-      emitTerminalStatus(windowId, status) {
-        FixtureWebSocket.instances?.forEach((socket) =>
-          socket.emit({ kind: "terminal_status", id: windowId, status }),
-        );
+      emitTerminalStatus(windowId, status, immediate = false) {
+        const payload = { kind: "terminal_status", id: windowId, status };
+        // Controlled receiver bursts start after the transport dispatcher.
+        if (immediate) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+          return;
+        }
+        FixtureWebSocket.instances?.forEach((socket) => {
+          socket.emit(payload);
+        });
       },
     };
   });

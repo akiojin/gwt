@@ -841,8 +841,8 @@ export function createProjectShellSurface({
         });
       }
 
-      const unsubscribeCatalog = windowCatalogModel.subscribe(state => state.catalog, () => renderWindowList());
-      const unsubscribeList = windowCatalogModel.subscribe(state => state.listEntries, () => renderWindowList());
+      const unsubscribeCatalog = windowCatalogModel.subscribeFrame(state => state.catalog, () => renderWindowList());
+      const unsubscribeList = windowCatalogModel.subscribeFrame(state => state.listEntries, () => renderWindowList());
       // Keep open/close, actions and stage transitions synchronous. During a
       // run, progress changes share one frame and pull the latest snapshot.
       const unsubscribeMigration = migrationModel.subscribe(
