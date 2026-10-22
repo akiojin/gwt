@@ -9,7 +9,7 @@
 //! reports the candidates, the kept worktrees with their reasons, and the
 //! bytes that would be freed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use gwt_github::SpecOpsError;
@@ -79,17 +79,25 @@ pub(crate) struct GcCandidate {
     pub worktree: PathBuf,
     pub branch: Option<String>,
     pub target: PathBuf,
-    /// Measured after planning, only for candidates: sizing every worktree
-    /// would walk hundreds of gigabytes for nothing.
+    /// Best-effort measured cache size, also used for pressure priority.
     pub bytes: u64,
 }
 
 /// A worktree the sweep keeps, with the reason shown to the operator (AC-2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GcKept {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcKept {
     pub worktree: PathBuf,
     pub branch: Option<String>,
     pub reason: String,
+    pub bytes: u64,
+}
+
+/// Retained or failed cache bytes, ranked largest first in GC results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcUnreclaimedReason {
+    pub reason: String,
+    pub bytes: u64,
+    pub worktrees: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -121,6 +129,7 @@ pub(crate) fn plan(
                 worktree: probe.root,
                 branch: probe.branch,
                 reason,
+                bytes: 0,
             }),
             None => plan.candidates.push(GcCandidate {
                 target: probe.root.join(BUILD_ARTIFACT_DIR),
@@ -228,6 +237,8 @@ pub struct GcFailure {
     pub worktree: PathBuf,
     pub target: PathBuf,
     pub reason: String,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +253,10 @@ pub(crate) struct GcReport {
     pub removed: Vec<GcRemoval>,
     pub failed: Vec<GcFailure>,
     pub reclaimed_bytes: u64,
+    pub unreclaimed_bytes: u64,
+    pub unreclaimed_by_reason: Vec<GcUnreclaimedReason>,
+    pub pressure_volumes: BTreeSet<String>,
+    pub reclaimed_volumes: BTreeMap<String, u64>,
     pub disk_space: crate::disk_space::DiskSpaceStatus,
 }
 
@@ -250,6 +265,19 @@ pub(crate) fn run_gc(
     base: &str,
     options: GcOptions,
     dry_run: bool,
+) -> Result<GcReport, SpecOpsError> {
+    run_gc_with_pressure(repo_path, base, options, dry_run, None)
+}
+
+/// Automatic GC gives unmerged caches lower priority, rather than permanent
+/// protection. The probe is shared with the trigger, including its configured
+/// thresholds. Every target must belong to a volume still under pressure.
+pub(crate) fn run_gc_with_pressure(
+    repo_path: &Path,
+    base: &str,
+    mut options: GcOptions,
+    dry_run: bool,
+    pressure_probe: Option<&dyn Fn() -> crate::disk_space::DiskSpaceStatus>,
 ) -> Result<GcReport, SpecOpsError> {
     let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let git_root = git_root_for(&repo_path);
@@ -286,15 +314,103 @@ pub(crate) fn run_gc(
         })
         .collect();
     let protected = protected_roots(&repo_path, &root_paths);
+    let unmerged: BTreeSet<_> = probes
+        .iter()
+        .filter(|probe| probe.merged == Ok(false))
+        .map(|probe| probe.root.clone())
+        .collect();
+    if pressure_probe.is_some() {
+        options.include_unmerged = true;
+    }
     let mut plan = plan(probes, base, options, &protected);
     for candidate in &mut plan.candidates {
         candidate.bytes = directory_size(&candidate.target);
     }
-    let reclaimable_bytes = plan.candidates.iter().map(|c| c.bytes).sum();
+    let initially_kept = plan.kept.len();
+    if pressure_probe.is_some() {
+        plan.candidates.sort_by_key(|candidate| {
+            (
+                unmerged.contains(&candidate.worktree),
+                std::cmp::Reverse(candidate.bytes),
+            )
+        });
+    }
+    let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut failed = Vec::new();
-    if !dry_run {
-        for candidate in &plan.candidates {
+    let mut pressure_volumes = BTreeSet::new();
+    let mut reclaimed_volumes = BTreeMap::new();
+    for candidate in plan.candidates {
+        let target_volume = crate::disk_space::volume_id(&candidate.target);
+        if let Some(probe) = pressure_probe {
+            let low_volumes = probe().low_volume_ids();
+            pressure_volumes.extend(low_volumes.iter().cloned());
+            let reason = match &target_volume {
+                Err(error) => Some(format!("target volume unknown: {error}")),
+                Ok(volume) if !low_volumes.contains(volume) => Some(format!(
+                    "target volume is not under disk pressure: {volume}"
+                )),
+                Ok(_) => None,
+            };
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+        }
+        // Dry runs use the same kernel evidence as deletion. Marker files
+        // alone never make a cache busy. Hold both guards through deletion.
+        let _artifacts_guard = match try_lock_gc_build_artifacts(&candidate.target) {
+            Ok(GcArtifactAccess::Available(guard)) => guard,
+            Ok(GcArtifactAccess::Busy(reason)) => {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+            Err(error) => {
+                failed.push(GcFailure {
+                    worktree: candidate.worktree.clone(),
+                    target: candidate.target.clone(),
+                    reason: format!("build artifact coordination unavailable: {error}"),
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+        };
+        if !dry_run {
+            // A sweep can take many minutes. Re-read physical processes and
+            // live pane/launch sidecars while holding the deletion boundary;
+            // enumeration's snapshot cannot authorize a later deletion.
+            let system = process_table();
+            let roots = std::slice::from_ref(&candidate.worktree);
+            let processes = scan_processes(&system, roots);
+            let hosts = live_gwt_hosts(&system);
+            let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
+            let reason = processes
+                .get(&candidate.worktree)
+                .map(|names| format!("active process: {}", names.join(", ")))
+                .or_else(|| {
+                    tracked
+                        .get(&candidate.worktree)
+                        .map(|sessions| format!("tracked launch: {}", sessions.join(", ")))
+                });
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
             // Only ever `<worktree>/target` of a listed worktree; the plan
             // cannot name anything else.
             debug_assert_eq!(
@@ -302,34 +418,167 @@ pub(crate) fn run_gc(
                 candidate.worktree.join(BUILD_ARTIFACT_DIR)
             );
             match std::fs::remove_dir_all(&candidate.target) {
-                Ok(()) => removed.push(GcRemoval {
-                    worktree: candidate.worktree.clone(),
-                    target: candidate.target.clone(),
-                    bytes: candidate.bytes,
-                }),
+                Ok(()) => {
+                    if let Ok(volume) = target_volume {
+                        *reclaimed_volumes.entry(volume).or_default() += candidate.bytes;
+                    }
+                    removed.push(GcRemoval {
+                        worktree: candidate.worktree.clone(),
+                        target: candidate.target.clone(),
+                        bytes: candidate.bytes,
+                    });
+                }
                 Err(error) => failed.push(GcFailure {
                     worktree: candidate.worktree.clone(),
                     target: candidate.target.clone(),
                     reason: error.to_string(),
+                    // remove_dir_all may already have removed part of it.
+                    bytes: directory_size(&candidate.target),
                 }),
             }
         }
+        candidates.push(candidate);
     }
+    let reclaimable_bytes = candidates.iter().map(|c| c.bytes).sum();
     let reclaimed_bytes = removed.iter().map(|r| r.bytes).sum();
+    // Relieve pressure before walking caches that cannot be reclaimed.
+    for kept in &mut plan.kept[..initially_kept] {
+        kept.bytes = directory_size(&kept.worktree.join(BUILD_ARTIFACT_DIR));
+    }
+    let unreclaimed_by_reason = unreclaimed_reasons(&plan.kept, &failed);
+    let unreclaimed_bytes = unreclaimed_by_reason.iter().map(|entry| entry.bytes).sum();
     let coordinator_root = gwt_core::index_coordinator::coordinator_root();
-    let disk_space = crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]);
+    let disk_space = pressure_probe.map_or_else(
+        || crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]),
+        |probe| probe(),
+    );
+    if pressure_probe.is_some() {
+        pressure_volumes.extend(disk_space.low_volume_ids());
+    }
     Ok(GcReport {
         dry_run,
         base: base.to_string(),
         include_unmerged: options.include_unmerged,
         include_protected_workspaces: options.include_protected_workspaces,
-        candidates: plan.candidates,
+        candidates,
         kept: plan.kept,
         reclaimable_bytes,
         removed,
         failed,
         reclaimed_bytes,
+        unreclaimed_bytes,
+        unreclaimed_by_reason,
+        pressure_volumes,
+        reclaimed_volumes,
         disk_space,
+    })
+}
+
+pub(crate) fn kept_reason_category(reason: &str) -> String {
+    reason
+        .split([':', '('])
+        .next()
+        .unwrap_or(reason)
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn unreclaimed_reasons(
+    kept: &[GcKept],
+    failed: &[GcFailure],
+) -> Vec<GcUnreclaimedReason> {
+    let mut totals = BTreeMap::<String, (u64, usize)>::new();
+    for (reason, bytes) in kept
+        .iter()
+        .map(|entry| (kept_reason_category(&entry.reason), entry.bytes))
+        .chain(
+            failed
+                .iter()
+                .map(|entry| ("removal failed".to_string(), entry.bytes)),
+        )
+    {
+        let total = totals.entry(reason).or_default();
+        total.0 += bytes;
+        total.1 += 1;
+    }
+    let mut reasons: Vec<_> = totals
+        .into_iter()
+        .map(|(reason, (bytes, worktrees))| GcUnreclaimedReason {
+            reason,
+            bytes,
+            worktrees,
+        })
+        .collect();
+    reasons.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.reason.cmp(&b.reason)));
+    reasons
+}
+
+struct GcArtifactGuard {
+    _barrier: std::fs::File,
+    _target: super::verification_lease::BuildArtifactGuard,
+}
+
+enum GcArtifactAccess {
+    Available(GcArtifactGuard),
+    Busy(String),
+}
+
+/// Legacy/unknown verification owns the root exclusively; pooled verification
+/// owns its exact target. Neither may overlap the target deletion interval.
+fn try_lock_gc_build_artifacts(target: &Path) -> std::io::Result<GcArtifactAccess> {
+    let root = gwt_core::index_coordinator::verification_coordinator_root();
+    std::fs::create_dir_all(&root)?;
+    let barrier = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("heavy.lock"))?;
+    match fs2::FileExt::try_lock_shared(&barrier) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            // A live exclusive holder blocks the entire host, not 171
+            // independent target owners. Keep metadata as diagnostics only:
+            // even a stale ticket cannot authorize bypassing a physical lock.
+            let ticket_path = root.join("heavy.ticket.json");
+            let ticket = std::fs::read(&ticket_path).ok().and_then(|raw| {
+                serde_json::from_slice::<gwt_core::index_coordinator::Ticket>(&raw).ok()
+            });
+            let holder = ticket.map_or_else(
+                || "lease/PID unavailable (missing or unreadable ticket)".to_string(),
+                |ticket| {
+                    let alive = match crate::process::host_process_liveness(ticket.owner.pid) {
+                        Some(true) => "true",
+                        Some(false) => "false",
+                        None => "unknown",
+                    };
+                    format!(
+                        "lease_id={}; target={}; owner_pid={}; owner_start_id={}; owner_pid_alive={alive}",
+                        ticket.lease_id.as_deref().unwrap_or("unknown"),
+                        ticket.target,
+                        ticket.owner.pid,
+                        ticket.owner.start_id,
+                    )
+                },
+            );
+            return Ok(GcArtifactAccess::Busy(format!(
+                "build artifacts in use by legacy global verification barrier: kernel_lock=contended; lock={}; ticket={}; {holder}",
+                root.join("heavy.lock").display(), ticket_path.display()
+            )));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(match super::verification_lease::try_lock_build_artifacts(target)? {
+        Some(target_guard) => GcArtifactAccess::Available(GcArtifactGuard {
+            _barrier: barrier, _target: target_guard,
+        }),
+        None => GcArtifactAccess::Busy(format!(
+            "build artifacts in use by canonical verification or GC: target_lock=contended (kernel or process-local claim); target lock={}; target={}; owner_pid=unrecorded",
+            super::verification_lease::build_artifact_lock_path(target)?.display(), target.display()
+        )),
     })
 }
 
@@ -466,7 +715,12 @@ fn live_gwt_hosts(system: &System) -> BTreeMap<u32, u64> {
                 .unwrap_or_else(|| Path::new(process.name()).to_string_lossy());
             stem.eq_ignore_ascii_case(HOST_BINARY_STEM)
         })
-        .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            )
+        })
         .collect()
 }
 
@@ -504,6 +758,9 @@ fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<S
     if roots.is_empty() {
         return found;
     }
+    // Roots are canonical; Windows can report a process cwd through its
+    // short-name alias, which must still protect the same physical worktree.
+    let normalize = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let own_pid = std::process::id();
     for (pid, process) in system.processes() {
         let pid = pid.as_u32();
@@ -512,7 +769,11 @@ fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<S
         }
         let exe = process.exe();
         let cwd = process.cwd();
-        let Some(root) = attribute_worktree(cwd, exe, roots) else {
+        let normalized_exe = exe.map(normalize);
+        let normalized_cwd = cwd.map(normalize);
+        let Some(root) =
+            attribute_worktree(normalized_cwd.as_deref(), normalized_exe.as_deref(), roots)
+        else {
             continue;
         };
         let name = exe
@@ -1055,6 +1316,19 @@ mod tests {
     /// apply run, while the calling (main) worktree keeps its own.
     #[test]
     fn gc_reports_then_removes_a_merged_sibling_worktree_target() {
+        check_gc_verification_boundary(false);
+    }
+
+    #[test]
+    fn gc_keeps_target_when_legacy_verification_starts_after_snapshot() {
+        check_gc_verification_boundary(true);
+    }
+
+    fn check_gc_verification_boundary(legacy_exclusive: bool) {
+        // ScopedGwtHome is thread-local; Git still inherits the process PATH.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -1072,6 +1346,9 @@ mod tests {
             );
         };
         git(&repo, &["init", "-q", "-b", "develop"]);
+        // Fixture commits must not leave detached Git maintenance in the process census.
+        git(&repo, &["config", "maintenance.auto", "false"]);
+        git(&repo, &["config", "gc.auto", "0"]);
         git(&repo, &["config", "user.email", "t@example.com"]);
         git(&repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("README.md"), "x").expect("write");
@@ -1131,6 +1408,153 @@ mod tests {
         );
         assert!(report["disk_space"]["volumes"].is_array(), "{out}");
         assert!(sibling_target.join("blob.bin").is_file());
+
+        // A coordination I/O error makes the cache unavailable on this run.
+        let barrier =
+            gwt_core::index_coordinator::verification_coordinator_root().join("heavy.lock");
+        std::fs::remove_file(&barrier).expect("remove idle barrier");
+        std::fs::create_dir(&barrier).expect("unopenable barrier");
+        let failed =
+            run_gc(&repo, "develop", both_opt_ins(), true).expect("coordination error report");
+        assert_eq!(failed.failed.len(), 1, "{failed:?}");
+        assert_eq!(failed.unreclaimed_bytes, 4096, "{failed:?}");
+        assert_eq!(failed.reclaimable_bytes, 0, "{failed:?}");
+        std::fs::remove_dir(&barrier).expect("restore idle barrier path");
+
+        // #5082: the pressure probe runs after the process snapshot and plan.
+        // Start canonical verification there to exercise the deletion race
+        // without sleeps or a second planning implementation.
+        git(
+            &sibling,
+            &["commit", "-q", "--allow-empty", "-m", "unmerged"],
+        );
+        let verification = std::cell::RefCell::new(None);
+        let stale_ticket = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "target": "abandoned-verification",
+            "priority": gwt_core::index_coordinator::JobPriority::ManualRebuild,
+            "owner": { "pid": u32::MAX, "start_id": "dead-runner" },
+            "acquired_at_ms": 0,
+            "expires_at_ms": 1,
+            "lease_id": "expired-lease"
+        }))
+        .expect("stale ticket");
+        let pressure = || {
+            if verification.borrow().is_none() {
+                let guard = if legacy_exclusive {
+                    let coordinator =
+                        gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                            .expect("legacy coordinator");
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(coordinator.heavy_lock_path())
+                        .expect("legacy artifact barrier");
+                    fs2::FileExt::try_lock_exclusive(&file).expect("idle legacy lease");
+                    // A stale ticket must not override a physically held barrier.
+                    std::fs::write(coordinator.heavy_ticket_path(), &stale_ticket)
+                        .expect("stale marker under live kernel lock");
+                    (Some(file), None)
+                } else {
+                    (
+                        None,
+                        Some(
+                            crate::cli::verification_lease::try_lock_build_artifacts(
+                                &sibling.join(BUILD_ARTIFACT_DIR),
+                            )
+                            .expect("canonical artifact lock")
+                            .expect("idle target"),
+                        ),
+                    )
+                };
+                verification.replace(Some(guard));
+            }
+            crate::disk_space::probe_with(
+                &[sibling.as_path()],
+                crate::disk_space::DiskThresholds {
+                    below_bytes: u64::MAX,
+                    below_percent: 100,
+                },
+            )
+        };
+        let held = run_gc_with_pressure(
+            &repo,
+            "develop",
+            GcOptions::default(),
+            false,
+            Some(&pressure),
+        )
+        .expect("GC while canonical verification starts");
+        assert!(sibling_target.join("blob.bin").is_file(), "{held:?}");
+        assert!(held.candidates.is_empty(), "{held:?}");
+        assert!(held.removed.is_empty(), "{held:?}");
+        let held_json = serde_json::to_value(&held).expect("held report");
+        assert_eq!(held_json["unreclaimed_bytes"], 4096, "{held_json}");
+        assert!(
+            held_json["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["bytes"] == 4096)
+                .unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .contains(if legacy_exclusive {
+                    "legacy global verification barrier"
+                } else {
+                    "target lock"
+                }),
+            "{held_json}"
+        );
+        let unrelated_target = tmp.path().join("unrelated-target");
+        std::fs::create_dir_all(&unrelated_target).expect("unrelated target");
+        assert_eq!(
+            matches!(
+                try_lock_gc_build_artifacts(&unrelated_target).expect("unrelated lock"),
+                GcArtifactAccess::Available(_)
+            ),
+            !legacy_exclusive,
+            "target locks must not pin unrelated caches; the legacy barrier stays global"
+        );
+        if legacy_exclusive {
+            assert!(held
+                .kept
+                .iter()
+                .any(|entry| entry.reason.contains("owner_pid_alive=false")));
+        }
+        let canonical_sibling = dunce::canonicalize(&sibling).expect("canonical sibling");
+        assert!(
+            held.kept.iter().any(|kept| {
+                kept.worktree == canonical_sibling && kept.reason.contains("build artifacts in use")
+            }),
+            "{held:?}"
+        );
+
+        let dry = run_gc(&repo, "develop", both_opt_ins(), true).expect("held-target dry run");
+        assert!(dry.candidates.is_empty(), "{dry:?}");
+        assert_eq!(dry.reclaimable_bytes, 0, "{dry:?}");
+        assert!(dry.removed.is_empty(), "{dry:?}");
+        assert!(sibling_target.join("blob.bin").is_file());
+        // Explicit unlock also releases Unix fork/exec duplicates of this FD.
+        let guard = verification
+            .borrow_mut()
+            .take()
+            .expect("verification guard");
+        if let Some(legacy) = &guard.0 {
+            fs2::FileExt::unlock(legacy).expect("release verification lock");
+        }
+        drop(guard);
+        // Marker/ticket residue without a kernel owner must not pin the cache.
+        let coordinator =
+            gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                .expect("coordinator");
+        std::fs::write(coordinator.heavy_ticket_path(), &stale_ticket).expect("stale marker");
+        git(
+            &sibling,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
 
         let mut out = String::new();
         run(

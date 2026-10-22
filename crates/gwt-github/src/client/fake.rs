@@ -9,7 +9,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -17,7 +17,7 @@ use std::{
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueCloseReason,
-    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, LabelAssignment, MergedPullRequest,
     OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
     RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
     RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
@@ -32,6 +32,7 @@ pub struct FakeIssueClient {
     next_comment_id: Arc<AtomicU64>,
     next_owner_comment_id: Arc<AtomicU64>,
     clock: Arc<AtomicU64>,
+    rfc3339_timestamps: Arc<AtomicBool>,
     /// Failure-injection countdown for `create_comment`: `-1` disables the
     /// knob; `n >= 0` allows `n` more successful creates, then fails.
     fail_create_comment_after: Arc<std::sync::atomic::AtomicI64>,
@@ -46,6 +47,7 @@ pub struct FakeIssueClient {
 
 struct FakeState {
     issues: HashMap<IssueNumber, IssueSnapshot>,
+    label_assignments: HashMap<(IssueNumber, String), LabelAssignment>,
     /// Recorded call log for tests (operation + target).
     pub call_log: Vec<String>,
     owner_issues: HashMap<RepositoryIdentity, HashMap<IssueNumber, RepositoryIssue>>,
@@ -111,6 +113,7 @@ impl FakeIssueClient {
         FakeIssueClient {
             inner: Arc::new(Mutex::new(FakeState {
                 issues: HashMap::new(),
+                label_assignments: HashMap::new(),
                 call_log: Vec::new(),
                 owner_issues: HashMap::new(),
                 owner_comments: HashMap::new(),
@@ -130,10 +133,16 @@ impl FakeIssueClient {
             next_comment_id: Arc::new(AtomicU64::new(1)),
             next_owner_comment_id: Arc::new(AtomicU64::new(1)),
             clock: Arc::new(AtomicU64::new(1)),
+            rfc3339_timestamps: Arc::new(AtomicBool::new(false)),
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fail_next_issue_patch: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Opt into comparable revisions from a fixed logical epoch, without wall time.
+    pub fn use_rfc3339_timestamps(&self) {
+        self.rfc3339_timestamps.store(true, Ordering::SeqCst);
     }
 
     /// Failure injection: the next `patch_body` / `patch_title` /
@@ -169,6 +178,25 @@ impl FakeIssueClient {
     pub fn corrupt_next_create_comment(&self) {
         self.corrupt_next_create_comment
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Set or clear GitHub label provenance independently of the Issue snapshot.
+    pub fn set_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+        assignment: Option<LabelAssignment>,
+    ) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (number, label.to_ascii_lowercase());
+        if let Some(assignment) = assignment {
+            state.label_assignments.insert(key, assignment);
+        } else {
+            state.label_assignments.remove(&key);
+        }
     }
 
     /// Preload an Issue snapshot. Used by tests to set up fixtures.
@@ -413,6 +441,14 @@ impl FakeIssueClient {
 
     fn tick(&self) -> UpdatedAt {
         let next = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.rfc3339_timestamps.load(Ordering::SeqCst) {
+            let epoch = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+                .expect("fixed logical epoch");
+            return UpdatedAt(
+                (epoch + chrono::Duration::seconds(next as i64))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+        }
         UpdatedAt(format!("t{next}"))
     }
 
@@ -491,6 +527,24 @@ impl Default for FakeIssueClient {
 }
 
 impl IssueClient for FakeIssueClient {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .call_log
+            .push(format!("fetch_label_assignment:{}:{label}", number.0));
+        Ok(state
+            .label_assignments
+            .get(&(number, label.to_ascii_lowercase()))
+            .cloned())
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,
@@ -683,6 +737,7 @@ impl IssueClient for FakeIssueClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.record(&mut state, "create_issue", &number.to_string());
         let snapshot = IssueSnapshot {
+            author_login: None,
             number,
             title: title.to_string(),
             body: body.to_string(),

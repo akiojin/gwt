@@ -58,7 +58,61 @@ def _make_project(base: Path, docs: int) -> Path:
     return project
 
 
+class GenerationPublicationRetryTests(unittest.TestCase):
+    def test_windows_publication_waits_for_closed_sqlite_handles(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied, shared = PermissionError("closing SQLite"), PermissionError("sharing violation")
+        denied.winerror, shared.winerror = 5, 32
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=[denied, shared, None]
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            runner._replace_staging_generation(staging, target)
+        self.assertEqual(replace.call_args_list, [mock.call(staging, target)] * 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_permanent_windows_publication_failure_is_bounded(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        denied = PermissionError("original staging error")
+        denied.winerror = 5
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner.os, "replace", side_effect=denied
+        ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError) as caught:
+                runner._replace_staging_generation(staging, target)
+        self.assertIs(caught.exception, denied)
+        self.assertLessEqual(replace.call_count, 10)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 1.1)
+
+    def test_other_publication_errors_are_not_retried(self):
+        staging, target = Path("issues.staging"), Path("issues.gen/generation")
+        for platform, winerror in (("posix", 5), ("nt", 112), ("nt", None)):
+            with self.subTest(platform=platform, winerror=winerror):
+                error = OSError("original error")
+                error.winerror = winerror
+                with mock.patch.object(runner.os, "name", platform), mock.patch.object(
+                    runner.os, "replace", side_effect=error
+                ) as replace, mock.patch.object(runner.time, "sleep") as sleep:
+                    with self.assertRaises(OSError) as caught:
+                        runner._replace_staging_generation(staging, target)
+                self.assertIs(caught.exception, error)
+                replace.assert_called_once_with(staging, target)
+                sleep.assert_not_called()
+
+
 class GenerationStoreTests(unittest.TestCase):
+    def test_staging_count_error_never_publishes_an_empty_generation(self):
+        collection = mock.Mock()
+        collection.count.side_effect = RuntimeError("count unavailable")
+        with mock.patch.object(
+            runner, "_open_chroma_collection", return_value=(mock.Mock(), collection)
+        ), mock.patch.object(runner, "_publish_generation") as publish:
+            result = runner._finish_full_build(
+                self.base / "board", self.base / "board.staging", "board"
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["error_code"], "BUILD_VERIFY_FAILED")
+        publish.assert_not_called()
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._tmp = tempfile.TemporaryDirectory()
@@ -426,6 +480,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.repo = self.base / "repo"
         self.repo.mkdir()
         self._git("init", "--quiet", str(self.repo))
+        # Auto maintenance can detach and write objects/maintenance.lock after
+        # commit returns, racing TemporaryDirectory cleanup (Issue #5167).
+        self._git("-C", str(self.repo), "config", "maintenance.auto", "false")
+        self._git("-C", str(self.repo), "config", "gc.auto", "0")
         self._git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/develop")
         (self.repo / "src").mkdir()
         (self.repo / "docs").mkdir()
@@ -498,6 +556,21 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
             "-m",
             message,
         )
+
+    def test_fixture_commit_does_not_spawn_auto_maintenance(self):
+        trace = self.base / "git-trace.jsonl"
+        (self.repo / "src" / "feature.rs").write_text(
+            "fn feature_v2() {}\n", encoding="utf-8"
+        )
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            self._commit("fixture maintenance probe")
+        maintenance = [
+            event["argv"]
+            for line in trace.read_text(encoding="utf-8").splitlines()
+            if (event := json.loads(line)).get("event") == "child_start"
+            and event["argv"][1:2] in (["maintenance"], ["gc"])
+        ]
+        self.assertEqual(maintenance, [], "fixture commits must finish before cleanup")
 
     def _build(self, compatibility_descriptor=None) -> dict:
         return runner.action_index_files_v2(
@@ -1569,6 +1642,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertIs(result.get("superseded"), True, result)
         self.assertIs(result.get("published"), False, result)
+        status = runner._explicit_file_index_v2_status(
+            REPO_HASH, WORKTREE_HASH, self.db_root
+        )
+        self.assertIn("build_progress", status["files"])
         self.assertEqual(self._head_path().read_bytes(), old_head)
         self.assertGreater(
             len(set((self._worktree_root() / "overlays").iterdir())),

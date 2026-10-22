@@ -1,7 +1,4 @@
-use std::{
-    path::Path,
-    sync::{Mutex, OnceLock},
-};
+use std::path::Path;
 
 #[cfg(unix)]
 use std::{path::PathBuf, process::Output};
@@ -14,9 +11,31 @@ use gwt::{
 use gwt_agent::AgentId;
 use gwt_core::process::hidden_command;
 use gwt_skills::settings_local::{hook_bin_override, ScopedHookBin};
-use gwt_skills::CodexHookDiscoveryMode;
+use gwt_skills::{CodexHookDiscoveryMode, ManagedAssetTarget};
 use serde_json::Value;
 use tempfile::tempdir;
+
+/// Read the delivered router and its workflow references, rather than assuming
+/// that the operating contract lives entirely in SKILL.md.
+fn read_skill_contract(skill_path: &Path) -> String {
+    let router = std::fs::read_to_string(skill_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+    let mut contract = router.clone();
+    for link in router.split("](references/").skip(1) {
+        let relative = link.split(')').next().expect("reference link target");
+        let path = skill_path
+            .parent()
+            .expect("skill directory")
+            .join("references")
+            .join(relative);
+        contract.push('\n');
+        contract.push_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        );
+    }
+    contract
+}
 
 /// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
 /// session kind. Every materialization gets the single guidance including the
@@ -40,8 +59,7 @@ fn coordination_guidance_is_identical_for_all_session_kinds() {
         )
         .expect("materialize managed assets");
 
-        std::fs::read_to_string(dir.path().join(".claude/skills/gwt-coordination/SKILL.md"))
-            .expect("read coordination SKILL.md")
+        read_skill_contract(&dir.path().join(".claude/skills/gwt-coordination/SKILL.md"))
     }
 
     let intake = materialize_and_read(true);
@@ -242,8 +260,24 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         codex_coordination.exists(),
         "Codex gwt-coordination SKILL.md not generated at {codex_coordination:?}"
     );
-    let coordination_body =
-        std::fs::read_to_string(&claude_coordination).expect("read coordination skill");
+    assert_eq!(
+        std::fs::read_to_string(&claude_coordination).expect("read coordination skill"),
+        gwt_skills::coordination_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&codex_coordination).expect("read Codex coordination skill"),
+        gwt_skills::coordination_guidance::render_skill_md(ManagedAssetTarget::Codex)
+    );
+    let coordination_body = read_skill_contract(&claude_coordination);
+    assert_eq!(
+        coordination_body,
+        read_skill_contract(&codex_coordination),
+        "Claude and Codex must receive byte-identical coordination contracts"
+    );
+    assert!(
+        coordination_body.contains(r#""operation":"pane.name","params":{}"#),
+        "materialized guidance must read gwt's assigned name without an AI-generated candidate"
+    );
     assert!(
         coordination_body.contains("\"operation\":\"workspace.update\""),
         "coordination skill must contain canonical workspace.update JSON operation"
@@ -292,10 +326,11 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     );
     let codex_commands = json_commands(&codex_hooks);
     assert!(
-        codex_commands
-            .iter()
-            .any(|command| command.contains(&cli_bin_text)),
-        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
+        !codex_commands.is_empty()
+            && codex_commands
+                .iter()
+                .all(|command| command.contains("gwtd") && !command.contains(&cli_bin_text)),
+        "shared-root codex hooks must use portable gwtd\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         codex_commands.len(),
         codex_commands
             .iter()
@@ -435,7 +470,17 @@ fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hoo
         .iter()
         .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
         .collect::<Vec<_>>();
-    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, None);
+    // Shared-root Codex hooks use portable gwtd; other providers retain the pin.
+    let portable_hook_bin = stable_hook_bin.parent().unwrap().join("gwtd");
+    std::os::unix::fs::symlink(&stable_hook_bin, &portable_hook_bin)
+        .expect("expose stable hook bin as portable gwtd");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let audit_path = std::env::join_paths(
+        std::iter::once(portable_hook_bin.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose audit PATH");
+    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, Some(&audit_path));
     assert!(
         output.status.success(),
         "browser-check audit failed\nstdout:\n{}\nstderr:\n{}",
@@ -639,7 +684,7 @@ fn refresh_managed_assets_for_an_agent_without_a_surface_still_heals_existing_ta
         .expect("create stale claude skill dir");
     std::fs::write(&stale_claude_skill, "stale").expect("seed stale claude skill");
 
-    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Gemini)
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Copilot)
         .expect("refresh assets for an agent without a managed surface");
 
     assert!(
@@ -847,6 +892,82 @@ fn materialize_into_pm_worktree(
     worktree
 }
 
+fn gwt_skill_names(root: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(root)
+        .expect("read skill root")
+        .map(|entry| entry.expect("skill entry"))
+        .filter(|entry| entry.path().join("SKILL.md").is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("gwt-"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// SPEC #3431 P1/P2: inspect the files the PM actually receives, including
+/// refresh of a runtime that previously carried implementation entrypoints.
+#[test]
+fn pm_runtime_receives_only_role_skills_and_their_command_aliases() {
+    let expected = [
+        "gwt-agent",
+        "gwt-coordination",
+        "gwt-discussion",
+        "gwt-feedback",
+        "gwt-issue-search",
+        "gwt-plan-spec",
+        "gwt-pm",
+        "gwt-project-search",
+        "gwt-register-issue",
+        "gwt-register-spec",
+        "gwt-search",
+        "gwt-spec-search",
+    ];
+    for (agent, provider) in [
+        (AgentId::ClaudeCode, ".claude"),
+        (AgentId::Codex, ".codex"),
+        (AgentId::GrokBuild, ".claude"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |worktree| {
+            let runtime = worktree.parent().unwrap().join("runtime");
+            for relative in [
+                format!("{provider}/skills/gwt-execute/SKILL.md"),
+                format!("{provider}/skills/user-skill/SKILL.md"),
+                ".claude/commands/gwt-execute.md".to_string(),
+            ] {
+                let path = runtime.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "preserved user content or stale entrypoint").unwrap();
+            }
+        });
+        let runtime = worktree.parent().unwrap().join("runtime");
+        let skills = runtime.join(provider).join("skills");
+        assert_eq!(gwt_skill_names(&skills), expected, "{agent:?}");
+        assert_eq!(
+            std::fs::read_to_string(skills.join("user-skill/SKILL.md")).unwrap(),
+            "preserved user content or stale entrypoint"
+        );
+        for name in expected {
+            read_skill_contract(&skills.join(name).join("SKILL.md"));
+        }
+        let planning =
+            std::fs::read_to_string(skills.join("gwt-plan-spec/references/task-decomposition.md"))
+                .unwrap();
+        assert!(!planning.contains("`gwt-verify`'s `references/test-matrix.md`"));
+        if provider == ".claude" {
+            let commands = runtime.join(".claude/commands");
+            assert!(!commands.join("gwt-execute.md").exists());
+            assert!(commands.join("gwt-plan-spec.md").is_file());
+            for entry in std::fs::read_dir(commands).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let name = path.file_stem().unwrap().to_str().unwrap();
+                assert!(!name.starts_with("gwt-") || expected.contains(&name));
+            }
+        }
+    }
+}
+
 /// SPEC-3431 FR-001 / T-052 regression: the `$gwt-pm` bootstrap prompt only
 /// resolves if the gwt-pm skill survives the launch's own asset refresh.
 ///
@@ -871,7 +992,10 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
             .join(".claude/skills/gwt-pm/SKILL.md"),
     )
     .expect("gwt-pm skill must survive distribution");
-    assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
+    assert_eq!(
+        skill,
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
+    );
 }
 
 /// The resume path never pre-writes the skill, and a binary upgrade must not
@@ -888,10 +1012,18 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         .join(".claude/skills/gwt-pm/SKILL.md");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
-        gwt_skills::pm_guidance::render_skill_md()
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
     );
+    let original_contract = read_skill_contract(&path);
 
-    std::fs::write(&path, "stale contract").expect("tamper");
+    for leaf in gwt_skills::pm_guidance::managed_paths(
+        &worktree.parent().unwrap().join("runtime/.claude/skills"),
+    )
+    .into_iter()
+    .filter(|leaf| leaf.is_file())
+    {
+        std::fs::write(&leaf, "stale contract").expect("tamper generated contract leaf");
+    }
     let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
     let _cli_bin_guard = ScopedHookBin::set(home.path().join("bin/gwtd"));
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
@@ -903,8 +1035,13 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     .expect("re-materialize");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance restored"),
-        gwt_skills::pm_guidance::render_skill_md(),
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode),
         "a tampered or stale contract must be rewritten from the canonical source"
+    );
+    assert_eq!(
+        read_skill_contract(&path),
+        original_contract,
+        "re-materialization must restore every workflow reference too"
     );
 }
 
@@ -915,34 +1052,57 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
 /// cycle may block.
 #[test]
 fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
-    let canonical = gwt_skills::pm_guidance::render_skill_md();
+    let mut first_contract = None;
 
-    for (agent, mirror) in [
-        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
-        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    for (agent, target, mirror) in [
+        (
+            AgentId::ClaudeCode,
+            ManagedAssetTarget::ClaudeCode,
+            ".claude/skills/gwt-pm/SKILL.md",
+        ),
+        (
+            AgentId::Codex,
+            ManagedAssetTarget::Codex,
+            ".codex/skills/gwt-pm/SKILL.md",
+        ),
     ] {
+        let canonical = gwt_skills::pm_guidance::render_skill_md(target);
         let home = tempdir().expect("tempdir");
         let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
-        let rendered =
-            std::fs::read_to_string(worktree.parent().unwrap().join("runtime").join(mirror))
-                .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        let skill_path = worktree.parent().unwrap().join("runtime").join(mirror);
+        let rendered = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
         assert_eq!(
             rendered, canonical,
             "{mirror} must be the canonical pm_guidance source verbatim"
         );
+        let contract = read_skill_contract(&skill_path);
+        if let Some(first) = &first_contract {
+            assert_eq!(
+                &contract, first,
+                "Claude and Codex must receive byte-identical PM workflow references"
+            );
+        } else {
+            first_contract = Some(contract.clone());
+        }
+        let normalized = contract.split_whitespace().collect::<Vec<_>>().join(" ");
         for phrase in [
             "`params.timeout_seconds:5`",
             "as a background task",
             "Do not await or synchronously poll it",
             "outer wall-clock deadline of 5 seconds",
+            "Never run `pane.send`",
+            "Provider approval prompts may be forwarded or answered only with explicit applicable instruction or approval scoped to the actual target and action",
+            "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane",
+            "For an authorized response, use `pm.operation.execute` with `operation:\"pm.message.send\"` and the exact target `id` and response `text` in `params`. `pane.send` remains forbidden",
         ] {
             assert!(
-                rendered.contains(phrase),
-                "{mirror} must carry the nonblocking resident loop: {phrase}"
+                normalized.contains(phrase),
+                "{mirror} must carry the resident loop and PM safety boundaries: {phrase}"
             );
         }
         assert!(
-            !rendered.contains("`params.timeout_seconds:60`"),
+            !contract.contains("`params.timeout_seconds:60`"),
             "{mirror} must not restore the 60-second blocking subscribe"
         );
     }
@@ -954,21 +1114,15 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
 fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
     let home = tempdir().expect("tempdir");
     let worktree = materialize_into_pm_worktree(home.path(), &AgentId::Codex, |_| {});
-    assert!(worktree
-        .parent()
-        .unwrap()
-        .join("runtime")
-        .join(".codex/skills/gwt-pm/SKILL.md")
-        .exists());
-    assert!(
-        !worktree
-            .parent()
-            .unwrap()
-            .join("runtime")
-            .join(".claude/skills/gwt-pm/SKILL.md")
-            .exists(),
-        "a Codex-only target must not write the Claude mirror"
-    );
+    let runtime = worktree.parent().unwrap().join("runtime");
+    read_skill_contract(&runtime.join(".codex/skills/gwt-pm/SKILL.md"));
+    for path in gwt_skills::pm_guidance::managed_paths(&runtime.join(".claude/skills")) {
+        assert!(
+            !path.exists(),
+            "a Codex-only target must not write the Claude mirror: {}",
+            path.display()
+        );
+    }
 }
 
 /// SPEC-3431 FR-122 / T-484: Grok consumes the existing Claude-compatible
@@ -1050,6 +1204,32 @@ fn non_pm_worktree_never_receives_gwt_pm_guidance() {
 
     assert!(!dir.path().join(".claude/skills/gwt-pm").exists());
     assert!(!dir.path().join(".codex/skills/gwt-pm").exists());
+    for provider in [".claude", ".codex"] {
+        assert_eq!(
+            gwt_skill_names(&dir.path().join(provider).join("skills")),
+            [
+                "gwt-agent",
+                "gwt-arch-review",
+                "gwt-build-spec",
+                "gwt-coordination",
+                "gwt-discussion",
+                "gwt-execute",
+                "gwt-feedback",
+                "gwt-fix-issue",
+                "gwt-issue-search",
+                "gwt-manage-pr",
+                "gwt-memory-search",
+                "gwt-plan-spec",
+                "gwt-project-index",
+                "gwt-project-search",
+                "gwt-register-issue",
+                "gwt-register-spec",
+                "gwt-search",
+                "gwt-spec-search",
+                "gwt-verify",
+            ]
+        );
+    }
 }
 
 /// #4057 regression: two materializations running at the same time on
@@ -1120,8 +1300,7 @@ fn run_git(repo: &Path, args: &[&str]) {
 fn browser_check_shell_block(name: &str) -> String {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
-    let skill = std::fs::read_to_string(&skill_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+    let skill = read_skill_contract(&skill_path);
     let begin = format!("# browser-check-{name}-begin");
     let end = format!("# browser-check-{name}-end");
     let body = skill
@@ -1144,7 +1323,7 @@ fn run_browser_check_hook_audit(
     path: Option<&std::ffi::OsStr>,
 ) -> Output {
     let script = format!(
-        "{}\n{}",
+        "test \"$HOME\" = \"$CHECK_HOME\" && test \"$USERPROFILE\" = \"$CHECK_HOME\" || exit 90\n{}\n{}",
         browser_check_shell_block("hook-authority"),
         browser_check_shell_block("hook-audit")
     );
@@ -1154,6 +1333,8 @@ fn run_browser_check_hook_audit(
         .current_dir(worktree)
         .env("REPO_ROOT", worktree)
         .env("CHECK_HOME", worktree)
+        .env("HOME", worktree)
+        .env("USERPROFILE", worktree)
         .env("CHECKOUT_GWTD", env!("CARGO_BIN_EXE_gwtd"))
         .env("GWT_HOOK_BIN", expected_hook_bin)
         .env("GWT_BIN_PATH", "/ambient/stale/target/debug/gwtd")
@@ -1168,9 +1349,8 @@ fn run_browser_check_hook_audit(
     command.output().expect("run browser-check hook audit")
 }
 
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1182,7 +1362,10 @@ fn json_commands(raw: &str) -> Vec<String> {
         match value {
             Value::Object(map) => {
                 if let Some(command) = map.get("command").and_then(Value::as_str) {
-                    out.push(command.to_string());
+                    out.push(
+                        gwt_skills::decode_powershell_encoded_command(command)
+                            .unwrap_or_else(|| command.to_string()),
+                    );
                 }
                 for value in map.values() {
                     collect(value, out);

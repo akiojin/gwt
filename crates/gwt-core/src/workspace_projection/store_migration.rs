@@ -48,6 +48,11 @@ use crate::{
     workspace_projection::load_workspace_work_items_from_path,
 };
 
+use super::persistence::{
+    container_detachments_path, load_container_detachments, merge_container_detachments,
+    WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR,
+};
+
 /// Schema version of [`QuarantineManifest`].
 pub const QUARANTINE_MANIFEST_VERSION: u32 = 1;
 
@@ -203,6 +208,76 @@ pub enum StoreConsolidationOutcome {
         /// Work items in the rebuilt canonical projection.
         work_item_count: usize,
     },
+}
+
+/// Existing path-keyed stores for this repository, without loading or hashing
+/// their Work projections. Ordinary Workspace operations use this bounded
+/// presence check so a large or corrupt legacy store cannot hide the split.
+pub fn split_project_store_paths(project_root: &Path) -> Vec<PathBuf> {
+    let Some(identity) = detect_repo_identity(project_root) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    split_candidate_roots(project_root)
+        .into_iter()
+        .filter_map(|root| {
+            let hash = compute_path_hash(&root);
+            let store = gwt_project_dir(&hash);
+            // A past quarantine does not cover a store an old writer recreated.
+            (hash != identity.hash && seen.insert(hash.as_str().to_string()) && store.is_dir())
+                .then_some(store)
+        })
+        .collect()
+}
+
+/// Collect only empty atomic-writer residue whose PID is demonstrably gone.
+/// An unavailable liveness probe retains the file, as do live/recycled PIDs,
+/// nonempty files, symlinks and names outside the coordinator writer contract.
+pub fn cleanup_abandoned_workspace_transaction_temps(
+    process_liveness: impl Fn(u32) -> Option<bool>,
+) -> std::io::Result<usize> {
+    let directory = crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(transaction_temp_writer_pid) else {
+            continue;
+        };
+        // Inspect the contents only after the writer is gone: it may finish
+        // writing between an earlier metadata read and the liveness probe.
+        if process_liveness(pid) != Some(false) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() || metadata.len() != 0 {
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
+fn transaction_temp_writer_pid(name: &str) -> Option<u32> {
+    let (transaction_id, writer) = name.strip_prefix('.')?.split_once(".json.tmp-")?;
+    uuid::Uuid::parse_str(transaction_id).ok()?;
+    let (pid, nonce) = writer.split_once('-')?;
+    uuid::Uuid::parse_str(nonce).ok()?;
+    pid.parse::<u32>().ok().filter(|pid| *pid != 0)
 }
 
 /// Dry run: report every orphaned store for `project_root` without writing.
@@ -368,7 +443,8 @@ pub fn apply_store_consolidation(
     }
 
     let canonical_works = gwt_project_state_works_path(&confirmed.canonical_hash);
-    let works_snapshot = fs::read(&canonical_works).ok();
+    let works_snapshot = read_optional_bytes(&canonical_works)?;
+    let detachments_snapshot = read_optional_bytes(&container_detachments_path(&canonical_works))?;
     let mut moved: Vec<MovedStore> = Vec::new();
 
     leases.release_source_leases_before_move();
@@ -386,7 +462,12 @@ pub fn apply_store_consolidation(
             work_item_count,
         }),
         Err(error) => {
-            rollback(&canonical_works, works_snapshot.as_deref(), &moved);
+            rollback(
+                &canonical_works,
+                works_snapshot.as_deref(),
+                detachments_snapshot.as_deref(),
+                &moved,
+            );
             Err(error)
         }
     }
@@ -477,6 +558,10 @@ fn inspect_store(
 ) -> ConsolidationResult<OrphanedStore> {
     let works_path = gwt_project_state_works_path(source_hash);
     let works_bytes = read_optional_bytes(&works_path)?;
+    let detachments_bytes = read_optional_bytes(&container_detachments_path(&works_path))?;
+    load_container_detachments(&works_path).map_err(|error| {
+        NeedsHuman::new(StoreConsolidationRefusal::CorruptInput, error.to_string())
+    })?;
     let work_item_count = if works_bytes.is_some() {
         load_workspace_work_items_from_path(&works_path)
             .map_err(|error| {
@@ -511,7 +596,14 @@ fn inspect_store(
         store_dir,
         work_item_count,
         work_event_count,
-        revision: content_revision(works_bytes.as_deref()),
+        revision: match detachments_bytes.as_deref() {
+            Some(bytes) => format!(
+                "{}:{}",
+                content_revision(works_bytes.as_deref()),
+                content_revision(Some(bytes))
+            ),
+            None => content_revision(works_bytes.as_deref()),
+        },
     })
 }
 
@@ -631,6 +723,9 @@ fn rebuild_canonical_projection(
     let mut legacy_items = Vec::new();
     for entry in moved {
         let orphan_works = entry.quarantined.join("project-state").join("works.json");
+        merge_container_detachments(canonical_works, &orphan_works).map_err(|error| {
+            NeedsHuman::new(StoreConsolidationRefusal::CorruptInput, error.to_string())
+        })?;
         let Some(projection) = load_store_projection(&orphan_works)? else {
             continue;
         };
@@ -750,7 +845,12 @@ fn load_store_projection(
     })
 }
 
-fn rollback(canonical_works: &Path, snapshot: Option<&[u8]>, moved: &[MovedStore]) {
+fn rollback(
+    canonical_works: &Path,
+    snapshot: Option<&[u8]>,
+    detachments_snapshot: Option<&[u8]>,
+    moved: &[MovedStore],
+) {
     for entry in moved {
         clear_read_only(&entry.manifest);
         let _ = fs::remove_file(&entry.manifest);
@@ -758,12 +858,20 @@ fn rollback(canonical_works: &Path, snapshot: Option<&[u8]>, moved: &[MovedStore
             let _ = fs::rename(&entry.quarantined, &entry.source);
         }
     }
-    match snapshot {
-        Some(bytes) => {
-            let _ = fs::write(canonical_works, bytes);
-        }
-        None => {
-            let _ = fs::remove_file(canonical_works);
+    for (path, snapshot) in [
+        (canonical_works, snapshot),
+        (
+            container_detachments_path(canonical_works).as_path(),
+            detachments_snapshot,
+        ),
+    ] {
+        match snapshot {
+            Some(bytes) => {
+                let _ = fs::write(path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }
@@ -948,3 +1056,7 @@ fn clear_read_only(path: &Path) {
         let _ = fs::set_permissions(path, permissions);
     }
 }
+
+#[cfg(test)]
+#[path = "store_migration_tests.rs"]
+mod tests;

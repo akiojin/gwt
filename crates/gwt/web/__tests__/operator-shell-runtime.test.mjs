@@ -4,11 +4,114 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
+
+test("runtime health batches a frame into the same latest immutable cell and detail snapshot", async () => {
+  const { subscribeRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof subscribeRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const unsubscribe = subscribeRuntimeHealth(document, model);
+  const cell = document.getElementById("op-strip-runtime-health-value");
+  const initial = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 40, processes: [] }));
+  const payload = { state: "hot", cpu_percent: 80, memory_bytes: 1024 ** 3,
+    processes: [{ pid: 7, name: "original", cpu_percent: 80, memory_bytes: 1024 ** 3 }] };
+  model.update(() => payload);
+  const previous = model.read();
+  assert.equal(previous.cpu_percent, 80, "model reads stay synchronous");
+  assert.equal(cell.textContent, initial, "updates must wait for the display frame");
+  assert.equal(frames.size, 1, "a burst schedules only one display frame");
+  const flush = () => {
+    const callbacks = [...frames];
+    frames.clear();
+    callbacks.forEach(callback => callback());
+  };
+  payload.processes[0].name = "mutated";
+  payload.cpu_percent = 5;
+  flush();
+  const detail = document.getElementById("op-runtime-health-detail");
+  detail.querySelector('[data-sort="cpu"]')?.dispatchEvent(new window.Event("click"));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  assert.match(detail.textContent, /original/);
+  assert.doesNotMatch(detail.textContent, /mutated/);
+  assert.equal(previous.processes[0].name, "original");
+  model.update(() => ({ state: "ok", cpu_percent: 5, processes: [] }));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  flush();
+  assert.match(cell.textContent, /^OK 5%/);
+  assert.doesNotMatch(detail.textContent, /original/);
+  assert.equal(previous.cpu_percent, 80);
+  const last = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 50 }));
+  assert.equal(frames.size, 1);
+  const cancelled = [...frames][0];
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending display frame");
+  cancelled();
+  model.update(() => ({ state: "hot", cpu_percent: 90 }));
+  assert.equal(cell.textContent, last);
+  assert.equal(frames.size, 0);
+});
+
+test("clock uses second boundaries and cancels all work while hidden", async () => {
+  const { wireStatusStripClock } = await importOperatorShell();
+  const { document, window } = parseHTML('<span id="op-strip-clock"></span>');
+  window.matchMedia = () => ({ matches: false });
+  Object.defineProperty(document, "hidden", { configurable: true, writable: true, value: false });
+  let now = new Date(2026, 0, 1, 12, 34, 56, 250).getTime();
+  let nextId = 0;
+  const timers = new Map();
+  const win = {
+    Date: class extends Date { constructor() { super(now); } },
+    setTimeout(callback, delay) { const id = ++nextId; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    requestAnimationFrame() { assert.fail("clock must not request animation frames"); },
+  };
+  const originalFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = win.requestAnimationFrame;
+  try {
+    wireStatusStripClock({ doc: document, win });
+  } finally {
+    globalThis.requestAnimationFrame = originalFrame;
+  }
+  const clock = document.getElementById("op-strip-clock");
+  assert.equal(clock.textContent, "12:34:56");
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 750);
+  const fire = () => {
+    const [id, timer] = [...timers.entries()][0];
+    timers.delete(id);
+    timer.callback();
+  };
+  now += 768; // A late callback must align the next tick again.
+  fire();
+  assert.equal(clock.textContent, "12:34:57");
+  assert.equal([...timers.values()][0].delay, 982);
+  document.hidden = true;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(timers.size, 0);
+  now += 6000;
+  assert.equal(clock.textContent, "12:34:57");
+  document.hidden = false;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(clock.textContent, "12:35:03");
+  assert.equal(timers.size, 1);
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(timers.size, 1, "repeated visibility events must not duplicate timers");
+  document.hidden = true;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  wireStatusStripClock({ doc: document, win });
+  assert.equal(timers.size, 0, "initially hidden clocks must schedule no work");
+});
 
 test("Operator shell fails open when browser storage and media APIs are unavailable", async () => {
   const { initOperatorShell } = await importOperatorShell();
@@ -18,6 +121,8 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
 
   const brokenWindow = {
     ...window,
+    setTimeout: () => 0,
+    clearTimeout() {},
     localStorage: throwingStorage(),
     sessionStorage: throwingStorage(),
     matchMedia: () => {
@@ -46,6 +151,8 @@ test("Operator shell keeps the Command Rail always visible with no reveal state 
   storage.setItem("gwt:ui:window-controls", "hidden");
   const testWindow = {
     ...window,
+    setTimeout: () => 0,
+    clearTimeout() {},
     localStorage: storage,
     sessionStorage: memoryStorage(),
     matchMedia: () => ({

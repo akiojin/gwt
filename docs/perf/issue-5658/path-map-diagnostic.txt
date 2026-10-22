@@ -1,0 +1,10 @@
+probe_pid=8688 keys=5698 expected_sum=17136002 mean_key_units=151.87 root="\\\\?\\E:\\gwt\\work\\issue-5658\\target\\issue-5658-home-9d0cb3721c774a6abf7fa54f4197330d\\.gwt\\sessions\\runtime"
+phase=btree_lookup iterations=20 wall_ms=1063.443 cpu_ms=984.375 sum=342720040
+phase=hash_lookup iterations=20 wall_ms=358.535 cpu_ms=281.250 sum=342720040
+phase=btree_lookup_mutex_per_key iterations=20 wall_ms=1312.590 cpu_ms=1093.750 sum=342720040
+phase=hash_lookup_mutex_per_key iterations=20 wall_ms=1505.123 cpu_ms=234.375 sum=342720040
+phase=btree_seen_prune iterations=20 wall_ms=1204.095 cpu_ms=859.375 sum=113960
+phase=hash_seen_prune iterations=20 wall_ms=517.557 cpu_ms=453.125 sum=113960
+phase=btree_delete_reinsert iterations=20 wall_ms=109.340 cpu_ms=109.375 sum=342720040
+phase=hash_delete_reinsert iterations=20 wall_ms=28.683 cpu_ms=31.250 sum=342720040
+identical_values_after_lookup_prune_delete_reinsert=true

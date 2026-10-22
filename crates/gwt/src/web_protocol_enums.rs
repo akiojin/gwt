@@ -26,7 +26,7 @@ use gwt_core::workspace_projection::{
 
 /// Every [`WindowState`] variant in wire order.
 /// Guarded by `all_window_runtime_states_is_exhaustive`.
-fn all_window_runtime_states() -> [WindowState; 6] {
+fn all_window_runtime_states() -> [WindowState; 7] {
     [
         WindowState::Running,
         WindowState::Starting,
@@ -34,6 +34,7 @@ fn all_window_runtime_states() -> [WindowState; 6] {
         WindowState::Waiting,
         WindowState::Stopped,
         WindowState::Error,
+        WindowState::Interrupted,
     ]
 }
 
@@ -161,7 +162,8 @@ mod tests {
                 | WindowState::Idle
                 | WindowState::Waiting
                 | WindowState::Stopped
-                | WindowState::Error => {}
+                | WindowState::Error
+                | WindowState::Interrupted => {}
             }
         }
         assert_unique(&wire_values(&all_window_runtime_states()));

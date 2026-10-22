@@ -39,6 +39,11 @@ pub enum HooksError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// #4486 AC-6: a filesystem failure that names its route and its path, so
+    /// the reason reaching `worktree_freshness.failure_reason` says what to fix.
+    #[error(transparent)]
+    Asset(#[from] crate::asset_io::AssetIoError),
+
     #[error("JSON parse error: {0}")]
     Parse(#[from] serde_json::Error),
 
@@ -148,7 +153,7 @@ fn backup_candidates_for(path: &Path) -> Vec<PathBuf> {
 fn load_backup_config(path: &Path) -> Result<Option<HooksConfig>, HooksError> {
     for candidate in backup_candidates_for(path) {
         if candidate.exists() {
-            let content = std::fs::read_to_string(&candidate)?;
+            let content = crate::asset_io::read_to_string(&candidate)?;
             if let Some(config) = try_parse_config(&content) {
                 return Ok(Some(config));
             }
@@ -165,7 +170,14 @@ fn acquire_lock(path: &Path) -> Result<std::fs::File, HooksError> {
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&lock_path)?;
+        .open(&lock_path)
+        .map_err(|source| {
+            crate::asset_io::AssetIoError::new(
+                crate::asset_io::AssetRoute::Write,
+                &lock_path,
+                source,
+            )
+        })?;
     match file.try_lock_exclusive() {
         Ok(_) => Ok(file),
         Err(_) => Err(HooksError::LockUnavailable(lock_path)),
@@ -180,8 +192,8 @@ pub fn backup_hooks(path: &Path) -> Result<PathBuf, HooksError> {
     let timestamped = timestamped_backup_path_for(&target);
     let stable = backup_path_for(&target);
 
-    std::fs::copy(&target, &timestamped)?;
-    std::fs::copy(&target, &stable)?;
+    crate::asset_io::backup(&target, &timestamped)?;
+    crate::asset_io::backup(&target, &stable)?;
 
     Ok(timestamped)
 }
@@ -191,7 +203,15 @@ pub fn restore_from_backup(path: &Path) -> Result<(), HooksError> {
     let target = resolved_hooks_path(path);
     for candidate in backup_candidates_for(&target) {
         if candidate.exists() {
-            std::fs::copy(&candidate, &target)?;
+            // Restoring writes the target; the path a reader must act on is
+            // the target, not the backup that was readable.
+            std::fs::copy(&candidate, &target).map_err(|source| {
+                crate::asset_io::AssetIoError::new(
+                    crate::asset_io::AssetRoute::Write,
+                    &target,
+                    source,
+                )
+            })?;
             return Ok(());
         }
     }
@@ -218,8 +238,8 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
     let _lock = acquire_lock(&target)?;
 
     let existing = if path.exists() || target.exists() {
-        let content =
-            std::fs::read_to_string(path).or_else(|_| std::fs::read_to_string(&target))?;
+        let content = crate::asset_io::read_to_string(path)
+            .or_else(|_| crate::asset_io::read_to_string(&target))?;
         if content.trim().is_empty() {
             load_backup_config(&target)?.unwrap_or_default()
         } else if let Some(config) = try_parse_config(&content) {
@@ -249,11 +269,18 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
     ));
     let json = serde_json::to_string_pretty(&new_config)?;
     {
-        let mut tmp = std::fs::File::create(&tmp_path)?;
-        tmp.write_all(json.as_bytes())?;
-        tmp.sync_all()?;
+        let write = |source| {
+            crate::asset_io::AssetIoError::new(
+                crate::asset_io::AssetRoute::Write,
+                &tmp_path,
+                source,
+            )
+        };
+        let mut tmp = std::fs::File::create(&tmp_path).map_err(write)?;
+        tmp.write_all(json.as_bytes()).map_err(write)?;
+        tmp.sync_all().map_err(write)?;
     }
-    std::fs::rename(&tmp_path, &target)?;
+    crate::asset_io::rename(&tmp_path, &target)?;
 
     Ok(())
 }

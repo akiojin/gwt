@@ -70,17 +70,71 @@ pub(crate) enum HookAgentSessionId {
 /// Raw Claude Code / Codex hook payload. Fields are optional only at this
 /// boundary so malformed provider payloads can still be parsed and logged.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawHookEventWire")]
 pub(crate) struct RawHookEvent {
-    #[serde(alias = "toolName")]
     tool_name: Option<String>,
-    #[serde(alias = "toolInput")]
     tool_input: Option<serde_json::Value>,
-    #[serde(alias = "sessionId")]
     session_id: Option<String>,
-    #[serde(alias = "transcriptPath")]
     transcript_path: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
+    active_skill: Option<String>,
+    active_plugin: Option<String>,
+}
+
+/// Wire shape that accepts each field under its snake_case and camelCase
+/// spelling as separate keys. Grok Build sends both spellings in one payload
+/// (Issue #4768), which a `#[serde(alias)]` rejects as a duplicate field.
+/// The snake_case (Claude-compatible) value wins; a key repeated under the
+/// same spelling and type mismatches stay fail-closed.
+#[derive(Deserialize)]
+struct RawHookEventWire {
+    tool_name: Option<String>,
+    #[serde(rename = "toolName")]
+    tool_name_camel: Option<String>,
+    tool_input: Option<serde_json::Value>,
+    #[serde(rename = "toolInput")]
+    tool_input_camel: Option<serde_json::Value>,
+    session_id: Option<String>,
+    #[serde(rename = "sessionId")]
+    session_id_camel: Option<String>,
+    transcript_path: Option<String>,
+    #[serde(rename = "transcriptPath")]
+    transcript_path_camel: Option<String>,
+    prompt: Option<String>,
+    cwd: Option<String>,
+    // Advisory metadata is optional even when a provider cannot describe it.
+    active_skill: Option<serde_json::Value>,
+    #[serde(rename = "activeSkill")]
+    active_skill_camel: Option<serde_json::Value>,
+    active_plugin: Option<serde_json::Value>,
+    #[serde(rename = "activePlugin")]
+    active_plugin_camel: Option<serde_json::Value>,
+}
+
+impl From<RawHookEventWire> for RawHookEvent {
+    fn from(wire: RawHookEventWire) -> Self {
+        Self {
+            tool_name: wire.tool_name.or(wire.tool_name_camel),
+            tool_input: wire.tool_input.or(wire.tool_input_camel),
+            session_id: wire.session_id.or(wire.session_id_camel),
+            transcript_path: wire.transcript_path.or(wire.transcript_path_camel),
+            prompt: wire.prompt,
+            cwd: wire.cwd,
+            active_skill: advisory_string(wire.active_skill.or(wire.active_skill_camel)),
+            active_plugin: advisory_string(wire.active_plugin.or(wire.active_plugin_camel)),
+        }
+    }
+}
+
+fn advisory_string(value: Option<serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 impl RawHookEvent {
@@ -115,6 +169,8 @@ impl From<RawHookEvent> for HookEvent {
             tool_input: raw.tool_input,
             transcript_path: raw.transcript_path,
             cwd: raw.cwd,
+            active_skill: raw.active_skill,
+            active_plugin: raw.active_plugin,
         }
     }
 }
@@ -206,7 +262,44 @@ mod tests {
             transcript_path: None,
             prompt: None,
             cwd: None,
+            active_skill: None,
+            active_plugin: None,
         }
+    }
+
+    #[test]
+    fn raw_hook_event_accepts_both_key_spellings_and_prefers_snake_case() {
+        let raw = RawHookEvent::read_from_str(
+            r#"{"sessionId":"camel","session_id":"snake","toolName":"run_command","tool_name":"Bash","transcriptPath":"/c","transcript_path":"/s"}"#,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(raw.session_id().unwrap().as_str(), "snake");
+        assert_eq!(raw.tool_name(), Some("Bash"));
+        assert_eq!(raw.transcript_path.as_deref(), Some("/s"));
+    }
+
+    #[test]
+    fn raw_hook_event_falls_back_to_camel_case_spelling() {
+        let raw = RawHookEvent::read_from_str(r#"{"sessionId":"camel","toolName":"Read"}"#)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(raw.session_id().unwrap().as_str(), "camel");
+        assert_eq!(raw.tool_name(), Some("Read"));
+    }
+
+    #[test]
+    fn raw_hook_event_still_rejects_a_repeated_key_and_a_type_mismatch() {
+        let repeated = RawHookEvent::read_from_str(r#"{"session_id":"a","session_id":"b"}"#);
+        assert!(repeated
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate field `session_id`"));
+
+        let mismatch = RawHookEvent::read_from_str(r#"{"sessionId":42}"#);
+        assert!(mismatch.unwrap_err().to_string().contains("invalid type"));
     }
 
     #[test]

@@ -1,0 +1,38 @@
+{
+  "project": "E:\\gwt\\work\\issue-5500",
+  "binary": "E:\\gwt\\work\\issue-5500\\target\\debug\\gwt.exe",
+  "binary_sha256": "994100DD2DA26B41548DD98FDA6E72F296851F85557CF5966C12CFC454FE89E4",
+  "pid": 40780,
+  "tid": 12320,
+  "thread_name": "gwt-agent-capacity",
+  "started_at": "2026-10-15T14:39:56.2664236Z",
+  "elapsed_seconds": 60.3365749,
+  "total_processor_time_before_seconds": 0.0,
+  "total_processor_time_after_seconds": 0.703125,
+  "cpu_seconds": 0.703125,
+  "average_cores": 0.011653379416470655,
+  "process_cpu_seconds": 40.828125,
+  "sessions_fixture": "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-capacity-fixture-5500\\sessions",
+  "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\gwt\\browser-check\\gwt-fresh-home.5500-437810cb-3f04-4873-97b3-b7bd77c7d25e",
+  "source_sha": "38770ebcb7fa7a2ba27ca77fd0b17292267eb0b4",
+  "runtime_files": 3435,
+  "runtime_bytes": 1612683,
+  "source_files_sha256": [
+    {
+      "path": "crates/gwt/src/agent_capacity.rs",
+      "sha256": "70F5A6BA23C0EEF586E0C8AC065EC342077A257BF94872C6CFF1133838723CC4"
+    },
+    {
+      "path": "crates/gwt/src/session_inventory.rs",
+      "sha256": "55ECAAD0A5C89F1E37CCB675EE9192BAF235E6B54DF5921C60BA71959770B040"
+    },
+    {
+      "path": "crates/gwt/src/main.rs",
+      "sha256": "21D49EEA2D0612C288B6D3705816C7EEBF7E9ED39AD72CFF9E984380D11E0398"
+    },
+    {
+      "path": "crates/gwt/src/app_runtime/mod.rs",
+      "sha256": "2BA203253222AF99A12E12CF536752B8322999EC9E104A72D3460261232474D4"
+    }
+  ]
+}

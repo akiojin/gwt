@@ -101,12 +101,21 @@ impl IssueCloseReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSnapshot {
     pub number: IssueNumber,
+    /// Original creator reported by GitHub; absent in legacy caches.
+    pub author_login: Option<String>,
     pub title: String,
     pub body: String,
     pub labels: Vec<String>,
     pub state: IssueState,
     pub updated_at: UpdatedAt,
     pub comments: Vec<CommentSnapshot>,
+}
+
+/// GitHub's latest assignment of a label to an Issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabelAssignment {
+    pub actor: Option<String>,
+    pub created_at: String,
 }
 
 /// Snapshot of a single Issue comment.
@@ -148,8 +157,10 @@ pub struct SpecSummary {
 /// Errors returned by [`IssueClient`] operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
-    #[error("issue #{0} not found")]
+    #[error("Issue {0} not found")]
     NotFound(IssueNumber),
+    #[error("PR {0} is a pull request, not an issue. Use `pr.view` instead.")]
+    PullRequestInsteadOfIssue(IssueNumber),
     #[error("comment {0} not found")]
     CommentNotFound(CommentId),
     #[error("body exceeds GitHub 65536 byte limit")]
@@ -221,6 +232,15 @@ pub trait IssueClient: Send + Sync {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError>;
+
+    /// Return the latest assignment, or `None` if absent or subsequently removed.
+    fn fetch_label_assignment(
+        &self,
+        _number: IssueNumber,
+        _label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        Ok(None)
+    }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 

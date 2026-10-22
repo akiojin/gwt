@@ -54,14 +54,18 @@ pub(crate) fn spawn_remote_start_work_branches_async(
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
+    issue_link_cache_dir: PathBuf,
 ) {
     thread::spawn(move || {
         if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&project_root) {
             let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
         }
+        let issue_by_branch =
+            crate::app_runtime::load_issue_branch_links(&project_root, &issue_link_cache_dir);
         let branches =
             list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
-                .map(|entries| {
+                .map(|mut entries| {
+                    retain_unlinked_branches(&mut entries, &issue_by_branch);
                     gwt::branch_list::eligible_remote_start_work_branch_names(
                         &entries,
                         &active_session_branches,
@@ -79,6 +83,15 @@ pub(crate) fn spawn_remote_start_work_branches_async(
                 },
             )],
         );
+    });
+}
+
+fn retain_unlinked_branches(
+    entries: &mut Vec<BranchListEntry>,
+    issue_by_branch: &std::collections::HashMap<String, u64>,
+) {
+    entries.retain(|entry| {
+        crate::app_runtime::issue_number_for_branch(Some(&entry.name), issue_by_branch).is_none()
     });
 }
 
@@ -367,5 +380,23 @@ mod tests {
                 "async branch {event} must be broadcast to the owning project, not targeted to a transient websocket client id",
             );
         }
+    }
+    #[test]
+    fn remote_other_branches_exclude_linked_issue_with_normalized_branch_name() {
+        let mut entries = vec![
+            remote_branch("origin/work/linked"),
+            remote_branch("origin/work/unlinked"),
+        ];
+        super::retain_unlinked_branches(
+            &mut entries,
+            &std::collections::HashMap::from([("work/linked".to_string(), 4556)]),
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["origin/work/unlinked"]
+        );
     }
 }

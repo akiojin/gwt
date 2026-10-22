@@ -20,6 +20,12 @@ pub(super) trait UpdateCliOps {
     fn flush_stdout(&mut self) -> io::Result<()>;
     fn check_for_executable(&mut self, force: bool, current_exe: Option<&Path>) -> UpdateState;
     fn prepare_update(&mut self, latest: &str, asset_url: &str) -> Result<PreparedPayload, String>;
+    fn apply_in_running_gui(
+        &mut self,
+        latest: &str,
+        asset_url: &str,
+        payload: &PreparedPayload,
+    ) -> Result<bool, String>;
     fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String>;
     fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String>;
     fn spawn_internal_apply_update(
@@ -88,6 +94,32 @@ impl UpdateCliOps for RealUpdateCliOps {
 
     fn prepare_update(&mut self, latest: &str, asset_url: &str) -> Result<PreparedPayload, String> {
         self.mgr.prepare_update(latest, asset_url)
+    }
+
+    fn apply_in_running_gui(
+        &mut self,
+        latest: &str,
+        asset_url: &str,
+        payload: &PreparedPayload,
+    ) -> Result<bool, String> {
+        let Some(owner) = crate::cli::tray::lock::running_instance(&gwt_core::paths::gwt_home())
+            .map_err(|_| "could not inspect the running GUI ownership".to_string())?
+        else {
+            return Ok(false);
+        };
+        gwt_core::update::persist_pending_update_manifest(
+            &gwt_core::update::PendingUpdateManifest {
+                version: latest.to_string(),
+                asset_url: asset_url.to_string(),
+                payload: payload.clone(),
+                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+                auto_apply_deferred: false,
+            },
+        )
+        .map_err(|_| "could not stage the requested version for the running GUI".to_string())?;
+        crate::update_control::request_apply(&owner, latest)?;
+        Ok(true)
     }
 
     fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String> {

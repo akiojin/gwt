@@ -1,257 +1,106 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseHTML } from "linkedom";
+import * as notifications from "../agent-completion-notifications.js";
 
 import {
   createAgentCompletionNotifier,
   createAgentAttentionToaster,
 } from "../agent-completion-notifications.js";
 
-function setupDocument({ hidden = true, focused = false } = {}) {
-  const { document } = parseHTML("<main></main>");
-  Object.defineProperty(document, "visibilityState", {
-    configurable: true,
-    get: () => (hidden ? "hidden" : "visible"),
-  });
-  document.hasFocus = () => focused;
-  return document;
-}
-
-function makeWindow(overrides = {}) {
+function intent(overrides = {}) {
   return {
-    id: "agent-1",
-    preset: "codex",
-    title: "Codex",
-    dynamic_title: "Codex",
-    ...overrides,
+    transition_id: "runtime-one:1", project_key: "0123456789abcdef",
+    window_id: "agent-1", category: "stopped", title: "Agent stopped",
+    body: "Fixture agent stopped in Repo One.", ...overrides,
   };
 }
 
-function makeProject(overrides = {}) {
-  return {
-    id: "tab-1",
-    title: "Repo One",
-    project_root: "/repo/one",
-    ...overrides,
-  };
-}
-
-test("notifier emits a quiet turn-complete notice only after a long hidden run returns idle", () => {
-  let now = 1_000;
-  const toasts = [];
+test("server intents deliver once by transition ID without runtime or reconnect authority", () => {
   const desktop = [];
-  const unread = [];
   const notifier = createAgentCompletionNotifier({
-    document: setupDocument({ hidden: true, focused: false }),
-    now: () => now,
-    minRunningMs: 300_000,
     getDesktopNotificationPermission: () => "granted",
-    showToast: (notice) => toasts.push(notice),
     showDesktopNotification: (notice) => desktop.push(notice),
-    onProjectUnread: (projectId) => unread.push(projectId),
   });
-
-  assert.equal(
-    notifier.handleRuntimeState({
-      windowId: "agent-1",
-      runtimeState: "running",
-      windowData: makeWindow(),
-      projectTab: makeProject(),
-    }),
-    null,
-  );
-
-  now += 300_001;
-  const notice = notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "idle",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-
-  assert.equal(notice.kind, "turn_complete");
-  assert.equal(notice.projectId, "tab-1");
-  assert.equal(notice.windowId, "agent-1");
-  assert.match(notice.title, /Turn complete/);
-  assert.match(notice.body, /Codex/);
-  assert.match(notice.body, /Repo One/);
-  assert.deepEqual(toasts, [notice]);
-  assert.deepEqual(desktop, [notice]);
-  assert.deepEqual(unread, ["tab-1"]);
+  assert.equal(typeof notifier.handleIntent, "function");
+  assert.equal(notifier.handleRuntimeState, undefined, "runtime frames cannot trigger OS notifications");
+  assert.equal(notifier.reset, undefined, "socket reconnect cannot erase transition dedupe");
+  assert.equal(notifier.forgetWindow, undefined, "window removal cannot erase transition dedupe");
+  const stopped = intent();
+  assert.deepEqual(notifier.handleIntent(stopped), stopped);
+  assert.equal(notifier.handleIntent({ ...stopped }), null);
+  const error = intent({ transition_id: "runtime-one:2", category: "error", title: "Agent error", body: "Stop-block hit an error" });
+  assert.deepEqual(notifier.handleIntent(error), error);
+  const human = intent({ transition_id: "runtime-one:3", category: "needs_human", window_id: null, title: "Needs human" });
+  assert.deepEqual(notifier.handleIntent(human), human);
+  assert.deepEqual(desktop, [stopped, error, human]);
 });
 
-test("T-603: notifier does not treat sustained running -> waiting as turn completion", () => {
-  let now = 1_000;
-  const toasts = [];
+test("desktop-only intents never prompt or publish an in-app toast when permission is not granted", () => {
+  let permission = "default";
   const desktop = [];
-  const unread = [];
+  const toasts = [];
   const notifier = createAgentCompletionNotifier({
-    document: setupDocument({ hidden: true, focused: false }),
-    now: () => now,
-    minRunningMs: 300_000,
-    getDesktopNotificationPermission: () => "granted",
-    showToast: (notice) => toasts.push(notice),
+    getDesktopNotificationPermission: () => permission,
     showDesktopNotification: (notice) => desktop.push(notice),
-    onProjectUnread: (projectId) => unread.push(projectId),
+    showToast: (notice) => toasts.push(notice),
   });
-
-  notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "running",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-
-  now += 300_001;
-  const notice = notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "waiting",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-
-  assert.equal(notice, null);
-  assert.deepEqual(toasts, []);
+  for (const value of ["default", "denied", "unsupported"]) {
+    permission = value;
+    assert.equal(notifier.handleIntent(intent({ transition_id: value })), null);
+  }
+  permission = "granted";
+  assert.equal(notifier.handleIntent(intent({ transition_id: "default" })), null, "granting later does not replay a consumed intent");
   assert.deepEqual(desktop, []);
-  assert.deepEqual(unread, []);
+  assert.deepEqual(toasts, []);
 });
 
-test("notifier suppresses short runs, focused windows, and default desktop permission", () => {
-  let now = 10_000;
-  const toasts = [];
+test("Idle, Waiting, and malformed messages cannot become desktop intents", () => {
   const desktop = [];
   const notifier = createAgentCompletionNotifier({
-    document: setupDocument({ hidden: false, focused: true }),
-    now: () => now,
-    minRunningMs: 300_000,
-    getDesktopNotificationPermission: () => "default",
-    showToast: (notice) => toasts.push(notice),
+    getDesktopNotificationPermission: () => "granted",
     showDesktopNotification: (notice) => desktop.push(notice),
   });
-
-  notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "running",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-
-  now += 299_999;
-  assert.equal(
-    notifier.handleRuntimeState({
-      windowId: "agent-1",
-      runtimeState: "idle",
-      windowData: makeWindow(),
-      projectTab: makeProject(),
-    }),
-    null,
-  );
-
-  notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "running",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-
-  now += 300_001;
-  assert.equal(
-    notifier.handleRuntimeState({
-      windowId: "agent-1",
-      runtimeState: "idle",
-      windowData: makeWindow(),
-      projectTab: makeProject(),
-    }),
-    null,
-  );
-  assert.deepEqual(toasts, []);
+  for (const value of [null, {}, intent({ transition_id: "" }), intent({ category: "idle" }), intent({ category: "waiting" })]) {
+    assert.equal(notifier.handleIntent(value), null);
+  }
   assert.deepEqual(desktop, []);
 });
 
-test("notifier reports stopped and error transitions as separate categories", () => {
-  let now = 0;
-  const notices = [];
+test("desktop notification click focuses its Project, activates its window, and closes", () => {
+  const actions = [];
+  const notifications = [];
+  class NotificationProbe {
+    static permission = "granted";
+    static requestPermission() { throw new Error("must never request permission"); }
+    constructor(title, options) { this.title = title; this.options = options; notifications.push(this); }
+    close() { actions.push("close"); }
+  }
   const notifier = createAgentCompletionNotifier({
-    document: setupDocument({ hidden: true, focused: false }),
-    now: () => now,
-    minRunningMs: 300_000,
-    getDesktopNotificationPermission: () => "denied",
-    showToast: (notice) => notices.push(notice),
-    showDesktopNotification: () => {
-      throw new Error("desktop notifications must not be attempted when denied");
-    },
+    window: { Notification: NotificationProbe, focus: () => actions.push("focus") },
+    onActivate: (notice) => actions.push(notice.window_id),
   });
-
-  notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "running",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-  now += 301_000;
-  assert.equal(
-    notifier.handleRuntimeState({
-      windowId: "agent-1",
-      runtimeState: "stopped",
-      windowData: makeWindow(),
-      projectTab: makeProject(),
-    }).kind,
-    "agent_stopped",
-  );
-
-  notifier.handleRuntimeState({
-    windowId: "agent-2",
-    runtimeState: "running",
-    windowData: makeWindow({ id: "agent-2", dynamic_title: "Claude" }),
-    projectTab: makeProject({ id: "tab-2", title: "Repo Two" }),
-  });
-  now += 301_000;
-  assert.equal(
-    notifier.handleRuntimeState({
-      windowId: "agent-2",
-      runtimeState: "error",
-      windowData: makeWindow({ id: "agent-2", dynamic_title: "Claude" }),
-      projectTab: makeProject({ id: "tab-2", title: "Repo Two" }),
-    }).kind,
-    "agent_error",
-  );
-
-  assert.deepEqual(
-    notices.map((notice) => notice.kind),
-    ["agent_stopped", "agent_error"],
-  );
+  notifier.handleIntent(intent());
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].title, "Agent stopped");
+  assert.equal(notifications[0].options.body, "Fixture agent stopped in Repo One.");
+  assert.match(notifications[0].options.tag, /runtime-one:1/);
+  notifications[0].onclick();
+  assert.deepEqual(actions, ["focus", "agent-1", "close"]);
 });
 
-test("notifier includes error detail in agent error notices", () => {
-  let now = 0;
-  const notices = [];
-  const notifier = createAgentCompletionNotifier({
-    document: setupDocument({ hidden: true, focused: false }),
-    now: () => now,
-    minRunningMs: 300_000,
-    getDesktopNotificationPermission: () => "denied",
-    showToast: (notice) => notices.push(notice),
-  });
-
-  notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "running",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-  });
-  now += 301_000;
-  const notice = notifier.handleRuntimeState({
-    windowId: "agent-1",
-    runtimeState: "error",
-    windowData: makeWindow(),
-    projectTab: makeProject(),
-    statusDetail: "Stop-block hit an error",
-  });
-
-  assert.equal(notice.kind, "agent_error");
-  assert.match(notice.body, /Stop-block hit an error/);
-  assert.deepEqual(notices, [notice]);
+test("unsupported OS constructor failures are logged safely once and remain deduplicated", () => {
+  let attempts = 0;
+  const warnings = [];
+  class NotificationProbe {
+    static permission = "granted";
+    constructor() { attempts++; throw new Error("OS notifications unavailable: /private/payload"); }
+  }
+  const notifier = createAgentCompletionNotifier({ window: { Notification: NotificationProbe, console: { warn: (...args) => warnings.push(args) } } });
+  assert.equal(notifier.handleIntent(intent()), null);
+  assert.equal(notifier.handleIntent(intent()), null);
+  assert.equal(attempts, 1);
+  assert.deepEqual(warnings, [["gwt: desktop notification delivery failed"]]);
 });
 
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
@@ -346,4 +195,24 @@ test("FR-040: missing windowId yields no toast", () => {
   const notice = toaster.handleRuntimeState({ windowId: "", runtimeState: "waiting" });
   assert.equal(notice, null);
   assert.equal(toasts.length, 0);
+});
+
+
+test("typed inputs retain source authority and never infer NeedsHuman from Waiting", () => {
+  const {notificationForTransition} = notifications;
+  assert.equal(typeof notificationForTransition, "function");
+  assert.equal(notificationForTransition({source: "runtime", state: "waiting"}), null);
+  assert.equal(notificationForTransition({source: "runtime", state: "needs_human"}), null);
+  assert.equal(notificationForTransition({source: "monitor", state: "stopped"}), null);
+  const notice = notificationForTransition({source: "monitor", state: "needs_human", issueNumber: 4665});
+  assert.equal(notice.title, "Needs human");
+  assert.match(notice.body, /#4665/);
+  assert.doesNotMatch(notice.title, /complete|finish/i);
+});
+
+test("Stopped attention says stopped, without claiming work finished", () => {
+  const {toaster} = collectAttentionToaster();
+  const notice = toaster.handleRuntimeState({windowId: "one", runtimeState: "stopped"});
+  assert.equal(notice.title, "Agent stopped");
+  assert.doesNotMatch(notice.title, /finish|complete/i);
 });

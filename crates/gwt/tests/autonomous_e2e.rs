@@ -23,6 +23,7 @@ const SHA: &str = "abc123";
 
 fn auto_issue(number: u64) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number,
         title: format!("Issue {number}"),
         labels: vec!["auto-merge".to_string()],
@@ -52,7 +53,7 @@ fn pass_rollup() -> &'static str {
 }
 
 fn autonomous_monitor() -> IssueMonitorState {
-    IssueMonitorState::with_prefs(
+    test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             autonomous_mode: true,
@@ -68,7 +69,8 @@ fn drive_to_reviewed(
     issue: &IssueMonitorIssue,
     review_passes: bool,
 ) {
-    // Scan the issue into the inbox first so inbox-state transitions are visible.
+    monitor.terminal_queue_push(&[issue.number], "operator", "2026-06-29T00:00:00Z");
+    // Scan the queued issue so inbox-state transitions are visible.
     gwt::scan_issue_monitor_candidates(
         monitor,
         std::slice::from_ref(issue),
@@ -98,7 +100,14 @@ fn full_pass_reaches_deliver_and_requeues_an_open_issue_only_on_sha_match() {
 
     // Gate assembly + routing: all conditions hold ⇒ Deliver.
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, BODY)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pass_rollup(),
+            SHA,
+            BODY,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready once verdict is in");
     assert_eq!(evaluate_autonomous_gate(&inputs), GateDecision::Pass);
     assert_eq!(route_autonomous_gate(&inputs), GateAction::Deliver);
@@ -145,7 +154,14 @@ fn rejected_review_does_not_reach_deliver() {
     drive_to_reviewed(&mut monitor, &issue, false); // review FAILED
 
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, BODY)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pass_rollup(),
+            SHA,
+            BODY,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready");
     assert!(matches!(
         evaluate_autonomous_gate(&inputs),
@@ -166,7 +182,14 @@ fn acceptance_drift_after_launch_does_not_reach_deliver() {
     // The Issue body was edited after launch (criteria changed).
     let drifted_body = "## Acceptance Criteria\n- [ ] AC-2: a different requirement\n";
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, drifted_body)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pass_rollup(),
+            SHA,
+            drifted_body,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready");
     assert!(matches!(
         evaluate_autonomous_gate(&inputs),
@@ -187,7 +210,14 @@ fn head_advance_after_review_does_not_reach_deliver() {
 
     // HEAD advanced: the current head SHA no longer equals the reviewed SHA.
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pass_rollup(), "def456", BODY)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pass_rollup(),
+            "def456",
+            BODY,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready");
     assert!(matches!(
         evaluate_autonomous_gate(&inputs),
@@ -208,7 +238,14 @@ fn pending_ci_waits_does_not_merge() {
 
     let pending_rollup = r#"[{"name":"build","status":"IN_PROGRESS","conclusion":null}]"#;
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pending_rollup, SHA, BODY)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pending_rollup,
+            SHA,
+            BODY,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready");
     assert!(matches!(
         evaluate_autonomous_gate(&inputs),
@@ -224,6 +261,7 @@ fn unverified_branch_protection_blocks_eligibility() {
     // on the next scan — never parked as needs_human.
     let mut monitor = autonomous_monitor();
     let issue = auto_issue(42);
+    monitor.terminal_queue_push(&[issue.number], "operator", "2026-06-29T00:00:00Z");
     gwt::scan_issue_monitor_candidates(
         &mut monitor,
         std::slice::from_ref(&issue),
@@ -263,7 +301,14 @@ fn gate_not_ready_until_verdict_returns() {
     monitor.begin_review(42, 99, SHA); // verdict pending
     assert!(
         monitor
-            .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, BODY)
+            .autonomous_gate_inputs(
+                42,
+                verified(),
+                pass_rollup(),
+                SHA,
+                BODY,
+                gwt_git::pr_status::PrMergeability::Mergeable
+            )
             .is_none(),
         "no gate decision while the independent review is still in flight",
     );
@@ -273,7 +318,7 @@ fn gate_not_ready_until_verdict_returns() {
 fn default_off_never_enters_the_autonomous_loop() {
     // SPEC #3165 non-regression: with autonomous_mode OFF, an auto-merge-labelled
     // issue is NOT an autonomous candidate and no autonomous state is created.
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let issue = auto_issue(42);
     let decision =
         monitor.prepare_autonomous_candidate(&issue, &verified(), "2026-06-29T00:00:00Z");
@@ -303,6 +348,7 @@ fn fr_family_decision_boundaries_are_observable() {
 
     // FR-006/FR-014 (eligibility + acceptance snapshot): eligibility is a
     // returned value; the captured snapshot + Implementing phase are state.
+    monitor.terminal_queue_push(&[issue.number], "operator", "2026-06-29T00:00:00Z");
     gwt::scan_issue_monitor_candidates(
         &mut monitor,
         std::slice::from_ref(&issue),
@@ -343,7 +389,14 @@ fn fr_family_decision_boundaries_are_observable() {
     monitor.begin_review(42, 99, SHA);
     monitor.record_review_verdict(42, true);
     let inputs = monitor
-        .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, BODY)
+        .autonomous_gate_inputs(
+            42,
+            verified(),
+            pass_rollup(),
+            SHA,
+            BODY,
+            gwt_git::pr_status::PrMergeability::Mergeable,
+        )
         .expect("gate ready");
     assert_eq!(evaluate_autonomous_gate(&inputs), GateDecision::Pass);
     assert_eq!(route_autonomous_gate(&inputs), GateAction::Deliver);
@@ -390,7 +443,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // human decision. It is requeued at the capped backoff, the PM is asked to
     // steer (warn notice + `steering` on the status view), and the row never
     // reads `needs_human`.
-    let mut escalated = IssueMonitorState::with_prefs(
+    let mut escalated = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             autonomous_mode: true,
@@ -402,6 +455,7 @@ fn fr_family_decision_boundaries_are_observable() {
         },
     );
     let issue2 = auto_issue(44);
+    escalated.terminal_queue_push(&[44], "operator", "2026-07-02T00:00:00Z");
     gwt::scan_issue_monitor_candidates(
         &mut escalated,
         std::slice::from_ref(&issue2),
@@ -445,32 +499,57 @@ fn fr_family_decision_boundaries_are_observable() {
 
 // ---------------------------------------------------------------------------
 // Issue #4084: idle windows (review verdict published / settled implementation
-// window / dead binding) free their slot within one scan so the queue head
-// launches, while a live-but-idle Active record stays on the steering path.
+// window) free their slot within one scan; a missing binding requires two
+// distinct canvas observations. A live-but-idle Active record stays on the
+// steering path.
 // ---------------------------------------------------------------------------
 
 mod idle_windows {
     use super::*;
+    use gwt::issue_monitor::IssueMonitorExecutionObservation;
     use gwt::{
-        IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorWindowObservation,
-        IssueMonitorWindowSnapshot, WindowState,
+        IssueMonitorExecutionSettlement, IssueMonitorIdleKind, IssueMonitorIdleReconciliation,
+        IssueMonitorWindowObservation, IssueMonitorWindowSnapshot, WindowState,
     };
     use std::collections::BTreeMap;
 
     /// Issue #4328: the launch ACK carries the instant it was confirmed, and a
-    /// canvas observation only judges a binding it was captured after. So the
-    /// fixture launches first and observes the canvas a minute later, the
-    /// order production sees.
-    const LAUNCHED_AT: &str = "2026-09-07T03:59:00Z";
+    /// canvas observation only judges a binding it was captured after. Issue
+    /// #4244 also retains registration for five minutes, so dead recovery is
+    /// observed after that grace has expired.
+    const LAUNCHED_AT: &str = "2026-09-07T03:54:00Z";
     const NOW: &str = "2026-09-07T04:00:00Z";
+    const LATER: &str = "2026-09-07T04:00:01Z";
+
+    fn settlements(
+        entries: &[(u64, IssueMonitorExecutionSettlement)],
+    ) -> BTreeMap<u64, IssueMonitorExecutionObservation> {
+        entries
+            .iter()
+            .map(|(number, settlement)| {
+                (
+                    *number,
+                    IssueMonitorExecutionObservation {
+                        settlement: *settlement,
+                        process_held: false,
+                        holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
+                        held_holder_session_id: None,
+                        exited_holder_session_id: None,
+                    },
+                )
+            })
+            .collect()
+    }
 
     fn idle_monitor() -> IssueMonitorState {
-        IssueMonitorState::with_prefs(
+        test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
                 max_active_agents: 1,
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 ..IssueMonitorPrefs::default()
             },
         )
@@ -490,6 +569,7 @@ mod idle_windows {
             review_dispatch,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 
@@ -501,10 +581,28 @@ mod idle_windows {
         }
     }
 
+    fn reconcile_missing_binding_after_two_distinct_scans(
+        monitor: &mut IssueMonitorState,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+    ) -> IssueMonitorIdleReconciliation {
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        for phase in ["first absence", "replayed canvas"] {
+            let outcome = monitor.reconcile_idle_windows(settlements, NOW);
+            assert!(outcome.released.is_empty(), "{phase}");
+            assert!(outcome.requeued.is_empty(), "{phase}");
+            assert_eq!(monitor.active_count(), 1, "{phase}: the slot stays held");
+        }
+        let mut newer = snapshot(Vec::new());
+        newer.observed_at = LATER.to_string();
+        monitor.record_window_snapshot(newer);
+        monitor.reconcile_idle_windows(settlements, LATER)
+    }
+
     /// Launch `launched` into the single slot with `queued` waiting behind it.
     fn launched_with_queue(launched: u64, queued: u64, window_id: &str) -> IssueMonitorState {
         let mut monitor = idle_monitor();
         monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[launched, queued], "operator", LAUNCHED_AT);
         gwt::scan_issue_monitor_candidates(
             &mut monitor,
             &[auto_issue(launched), auto_issue(queued)],
@@ -525,7 +623,7 @@ mod idle_windows {
         released: u64,
         queued: u64,
         kind: IssueMonitorIdleKind,
-        settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
     ) {
         let outcome = monitor.reconcile_idle_windows(settlements, NOW);
         assert_eq!(outcome.released, vec![released], "{kind:?}");
@@ -599,7 +697,7 @@ mod idle_windows {
             42,
             52,
             IssueMonitorIdleKind::ExecutionSettled,
-            &BTreeMap::from([(42, IssueMonitorExecutionSettlement::Completed)]),
+            &settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]),
         );
         assert_eq!(
             monitor
@@ -612,15 +710,33 @@ mod idle_windows {
     }
 
     #[test]
-    fn dead_binding_frees_the_slot_within_one_scan() {
+    fn dead_binding_frees_the_slot_after_two_distinct_scans() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        assert_slot_freed_for_queue_head(
-            &mut monitor,
-            43,
-            53,
-            IssueMonitorIdleKind::BindingDead,
-            &BTreeMap::new(),
+        let outcome =
+            reconcile_missing_binding_after_two_distinct_scans(&mut monitor, &BTreeMap::new());
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind,
+            IssueMonitorIdleKind::BindingDead
+        );
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.queued_issue_numbers(),
+            vec![43, 53],
+            "recovery preserves the operator's terminal queue order"
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the still-open owner is queued even without an execution record"
+        );
+        assert_eq!(
+            monitor
+                .next_launch_request(LATER)
+                .map(|request| request.issue_number),
+            Some(43),
+            "the terminal queue head is admitted when the missing binding is confirmed"
         );
         assert!(
             monitor.take_pending_idle_pane_closes().is_empty(),
@@ -638,10 +754,9 @@ mod idle_windows {
     #[test]
     fn a_restart_killed_pane_frees_its_slot_and_requeues_its_own_issue() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
         );
         assert_eq!(outcome.released, vec![43]);
         assert_eq!(outcome.requeued, vec![43]);
@@ -653,7 +768,7 @@ mod idle_windows {
         );
         assert!(monitor.queued_issue_numbers().contains(&43));
         assert!(
-            monitor.next_launch_request(NOW).is_some(),
+            monitor.next_launch_request(LATER).is_some(),
             "the freed slot admits a launch in the same scan"
         );
     }
@@ -666,10 +781,9 @@ mod idle_windows {
     fn a_dead_binding_frees_its_slot_with_autonomous_mode_off() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.set_autonomous_mode(false);
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
         );
         assert_eq!(outcome.released, vec![43]);
         assert_eq!(outcome.requeued, vec![43]);
@@ -686,11 +800,12 @@ mod idle_windows {
     fn a_dead_binding_recovery_reports_itself_with_autonomous_mode_off() {
         let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
         monitor.set_autonomous_mode(false);
-        monitor.record_window_snapshot(snapshot(Vec::new()));
-        monitor.reconcile_idle_windows(
-            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
-            NOW,
+        let outcome = reconcile_missing_binding_after_two_distinct_scans(
+            &mut monitor,
+            &settlements(&[(43, IssueMonitorExecutionSettlement::Interrupted)]),
         );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
         let notices = monitor.take_autonomous_notices();
         assert!(
             notices.iter().any(|notice| notice.issue_number == 43
@@ -715,7 +830,7 @@ mod idle_windows {
             false,
         )]));
         let outcome = monitor.reconcile_idle_windows(
-            &BTreeMap::from([(44, IssueMonitorExecutionSettlement::Active)]),
+            &settlements(&[(44, IssueMonitorExecutionSettlement::Active)]),
             NOW,
         );
         assert!(outcome.released.is_empty());
@@ -731,4 +846,19 @@ mod idle_windows {
         assert!(monitor.next_launch_request(NOW).is_none());
         assert!(monitor.take_pending_idle_pane_closes().is_empty());
     }
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor(config: gwt::IssueMonitorConfig) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

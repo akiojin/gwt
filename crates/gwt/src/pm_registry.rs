@@ -17,7 +17,6 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -47,6 +46,10 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
      output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
      escalation_due.";
+
+/// Physical wake decorations shared by producers and human-prompt classification.
+pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
+pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
 
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
@@ -172,6 +175,9 @@ pub fn pm_agent_is_supported(agent_id: &str) -> bool {
 /// Project-scoped PM settings that survive deregistration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSettings {
+    /// Issue #3812: pause only autonomous PM cycles; keep the conversation registered.
+    #[serde(default)]
+    pub paused: bool,
     /// Explicit project-relative policy files copied into gwt-owned PM guidance.
     /// Mere presence of a repository instruction file never opts it in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -261,6 +267,7 @@ impl PmLaunchProfile {
 impl Default for PmSettings {
     fn default() -> Self {
         Self {
+            paused: false,
             project_policy_files: Vec::new(),
             auto_start: true,
             launch_profile: None,
@@ -315,6 +322,77 @@ pub struct PmWorktreeFreshness {
     pub failure_reason: Option<String>,
 }
 
+/// Why the PM ensure gate refused to start a PM, for the cases a Restart
+/// cannot clear (#4486 AC-7).
+///
+/// The gate has several early returns. Most are transient or intentional — an
+/// `auto_start` opt-out, a pane close still finalizing, the crash-loop backoff
+/// floor — and the explicit Restart path deliberately bypasses them. These
+/// three are different: the condition lives outside the gate, so pressing
+/// Restart runs the same refusal again and nothing changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmStartBlockKind {
+    /// The tab is not a migration-clear Git project.
+    MigrationPending,
+    /// `pm.json` could not be read, so the gate cannot know what to start.
+    PrefsUnreadable,
+    /// Issue #3607: another project store in this repository already owns the
+    /// PM. The singleton is per repository, and the other store's `pm.json`
+    /// is invisible from here.
+    AnotherStoreOwnsThePm,
+}
+
+impl PmStartBlockKind {
+    /// What the operator has to do. A block is only useful if it names the
+    /// next action; "the PM did not start" alone sends people back to the
+    /// Restart button that cannot help them.
+    pub const fn required_operation(self) -> &'static str {
+        match self {
+            Self::MigrationPending => {
+                "Finish the project migration for this tab, then reopen the project."
+            }
+            Self::PrefsUnreadable => {
+                "Repair or remove the project store's pm.json, then reopen the project."
+            }
+            Self::AnotherStoreOwnsThePm => {
+                "Stop the PM held by the other project store with `pm.stop`, \
+                 passing the session id listed in `repository_registrations`."
+            }
+        }
+    }
+}
+
+/// A PM start refusal a Restart cannot clear, with what to do about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmStartBlock {
+    pub kind: PmStartBlockKind,
+    /// Always `true` for every current variant, and serialized anyway: a
+    /// reader must not have to know the variant list to tell a permanent
+    /// block from a transient one, and a future transient variant should not
+    /// silently inherit "permanent" from its neighbours.
+    pub permanent: bool,
+    /// Whether pressing Restart re-runs the same refusal. `false` would mean
+    /// the button is worth offering; today no variant qualifies.
+    pub restart_clears_it: bool,
+    pub reason: String,
+    pub required_operation: String,
+    pub observed_at: String,
+}
+
+impl PmStartBlock {
+    pub fn new(kind: PmStartBlockKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            permanent: true,
+            restart_clears_it: false,
+            reason: reason.into(),
+            required_operation: kind.required_operation().to_string(),
+            observed_at: pm_refresh_checked_at(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PmPrefs {
     #[serde(default)]
@@ -323,6 +401,11 @@ pub struct PmPrefs {
     pub settings: PmSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_freshness: Option<PmWorktreeFreshness>,
+    /// #4486 AC-7: the last start refusal a Restart cannot clear. Cleared
+    /// whenever the gate reaches a live or spawning PM, so a stale block can
+    /// never outlive the condition that caused it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_block: Option<PmStartBlock>,
 }
 
 /// Outcome of a singleton registration attempt (FR-001).
@@ -339,6 +422,15 @@ pub enum PmRegisterOutcome {
 
 pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm.json")
+}
+
+/// Fresh and restored PM conversations stay available while paused, without
+/// an automatic bootstrap prompt. Unreadable settings fail closed.
+pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
+    pm_worktree_store_dir(worktree).is_none_or(|store| {
+        load_pm_prefs(&store.join("project-state/pm.json"))
+            .is_ok_and(|prefs| !prefs.settings.paused)
+    })
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
@@ -3063,15 +3155,10 @@ fn with_pm_worktree_refresh_lock<T>(
 ) -> io::Result<T> {
     let project_state = project_dir.join("project-state");
     ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(project_state.join("pm-refresh.lock"))?;
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    let path = project_state.join("pm-refresh.lock");
+    let lock = gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?;
     let result = operation();
-    let unlock = FileExt::unlock(&lock);
+    let unlock = lock.unlock();
     match (result, unlock) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
@@ -3160,29 +3247,6 @@ fn parse_pm_worktree_control_path(path: &Path, prefix: Option<&str>) -> io::Resu
     })
 }
 
-fn git_common_dir(git_root: &Path) -> io::Result<PathBuf> {
-    let output =
-        gwt_core::process::run_git_logged(&["rev-parse", "--git-common-dir"], Some(git_root))?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "resolve PM Git common directory: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if common.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resolve PM Git common directory: Git returned an empty path",
-        ));
-    }
-    Ok(if common.is_absolute() {
-        common
-    } else {
-        git_root.join(common)
-    })
-}
-
 fn git_repository_is_bare(git_root: &Path) -> io::Result<bool> {
     let output =
         gwt_core::process::run_git_logged(&["rev-parse", "--is-bare-repository"], Some(git_root))?;
@@ -3222,8 +3286,15 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     let dot_git = worktree.join(".git");
     let admin_dir = parse_pm_worktree_control_path(&dot_git, Some("gitdir: "))?;
     require_real_pm_scratch_directory(&admin_dir, "PM linked-worktree admin directory")?;
-    let common_dir = git_common_dir(git_root)?;
+    let common_dir = gwt_core::repo_hash::repository_common_dir(git_root).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PM Git common directory is unavailable",
+        )
+    })?;
+    require_real_pm_scratch_directory(&common_dir, "PM Git common directory")?;
     let worktrees_dir = common_dir.join("worktrees");
+    require_real_pm_scratch_directory(&worktrees_dir, "PM linked-worktree registrations")?;
     let canonical_admin = dunce::canonicalize(&admin_dir)?;
     let canonical_worktrees = dunce::canonicalize(&worktrees_dir)?;
     if canonical_admin.parent() != Some(canonical_worktrees.as_path()) {
@@ -3245,19 +3316,31 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
             ),
         ));
     }
-    let registered = gwt_git::WorktreeManager::new(git_root)
-        .list()
-        .map_err(|error| io::Error::other(error.to_string()))?
-        .into_iter()
-        .filter(|entry| same_canonical_path(&entry.path, worktree))
-        .count();
-    if registered != 1 {
+    // The reciprocal gitdir pair identifies this one registration. Verify its
+    // remaining control files directly rather than enumerating every worktree.
+    let admin_common = parse_pm_worktree_control_path(&admin_dir.join("commondir"), None)?;
+    if dunce::canonicalize(admin_common)? != dunce::canonicalize(common_dir)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "PM worktree must have exactly one Git registration, found {registered}: {}",
-                worktree.display()
+                "PM linked-worktree commondir does not authorize {}",
+                worktree.display(),
             ),
+        ));
+    }
+    let head_path = admin_dir.join("HEAD");
+    require_regular_pm_worktree_control_file(&head_path, "PM linked-worktree HEAD")?;
+    let head = fs::read_to_string(&head_path)?;
+    let head = head.trim();
+    let symbolic = head.strip_prefix("ref: ").is_some_and(|reference| {
+        reference.starts_with("refs/") && !reference.bytes().any(|byte| byte.is_ascii_whitespace())
+    });
+    let detached =
+        matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !symbolic && !detached {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid PM linked-worktree HEAD: {}", head_path.display()),
         ));
     }
     Ok(())
@@ -4063,7 +4146,7 @@ fn persist_untrusted_inspection_failure_if_safe(project_dir: &Path, error: &io::
 pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorktreeRefreshOutcome> {
     let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
     let worktree = project_dir.join("pm/worktree");
-    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+    let git_root = match gwt_git::repository::git_health::validate_project_git(repo_path) {
         Ok(git_root) => git_root,
         Err(error) => {
             let error = io::Error::other(error.to_string());
@@ -4357,6 +4440,10 @@ pub struct PmLoopState {
     /// window, without touching the Stop-gate floor clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_at: Option<String>,
+    /// Identity of the current activation or scheduled delivery. Resume replaces
+    /// it so queued prompts and Stop hooks cannot revive a pre-pause cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_id: Option<String>,
 }
 
 /// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is
@@ -4417,6 +4504,16 @@ pub fn is_pm_worktree(path: &Path) -> bool {
 /// and the plain shape test rejects a genuine PM worktree. Comparing both
 /// spellings keeps the answer about the path, not about how it was spelled.
 pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    // Ordinary Work rows cannot be PM worktrees. Exclude them before resolving
+    // the shared home (and validating its isolation in tests) for every row.
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
     if is_pm_worktree(path) {
         return true;
     }
@@ -4425,14 +4522,6 @@ pub fn is_canonical_pm_worktree(path: &Path) -> bool {
     else {
         return false;
     };
-    let Some(pm_dir) = path.parent() else {
-        return false;
-    };
-    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
-        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
-    {
-        return false;
-    }
     pm_dir
         .parent()
         .and_then(Path::parent)
@@ -4623,18 +4712,38 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
             .create_new(true)
             .write(true)
             .open(&scratch_path)?;
-        scratch.write_all(content)?;
-        scratch.sync_all()?;
+        timed_pm_prefs_stage("pm_prefs.sync", || {
+            scratch.write_all(content)?;
+            scratch.sync_all()
+        })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
         // rename (same convention as the Issue Monitor prefs writer).
-        gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
-        fs::rename(&scratch_path, path)?;
-        sync_parent_directory(path)
+        timed_pm_prefs_stage("pm_prefs.rename", || {
+            gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
+            fs::rename(&scratch_path, path)?;
+            sync_parent_directory(path)
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&scratch_path);
     }
+    result
+}
+
+fn timed_pm_prefs_stage<T>(
+    stage: &'static str,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current()
+        .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+    let result = action();
+    tracing::info!(
+        target: "gwt.pm.refresh", stage,
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+        ?remaining_budget_ms, success = result.is_ok(), "PM refresh stage"
+    );
     result
 }
 
@@ -4647,15 +4756,18 @@ fn with_pm_prefs_lock<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>)
     // Lock a stable sibling inode: locking `path` itself would stop
     // protecting future writers as soon as the atomic rename replaces that
     // inode.
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path.with_extension("lock"))?;
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    //
+    // Issue #4686 AC-5: the resident PM's prompt dispatch takes this lock every
+    // tick and fails closed on it, so a bare deadline expiry here is one of the
+    // failures that leaves the PM without Board or runtime state. The named lock
+    // records the holder's pid, operation, and acquisition time, which is what
+    // distinguishes a busy peer from a lock file nobody released.
+    let lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &path.with_extension("lock"),
+        "pm_prefs",
+    )?;
     let result = operation();
-    let unlock_result = FileExt::unlock(&lock);
+    let unlock_result = lock.unlock();
     match (result, unlock_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
@@ -4704,6 +4816,47 @@ pub fn mutate_pm_prefs<T>(
         let result = mutation(&mut prefs);
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
+    })
+}
+
+/// Pause only autonomous PM work. Resume re-arms the existing loop once;
+/// registration, auto-start and Issue Monitor state remain intact.
+pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {
+    let path = pm_prefs_path_for_repo_path(repo_path);
+    with_pm_prefs_lock(&path, || {
+        let mut prefs = load_pm_prefs_unlocked(&path)?;
+        if prefs.settings.paused == paused {
+            return Ok(prefs);
+        }
+        if !paused {
+            let loop_path = pm_loop_state_path_for_repo_path(repo_path);
+            let last_user_prompt_at = load_pm_loop_state(&loop_path)?.last_user_prompt_at;
+            save_pm_loop_state(
+                &loop_path,
+                &PmLoopState {
+                    last_wake_id: Some(uuid::Uuid::new_v4().to_string()),
+                    last_user_prompt_at,
+                    ..PmLoopState::default()
+                },
+            )?;
+        }
+        prefs.settings.paused = paused;
+        save_pm_prefs_unlocked(&path, &prefs)?;
+        Ok(prefs)
+    })
+}
+
+/// Serialize physical autonomous prompt delivery with Pause's durable commit.
+/// A queued worker cannot inject a prompt after Pause has returned successfully.
+pub fn with_active_pm_loop<T>(
+    prefs_path: &Path,
+    deliver: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_pm_prefs_lock(prefs_path, || {
+        if load_pm_prefs_unlocked(prefs_path)?.settings.paused {
+            return Ok(None);
+        }
+        Ok(Some(deliver()))
     })
 }
 
@@ -4897,6 +5050,7 @@ pub struct PmStatusReport {
     pub schema_version: u32,
     pub registered: bool,
     pub auto_start: bool,
+    pub paused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration: Option<PmRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4905,6 +5059,11 @@ pub struct PmStatusReport {
     pub stale_hint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_freshness: Option<PmWorktreeFreshness>,
+    /// #4486 AC-7: why the PM is not running, when the reason is one a
+    /// Restart cannot clear. `None` means either the PM is fine or the last
+    /// refusal was transient — in both cases Restart is worth offering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_block: Option<PmStartBlock>,
     /// FR-014: the PM never occupies an Issue Monitor implementation slot.
     /// Always 0; kept explicit so operators can see the accounting rule.
     /// The global resource cap engine itself remains SPEC #3200's
@@ -5049,6 +5208,7 @@ pub fn pm_status_report_for_caller(
         schema_version: 1,
         registered: registration.is_some(),
         auto_start: prefs.settings.auto_start,
+        paused: prefs.settings.paused,
         pm_bucket: u32::from(registration.is_some()),
         implementation_slots_consumed: 0,
         caller_is_registered_pm: caller_session.map(|caller| {
@@ -5060,8 +5220,35 @@ pub fn pm_status_report_for_caller(
         session_record_present: record_present,
         stale_hint: record_present.map(|present| !present),
         worktree_freshness: prefs.worktree_freshness.clone(),
+        start_block: prefs.start_block.clone(),
         repository_registrations: Vec::new(),
     }
+}
+
+/// #4486 AC-7: persist a start refusal a Restart cannot clear.
+///
+/// Writing the same block twice keeps the first `observed_at`, so the report
+/// says when the condition began rather than when it was last re-observed —
+/// the gate re-runs on every ensure, and a clock that resets each time would
+/// hide how long the PM has been down.
+pub fn record_pm_start_block(prefs_path: &Path, block: PmStartBlock) -> io::Result<()> {
+    mutate_pm_prefs(prefs_path, |prefs| match prefs.start_block.as_ref() {
+        Some(existing) if existing.kind == block.kind => {}
+        _ => prefs.start_block = Some(block.clone()),
+    })?;
+    Ok(())
+}
+
+/// #4486 AC-7: drop a recorded block once the gate gets past it.
+///
+/// Called on every path that reaches a live, resumed, or spawning PM. A block
+/// that outlived its cause would send an operator after a condition that is
+/// no longer there.
+pub fn clear_pm_start_block(prefs_path: &Path) -> io::Result<()> {
+    mutate_pm_prefs(prefs_path, |prefs| {
+        prefs.start_block = None;
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5207,6 +5394,155 @@ mod tests {
         assert!(error.to_string().contains(&recovery.display().to_string()));
     }
 
+    /// #4486 AC-7: every block must name a distinct, non-empty next action.
+    /// A block whose `required_operation` is missing or shared with another
+    /// kind sends the operator back to the Restart button it exists to warn
+    /// them away from.
+    #[test]
+    fn every_start_block_kind_names_its_own_required_operation() {
+        let kinds = [
+            PmStartBlockKind::MigrationPending,
+            PmStartBlockKind::PrefsUnreadable,
+            PmStartBlockKind::AnotherStoreOwnsThePm,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in kinds {
+            let operation = kind.required_operation();
+            assert!(!operation.trim().is_empty(), "{kind:?} has no next action");
+            assert!(
+                seen.insert(operation),
+                "{kind:?} repeats another kind's next action: {operation}"
+            );
+            let block = PmStartBlock::new(kind, "reason");
+            assert!(block.permanent, "{kind:?} must report itself as permanent");
+            assert!(
+                !block.restart_clears_it,
+                "{kind:?} must say a Restart does not clear it"
+            );
+            assert_eq!(block.required_operation, operation);
+        }
+        assert!(
+            PmStartBlockKind::AnotherStoreOwnsThePm
+                .required_operation()
+                .contains("repository_registrations"),
+            "the cross-store block must point at the field holding the session id \
+             that `pm.stop` needs"
+        );
+    }
+
+    /// #4486 AC-7: the block reaches `pm.status`, and the wire form is
+    /// snake_case so a reader can branch on the kind.
+    #[test]
+    fn a_recorded_start_block_reaches_the_status_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefs_path = dir.path().join("project/project-state/pm.json");
+        record_pm_start_block(
+            &prefs_path,
+            PmStartBlock::new(
+                PmStartBlockKind::AnotherStoreOwnsThePm,
+                "another project store already owns the resident PM",
+            ),
+        )
+        .expect("record the block");
+
+        let prefs = load_pm_prefs(&prefs_path).expect("read back PM prefs");
+        let status = pm_status_report(&prefs, |_| false);
+        let block = status.start_block.expect("pm.status start block");
+        assert_eq!(block.kind, PmStartBlockKind::AnotherStoreOwnsThePm);
+        assert!(block.permanent);
+        assert!(!block.restart_clears_it);
+        assert!(block.reason.contains("another project store"));
+        assert!(block.required_operation.contains("pm.stop"));
+
+        let wire = serde_json::to_value(&block).expect("serialize");
+        assert_eq!(wire["kind"], "another_store_owns_the_pm");
+        assert_eq!(wire["restart_clears_it"], false);
+        assert_eq!(
+            wire["permanent"], true,
+            "permanent is serialized even though every current variant is true, \
+             so a reader never has to know the variant list"
+        );
+    }
+
+    /// #4486 AC-7: the ensure gate re-runs on every attempt, so re-recording the
+    /// same kind must keep the first `observed_at`. A clock that reset each
+    /// time would hide how long the PM has been down.
+    #[test]
+    fn re_recording_the_same_block_keeps_when_the_condition_began() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefs_path = dir.path().join("project/project-state/pm.json");
+        let first = PmStartBlock {
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            ..PmStartBlock::new(PmStartBlockKind::PrefsUnreadable, "pm.json unreadable")
+        };
+        record_pm_start_block(&prefs_path, first).expect("record once");
+        let later = PmStartBlock {
+            observed_at: "2026-06-01T00:00:00Z".to_string(),
+            ..PmStartBlock::new(
+                PmStartBlockKind::PrefsUnreadable,
+                "pm.json still unreadable",
+            )
+        };
+        record_pm_start_block(&prefs_path, later).expect("record again");
+
+        let prefs = load_pm_prefs(&prefs_path).expect("read back PM prefs");
+        let block = prefs.start_block.expect("block");
+        assert_eq!(
+            block.observed_at, "2026-01-01T00:00:00Z",
+            "the report must say when the condition began, not when it was last re-observed"
+        );
+
+        // A *different* kind is a different condition, so it replaces.
+        let other = PmStartBlock {
+            observed_at: "2026-09-01T00:00:00Z".to_string(),
+            ..PmStartBlock::new(PmStartBlockKind::MigrationPending, "migration pending")
+        };
+        record_pm_start_block(&prefs_path, other).expect("record a different kind");
+        let prefs = load_pm_prefs(&prefs_path).expect("read back PM prefs");
+        let block = prefs.start_block.expect("block");
+        assert_eq!(block.kind, PmStartBlockKind::MigrationPending);
+        assert_eq!(block.observed_at, "2026-09-01T00:00:00Z");
+    }
+
+    /// #4486 AC-7: a block must not outlive its cause. The gate clears it on
+    /// every path that reaches a live, resumed, or spawning PM; a stale block
+    /// would send an operator after a condition that is no longer there.
+    #[test]
+    fn clearing_a_start_block_removes_it_from_the_status_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefs_path = dir.path().join("project/project-state/pm.json");
+        record_pm_start_block(
+            &prefs_path,
+            PmStartBlock::new(PmStartBlockKind::MigrationPending, "migration pending"),
+        )
+        .expect("record");
+        clear_pm_start_block(&prefs_path).expect("clear");
+
+        let prefs = load_pm_prefs(&prefs_path).expect("read back PM prefs");
+        assert!(prefs.start_block.is_none());
+        let status = pm_status_report(&prefs, |_| false);
+        assert!(
+            status.start_block.is_none(),
+            "a cleared block must not be reported"
+        );
+        let wire = serde_json::to_value(&status).expect("serialize");
+        assert!(
+            wire.get("start_block").is_none(),
+            "an absent block is omitted from the wire form, not sent as null"
+        );
+    }
+
+    /// Legacy `pm.json` written before this field existed must still load.
+    #[test]
+    fn prefs_without_a_start_block_field_load_as_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prefs_path = dir.path().join("project/project-state/pm.json");
+        std::fs::create_dir_all(prefs_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&prefs_path, br#"{"settings":{}}"#).expect("seed legacy prefs");
+        let prefs = load_pm_prefs(&prefs_path).expect("load legacy prefs");
+        assert!(prefs.start_block.is_none());
+    }
+
     #[test]
     fn generated_hook_rollback_failure_is_durable_in_the_typed_status_snapshot() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5322,6 +5658,92 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+
+    #[test]
+    fn linked_pm_registration_validation_only_reads_the_target_admin_files() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("pm-worktree");
+        fs::create_dir(&repo).expect("repo directory");
+        run_pm_scratch_git(&repo, &["init"]);
+        run_pm_scratch_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=PM Test",
+                "-c",
+                "user.email=pm@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        run_pm_scratch_git(
+            &repo,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        validate_linked_pm_worktree_marker(&repo, &worktree).expect("valid registration");
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count(),
+            before,
+            "registration validation must not spawn Git or enumerate other worktrees"
+        );
+
+        let admin = parse_pm_worktree_control_path(&worktree.join(".git"), Some("gitdir: "))
+            .expect("admin marker");
+        let head = fs::read(admin.join("HEAD")).expect("registered HEAD");
+        for index in 0..788 {
+            let unrelated = repo.join(format!(".git/worktrees/unrelated-{index}"));
+            fs::create_dir(&unrelated).expect("unrelated admin directory");
+            fs::write(unrelated.join("HEAD"), &head).expect("unrelated HEAD");
+            fs::write(unrelated.join("commondir"), "../..\n").expect("unrelated commondir");
+            fs::write(
+                unrelated.join("gitdir"),
+                format!(
+                    "{}/.git\n",
+                    temp.path().join(format!("missing-{index}")).display()
+                ),
+            )
+            .expect("unrelated stale registration");
+        }
+        fs::write(
+            repo.join(".git/worktrees/unrelated-787/HEAD"),
+            "invalid HEAD\n",
+        )
+        .expect("one malformed unrelated registration");
+        {
+            let expired = gwt_core::operation_deadline::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expired);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expired);
+            validate_linked_pm_worktree_marker(&repo, &worktree).expect(
+                "unrelated registrations and an expired Git budget cannot affect the target",
+            );
+        }
+        assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+        fs::write(admin.join("commondir"), temp.path().to_str().unwrap())
+            .expect("replace common directory");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("a reciprocal registration must still belong to the expected common dir");
+        fs::write(admin.join("commondir"), "../..\n").expect("restore common directory");
+        fs::write(admin.join("HEAD"), "invalid HEAD\n").expect("corrupt HEAD");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("malformed registration HEAD must fail closed");
+        #[cfg(unix)]
+        {
+            let external = temp.path().join("external-commondir");
+            fs::write(&external, "../..\n").expect("external control file");
+            fs::remove_file(admin.join("commondir")).expect("remove common directory marker");
+            std::os::unix::fs::symlink(&external, admin.join("commondir"))
+                .expect("indirect common directory marker");
+            let error = validate_linked_pm_worktree_marker(&repo, &worktree)
+                .expect_err("symlinked registration controls must fail closed");
+            assert!(error.to_string().contains("regular file"), "{error}");
+        }
     }
 
     fn commit_tracked_pm_scratch(worktree: &Path, relative: &str, contents: &[u8]) {
@@ -5586,6 +6008,34 @@ mod tests {
         let prefs: PmPrefs =
             serde_json::from_str("{\"settings\":{}}").expect("parse empty settings");
         assert!(prefs.settings.auto_start);
+    }
+
+    #[test]
+    fn paused_settings_survive_reload_and_preserve_registration_and_auto_start() {
+        let (_dir, path) = temp_prefs_path();
+        let mut value = serde_json::to_value(PmPrefs {
+            registration: Some(registration("paused-pm")),
+            ..PmPrefs::default()
+        })
+        .expect("prefs JSON");
+        value["settings"]["paused"] = serde_json::json!(true);
+        let prefs: PmPrefs = serde_json::from_value(value).expect("paused prefs");
+        save_pm_prefs(&path, &prefs).expect("persist paused prefs");
+        let loaded = load_pm_prefs(&path).expect("reload");
+        let report = serde_json::to_value(pm_status_report(&loaded, |_| true)).expect("status");
+        assert_eq!(
+            report["paused"], true,
+            "pause must survive the file roundtrip"
+        );
+        assert_eq!(report["registered"], true);
+        assert_eq!(report["auto_start"], true);
+        let (_, outcome) =
+            try_register_pm(&path, registration("other-pm"), |_| true).expect("singleton check");
+        assert!(matches!(outcome, PmRegisterOutcome::RejectedLive { .. }));
+        let legacy: PmPrefs = serde_json::from_str("{}").expect("legacy prefs");
+        let legacy =
+            serde_json::to_value(pm_status_report(&legacy, |_| true)).expect("legacy status");
+        assert_eq!(legacy["paused"], false);
     }
 
     #[test]

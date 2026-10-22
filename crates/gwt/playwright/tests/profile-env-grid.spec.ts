@@ -1,8 +1,16 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Profile environment variable grid", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+  let browserErrors: string[] = [];
+  test.beforeEach(({ page }) => {
+    const errors = browserErrors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  });
+  test.afterEach(() => expect(browserErrors).toEqual([]));
 
   test("renders OS rows, auto-switches overrides, and saves added variables", async ({
     page,
@@ -186,14 +194,165 @@ test.describe("Profile environment variable grid", () => {
     expect(nameBoxAfter?.y).toBeCloseTo(nameBoxBefore?.y || 0, 1);
     await expect(editor).toHaveJSProperty("scrollTop", 0);
   });
+
+  test("keeps a newer unfocused draft when an older save ACK arrives", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page, { holdSaves: true });
+    await page.goto(APP_URL);
+    const profile = page.locator(".surface-profile");
+    await waitForProfileIdle(profile);
+    const value = profile.locator('.profile-env-row[data-env-key="PATH"] input');
+    await value.fill("/older/bin");
+    await value.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 1);
+    await value.fill("/newer/bin");
+    await value.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 2);
+    await expect(value).not.toBeFocused();
+
+    await page.evaluate(() => window.__profileFixtureReplyNext());
+    await expect(value).toHaveValue("/newer/bin");
+    await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-result')).toHaveText("/newer/bin");
+    await page.evaluate(() => window.__profileFixtureReplyNext());
+    await waitForProfileIdle(profile);
+    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await waitForProfileIdle(profile);
+    await expect(value).toHaveValue("/newer/bin");
+  });
+
+  test("retains the draft and existing snapshot on a save error, then recovers", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page, { holdSaves: true });
+    await page.goto(APP_URL);
+    const profile = page.locator(".surface-profile");
+    await waitForProfileIdle(profile);
+    const name = profile.locator(".profile-field input").first();
+    await name.fill("unsaved-name");
+    await name.blur();
+    await page.waitForFunction(() => window.__profileFixturePendingSaves.length === 1);
+    await expect(profile.locator(".profile-status")).toHaveText("Saving profile...");
+    await page.evaluate(() => window.__profileFixtureReplyNext("fixture save failed"));
+    await expect(profile.locator(".profile-status.error")).toHaveText("fixture save failed");
+    await expect(name).toHaveValue("unsaved-name");
+    await expect(profile.locator(".profile-row.selected .profile-row-title")).toHaveText("default");
+    await expect(profile.locator('.profile-env-row[data-env-key="PATH"] .profile-env-os-value')).toHaveText("/usr/bin");
+    await name.fill("default");
+    await name.blur();
+    await profile.getByRole("button", { name: "Refresh profiles" }).click();
+    await waitForProfileIdle(profile);
+    await expect(name).toHaveValue("default");
+    await expect(profile.locator(".profile-status.error")).toHaveCount(0);
+  });
+
+  test("live Profile saves a marker across reload and recovers from a rename error", async ({ page }, info) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires an isolated live gwt backend");
+    test.setTimeout(90_000);
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+      await gotoLiveGwt(page, base!, { enableTestBridge: true, keepPresetModal: true });
+      await page.locator("#add-button").click();
+      await page.locator('#preset-modal [data-preset="profile"]').click();
+      const pane = page.locator('.workspace-window[data-preset="profile"]');
+      const profile = pane;
+      await expect(profile.getByText("Environment Variables", { exact: true })).toBeVisible();
+      // The default window is shorter than the fixed metadata plus env editor.
+      // Use normal window gestures to give the live case the fixture's height.
+      const titlebar = await pane.locator(".titlebar").boundingBox();
+      expect(titlebar).not.toBeNull();
+      await page.mouse.move(titlebar!.x + 20, titlebar!.y + 10);
+      await page.mouse.down();
+      await page.mouse.move(120, 90, { steps: 5 });
+      await page.mouse.up();
+      const handle = await pane.locator(".resize-handle").boundingBox();
+      const frame = await pane.boundingBox();
+      expect(handle).not.toBeNull();
+      expect(frame).not.toBeNull();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2 + 680 - frame!.height, { steps: 5 });
+      await page.mouse.up();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const id = await pane.getAttribute("data-id");
+      expect(id).toBeTruthy();
+      await waitForProfileIdle(profile);
+      const cursor = () => page.evaluate(() => Number((window as any).__gwtPlaywrightMessageSequence) || 0);
+      const refresh = async () => {
+        const after = await cursor();
+        await profile.getByRole("button", { name: "Refresh profiles" }).click();
+        await waitForLiveProfileReply(page, id!, after);
+        await waitForProfileIdle(profile);
+      };
+      await refresh();
+
+      const key = "GWT_PROFILE_LIVE_FIXTURE";
+      const marker = `profile-grid-${theme}`;
+      await expect(profile.locator(`.profile-env-row[data-env-key="${key}"]`)).toHaveCount(0);
+      await profile.getByRole("button", { name: "+ Add variable" }).click();
+      const keyInput = profile.locator('input[aria-label^="Environment variable key"]').last();
+      const keyCursor = await cursor();
+      await keyInput.fill(key);
+      await keyInput.blur();
+      await waitForLiveProfileReply(page, id!, keyCursor, key);
+      const value = profile.locator(`.profile-env-row[data-env-key="${key}"] input[aria-label^="Profile value"]`);
+      const saveCursor = await cursor();
+      await value.fill(marker);
+      await value.blur();
+      await waitForLiveProfileReply(page, id!, saveCursor, key, marker);
+      await waitForProfileIdle(profile);
+      await refresh();
+      await expect(value).toHaveValue(marker);
+      await page.reload();
+      await waitForLiveProfileReply(page, id!, 0, key, marker);
+      await expect(value).toHaveValue(marker);
+      await waitForProfileIdle(profile);
+
+      const name = profile.locator(".profile-field input").first();
+      const errorCursor = await cursor();
+      await name.fill("default-fixture-invalid");
+      await name.blur();
+      await waitForLiveProfileReply(page, id!, errorCursor, undefined, undefined, "profile_error");
+      await expect(profile.locator(".profile-status.error")).toContainText("default profile cannot be renamed");
+      await expect(name).toHaveValue("default-fixture-invalid");
+      await expect(value).toHaveValue(marker);
+      await name.fill("default");
+      await name.blur();
+      await refresh();
+      await expect(name).toHaveValue("default");
+      await expect(value).toHaveValue(marker);
+      await expect(profile.locator(".profile-status.error")).toHaveCount(0);
+      await profile.locator(`.profile-env-row[data-env-key="${key}"]`).scrollIntoViewIfNeeded();
+      const screenshot = info.outputPath("profile-live.png");
+      await pane.screenshot({
+        path: screenshot,
+        mask: [
+          profile.locator(".profile-env-os-value"),
+          profile.locator(`.profile-env-row:not([data-env-key="${key}"])`).locator("input, .profile-env-result"),
+          profile.locator(".profile-field input, .profile-field textarea"),
+        ],
+      });
+      await info.attach("Profiles live", { path: screenshot, contentType: "image/png" });
+    });
+  });
 });
 
 async function waitForProfileIdle(profile) {
   await expect(profile.locator(".profile-status")).toContainText(/^Active /);
 }
 
-async function installProfileBackend(page) {
-  await page.addInitScript(() => {
+async function waitForLiveProfileReply(page, id: string, after: number, key?: string, value?: string, kind = "profile_snapshot") {
+  // Return only a boolean; real OS environment values must not become artifacts.
+  await page.waitForFunction(({ id, after, key, value, kind }) =>
+    (window as any).__gwtPlaywrightMessages.some((entry: any) =>
+      entry.sequence > after && entry.payload.id === id && entry.payload.kind === kind &&
+      (!key || entry.payload.snapshot?.profiles.some((profile: any) =>
+        profile.env_vars.some((env: any) => env.key === key && (value === undefined || env.value === value))))
+    ), { id, after, key, value, kind });
+}
+
+async function installProfileBackend(page, { holdSaves = false } = {}) {
+  await page.addInitScript(({ holdSaves }) => {
     const recordedSends = [];
     window.__profileFixtureSends = recordedSends;
 
@@ -259,6 +418,13 @@ async function installProfileBackend(page) {
       ],
       merged_preview: [],
     };
+    const pendingSaves = [];
+    window.__profileFixturePendingSaves = pendingSaves;
+    window.__profileFixtureReplyNext = (error = "") => {
+      const pending = pendingSaves.shift();
+      if (!pending) throw new Error("No pending Profile save");
+      pending.socket.replyToSave(pending.message, error);
+    };
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -288,10 +454,22 @@ async function installProfileBackend(page) {
           return;
         }
         if (message.kind === "save_profile") {
+          if (holdSaves) pendingSaves.push({ socket: this, message });
+          else this.replyToSave(message);
+        }
+      }
+
+      replyToSave(message, error = "") {
+        let payload;
+        if (error) {
+          payload = { kind: "profile_error", id: message.id, message: error };
+        } else {
           snapshot.profiles[0].env_vars = message.env_vars;
           snapshot.profiles[0].disabled_env = message.disabled_env;
-          this.emit({ kind: "profile_snapshot", id: message.id, snapshot });
+          payload = { kind: "profile_snapshot", id: message.id, snapshot };
         }
+        if (holdSaves) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+        else this.emit(payload);
       }
 
       close() {
@@ -312,5 +490,5 @@ async function installProfileBackend(page) {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, { holdSaves });
 }

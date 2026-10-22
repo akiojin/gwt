@@ -146,7 +146,7 @@ impl HolderActivity {
 
     /// The tree moved: it gained more CPU than scheduler noise, or a
     /// process started or exited.
-    fn advancing(&self) -> bool {
+    pub(crate) fn advancing(&self) -> bool {
         self.cpu_percent >= PROGRESS_FLOOR_CPU_PERCENT || self.turnover
     }
 
@@ -161,6 +161,18 @@ impl HolderActivity {
     /// starved holder is never read as an orphan.
     pub(crate) fn orphaned(&self) -> bool {
         self.parent_gone && self.workload_processes == 0 && !self.advancing()
+    }
+
+    /// Issue #4746: an in-tree driver can remain blocked after every child
+    /// exited while its requester is still alive. Keep delegated silence
+    /// unknown: its work may be outside the process trees we found. This
+    /// reading only permits a second observation during explicit release.
+    pub(crate) fn reclaimable(&self) -> bool {
+        self.orphaned()
+            || (self.old_enough()
+                && !self.delegated
+                && self.workload_processes == 0
+                && !self.advancing())
     }
 
     /// Barely scheduled on a saturated host: runnable, just not getting a
@@ -191,6 +203,8 @@ impl HolderActivity {
     pub(crate) fn state(&self) -> &'static str {
         if self.orphaned() {
             "orphaned"
+        } else if self.reclaimable() {
+            "reclaimable"
         } else if self.undecidable() {
             "unknown"
         } else if self.starved() {
@@ -211,8 +225,14 @@ impl HolderActivity {
             return format!(
                 "holder orphaned: held {held}, its parent process exited and no command of its \
                  own is left running — in its tree or under the daemon — over the last \
-                 {window:.1}s. Nobody is waiting for this run and it will not release the lease \
-                 before the TTL; reclaim it with `verify.lease.release` and a reason"
+                 {window:.1}s. This describes the observed process set, not permission to stop it"
+            );
+        }
+        if self.reclaimable() {
+            return format!(
+                "holder reclaimable: held {held}, its in-tree commands have all exited and \
+                 the driver gained no CPU beyond scheduler noise over the last {window:.1}s. \
+                 This describes the observed process set, not permission to stop it"
             );
         }
         if self.undecidable() {
@@ -220,8 +240,8 @@ impl HolderActivity {
                 "holder state unknown: held {held}, it launched its commands outside its own \
                  process tree (spawn-host daemon) and none of the {processes} processes this \
                  reading could reach gained CPU over the last {window:.1}s — that is not evidence \
-                 of a stopped holder, only that the work was not found. Confirm with `ps -eo \
-                 pid,ppid,time,command` before acting on it"
+                 of a stopped holder, only that the work was not found. Repeated sampling \
+                 does not authorize reclaiming or stopping it"
             );
         }
         if self.starved() {
@@ -768,7 +788,10 @@ mod tests {
         let described = activity.describe();
         assert!(!described.contains("may be hung"), "{described}");
         assert!(described.contains("not evidence"), "{described}");
-        assert!(described.contains("ps -eo"), "{described}");
+        assert!(
+            described.contains("Repeated sampling does not authorize"),
+            "{described}"
+        );
     }
 
     /// The daemon is the launcher, not the work. Its own CPU — Issue Monitor
@@ -801,6 +824,20 @@ mod tests {
 
         assert!(!activity.delegated, "{activity:?}");
         assert_eq!(activity.state(), "stalled");
+    }
+
+    #[test]
+    fn an_empty_stalled_driver_is_reclaimable_while_its_parent_lives() {
+        let samples = [agent(), sample(21468, Some(AGENT_PID), 11_120)];
+        let idle = activity(&samples, &samples, 7_260_000, Some(30.0));
+
+        assert!(!idle.orphaned());
+        assert_eq!(idle.state(), "reclaimable", "{idle:?}");
+        assert!(idle.describe().contains("not permission to stop it"));
+        assert_eq!(
+            activity(&samples, &samples, 100, None).state(),
+            "progressing"
+        );
     }
 
     /// Issue #4633 AC-5: the reading behind the "progressing" report for a
@@ -874,7 +911,10 @@ mod tests {
         assert_eq!(activity.state(), "orphaned", "{activity:?}");
         let described = activity.describe();
         assert!(described.contains("orphaned"), "{described}");
-        assert!(described.contains("verify.lease.release"), "{described}");
+        assert!(
+            described.contains("not permission to stop it"),
+            "{described}"
+        );
         assert!(!described.contains("progressing"), "{described}");
     }
 

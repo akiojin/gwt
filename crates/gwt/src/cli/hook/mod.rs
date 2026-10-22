@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+pub(crate) mod branch_freshness;
 mod context;
 pub mod coordination_event;
 pub mod diagnostics;
@@ -26,11 +27,14 @@ pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
+pub mod external_skill_conflicts;
 pub mod forward;
 pub mod health;
 mod identity;
 pub mod known_workarounds;
 pub mod pm_loop_stop_check;
+pub(crate) mod pm_reporting;
+pub mod pm_spec_survey;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;
@@ -138,15 +142,18 @@ impl HookKind {
 /// session identity is intentionally kept out of this permissive event shape;
 /// managed hook paths must parse the raw payload and promote the raw
 /// `session_id` into a required session id type before using it.
+/// Parsed through `RawHookEvent` so a payload carrying both the snake_case
+/// and camelCase spelling of a key is accepted (Issue #4768).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawHookEvent")]
 pub struct HookEvent {
-    #[serde(alias = "toolName")]
     pub tool_name: Option<String>,
-    #[serde(alias = "toolInput")]
     pub tool_input: Option<serde_json::Value>,
-    #[serde(alias = "transcriptPath")]
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
+    /// Advisory provenance only; these fields never grant authority.
+    pub active_skill: Option<String>,
+    pub active_plugin: Option<String>,
 }
 
 impl HookEvent {
@@ -167,9 +174,36 @@ impl HookEvent {
         Self::read_from_str(&buf)
     }
 
-    /// Convenience accessor for `tool_input.command` (Bash tool payloads).
+    /// Shell text from Bash (`command`) or Codex exec_command (`cmd`).
     pub fn command(&self) -> Option<&str> {
-        self.tool_input.as_ref()?.get("command")?.as_str()
+        let input = self.tool_input.as_ref()?;
+        input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str))
+    }
+
+    /// Codex can select a command directory independently of the hook cwd.
+    pub(super) fn command_cwd(&self, fallback: &std::path::Path) -> std::path::PathBuf {
+        let cwd = self
+            .cwd
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| fallback.to_path_buf());
+        if matches!(
+            self.tool_name.as_deref(),
+            Some("exec_command" | "functions.exec_command")
+        ) {
+            if let Some(workdir) = self
+                .tool_input
+                .as_ref()
+                .and_then(|input| input.get("workdir"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return cwd.join(workdir);
+            }
+        }
+        cwd
     }
 }
 
@@ -579,7 +613,10 @@ pub fn run_daemon_hook<E: CliEnv>(
                         return Ok(2);
                     }
                 },
-                None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+                // The operator supplied a project, not a provider version.
+                // Verify both files just as launch does; otherwise a linked
+                // worktree's local hooks can remain unregistered after success.
+                None => gwt_skills::CodexHookDiscoveryMode::Both,
             };
             // #3967: compare against the binary managed hook generation embeds,
             // resolved the same way materialization resolves it. Guessing here
@@ -737,6 +774,55 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(|pair| pair[1].as_str())
 }
 
+pub(super) fn append_codex_trust_health_for_doctor(
+    input: &health::ManagedHookHealthInput,
+    health: &mut health::ManagedHookHealth,
+) {
+    if health.status == health::ManagedHookHealthStatus::Inactive {
+        return;
+    }
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root);
+    let root = runtime.as_deref().unwrap_or(&input.worktree_root);
+    if !crate::managed_assets::managed_codex_hook_paths(root)
+        .iter()
+        .any(|path| path.exists())
+    {
+        return;
+    }
+    let Some(config_path) = default_codex_config_path() else {
+        health
+            .issues
+            .push("Codex hook trust config path is unavailable".to_string());
+        if health.status != health::ManagedHookHealthStatus::Degraded {
+            health.status = health::ManagedHookHealthStatus::NeedsAttention;
+        }
+        return;
+    };
+    let expected = input
+        .expected_hook_bin
+        .clone()
+        .or_else(|| crate::managed_assets::managed_hook_bin().ok());
+    let issue = match gwt_skills::inspect_codex_managed_hook_trust_for_mode_with_expected_bin(
+        root,
+        &config_path,
+        crate::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
+        expected.as_deref(),
+    ) {
+        Ok(report) => report.hooks_need_review_reason(),
+        Err(error) => Some(format!(
+            "Codex hook trust inspection failed for {} (config {}): {error}",
+            root.display(),
+            config_path.display()
+        )),
+    };
+    if let Some(issue) = issue {
+        health.issues.push(issue);
+        if health.status != health::ManagedHookHealthStatus::Degraded {
+            health.status = health::ManagedHookHealthStatus::NeedsAttention;
+        }
+    }
+}
+
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
     std::env::var_os("CODEX_HOME")
         .filter(|home| !home.is_empty())
@@ -765,6 +851,20 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    /// Issue #4768: policy hooks parse the same Grok payload that carries
+    /// `toolName` and `tool_name` together.
+    #[test]
+    fn hook_event_accepts_grok_payload_with_both_key_spellings() {
+        let event = HookEvent::read_from_str(
+            r#"{"sessionId":"g","session_id":"g","toolName":"run_command","tool_name":"Bash","toolInput":{"command":"pwd"},"tool_input":{"command":"ls"}}"#,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(event.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(event.command(), Some("ls"));
+    }
 
     #[test]
     fn resident_pm_policy_recognizes_nested_cwd_only_under_canonical_pm_worktree() {

@@ -709,12 +709,9 @@ impl WorkspaceProjection {
                 self.owner = None;
                 self.summary = None;
                 self.next_action = None;
-                self.agents.retain(|agent| {
-                    agent
-                        .workspace_id
-                        .as_deref()
-                        .is_none_or(|assigned| assigned == work_id)
-                });
+                // Session assignments are repository-wide authority, not part
+                // of the selected Work's display identity. Other live Works
+                // must retain their assignments across launch and restore.
             }
             self.id = work_id;
         }
@@ -735,6 +732,7 @@ impl WorkspaceProjection {
         self.upsert_agent_summary(agent);
         let active_agents = self
             .assigned_agents()
+            .filter(|agent| agent.workspace_id.as_deref().is_none_or(|id| id == self.id))
             .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
             .count();
         self.status_text = if active_agents == 1 {
@@ -2346,7 +2344,7 @@ mod tests {
 
     // #3065: a launch that re-points the shared projection at a DIFFERENT
     // work item must not inherit the previous work's identity (owner /
-    // summary / next_action) or keep agents assigned to the previous work.
+    // summary / next_action). Session assignments remain repository-wide.
     #[test]
     fn apply_launch_does_not_inherit_identity_across_work_items() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
@@ -2397,12 +2395,12 @@ mod tests {
             Some("Check Board for latest updates"),
             "next action falls back to the default, not the previous work's"
         );
-        assert!(
+        assert_eq!(
             projection
-                .agents
-                .iter()
-                .all(|agent| agent.workspace_id.as_deref() != Some("work-old-11111111")),
-            "agents assigned to the previous work item are dropped"
+                .latest_agent_for_session("sess-old")
+                .and_then(|agent| agent.workspace_id.as_deref()),
+            Some("work-old-11111111"),
+            "launching another Work must preserve the existing Session's authority"
         );
         assert_eq!(projection.status_text, "Codex is running");
     }

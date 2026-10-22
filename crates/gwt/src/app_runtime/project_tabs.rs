@@ -8,8 +8,8 @@
 //!   [`AppRuntime::open_project_path_events`], ...)
 //! - GitHub repository search for the clone dialog
 //!   (`search_github_repositories`, `parse_github_repository_search_results`)
-//! - Project tab selection / close ([`AppRuntime::select_project_tab_events`],
-//!   [`AppRuntime::close_project_tab_events`]) and recent-project bookkeeping
+//! - Explicit Project close ([`AppRuntime::close_project_tab_events`]) and
+//!   recent-project bookkeeping
 //! - SPEC-1934 migration detection broadcasts / replies
 //!   (`recovery_state_label` stays re-exported through `mod.rs` for
 //!   `migration.rs`)
@@ -20,19 +20,56 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use super::project_route::ProjectOpenControlFailure;
 use super::startup::prepare_open_project_window_restores;
+#[cfg(test)]
+use super::PreparedProjectSwitch;
 use super::{
     combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
-    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    PreparedMigrationSnapshot, PreparedProjectOpen, PreparedProjectSwitch, ProjectContext,
+    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, FrontendEvent,
+    OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
     ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
     ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
     UserEvent, Uuid, WindowCanvasState,
 };
+
+#[derive(Clone, Copy)]
+enum PickerPurpose {
+    Open,
+    CloneParent,
+}
+
+impl PickerPurpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::CloneParent => "clone_parent",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectPickerState {
+    next_id: u64,
+    pending: HashMap<String, (u64, PickerPurpose)>,
+    // A terminal timeout reply does not mean the native dialog has closed.
+    workers: HashMap<String, u64>,
+}
+
+fn pick_project_folder_with_deadline(deadline: Instant) -> Result<Option<PathBuf>, String> {
+    // The independent runtime timer sends the deadline reply. Keep this worker
+    // alive until the native thread exits, including on platforms without a
+    // programmatic dialog cancellation API, so another dialog cannot overlap.
+    std::thread::Builder::new()
+        .name("gwt-project-picker".into())
+        .spawn(move || super::native_project_picker::pick_project_folder(deadline))
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|_| "Folder selection worker stopped".to_string())?
+}
 
 pub(crate) fn initial_project_tab_incarnations(
     tabs: &[ProjectTabRuntime],
@@ -136,7 +173,7 @@ fn search_github_repositories(
     }
     let hub = gwt_core::process_console::global();
     let limit_str = limit.to_string();
-    let output = gwt_core::process_console::spawn_logged_blocking(
+    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
@@ -150,6 +187,7 @@ fn search_github_repositories(
             limit_str.as_str(),
         ],
         gwt_core::process_console::SpawnOptions::new("gh search repos"),
+        Instant::now() + Duration::from_secs(15),
     )
     .map_err(|error| format!("gh search repos: {error}"))?;
     if !output.success() {
@@ -229,6 +267,7 @@ fn prepare_project_open(
     }))
 }
 
+#[cfg(test)]
 fn prepare_project_switch(
     tab_id: String,
     project_root: PathBuf,
@@ -253,36 +292,161 @@ impl AppRuntime {
         events
     }
 
-    pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
-        let selected = rfd::FileDialog::new().pick_folder();
-        self.open_project_dialog_selection_events(selected)
+    pub(crate) fn open_project_dialog_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        self.request_project_picker(client_id, PickerPurpose::Open)
     }
 
+    fn request_project_picker(
+        &mut self,
+        client_id: &str,
+        purpose: PickerPurpose,
+    ) -> Vec<OutboundEvent> {
+        if self.project_picker.workers.contains_key(client_id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PickerBusy {
+                    purpose: purpose.as_str().into(),
+                    message: "Folder selection is already open. Finish or cancel it first.".into(),
+                },
+            )];
+        }
+        self.project_picker.next_id = self
+            .project_picker
+            .next_id
+            .checked_add(1)
+            .expect("picker request id exhausted");
+        let request_id = self.project_picker.next_id;
+        self.project_picker
+            .pending
+            .insert(client_id.into(), (request_id, purpose));
+        self.project_picker
+            .workers
+            .insert(client_id.into(), request_id);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        // The deadline must run independently of the blocking pool: a queued
+        // dialog still owes its client a terminal reply within the same budget.
+        match &self.blocking_tasks {
+            super::BlockingTaskSpawner::Tokio(handle) => {
+                let proxy = self.proxy.clone();
+                let client_id = client_id.to_string();
+                drop(handle.spawn(async move {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    proxy.send(UserEvent::ProjectPickerFinished {
+                        client_id,
+                        request_id,
+                        worker_finished: false,
+                        result: Err("Folder selection timed out".into()),
+                    });
+                }));
+            }
+            #[cfg(test)]
+            _ => {}
+        }
+        let proxy = self.proxy.clone();
+        let client = client_id.to_string();
+        let mut events = vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::PickerStarted {
+                request_id,
+                purpose: purpose.as_str().into(),
+            },
+        )];
+        tracing::info!(
+            request_id,
+            client_id,
+            purpose = purpose.as_str(),
+            "project picker started"
+        );
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = pick_project_folder_with_deadline(deadline);
+            proxy.send(UserEvent::ProjectPickerFinished {
+                client_id: client,
+                request_id,
+                worker_finished: true,
+                result,
+            });
+        }) {
+            events.extend(self.handle_project_picker_finished(
+                client_id,
+                request_id,
+                true,
+                Err(error),
+            ));
+        }
+        events
+    }
+
+    pub(crate) fn handle_project_picker_finished(
+        &mut self,
+        client_id: &str,
+        request_id: u64,
+        worker_finished: bool,
+        result: Result<Option<PathBuf>, String>,
+    ) -> Vec<OutboundEvent> {
+        if worker_finished && self.project_picker.workers.get(client_id) == Some(&request_id) {
+            self.project_picker.workers.remove(client_id);
+        }
+        let Some(&(pending_id, purpose)) = self.project_picker.pending.get(client_id) else {
+            return Vec::new();
+        };
+        if pending_id != request_id {
+            return Vec::new();
+        }
+        self.project_picker.pending.remove(client_id);
+        let purpose_name = purpose.as_str().to_string();
+        let mut events = Vec::new();
+        let event = match result {
+            Ok(Some(path)) => {
+                tracing::info!(request_id, client_id, purpose = %purpose_name, path = %path.display(), "project picker picked");
+                let selected = BackendEvent::PickerSelected {
+                    request_id,
+                    purpose: purpose_name,
+                    path: path.display().to_string(),
+                };
+                if matches!(purpose, PickerPurpose::Open) {
+                    events.extend(self.open_project_path_with_request_events(
+                        path,
+                        Some(format!("picker:{request_id}")),
+                    ));
+                }
+                selected
+            }
+            Ok(None) => {
+                tracing::info!(request_id, client_id, purpose = %purpose_name, "project picker cancelled");
+                BackendEvent::PickerCancelled {
+                    request_id,
+                    purpose: purpose_name,
+                }
+            }
+            Err(message) => {
+                tracing::warn!(request_id, client_id, purpose = %purpose_name, %message, "project picker failed");
+                BackendEvent::PickerError {
+                    request_id,
+                    purpose: purpose_name,
+                    message,
+                }
+            }
+        };
+        events.insert(0, OutboundEvent::reply(client_id, event));
+        events
+    }
+
+    #[cfg(test)]
     pub(crate) fn open_project_dialog_selection_events(
         &mut self,
         selected: Option<PathBuf>,
     ) -> Vec<OutboundEvent> {
         let Some(path) = selected else {
-            self.invalidate_project_navigation();
             return Vec::new();
         };
-        self.request_project_open(path, ProjectNavigationSource::Open)
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id: None })
     }
 
     pub(crate) fn select_clone_project_parent_events(
         &mut self,
         client_id: &str,
     ) -> Vec<OutboundEvent> {
-        let selected = rfd::FileDialog::new().pick_folder();
-        let Some(path) = selected else {
-            return Vec::new();
-        };
-        vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::CloneProjectParentSelected {
-                path: path.display().to_string(),
-            },
-        )]
+        self.request_project_picker(client_id, PickerPurpose::CloneParent)
     }
 
     pub(crate) fn github_repository_search_events(
@@ -290,22 +454,33 @@ impl AppRuntime {
         client_id: &str,
         query: &str,
     ) -> Vec<OutboundEvent> {
-        match search_github_repositories(query, 20) {
-            Ok(repositories) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::GithubRepositorySearchResults {
-                    query: query.to_string(),
+        let proxy = self.proxy.clone();
+        let client = client_id.to_string();
+        let search_query = query.to_string();
+        if let Err(message) = self.blocking_tasks.try_spawn(move || {
+            let event = match search_github_repositories(&search_query, 20) {
+                Ok(repositories) => BackendEvent::GithubRepositorySearchResults {
+                    query: search_query,
                     repositories,
                 },
-            )],
-            Err(message) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::GithubRepositorySearchError {
-                    query: query.to_string(),
+                Err(message) => BackendEvent::GithubRepositorySearchError {
+                    query: search_query,
                     message,
                 },
-            )],
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client, event,
+            )]));
+        }) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::GithubRepositorySearchError {
+                    query: query.into(),
+                    message,
+                },
+            )];
         }
+        Vec::new()
     }
 
     pub(crate) fn clone_project_start_events(
@@ -320,6 +495,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "repository URL is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
@@ -329,23 +505,62 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "destination parent folder is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
 
         let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
         let url = trimmed_url.to_string();
         let parent = PathBuf::from(trimmed_parent);
+        let project_key = gwt_core::repo_hash::compute_repo_hash(trimmed_url);
+        let registered_keys = self
+            .project_tab_incarnations
+            .values()
+            .map(|incarnation| incarnation.project_key.clone())
+            .collect::<Vec<_>>();
+        let recent_projects = self
+            .recent_projects
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    self.recent_project_key(&entry.path).cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let worker_client_id = client_id.clone();
         self.blocking_tasks.spawn(move || {
+            // Recent identities may not be hydrated yet. Resolve them here,
+            // before clone creates directories or starts Git, off the tao thread.
+            let existing_project_key = registered_keys
+                .into_iter()
+                .chain(recent_projects.into_iter().map(|(path, key)| {
+                    key.unwrap_or_else(|| gwt_core::paths::resolve_project_scope(&path).hash)
+                }))
+                .find(|key| key == &project_key);
+            if let Some(existing_project_key) = existing_project_key {
+                proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
+                    message: "Repository is already registered.".to_string(),
+                    existing_project_key: Some(existing_project_key.to_string()),
+                });
+                return;
+            }
             proxy.send(UserEvent::CloneProjectProgress {
+                client_id: worker_client_id.clone(),
                 message: "Cloning repository...".to_string(),
             });
             match gwt_git::clone_project_as_nested_bare(&url, &parent) {
                 Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
+                    client_id: worker_client_id,
                     workspace_home: outcome.workspace_home,
                 }),
                 Err(error) => proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
                     message: error.to_string(),
+                    existing_project_key: None,
                 }),
             }
         });
@@ -359,16 +574,26 @@ impl AppRuntime {
     }
 
     pub(crate) fn open_project_path_events(&mut self, path: PathBuf) -> Vec<OutboundEvent> {
-        self.request_project_open(path, ProjectNavigationSource::Open)
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id: None })
+    }
+
+    pub(crate) fn open_project_path_with_request_events(
+        &mut self,
+        path: PathBuf,
+        request_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        self.request_project_open(path, ProjectNavigationSource::Open { request_id })
     }
 
     pub(crate) fn handle_clone_project_done(
         &mut self,
+        client_id: &str,
         workspace_home: &Path,
     ) -> Vec<OutboundEvent> {
         self.request_project_open(
             workspace_home.to_path_buf(),
             ProjectNavigationSource::Clone {
+                client_id: client_id.to_string(),
                 workspace_home: workspace_home.to_path_buf(),
             },
         )
@@ -394,17 +619,13 @@ impl AppRuntime {
         request
     }
 
-    fn invalidate_project_navigation(&mut self) {
-        self.next_project_navigation_request_id();
-        self.pending_project_navigation = None;
-    }
-
     fn request_project_open(
         &mut self,
         path: PathBuf,
         source: ProjectNavigationSource,
     ) -> Vec<OutboundEvent> {
         let request = self.reserve_project_navigation(source, None);
+        tracing::info!(request_id = request.id, path = %path.display(), "project-open preparation started");
         // Issue #4145 AC-1: start of the project-open route; closed in
         // `handle_project_navigation_prepared` once the tab is committed.
         self.project_open_started = Some((request.id, Instant::now()));
@@ -419,6 +640,7 @@ impl AppRuntime {
                 },
             )));
         }) {
+            tracing::warn!(request_id = request.id, %error, "project-open preparation could not start");
             if self
                 .pending_project_navigation
                 .as_ref()
@@ -437,12 +659,26 @@ impl AppRuntime {
         message: String,
     ) -> Vec<OutboundEvent> {
         let event = match source {
-            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError { message },
-            ProjectNavigationSource::Open | ProjectNavigationSource::Switch { .. } => {
-                BackendEvent::ProjectOpenError { message }
-            }
+            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError {
+                message,
+                existing_project_key: None,
+            },
+            ProjectNavigationSource::Open { request_id } => BackendEvent::ProjectOpenError {
+                message,
+                request_id: request_id.clone(),
+            },
+            #[cfg(test)]
+            ProjectNavigationSource::Switch { .. } => BackendEvent::ProjectOpenError {
+                message,
+                request_id: None,
+            },
         };
-        vec![OutboundEvent::hub(event)]
+        vec![match source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, event)
+            }
+            _ => OutboundEvent::hub(event),
+        }]
     }
 
     fn project_navigation_request_is_current(&self, request: &ProjectNavigationRequest) -> bool {
@@ -450,10 +686,12 @@ impl AppRuntime {
             return false;
         }
         request.target_incarnation.as_ref().is_none_or(|expected| {
-            let ProjectNavigationSource::Switch { tab_id } = &request.source else {
-                return false;
-            };
-            self.project_tab_incarnations.get(tab_id) == Some(expected)
+            #[cfg(test)]
+            if let ProjectNavigationSource::Switch { tab_id } = &request.source {
+                return self.project_tab_incarnations.get(tab_id) == Some(expected);
+            }
+            let _ = expected;
+            false
         })
     }
 
@@ -476,16 +714,30 @@ impl AppRuntime {
         prepared: ProjectNavigationPrepared,
     ) -> Vec<OutboundEvent> {
         if !self.project_navigation_request_is_current(&prepared.request) {
+            tracing::warn!(
+                request_id = prepared.request.id,
+                "project-open preparation superseded"
+            );
             self.settle_project_open_waiter(
                 prepared.request.id,
                 Err(ProjectOpenControlFailure::Unavailable(
                     "superseded by a newer project navigation".to_string(),
                 )),
             );
+            if matches!(
+                &prepared.request.source,
+                ProjectNavigationSource::Clone { .. }
+            ) {
+                return self.project_open_error_events(
+                    &prepared.request.source,
+                    "superseded by a newer project navigation".to_string(),
+                );
+            }
             return Vec::new();
         }
         match prepared.result {
             Err(error) => {
+                tracing::warn!(request_id = prepared.request.id, %error, "project-open preparation failed");
                 self.pending_project_navigation = None;
                 self.settle_project_open_waiter(
                     prepared.request.id,
@@ -494,6 +746,8 @@ impl AppRuntime {
                 self.project_open_error_events(&prepared.request.source, error)
             }
             Ok(ProjectNavigationPayload::Open(open)) => {
+                tracing::info!(request_id = prepared.request.id, project_key = %open.project_key, "project-open preparation finished");
+                #[cfg(test)]
                 if matches!(
                     prepared.request.source,
                     ProjectNavigationSource::Switch { .. }
@@ -507,6 +761,7 @@ impl AppRuntime {
                 self.settle_project_open_waiter(prepared.request.id, Ok(project_key));
                 events
             }
+            #[cfg(test)]
             Ok(ProjectNavigationPayload::Switch(switch)) => {
                 let ProjectNavigationSource::Switch { tab_id } = &prepared.request.source else {
                     return Vec::new();
@@ -574,6 +829,23 @@ impl AppRuntime {
         };
 
         self.refresh_project_state(&tab_id);
+        if new_tab {
+            // Persisted windows need addresses before restore or frontend requests.
+            // Register only this Project: rebuilding the global lookup would
+            // invalidate unrelated Projects' window lifecycle generations.
+            let window_ids = self
+                .tab(&tab_id)
+                .expect("opened project tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(|window| window.id.clone())
+                .collect::<Vec<_>>();
+            for window_id in window_ids {
+                self.register_window(&tab_id, &window_id);
+            }
+        }
         let context = self
             .project_context(&tab_id)
             .expect("opened project context");
@@ -582,14 +854,29 @@ impl AppRuntime {
         self.register_project_log_scope(&tab_id);
         let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
-        if let ProjectNavigationSource::Clone { workspace_home } = &source {
+        if let ProjectNavigationSource::Clone { workspace_home, .. } = &source {
             self.remember_recent_clone_workspace_home(workspace_home);
         }
         let _ = self.persist();
 
+        let opened = BackendEvent::ProjectOpened {
+            project_key: prepared.project_key.to_string(),
+            title: prepared.target.title.clone(),
+            request_id: match &source {
+                ProjectNavigationSource::Open { request_id } => request_id.clone(),
+                _ => None,
+            },
+        };
+        let opened = match &source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, opened)
+            }
+            _ => OutboundEvent::hub(opened),
+        };
         let mut events = vec![
             self.hub_state_broadcast(),
             self.workspace_state_broadcast(&context),
+            opened,
         ];
         if new_tab {
             events.extend(
@@ -632,10 +919,18 @@ impl AppRuntime {
                 ));
             }
         }
-        if let ProjectNavigationSource::Clone { workspace_home } = source {
-            events.push(OutboundEvent::hub(BackendEvent::CloneProjectDone {
-                workspace_home: workspace_home.display().to_string(),
-            }));
+        if let ProjectNavigationSource::Clone {
+            client_id,
+            workspace_home,
+        } = source
+        {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::CloneProjectDone {
+                    project_key: context.project_key.to_string(),
+                    workspace_home: workspace_home.display().to_string(),
+                },
+            ));
         }
         events
     }
@@ -668,6 +963,17 @@ impl AppRuntime {
     }
 
     pub(crate) fn refresh_project_tab_incarnation(&mut self, tab_id: &str) {
+        let window_ids = self
+            .window_lookup
+            .iter()
+            .filter(|(_, address)| address.tab_id == tab_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for window_id in window_ids {
+            self.invalidate_launch_delivery_ack(&window_id);
+            self.initial_launch_workers.remove(&window_id);
+            self.pending_launch_completions.remove(&window_id);
+        }
         let Some(tab) = self.tab(tab_id).cloned() else {
             self.project_tab_incarnations.remove(tab_id);
             self.refresh_project_state(tab_id);
@@ -785,6 +1091,7 @@ impl AppRuntime {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
         // the GUI event loop here, so this guard is the switch route.
@@ -835,6 +1142,77 @@ impl AppRuntime {
         events
     }
 
+    /// Route explicit close requests before normal Project dispatch so stale
+    /// connections receive a deterministic client-only error, even after close.
+    pub(super) fn close_project_request_events(
+        &mut self,
+        client_id: &str,
+        event: &FrontendEvent,
+        scope: &super::ClientScope,
+    ) -> Option<Vec<OutboundEvent>> {
+        let (project_key, token) = match event {
+            FrontendEvent::PreviewCloseProject { project_key } => (project_key, None),
+            FrontendEvent::ConfirmCloseProject { token }
+            | FrontendEvent::CancelCloseProject { token } => (&token.project_key, Some(token)),
+            _ => return None,
+        };
+        let error = || {
+            let event = BackendEvent::CloseProjectError {
+                project_key: project_key.clone(),
+                message: "Close request expired or unauthorized. Try Close Project again.".into(),
+            };
+            Some(vec![OutboundEvent::reply(client_id.to_string(), event)])
+        };
+        if matches!(scope, super::ClientScope::Project(key) if key.as_str() != project_key) {
+            return error();
+        }
+        let Some(context) = self
+            .project_contexts()
+            .into_iter()
+            .find(|context| context.project_key.as_str() == project_key)
+        else {
+            return error();
+        };
+        if let Some(token) = token {
+            let Some(state) = self.project_state_mut(&context) else {
+                return error();
+            };
+            if token.generation != context.generation
+                || state.close_project_nonces.get(client_id) != Some(&token.nonce)
+            {
+                return error();
+            }
+            state.close_project_nonces.remove(client_id);
+            return Some(
+                if matches!(event, FrontendEvent::ConfirmCloseProject { .. }) {
+                    self.close_project_tab_events(&context.tab_id)
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        let tab = self.tabs.iter().find(|tab| tab.id == context.tab_id)?;
+        let title = tab.title.clone();
+        let running_agents =
+            crate::runtime_support::collect_running_agents(&tab.workspace.persisted().windows);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        self.project_state_mut(&context)?
+            .close_project_nonces
+            .insert(client_id.to_string(), nonce.clone());
+        Some(vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::CloseProjectPreview {
+                token: gwt::protocol::CloseProjectToken {
+                    project_key: project_key.clone(),
+                    generation: context.generation,
+                    nonce,
+                },
+                title,
+                running_agents,
+            },
+        )])
+    }
+
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context(tab_id) else {
             return Vec::new();
@@ -883,13 +1261,8 @@ impl AppRuntime {
         vec![
             OutboundEvent::project(
                 context.project_key.clone(),
-                BackendEvent::WindowCanvasState {
-                    workspace: gwt::AppStateView {
-                        app_version: crate::runtime_support::current_app_version().to_string(),
-                        tabs: Vec::new(),
-                        active_tab_id: None,
-                        recent_projects: Vec::new(),
-                    },
+                BackendEvent::ProjectClosed {
+                    project_key: context.project_key.to_string(),
                 },
             ),
             self.hub_state_broadcast(),

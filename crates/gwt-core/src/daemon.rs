@@ -570,6 +570,11 @@ pub struct VerificationSpawnFinished {
     /// left by a runner is visible instead of silently reclaimed.
     #[serde(default)]
     pub reclaimed_survivors: bool,
+    /// The signal that killed the child, when one did (Issue #4528). Kept
+    /// apart from `exit_code` because a wait failure also reports `-1`.
+    /// Absent from daemons that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
 }
 
 /// Tagged frame envelope returned by `gwtd`.

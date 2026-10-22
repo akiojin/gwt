@@ -11,7 +11,7 @@ const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8"
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
 
-function fixture() {
+function fixture(action = "", popupBlocked = false) {
   const { document, window } = parseHTML(indexHtml);
   const sockets = [];
   class FakeSocket {
@@ -29,14 +29,23 @@ function fixture() {
     deliver(event) { this.handlers.message({ data: JSON.stringify(event) }); }
   }
   const timers = [];
+  const tabs = [];
   const win = Object.assign(window, {
-    location: { href: "http://127.0.0.1:4545/", pathname: "/" },
+    location: { href: `http://127.0.0.1:4545/${action}`, pathname: "/" },
     WebSocket: FakeSocket,
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
     clearTimeout() {},
+    open(url, target) {
+      assert.equal(url, "about:blank");
+      assert.equal(target, "_blank");
+      if (popupBlocked) return null;
+      const tab = { opener: {}, location: { href: url }, closed: false, close() { this.closed = true; } };
+      tabs.push(tab);
+      return tab;
+    },
   });
   const app = mountHubApp({ window: win, document });
-  return { app, document, sockets, timers };
+  return { app, document, sockets, timers, tabs };
 }
 
 function hubState(projects, recent = []) {
@@ -96,6 +105,7 @@ test("Open Folder asks the runtime and then offers the new Project as a link", (
   document.querySelector('[data-hub-action="open-folder"]').click();
   assert.deepEqual(sockets[0].sent.at(-1), { kind: "open_project_dialog" });
   sockets[0].deliver(hubState([projectA, projectB]));
+  sockets[0].deliver({ ...projectB, kind: "project_opened" });
   const notice = document.querySelector(".gwt-hub__notice");
   assert.equal(notice.hidden, false);
   const link = notice.querySelector("a");
@@ -116,8 +126,8 @@ test("a failed open is reported without a link", () => {
   assert.equal(document.querySelector(".gwt-hub__notice").hidden, true);
 });
 
-test("Clone uses the shared modal dialog and closes when the clone lands", () => {
-  const { document, sockets } = fixture();
+test("Clone reserves a tab on submit and opens the committed Project", () => {
+  const { document, sockets, tabs } = fixture();
   sockets[0].open();
   document.querySelector('[data-hub-action="clone"]').click();
   const modal = document.getElementById("clone-project-modal");
@@ -130,13 +140,72 @@ test("Clone uses the shared modal dialog and closes when the clone lands", () =>
   document.getElementById("clone-project-url-input").value = "https://github.com/o/r.git";
   document.getElementById("clone-project-url-input").dispatchEvent(new document.defaultView.Event("input"));
   document.getElementById("clone-project-start").click();
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].opener, null);
+  assert.equal(tabs[0].location.href, "about:blank", "wait for the committed Project identity");
   assert.deepEqual(sockets[0].sent.at(-1), {
     kind: "clone_project_start",
     url: "https://github.com/o/r.git",
     parent_path: "/tmp/parent",
   });
-  sockets[0].deliver({ kind: "clone_project_done" });
+  sockets[0].deliver({ kind: "clone_project_done", project_key: projectB.project_key });
   assert.equal(modal.classList.contains("open"), false);
+  assert.equal(tabs[0].location.href, "http://127.0.0.1:4545/p/fedcba9876543210");
+  assert.equal(document.querySelector(".gwt-hub__notice a").getAttribute("href"), "/p/fedcba9876543210");
+});
+
+function submitClone(document) {
+  document.querySelector('[data-hub-action="clone"]').click();
+  for (const [id, value] of [["clone-project-url-input", "https://github.com/o/r.git"], ["clone-project-parent-input", "/tmp/parent"]]) {
+    const input = document.getElementById(id);
+    input.value = value;
+    input.dispatchEvent(new document.defaultView.Event("input"));
+  }
+  document.getElementById("clone-project-start").click();
+}
+
+test("a registered clone closes its reserved tab and offers the existing Project", () => {
+  const { document, sockets, tabs } = fixture();
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_error", message: "Repository is already registered.", existing_project_key: projectA.project_key });
+  assert.ok(tabs[0], "Clone submission reserves a tab");
+  assert.equal(tabs[0].closed, true);
+  const dialog = document.querySelector('#clone-project-modal [role="dialog"]');
+  assert.match(dialog.textContent, /Repository is already registered/);
+  const link = dialog.querySelector("a");
+  assert.equal(link.textContent, "Open existing project");
+  assert.equal(link.getAttribute("href"), "/p/0123456789abcdef");
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noopener");
+  [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Cancel").click();
+  document.querySelector('[data-hub-action="clone"]').click();
+  assert.equal(Boolean(dialog.querySelector("a")), false, "a reopened dialog clears the previous duplicate result");
+});
+
+test("clone failure and disconnect close the unused reserved tab", () => {
+  const { document, sockets, tabs } = fixture();
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_error", message: "Clone failed." });
+  assert.ok(tabs[0], "Clone submission reserves a tab");
+  assert.equal(tabs[0].closed, true);
+  assert.match(document.querySelector('#clone-project-modal').textContent, /Clone failed/);
+  document.getElementById("clone-project-start").click();
+  sockets[0].handlers.close();
+  assert.equal(tabs[1].closed, true);
+  assert.equal(document.getElementById("clone-project-start").disabled, false);
+});
+
+test("a blocked popup retains the explicit committed Project link", () => {
+  const { document, sockets, tabs } = fixture("", true);
+  sockets[0].open();
+  submitClone(document);
+  sockets[0].deliver({ kind: "clone_project_done", project_key: projectB.project_key });
+  assert.equal(tabs.length, 0);
+  const notice = document.querySelector(".gwt-hub__notice");
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.querySelector("a").getAttribute("href"), "/p/fedcba9876543210");
 });
 
 test("the Hub reconnects after its socket closes", () => {
@@ -147,4 +216,155 @@ test("the Hub reconnects after its socket closes", () => {
   timers[0]();
   assert.equal(sockets.length, 2);
   assert.equal(new URL(sockets[1].url).search, "");
+});
+
+test("folder picker refuses repeats and cancellation clears pending without an error", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  const open = document.querySelector('[data-hub-action="open-folder"]');
+  open.click();
+  assert.match(open.textContent, /Choosing/);
+  sockets[0].deliver({ kind: "picker_started", request_id: 1, purpose: "open" });
+  open.click();
+  assert.equal(sockets[0].sent.filter((event) => event.kind === "open_project_dialog").length, 1);
+  sockets[0].deliver({ kind: "picker_cancelled", request_id: 1, purpose: "open" });
+  assert.equal(open.textContent, "Open Folder…");
+  assert.equal(document.querySelector('.gwt-hub__error').hidden, true);
+  open.click();
+  sockets[0].deliver({ kind: "picker_started", request_id: 2, purpose: "open" });
+  sockets[0].deliver({ kind: "picker_cancelled", request_id: 1, purpose: "open" });
+  assert.match(open.textContent, /Choosing/);
+  sockets[0].deliver({ kind: "picker_error", request_id: 2, purpose: "open", message: "Picker timed out" });
+  assert.equal(open.textContent, "Open Folder…");
+  assert.equal(document.querySelector('.gwt-hub__error').textContent, "Picker timed out");
+});
+
+test("explicit open success shows a link even for an already-open Project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA]));
+  document.querySelector('[data-hub-action="open-folder"]').click();
+  sockets[0].deliver({ ...projectA, kind: "project_opened" });
+  const notice = document.querySelector('.gwt-hub__notice');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /Opened Alpha/);
+  assert.equal(notice.querySelector('a').getAttribute('href'), '/p/0123456789abcdef');
+});
+
+test("open and clone share pending state and selected destination clears it", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  document.querySelector('[data-hub-action="clone"]').click();
+  document.querySelector('#clone-project-parent-button').click();
+  sockets[0].deliver({ kind: 'picker_started', purpose: 'clone_parent', request_id: 8 });
+  document.querySelector('[data-hub-action="open-folder"]').click();
+  assert.equal(sockets[0].sent.filter((event) => event.kind === 'open_project_dialog').length, 0);
+  sockets[0].deliver({ kind: 'picker_busy', purpose: 'open', message: 'Picker is busy' });
+  assert.match(document.querySelector('#clone-project-parent-button').textContent, /Choosing/);
+  sockets[0].deliver({ kind: 'picker_selected', purpose: 'clone_parent', request_id: 8, path: 'E:\\repos' });
+  assert.equal(document.querySelector('#clone-project-parent-input').value, 'E:\\repos');
+  assert.equal(document.querySelector('#clone-project-parent-button').textContent, 'Choose Folder...');
+  assert.equal(document.querySelector('.gwt-hub__error').hidden, true);
+});
+
+test("busy refusal after a timeout clears the unaccepted retry", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  const open = document.querySelector('[data-hub-action="open-folder"]');
+  open.click();
+  sockets[0].deliver({ kind: 'picker_started', purpose: 'open', request_id: 10 });
+  sockets[0].deliver({ kind: 'picker_error', purpose: 'open', request_id: 10, message: 'Timed out' });
+  open.click();
+  sockets[0].deliver({ kind: 'picker_busy', purpose: 'open', message: 'Close the existing dialog first' });
+  assert.equal(open.textContent, 'Open Folder…');
+  open.click();
+  assert.equal(sockets[0].sent.filter((event) => event.kind === 'open_project_dialog').length, 3);
+});
+
+test("manual open and clone destination work without a native picker", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  const path = document.querySelector('[data-open-project-path]');
+  assert.ok(path);
+  path.value = 'E:\\repos\\alpha';
+  path.dispatchEvent(new document.defaultView.Event('input'));
+  document.querySelector('[data-open-project-submit]').click();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'reopen_recent_project', path: 'E:\\repos\\alpha' });
+  document.querySelector('[data-hub-action="clone"]').click();
+  const parent = document.querySelector('#clone-project-parent-input');
+  assert.ok(parent);
+  parent.value = 'E:\\repos';
+  parent.dispatchEvent(new document.defaultView.Event('input'));
+  const url = document.querySelector('#clone-project-url-input');
+  url.value = 'https://github.com/o/r.git';
+  url.dispatchEvent(new document.defaultView.Event('input'));
+  assert.equal(document.querySelector('#clone-project-start').disabled, false);
+  document.querySelector('#clone-project-start').click();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'clone_project_start', url: url.value, parent_path: parent.value });
+});
+
+test("Hub Close Project previews the selected key and removes only a closed project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA, projectB]));
+  document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  const token = { project_key: projectA.project_key, generation: 1, nonce: 'test' };
+  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [] });
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'confirm_close_project', token });
+  sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
+  assert.equal(document.querySelector(`[data-close-project="${projectA.project_key}"]`), null);
+  assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
+});
+
+test("Hub retries Close after its preview connection is lost", () => {
+  const { document, sockets, timers } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA]));
+  const close = document.querySelector(`[data-close-project="${projectA.project_key}"]`);
+  close.click();
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  close.click();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+});
+
+
+test("tray Open Project URL starts the existing picker once, after frontend readiness", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }, { kind: "open_project_dialog" }]);
+  assert.equal(document.querySelector('[data-hub-action="open-folder"]').textContent, "Choosing folder…");
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("tray Open Project discards its queued picker when the initial connection fails", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  const open = document.querySelector('[data-hub-action="open-folder"]');
+  sockets[0].handlers.close();
+  assert.equal(open.textContent, "Open Folder…");
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  open.click();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: "open_project_dialog" });
+});
+
+test("tray Clone URL opens the existing accessible clone dialog without starting a clone", () => {
+  const { document, sockets } = fixture("?action=clone");
+  assert.equal(document.querySelector('#clone-project-modal').classList.contains("open"), true);
+  assert.ok(document.querySelector('#clone-project-modal .modal-shell[role="dialog"][aria-modal="true"]'));
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("unknown Hub actions retain the ordinary picker", () => {
+  const { document, sockets } = fixture("?action=unknown");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+  assert.equal(document.querySelector('#clone-project-modal').getAttribute("aria-hidden"), "true");
 });

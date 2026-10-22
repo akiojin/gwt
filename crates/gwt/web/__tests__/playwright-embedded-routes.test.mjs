@@ -84,7 +84,6 @@ test("Playwright embedded routes serve every app.js transitive root module impor
 });
 
 test("Playwright embedded route import graph follows relative web module imports", () => {
-  const imports = reachableRootModuleImports("project-tabs-renderer.js");
-  assert.ok(imports.includes("window-runtime-state.js"));
-  assert.ok(imports.includes("protocol-enums.js"));
+  const imports = reachableRootModuleImports("close-project-confirm-modal.js");
+  assert.ok(imports.includes("focus-trap.js"));
 });

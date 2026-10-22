@@ -1,0 +1,19 @@
+probe_pid=41024
+dataset_files=9809 accepted=1581 ordered_paths_hash=29185bca56810652 exact_ordered_equality=true old_root_canonicalize_calls_source_count=9809 prototype_root_canonicalize_calls=1 fresh_file_canonicalize_calls_each=9809
+round=0 algorithm=original_public_api wall_ms=2294.076 cpu_ms=1671.875 accepted=1581 hash=29185bca56810652
+round=0 algorithm=root_once wall_ms=974.923 cpu_ms=953.125 accepted=1581 hash=29185bca56810652
+round=1 algorithm=root_once wall_ms=1008.539 cpu_ms=1000.000 accepted=1581 hash=29185bca56810652
+round=1 algorithm=original_public_api wall_ms=1879.982 cpu_ms=1593.750 accepted=1581 hash=29185bca56810652
+round=2 algorithm=original_public_api wall_ms=2116.372 cpu_ms=1812.500 accepted=1581 hash=29185bca56810652
+round=2 algorithm=root_once wall_ms=1227.956 cpu_ms=984.375 accepted=1581 hash=29185bca56810652
+round=3 algorithm=root_once wall_ms=983.000 cpu_ms=953.125 accepted=1581 hash=29185bca56810652
+round=3 algorithm=original_public_api wall_ms=2998.756 cpu_ms=1734.375 accepted=1581 hash=29185bca56810652
+round=4 algorithm=original_public_api wall_ms=2391.578 cpu_ms=1828.125 accepted=1581 hash=29185bca56810652
+round=4 algorithm=root_once wall_ms=1753.670 cpu_ms=1062.500 accepted=1581 hash=29185bca56810652
+round=5 algorithm=root_once wall_ms=2002.741 cpu_ms=1031.250 accepted=1581 hash=29185bca56810652
+round=5 algorithm=original_public_api wall_ms=3075.216 cpu_ms=1609.375 accepted=1581 hash=29185bca56810652
+paired_rounds=6 original_total_cpu_ms=10250.000 root_once_total_cpu_ms=5984.375 original_mean_cpu_ms=1708.333 root_once_mean_cpu_ms=997.396 original_mean_wall_ms=2459.330 root_once_mean_wall_ms=1325.138
+edge=absolute_root_missing_relative_and_symlinks inputs=7 accepted=3 hash=af630450469eaa7b exact_ordered_equality=true
+edge=relative_root inputs=3 accepted=2 hash=3435be9bae552df9 exact_ordered_equality=true
+edge=missing_root_fallback inputs=3 accepted=2 hash=7401e80b85e8638e exact_ordered_equality=true
+available_symlink_edges=0 no_persistent_root_cache=true file_canonicalization_fresh=true

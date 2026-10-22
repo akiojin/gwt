@@ -4,6 +4,77 @@ use gwt::{
 };
 
 #[test]
+fn agent_capacity_override_wire_accepts_auto_and_rejects_non_positive() {
+    let automatic = serde_json::json!({
+        "kind": "set_issue_monitor_max_active_agents",
+        "max_active_agents": null,
+    });
+    let event: FrontendEvent = serde_json::from_value(automatic.clone())
+        .expect("null explicitly restores automatic capacity");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: None
+        }
+    ));
+    for invalid in [serde_json::json!(0), serde_json::json!(-1)] {
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "set_issue_monitor_max_active_agents", "max_active_agents": invalid,
+            }))
+            .is_err(),
+            "a manual limit must be positive"
+        );
+    }
+}
+
+#[test]
+fn frontend_issue_monitor_allowed_labels_use_snake_case_wire_shape() {
+    for labels in [
+        serde_json::json!(["Server", "backend"]),
+        serde_json::json!([]),
+    ] {
+        let wire = serde_json::json!({
+            "kind": "set_issue_monitor_allowed_labels",
+            "allowed_labels": labels,
+        });
+        let event: FrontendEvent = serde_json::from_value(wire).expect("allowed labels event");
+        assert!(
+            matches!(event, FrontendEvent::SetIssueMonitorAllowedLabels { allowed_labels, request_id: None }
+            if serde_json::to_value(&allowed_labels).expect("serialize labels") == labels)
+        );
+    }
+}
+
+#[test]
+fn allowed_labels_failure_has_request_identity_and_lossless_reply_policy() {
+    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+        "kind": "set_issue_monitor_allowed_labels", "allowed_labels": ["Server"], "request_id": 41,
+    }))
+    .expect("correlated label command");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorAllowedLabels {
+            request_id: Some(41),
+            ..
+        }
+    ));
+    let failure = BackendEvent::IssueMonitorAllowedLabelsWriteFailed {
+        request_id: 41,
+        outcome_unknown: true,
+    };
+    let policy = failure.delivery_policy();
+    assert_eq!(policy.kind, "issue_monitor_allowed_labels_write_failed");
+    assert_eq!(format!("{:?}", policy.backpressure), "ClientScopedSnapshot");
+    assert_eq!(
+        serde_json::to_value(failure).expect("failure wire shape"),
+        serde_json::json!({
+            "kind": "issue_monitor_allowed_labels_write_failed", "request_id": 41, "outcome_unknown": true,
+        })
+    );
+}
+
+#[test]
 fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     let event: FrontendEvent =
         serde_json::from_str(r#"{"kind":"set_issue_monitor_enabled","enabled":true}"#)
@@ -106,7 +177,7 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     assert!(matches!(
         event,
         FrontendEvent::SetIssueMonitorMaxActiveAgents {
-            max_active_agents: 3
+            max_active_agents: Some(3)
         }
     ));
 
@@ -127,8 +198,22 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     .expect("quick issue event");
     assert!(matches!(
         event,
-        FrontendEvent::QuickRegisterIssue { title, launch: true }
+        FrontendEvent::QuickRegisterIssue { title, launch: true, auto_merge: false }
             if title == "Investigate Intake registration"
+    ));
+
+    // SPEC #3885 T-033: the "+ New" popover sends its auto-merge checkbox.
+    let event: FrontendEvent = serde_json::from_str(
+        r#"{"kind":"quick_register_issue","title":"Ship","launch":false,"auto_merge":true}"#,
+    )
+    .expect("quick issue event with auto_merge");
+    assert!(matches!(
+        event,
+        FrontendEvent::QuickRegisterIssue {
+            launch: false,
+            auto_merge: true,
+            ..
+        }
     ));
 }
 
@@ -169,11 +254,20 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
-            auto_apply_updates: false,
+            max_active_agents_scope: "machine".to_string(),
+            agent_capacity: Default::default(),
+            max_active_agents_override: Some(1),
+            max_active_last_change: None,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
             terminal_queue_len: 0,
+            terminal_queue: Vec::new(),
+            terminal_queue_auto_refill: false,
+            terminal_queue_auto_refill_limit: 0,
+            allowed_labels: Vec::new(),
+            label_excluded_count: 0,
+            label_excluded_issues: Vec::new(),
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 1,
@@ -186,8 +280,11 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
+            update_drain_release: None,
             autonomous_issues: Vec::new(),
+            tier_facts: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -204,7 +301,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         value["status"]["launch_profile_candidates"],
         serde_json::json!([])
     );
-    assert_eq!(value["status"]["usage_threshold_percent"], 80);
+    assert!(value["status"].get("usage_threshold_percent").is_none());
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
@@ -212,6 +309,24 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     assert_eq!(value["status"]["total_candidates"], 8);
     assert_eq!(value["status"]["active_issue_number"], 42);
     assert_eq!(value["status"]["launch_profile_source"], "last_settings");
+    let mut status = value["status"].clone();
+    status["tier_facts"] = serde_json::json!([{
+        "issue_number": 42, "recorded_launch_tier": 0, "recorded_landing_tier": 0,
+        "history_floor": 0, "minimum_tier_override": 0,
+        "agent_failures": 1, "next_minimum_tier": 1,
+        "confirmed_launch": {"tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"}
+    }]);
+    let decoded: IssueMonitorStatusView = serde_json::from_value(status.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["tier_facts"],
+        status["tier_facts"]
+    );
+    status.as_object_mut().unwrap().remove("tier_facts");
+    let legacy: IssueMonitorStatusView = serde_json::from_value(status).unwrap();
+    assert!(serde_json::to_value(legacy)
+        .unwrap()
+        .get("tier_facts")
+        .is_none());
     assert_eq!(
         value["status"]["launch_profile_summary"],
         "codex / gpt-5.5 / high / host"
@@ -222,6 +337,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
 fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let item = IssueMonitorInboxItem {
         issue: IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Improve monitor".to_string(),
             labels: vec!["auto-improve".to_string()],
@@ -249,6 +365,8 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let inbox = serde_json::to_value(BackendEvent::IssueMonitorInbox { items: vec![item] })
         .expect("serialize inbox");
     let toast = serde_json::to_value(BackendEvent::IssueMonitorToast {
+        notification_transition: None,
+        notification_transition_id: None,
         level: "info".to_string(),
         message: "Issue queued".to_string(),
         issue_number: Some(42),
@@ -291,6 +409,7 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     ] {
         let item = IssueMonitorInboxItem {
             issue: IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Excluded issue".to_string(),
                 labels: vec!["hold".to_string()],
@@ -359,6 +478,7 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         parent_spec: None,
         monitor_state: Some(MonitorInboxState::HoldExcluded),
         queue_position: Some(3),
+        queued_by: None,
         exclusion_reason: Some("matched label: hold".to_string()),
         related_work_refs: vec![gwt::KnowledgeWorkRefView {
             id: "work-42".to_string(),
@@ -374,4 +494,14 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
     assert_eq!(value["exclusion_reason"], "matched label: hold");
     assert_eq!(value["related_work_refs"][0]["id"], "work-42");
     assert_eq!(value["related_work_refs"][0]["branch"], "work/issue-42");
+}
+
+#[test]
+fn kanban_queue_move_and_refill_events_decode() {
+    for payload in [
+        r#"{"kind":"issue_monitor_queue_move","issue_number":42,"position":0}"#,
+        r#"{"kind":"set_issue_monitor_auto_refill","enabled":true,"limit":5}"#,
+    ] {
+        let _: FrontendEvent = serde_json::from_str(payload).expect("Kanban control decodes");
+    }
 }

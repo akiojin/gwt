@@ -96,17 +96,48 @@ test.describe("Project-per-Browser-Tab (live)", () => {
             frame.kind === "workspace_state" && frame.scope === keys[index])).toBe(true);
           await expectTheme(current, theme);
           expect(current.url()).toBe(liveGwtProjectUrl(base!, keys[index]));
+          await current.locator('.op-rail__surface[data-surface="agents"]').click();
         }
 
         // A/B isolation and A/A mirror.
         const aWindow = await createLiveShell(page);
         created.push({ page, id: aWindow });
-        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
+        await mirror.getByRole("tab", { name: "All agents", exact: true }).click();
+        await expect(mirror.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
         await expect(other.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         const bWindow = await createLiveShell(other);
         created.push({ page: other, id: bWindow });
+        await page.getByRole("tab", { name: "All agents", exact: true }).click();
+        await other.getByRole("tab", { name: "All agents", exact: true }).click();
         await expect(page.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
         await expect(mirror.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
+
+        // T-103: actual PTY output/status must follow the window owner, and
+        // both A clients must receive it. Split the marker in the command so
+        // echoed input alone cannot satisfy the output assertion.
+        const output = (index: number, id: string, kind = "terminal_output") => frames[index]
+          .filter((frame) => frame.kind === kind && frame.payload.id === id)
+          .map((frame) => Buffer.from(frame.payload.data_base64, "base64").toString()).join("");
+        for (const [current, id, suffix] of [[page, aWindow, "A"], [other, bWindow, "B"]] as const) {
+          await expect.poll(() => frames[current === page ? 0 : 1].some((frame) =>
+            frame.kind === "terminal_status" && frame.payload.id === id)).toBe(true);
+          await expect.poll(() => current.evaluate((id) =>
+            (window as any).__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 })
+            .toMatch(/[^\n]+[>$#%]$/);
+          await sendLiveGwtEvent(current, { kind: "terminal_input", id,
+            data: `node -p "'GWT_SCOPE_' + '${suffix}'"\r` });
+        }
+        await expect.poll(() => output(0, aWindow)).toContain("GWT_SCOPE_A");
+        await expect.poll(() => output(2, aWindow)).toContain("GWT_SCOPE_A");
+        await expect.poll(() => output(1, bWindow)).toContain("GWT_SCOPE_B");
+        const terminalKinds = ["terminal_output", "terminal_status", "terminal_snapshot", "terminal_preview"];
+        const expectTerminalIsolation = () => {
+          for (const [index, foreignId] of [[0, bWindow], [1, aWindow], [2, bWindow]] as const) {
+            expect(frames[index].filter((frame) => terminalKinds.includes(frame.kind))
+              .map((frame) => frame.payload.id)).not.toContain(foreignId);
+          }
+        };
+        expectTerminalIsolation();
         for (const [index, received] of frames.entries()) {
           const snapshots = received.filter((frame) => frame.kind === "workspace_state");
           expect(snapshots.every((frame) => frame.scope === keys[index]
@@ -132,23 +163,26 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         await expect.poll(() => frames[0].filter((frame) => frame.kind === "workspace_state").at(-1)?.scope)
           .toBe(projectA.project_key);
         expect(fullSyncs().slice(1)).toEqual(before.slice(1));
-        await expect(page.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
+        await page.getByRole("tab", { name: "All agents", exact: true }).click();
+        await expect(page.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
+        await expect.poll(() => output(0, aWindow, "terminal_snapshot")).toContain("GWT_SCOPE_A");
+        expectTerminalIsolation();
 
         // URL stability: workspace actions keep the URL; another Project and
-        // the Hub open in new browser tabs.
+        // Hub links open Projects in new browser tabs.
         await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
-        const projectPopup = page.waitForEvent("popup");
-        await page.locator(`[data-project-tab-id="${projectB.id}"]`).click();
+        await expect(page.locator("#project-home-link")).toHaveCount(0);
+        const hubTab = await context.newPage();
+        await hubTab.goto(new URL("/", base!).href);
+        await expect(hubTab.locator("[data-hub]")).toBeVisible();
+        const projectPopup = hubTab.waitForEvent("popup");
+        await hubTab.locator(`[data-hub-list="open"] a[href="/p/${projectB.project_key}"]`).click();
         const projectTab = await projectPopup;
         await expect.poll(() => projectTab.url()).toBe(liveGwtProjectUrl(base!, projectB.project_key));
         await projectTab.close();
-        const hubPopup = page.waitForEvent("popup");
-        await page.locator("#project-home-link").click();
-        const hubTab = await hubPopup;
-        await expect(hubTab.locator("[data-hub]")).toBeVisible();
         await hubTab.close();
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
       } finally {
@@ -169,7 +203,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
     await withLiveGwtBackendLock(base!, testInfo, async () => {
       const errors = collectBrowserErrors(page);
       const recentRoot = await mkdtemp(join(tmpdir(), "gwt-4538-recent-"));
-      let recentTabId: string | undefined;
+      let recentProjectKey: string | undefined;
       try {
         // Hub: picker only, path-free new-tab links.
         await gotoLiveGwt(page, base!, { hub: true });
@@ -193,7 +227,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const popup = page.waitForEvent("popup");
         await links.first().click();
         const opened = await popup;
-        await expect(opened.locator(".project-tab[aria-current='page']")).toBeVisible();
+        await expect(opened.locator("#close-project-button")).toBeVisible();
         expect(new URL(opened.url()).pathname).toMatch(/^\/p\/[0-9a-f]{16}$/);
         await opened.close();
 
@@ -216,22 +250,22 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const openEntry = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.id;
+        recentProjectKey = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
         await readLiveHubCatalog(page, base!, {
-          send: { kind: "close_project_tab", tab_id: recentTabId },
+          send: { kind: "preview_close_project", project_key: recentProjectKey },
           until: (catalog, key) => !catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = undefined;
+        recentProjectKey = undefined;
         await page.goto(liveGwtProjectUrl(base!, recent.project_key!));
-        await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible({ timeout: 30_000 });
+        await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 30_000 });
         const reopened = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = reopened.projects.find((entry) => entry.project_key === recent.project_key)!.id;
+        recentProjectKey = reopened.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
       } finally {
-        if (recentTabId) {
+        if (recentProjectKey) {
           await readLiveHubCatalog(page, base!, {
-            send: { kind: "close_project_tab", tab_id: recentTabId },
+            send: { kind: "preview_close_project", project_key: recentProjectKey },
           }).catch(() => {});
         }
         await rm(recentRoot, { recursive: true, force: true });

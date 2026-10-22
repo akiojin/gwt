@@ -1,0 +1,1117 @@
+{
+  "label": "after",
+  "theme": "dark",
+  "baseline_sha": "bc175f05a2b730775e1f5302b3af0d588ba4470a",
+  "outcome": "complete",
+  "recovery_stage": "complete",
+  "recovery_error": null,
+  "recovery_timeout_ms": null,
+  "foreground_metrics_complete": true,
+  "timing_origin": "controller timestamp immediately before native window restore request",
+  "controller_restore_started_at_ms": 1792096957498,
+  "browser_performance_time_origin_ms": 1792095154137.4,
+  "controller_restore_start_performance_ms": 1803360.6000976562,
+  "long_task_windows_ms": {
+    "recovery": [
+      0,
+      2000
+    ],
+    "settled": [
+      2000,
+      4000
+    ]
+  },
+  "acceptance_duration": true,
+  "background_elapsed_ms": 1800009,
+  "workload": {
+    "transport": "native loopback WebSocket (ws@8.18.3); browser message events",
+    "panes": 8,
+    "tick_ms": 50,
+    "burst_events": 4096,
+    "burst_interval_ms": 30000,
+    "events": [
+      "terminal_output",
+      "terminal_preview",
+      "workspace_state"
+    ]
+  },
+  "frontend": {
+    "base_url": "http://127.0.0.1:60248/",
+    "checkout": "E:\\gwt\\work\\issue-5531",
+    "owned_pid": "54196",
+    "isolated_home": "E:\\gwt\\work\\issue-5531\\target\\issue-5531-home-b8f10ee579ed466fa000127c49b1f172",
+    "browser_pid": 48088,
+    "background": "native minimized Chromium window"
+  },
+  "input_ms": 2158,
+  "snapshot_ms": 176,
+  "ready_requests_after_resume": 1,
+  "metrics": {
+    "active": true,
+    "maxQueue": 2048,
+    "messages": 686882,
+    "resyncs": 52,
+    "resumes": 1,
+    "resync_reasons": {
+      "overflow": 51,
+      "visible": 1
+    },
+    "visible_at": 1803431.5,
+    "max_long_task_ms": 361,
+    "long_tasks": [
+      {
+        "start_ms": 3187.7999999970198,
+        "duration_ms": 51
+      },
+      {
+        "start_ms": 38515.20000000298,
+        "duration_ms": 59
+      },
+      {
+        "start_ms": 41344.59999999404,
+        "duration_ms": 310
+      },
+      {
+        "start_ms": 93203.79999999702,
+        "duration_ms": 97
+      },
+      {
+        "start_ms": 143115,
+        "duration_ms": 67
+      },
+      {
+        "start_ms": 147765.59999999404,
+        "duration_ms": 58
+      },
+      {
+        "start_ms": 285183.299999997,
+        "duration_ms": 50
+      },
+      {
+        "start_ms": 314238.59999999404,
+        "duration_ms": 179
+      },
+      {
+        "start_ms": 548403.599999994,
+        "duration_ms": 315
+      },
+      {
+        "start_ms": 656415.299999997,
+        "duration_ms": 361
+      },
+      {
+        "start_ms": 748272.299999997,
+        "duration_ms": 81
+      },
+      {
+        "start_ms": 752418.299999997,
+        "duration_ms": 61
+      },
+      {
+        "start_ms": 754180.900000006,
+        "duration_ms": 88
+      },
+      {
+        "start_ms": 754819.299999997,
+        "duration_ms": 82
+      },
+      {
+        "start_ms": 757802.799999997,
+        "duration_ms": 55
+      },
+      {
+        "start_ms": 758380.5,
+        "duration_ms": 66
+      },
+      {
+        "start_ms": 760115.599999994,
+        "duration_ms": 69
+      },
+      {
+        "start_ms": 801759,
+        "duration_ms": 68
+      },
+      {
+        "start_ms": 803274.799999997,
+        "duration_ms": 62
+      },
+      {
+        "start_ms": 860137.099999994,
+        "duration_ms": 87
+      },
+      {
+        "start_ms": 860258,
+        "duration_ms": 86
+      },
+      {
+        "start_ms": 948004.400000006,
+        "duration_ms": 324
+      },
+      {
+        "start_ms": 1035347.700000003,
+        "duration_ms": 238
+      },
+      {
+        "start_ms": 1185546.599999994,
+        "duration_ms": 79
+      },
+      {
+        "start_ms": 1210827.5,
+        "duration_ms": 88
+      },
+      {
+        "start_ms": 1229194.900000006,
+        "duration_ms": 253
+      },
+      {
+        "start_ms": 1268446.599999994,
+        "duration_ms": 77
+      },
+      {
+        "start_ms": 1283779.900000006,
+        "duration_ms": 86
+      },
+      {
+        "start_ms": 1308120,
+        "duration_ms": 60
+      },
+      {
+        "start_ms": 1346165.299999997,
+        "duration_ms": 83
+      },
+      {
+        "start_ms": 1368133,
+        "duration_ms": 53
+      },
+      {
+        "start_ms": 1380073.900000006,
+        "duration_ms": 117
+      },
+      {
+        "start_ms": 1384758.200000003,
+        "duration_ms": 108
+      },
+      {
+        "start_ms": 1390125.200000003,
+        "duration_ms": 73
+      },
+      {
+        "start_ms": 1391339,
+        "duration_ms": 52
+      },
+      {
+        "start_ms": 1435331.400000006,
+        "duration_ms": 83
+      },
+      {
+        "start_ms": 1438436.200000003,
+        "duration_ms": 56
+      },
+      {
+        "start_ms": 1439498.799999997,
+        "duration_ms": 52
+      },
+      {
+        "start_ms": 1443517.599999994,
+        "duration_ms": 57
+      },
+      {
+        "start_ms": 1451341.400000006,
+        "duration_ms": 51
+      },
+      {
+        "start_ms": 1460230.799999997,
+        "duration_ms": 76
+      },
+      {
+        "start_ms": 1474123.700000003,
+        "duration_ms": 65
+      },
+      {
+        "start_ms": 1474570.599999994,
+        "duration_ms": 90
+      },
+      {
+        "start_ms": 1474692.099999994,
+        "duration_ms": 90
+      },
+      {
+        "start_ms": 1478617.700000003,
+        "duration_ms": 50
+      },
+      {
+        "start_ms": 1504084.599999994,
+        "duration_ms": 51
+      },
+      {
+        "start_ms": 1504182.5,
+        "duration_ms": 73
+      },
+      {
+        "start_ms": 1601779,
+        "duration_ms": 245
+      },
+      {
+        "start_ms": 1765110.599999994,
+        "duration_ms": 192
+      }
+    ],
+    "visibility": [
+      {
+        "state": "visible",
+        "at_ms": 1803431.5
+      }
+    ],
+    "resume_max_long_task_ms": 0,
+    "settled_max_long_task_ms": 0
+  },
+  "traffic": {
+    "ticks": 29724,
+    "frames": 686882,
+    "ready_requests": 53
+  },
+  "samples": [
+    {
+      "at_ms": 30013,
+      "ticks": 495,
+      "frames": 12075,
+      "ready_requests": 2,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 12059,
+        "maxQueue": 2048,
+        "max_long_task_ms": 51,
+        "resyncs": 1,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 60023,
+      "ticks": 926,
+      "frames": 23106,
+      "ready_requests": 3,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 23106,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 2,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 90038,
+      "ticks": 1421,
+      "frames": 35164,
+      "ready_requests": 4,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 35164,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 3,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 120052,
+      "ticks": 1918,
+      "frames": 47253,
+      "ready_requests": 5,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 47253,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 4,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 150068,
+      "ticks": 2404,
+      "frames": 59150,
+      "ready_requests": 5,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 59150,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 4,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 180088,
+      "ticks": 2895,
+      "frames": 67047,
+      "ready_requests": 6,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 67031,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 5,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 210103,
+      "ticks": 3393,
+      "frames": 79153,
+      "ready_requests": 7,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 79153,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 6,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 240114,
+      "ticks": 3890,
+      "frames": 91243,
+      "ready_requests": 8,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 91243,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 7,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 270123,
+      "ticks": 4391,
+      "frames": 103397,
+      "ready_requests": 9,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 103397,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 8,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 300135,
+      "ticks": 4902,
+      "frames": 115712,
+      "ready_requests": 10,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 115712,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 9,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 330144,
+      "ticks": 5407,
+      "frames": 127930,
+      "ready_requests": 11,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 127930,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 10,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 360163,
+      "ticks": 5909,
+      "frames": 135987,
+      "ready_requests": 11,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 135987,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 10,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 390178,
+      "ticks": 6412,
+      "frames": 148173,
+      "ready_requests": 12,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 148173,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 11,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 420194,
+      "ticks": 6916,
+      "frames": 160375,
+      "ready_requests": 13,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 160375,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 12,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 450203,
+      "ticks": 7422,
+      "frames": 172610,
+      "ready_requests": 14,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 172594,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 13,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 480213,
+      "ticks": 7927,
+      "frames": 184828,
+      "ready_requests": 15,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 184828,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 14,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 510227,
+      "ticks": 8434,
+      "frames": 197078,
+      "ready_requests": 16,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 197078,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 15,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 540242,
+      "ticks": 8935,
+      "frames": 205119,
+      "ready_requests": 16,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 205119,
+        "maxQueue": 2048,
+        "max_long_task_ms": 310,
+        "resyncs": 15,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 570253,
+      "ticks": 9414,
+      "frames": 216920,
+      "ready_requests": 17,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 216920,
+        "maxQueue": 2048,
+        "max_long_task_ms": 315,
+        "resyncs": 16,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 600260,
+      "ticks": 9919,
+      "frames": 229138,
+      "ready_requests": 18,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 229138,
+        "maxQueue": 2048,
+        "max_long_task_ms": 315,
+        "resyncs": 17,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 630268,
+      "ticks": 10421,
+      "frames": 241309,
+      "ready_requests": 19,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 241309,
+        "maxQueue": 2048,
+        "max_long_task_ms": 315,
+        "resyncs": 18,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 660276,
+      "ticks": 10902,
+      "frames": 253142,
+      "ready_requests": 20,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 253142,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 19,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 690283,
+      "ticks": 11397,
+      "frames": 261086,
+      "ready_requests": 20,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 261086,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 19,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 720290,
+      "ticks": 11904,
+      "frames": 273337,
+      "ready_requests": 21,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 273337,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 20,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 750410,
+      "ticks": 12408,
+      "frames": 285539,
+      "ready_requests": 22,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 285507,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 21,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 780423,
+      "ticks": 12881,
+      "frames": 297261,
+      "ready_requests": 24,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 297261,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 23,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 810428,
+      "ticks": 13386,
+      "frames": 309479,
+      "ready_requests": 25,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 309479,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 24,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 840445,
+      "ticks": 13884,
+      "frames": 321585,
+      "ready_requests": 26,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 321585,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 25,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 870463,
+      "ticks": 14387,
+      "frames": 329658,
+      "ready_requests": 26,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 329658,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 25,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 900480,
+      "ticks": 14864,
+      "frames": 341427,
+      "ready_requests": 27,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 341427,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 26,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 930490,
+      "ticks": 15368,
+      "frames": 353629,
+      "ready_requests": 28,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 353629,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 27,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 960507,
+      "ticks": 15858,
+      "frames": 365606,
+      "ready_requests": 29,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 365590,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 28,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 990524,
+      "ticks": 16351,
+      "frames": 377632,
+      "ready_requests": 30,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 377632,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 29,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1020528,
+      "ticks": 16845,
+      "frames": 389674,
+      "ready_requests": 31,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 389674,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 30,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1050542,
+      "ticks": 17327,
+      "frames": 397410,
+      "ready_requests": 31,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 397410,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 30,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1080552,
+      "ticks": 17824,
+      "frames": 409500,
+      "ready_requests": 32,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 409500,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 31,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1110561,
+      "ticks": 18323,
+      "frames": 421622,
+      "ready_requests": 33,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 421622,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 32,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1140568,
+      "ticks": 18823,
+      "frames": 433760,
+      "ready_requests": 34,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 433760,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 33,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1170585,
+      "ticks": 19307,
+      "frames": 445641,
+      "ready_requests": 35,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 445641,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 34,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1200596,
+      "ticks": 19811,
+      "frames": 457826,
+      "ready_requests": 35,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 457826,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 34,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1230615,
+      "ticks": 20311,
+      "frames": 465868,
+      "ready_requests": 36,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 465868,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 35,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1260634,
+      "ticks": 20812,
+      "frames": 478022,
+      "ready_requests": 37,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 478022,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 36,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1290708,
+      "ticks": 21298,
+      "frames": 489935,
+      "ready_requests": 38,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 489904,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 37,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1320724,
+      "ticks": 21795,
+      "frames": 502025,
+      "ready_requests": 39,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 502025,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 38,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1350740,
+      "ticks": 22291,
+      "frames": 514099,
+      "ready_requests": 40,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 514099,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 39,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1380757,
+      "ticks": 22790,
+      "frames": 522108,
+      "ready_requests": 40,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 522108,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 39,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1410774,
+      "ticks": 23290,
+      "frames": 534246,
+      "ready_requests": 41,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 534246,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 40,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1440778,
+      "ticks": 23788,
+      "frames": 546352,
+      "ready_requests": 42,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 546352,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 41,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1470805,
+      "ticks": 24292,
+      "frames": 558554,
+      "ready_requests": 43,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 558538,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 42,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1500868,
+      "ticks": 24795,
+      "frames": 570740,
+      "ready_requests": 44,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 570724,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 43,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1530899,
+      "ticks": 25288,
+      "frames": 582766,
+      "ready_requests": 45,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 582766,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 44,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1560913,
+      "ticks": 25784,
+      "frames": 590727,
+      "ready_requests": 45,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 590727,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 44,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1590929,
+      "ticks": 26282,
+      "frames": 602833,
+      "ready_requests": 46,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 602833,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 45,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1620943,
+      "ticks": 26773,
+      "frames": 614826,
+      "ready_requests": 47,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 614826,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 46,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1650949,
+      "ticks": 27272,
+      "frames": 626948,
+      "ready_requests": 48,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 626948,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 47,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1680959,
+      "ticks": 27770,
+      "frames": 639054,
+      "ready_requests": 49,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 639054,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 48,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1710976,
+      "ticks": 28264,
+      "frames": 651096,
+      "ready_requests": 50,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 651096,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 49,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1740994,
+      "ticks": 28761,
+      "frames": 659073,
+      "ready_requests": 50,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 659057,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 49,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1771008,
+      "ticks": 29245,
+      "frames": 670954,
+      "ready_requests": 51,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 670954,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 50,
+        "resumes": 0
+      }
+    },
+    {
+      "at_ms": 1800007,
+      "ticks": 29724,
+      "frames": 682755,
+      "ready_requests": 52,
+      "visibility": "hidden",
+      "metrics": {
+        "messages": 682755,
+        "maxQueue": 2048,
+        "max_long_task_ms": 361,
+        "resyncs": 51,
+        "resumes": 0
+      }
+    }
+  ],
+  "errors": [],
+  "fixture_errors": []
+}

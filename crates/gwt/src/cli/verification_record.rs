@@ -39,6 +39,8 @@ use gwt_github::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::delivery_paths::{classify_path, DeliveryPath, BOOKKEEPING_GIT_EXCLUDE};
+use super::verification_lease::admission::VerificationError;
 use super::CliEnv;
 use crate::cli::execution_state;
 
@@ -49,7 +51,38 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+mod admission_resume;
+pub mod cancellation;
+pub mod continuation;
+pub mod driver;
 pub mod headed_e2e;
+pub(crate) mod interactive_process;
+pub mod interruption;
+pub mod measurement;
+pub mod nextest;
+pub mod wire;
+
+/// Additive fields are preserved and hash-covered independently of the
+/// reader's typed schema. Incompatible meanings require a version bump.
+pub const VERIFICATION_FORMAT_VERSION: u32 = 1;
+
+/// Per-command lease provenance; absent for Light commands and old records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAdmission {
+    pub lease_id: String,
+    pub queue_wait_ms: u64,
+}
+
+/// Complete sanitized command output. Offsets and hashes describe the saved
+/// UTF-8 bytes, before the bounded tail's truncation marker is added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationOutputStream {
+    pub stream: String,
+    pub path: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub tail_start_byte: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
@@ -58,9 +91,108 @@ pub struct VerificationCommandResult {
     /// Bounded stdout/stderr tail retained only when the command fails.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_tail: String,
+    /// Diagnostic artifacts for both PASS and FAIL; absent on legacy records.
+    /// A nonzero tail_start_byte records exactly which prefix was truncated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_streams: Vec<VerificationOutputStream>,
     /// Measured by the command-local Playwright reporter, never by PR prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headed_e2e: Option<headed_e2e::HeadedE2eEvidence>,
+    /// Fresh command-local JUnit artifact and measured slowest tests (#4822).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nextest: Option<nextest::NextestEvidence>,
+    /// The signal that killed the command from outside (Issue #4528). Such a
+    /// command reports `exit_code: -1` like a spawn failure does, but it says
+    /// nothing about the code under test, so it is counted apart from FAIL.
+    /// It never turns the command into a pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_by_signal: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<CommandAdmission>,
+    /// Native Job/CPU observations for performance commands (#5816).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<measurement::Evidence>,
+}
+
+/// The signal that ended a process, when one did (Issue #4528).
+pub(crate) fn terminating_signal(status: std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(&status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// How a run's commands ended, with external interruption kept apart from
+/// failure so a killed run is not mistaken for broken code (Issue #4528).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RunOutcomeCounts {
+    pub passed: usize,
+    pub failed: usize,
+    pub interrupted: usize,
+    pub environment_incompatible: usize,
+}
+
+impl RunOutcomeCounts {
+    pub(crate) fn of(commands: &[VerificationCommandResult]) -> Self {
+        let mut counts = Self::default();
+        for command in commands {
+            if command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                counts.environment_incompatible += 1;
+            } else if command.terminated_by_signal.is_some() {
+                counts.interrupted += 1;
+            } else if command.exit_code == 0 {
+                counts.passed += 1;
+            } else {
+                counts.failed += 1;
+            }
+        }
+        counts
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut summary = format!(
+            "verify: outcome — {} passed, {} failed, {} interrupted by external signal\n",
+            self.passed, self.failed, self.interrupted
+        );
+        if self.environment_incompatible > 0 {
+            summary.push_str(&format!(
+                "verify: {} environment incompatible\n",
+                self.environment_incompatible
+            ));
+        }
+        summary
+    }
+}
+
+/// The run's headline status. `INTERRUPTED` is reported only when every
+/// command that did not pass was killed from outside; any real failure keeps
+/// the run a `FAIL`.
+pub(crate) fn run_status_label(
+    all_passed: bool,
+    quarantined: bool,
+    commands: &[VerificationCommandResult],
+) -> &'static str {
+    let counts = RunOutcomeCounts::of(commands);
+    if counts.environment_incompatible > 0 && counts.failed == 0 {
+        "ENVIRONMENT_INCOMPATIBLE"
+    } else if all_passed {
+        "PASS"
+    } else if quarantined {
+        "QUARANTINED"
+    } else if counts.interrupted > 0 && counts.failed == 0 {
+        "INTERRUPTED"
+    } else {
+        "FAIL"
+    }
 }
 
 /// Plan-bound request to classify one exact Rust/libtest failure. The
@@ -273,8 +405,17 @@ pub struct VerificationAdjudicationRef {
 
 /// One tool-generated verification run (T-110).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationRunRecord {
+pub struct VerificationRunData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub record_id: String,
+    /// Exact continuation inputs and occurrence provenance (#5035). Omission
+    /// preserves legacy hashes; legacy records are never resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<continuation::Continuation>,
+    /// Present only while a run is unfinished; omitted for legacy compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<interruption::RunLifecycle>,
     pub session_id: String,
     /// The reported human verification outcome, separate from automated test
     /// success. Omission remains unknown for existing records (Issue #4217).
@@ -288,14 +429,31 @@ pub struct VerificationRunRecord {
     /// remains readable only for pre-generation legacy executions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<ExecutionBindingIdentity>,
+    /// First Heavy command's lease (legacy run-level provenance, Issue #4528).
+    /// Each command also carries its own admission. `None` for Light-only
+    /// runs and records written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
     /// Worktree fingerprint at run time: normalized HEAD + tracked changes (see
     /// [`worktree_fingerprint`]). Completion recomputes and compares.
     pub worktree_fingerprint: String,
+    /// Diagnostic provenance only; freshness still uses the full fingerprint.
+    /// Omission preserves legacy record serialization and integrity hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_head: Option<String>,
+    /// Windows driver image identity, including its embedded source commit.
+    /// Omitted on other hosts so existing evidence hashes remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<driver::DriverProvenance>,
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     /// Conditional dispositions for exact failures. Raw command exits and
     /// `all_passed` remain authoritative and are never rewritten.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_failures"
+    )]
     pub quarantined_failures: Vec<TypedQuarantinedFailure>,
     /// Integrity-covered Board references attached through
     /// `verify.adjudicate` and consumed only by `pr.ready`.
@@ -315,11 +473,18 @@ pub struct VerificationRunRecord {
     /// Planned commands the run did not execute (diagnostic for the gates).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planned_missing: Vec<String>,
+    /// Requested commands never admitted or run because an earlier command
+    /// already failed raw (Issue #5094). Such a run can never become Ready
+    /// evidence; rerun the full registered matrix instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_after_failure: Vec<String>,
     /// Integrity hash of the exact verification-plan snapshot consumed by
-    /// this run. Replacing the plan invalidates the run even when both plans
-    /// happen to contain commands covered by the run.
+    /// this run. Semantic identity is compared separately (#4707).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub verification_plan_hash: String,
+    /// Immutable, integrity-covered input for semantic comparison and diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_plan_snapshot: Option<VerificationPlanRecord>,
     /// Whether the exact plan snapshot was derived from changed surfaces.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_derived: bool,
@@ -330,6 +495,8 @@ pub struct VerificationRunRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
 }
+
+pub type VerificationRunRecord = wire::WireRecord<VerificationRunData>;
 
 impl VerificationRunRecord {
     pub fn headed_e2e_passed(&self) -> bool {
@@ -357,7 +524,16 @@ fn headed_e2e_passed(commands: &[VerificationCommandResult]) -> bool {
 pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
     let mut canonical = record.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if record.format_version.is_some() {
+        return wire::canonical_hash(
+            &serde_json::to_value(&canonical).expect("serializable record"),
+        );
+    }
+    let bytes = {
+        // Pre-versioned records used struct field order and omission rules.
+        serde_json::to_vec(&canonical.data)
+    }
+    .expect("serializable record");
     format!("{:x}", Sha256::digest(&bytes))
 }
 
@@ -365,7 +541,15 @@ pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
 /// a legacy pre-P9a record without one).
 #[must_use]
 pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
-    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+    match record.format_version {
+        None => {
+            record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+        }
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !record.content_hash.is_empty() && record.content_hash == compute_content_hash(record)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Worktree-relative path of the registered verification plan (SPEC-3248
@@ -378,7 +562,9 @@ pub const VERIFICATION_PLAN_STATE_RELATIVE: &str = ".gwt/skill-state/verificatio
 /// scenarios is the full T-130; here the plan is a first-class recorded
 /// contract that `verify.run` must cover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationPlanRecord {
+pub struct VerificationPlanData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<u32>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
@@ -404,7 +590,11 @@ pub struct VerificationPlanRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_outputs: Vec<String>,
     /// Exact typed quarantine requests registered before `verify.run`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_stored_quarantines"
+    )]
     pub quarantines: Vec<VerificationQuarantineRequest>,
     /// Content-level worktree fingerprint at plan registration. Derived
     /// matrices are valid only for this exact change set; a later surface
@@ -417,19 +607,134 @@ pub struct VerificationPlanRecord {
     pub content_hash: String,
 }
 
+pub type VerificationPlanRecord = wire::WireRecord<VerificationPlanData>;
+
+fn retain_stored_fields(value: &mut serde_json::Value, fields: &[&str]) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| fields.contains(&key.as_str()));
+    }
+}
+
+// Quarantine inputs remain strict. Only the integrity-covered stored record
+// projection ignores additive fields; WireRecord retains their original JSON.
+fn deserialize_stored_quarantines<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<VerificationQuarantineRequest>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "baseline_command",
+                "owner_issue",
+                "pr_number",
+            ],
+        );
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+fn deserialize_stored_failures<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<TypedQuarantinedFailure>, D::Error> {
+    let mut values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        retain_stored_fields(
+            value,
+            &[
+                "failed_command",
+                "test_identity",
+                "owner_issue",
+                "head_sha",
+                "merge_base_sha",
+                "baseline_command",
+                "baseline_exit_code",
+                "baseline_result_line",
+                "pr_number",
+                "pr_reference",
+            ],
+        );
+        if let Some(reference) = value.get_mut("pr_reference") {
+            retain_stored_fields(reference, &["kind", "comment_id", "marker"]);
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
 /// Compute the integrity hash for a plan (content with the hash emptied).
 #[must_use]
 pub fn compute_plan_hash(plan: &VerificationPlanRecord) -> String {
     let mut canonical = plan.clone();
     canonical.content_hash = String::new();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    if plan.format_version.is_some() {
+        return wire::canonical_hash(&serde_json::to_value(&canonical).expect("serializable plan"));
+    }
+    let bytes = serde_json::to_vec(&canonical.data).expect("serializable plan");
     format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// Verification meaning excludes registration metadata, which remains protected
+/// by `compute_plan_hash`. Keep this comparison shared by in-flight and delivery
+/// checks; command order and all authority/coverage fields are significant.
+fn changed_plan_fields(
+    before: &VerificationPlanRecord,
+    after: &VerificationPlanRecord,
+) -> Vec<&'static str> {
+    [
+        ("commands", before.commands != after.commands),
+        ("session_id", before.session_id != after.session_id),
+        ("owner_number", before.owner_number != after.owner_number),
+        (
+            "execution_binding",
+            before.execution_binding != after.execution_binding,
+        ),
+        ("derived", before.derived != after.derived),
+        ("surfaces", before.surfaces != after.surfaces),
+        (
+            "generated_outputs",
+            before.generated_outputs != after.generated_outputs,
+        ),
+        ("quarantines", before.quarantines != after.quarantines),
+        (
+            "format_version",
+            before.format_version != after.format_version,
+        ),
+        (
+            "unknown_fields",
+            before.unknown_fields() != after.unknown_fields(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, changed)| changed.then_some(field))
+    .collect()
+}
+
+fn same_plan_meaning(before: &VerificationPlanRecord, after: &VerificationPlanRecord) -> bool {
+    !before.content_hash.is_empty()
+        && !after.content_hash.is_empty()
+        && plan_integrity_ok(before)
+        && plan_integrity_ok(after)
+        && changed_plan_fields(before, after).is_empty()
 }
 
 /// True when the plan's stored integrity hash matches (or is legacy-empty).
 #[must_use]
 pub fn plan_integrity_ok(plan: &VerificationPlanRecord) -> bool {
-    plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan)
+    match plan.format_version {
+        None => plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan),
+        Some(VERIFICATION_FORMAT_VERSION) => {
+            !plan.content_hash.is_empty() && plan.content_hash == compute_plan_hash(plan)
+        }
+        Some(_) => false,
+    }
 }
 
 /// Resolve the plan path for a worktree.
@@ -451,8 +756,7 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
             Err(err) => return Err(err),
         },
     };
-    let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let plan = decode_record(&contents, "plan")?;
     Ok(Some(plan))
 }
 
@@ -472,13 +776,38 @@ pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<(
             plan.worktree_fingerprint =
                 worktree_fingerprint_excluding(worktree, &plan.generated_outputs)?;
         }
-        save_plan_unleased(worktree, &plan)
+        save_plan_unleased(worktree, &plan).map(|_| ())
     })
 }
 
-fn save_plan_unleased(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
+fn save_plan_unleased(
+    worktree: &Path,
+    plan: &VerificationPlanRecord,
+) -> io::Result<VerificationPlanRecord> {
     let mut plan = plan.clone();
     plan.content_hash = compute_plan_hash(&plan);
+    // Old runs have no embedded snapshot to compare. Preserve their exact
+    // plan on an idempotent registration, without modifying the run. Recovery
+    // must still register a new post-block snapshot.
+    if let (Ok(Some(previous)), Ok(Some(run))) = (load_plan(worktree), load(worktree)) {
+        if run.verification_plan_snapshot.is_none()
+            && same_plan_meaning(&previous, &plan)
+            && previous.worktree_fingerprint == plan.worktree_fingerprint
+            && crate::cli::execution_state::load(worktree)?.is_none_or(|execution| {
+                execution.status != crate::cli::execution_state::ExecutionControlStatus::Blocked
+            })
+            && evaluate_evidence_snapshot(
+                worktree,
+                &plan.session_id,
+                plan.owner_number,
+                Some(&previous),
+                &run,
+            )
+            .is_delivery_acceptable()
+        {
+            return Ok(previous);
+        }
+    }
     let serialized = serde_json::to_vec_pretty(&plan)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     crate::cli::trusted_store::write_with_mirror(
@@ -486,7 +815,8 @@ fn save_plan_unleased(worktree: &Path, plan: &VerificationPlanRecord) -> io::Res
         "verification-plan.json",
         &plan_state_path(worktree),
         &serialized,
-    )
+    )?;
+    Ok(plan)
 }
 
 fn register_plan_for_caller(
@@ -534,7 +864,8 @@ fn register_plan_with_context_unleased(
     context: PlanRegistrationContext,
     authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
-    let mut plan = VerificationPlanRecord {
+    let plan = VerificationPlanRecord::from(VerificationPlanData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
         session_id: session_id.to_string(),
         owner_number: authority.owner_number,
         execution_binding: authority.execution_binding.clone(),
@@ -546,10 +877,8 @@ fn register_plan_with_context_unleased(
         worktree_fingerprint: context.worktree_fingerprint,
         created_at: Utc::now(),
         content_hash: String::new(),
-    };
-    plan.content_hash = compute_plan_hash(&plan);
-    save_plan_unleased(worktree, &plan)?;
-    Ok(plan)
+    });
+    save_plan_unleased(worktree, &plan)
 }
 
 fn derive_and_register_plan_for_caller(
@@ -558,6 +887,7 @@ fn derive_and_register_plan_for_caller(
     generated_outputs: Vec<String>,
     quarantines: Vec<VerificationQuarantineRequest>,
     authority: &VerificationCallerAuthority,
+    pre_pr: Option<(&[String], &[String])>,
 ) -> Result<
     (
         crate::cli::verify_derivation::DerivedPlan,
@@ -565,11 +895,19 @@ fn derive_and_register_plan_for_caller(
     ),
     String,
 > {
+    let required = if pre_pr.is_some() {
+        crate::cli::verify_derivation::read_pre_pr_required_contexts(worktree)?
+    } else {
+        Vec::new()
+    };
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
         let fingerprint_before =
             worktree_fingerprint_excluding(worktree, &generated_outputs)?;
-        let derived = crate::cli::verify_derivation::derive(worktree)
+        let derived = match pre_pr {
+            Some((acceptance, local)) => crate::cli::verify_derivation::derive_pre_pr(worktree, &required, acceptance, local, &generated_outputs),
+            None => crate::cli::verify_derivation::derive_excluding(worktree, &generated_outputs),
+        }
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
         validate_quarantine_requests(&quarantines, &derived.commands)?;
         let fingerprint_after =
@@ -621,9 +959,72 @@ pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
             Err(err) => return Err(err),
         },
     };
-    let record = serde_json::from_str::<VerificationRunRecord>(&contents)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let record = decode_record(&contents, "run")?;
     Ok(Some(record))
+}
+
+#[derive(Debug)]
+struct UnsupportedFormat {
+    kind: &'static str,
+    version: u64,
+}
+
+impl std::fmt::Display for UnsupportedFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "verification {} format version {} is unsupported by this gwtd (supported version: {}); upgrade gwtd to a compatible version", self.kind, self.version, VERIFICATION_FORMAT_VERSION)
+    }
+}
+
+impl std::error::Error for UnsupportedFormat {}
+
+/// Version admission precedes typed decoding: newer schemas can change even
+/// recognized fields, which must not be mistaken for corrupt evidence.
+fn decode_record<T: serde::de::DeserializeOwned>(
+    contents: &str,
+    kind: &'static str,
+) -> io::Result<T> {
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    if let Some(version) = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat { kind, version },
+            ));
+        }
+    }
+    if let Some(version) = value
+        .get("verification_plan_snapshot")
+        .and_then(|plan| plan.get("format_version"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        if version != u64::from(VERIFICATION_FORMAT_VERSION) {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                UnsupportedFormat {
+                    kind: "plan",
+                    version,
+                },
+            ));
+        }
+    }
+    serde_json::from_value(value).map_err(|err| io::Error::new(ErrorKind::InvalidData, err))
+}
+
+pub(crate) fn evidence_read_error(error: &io::Error) -> EvidenceStatus {
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<UnsupportedFormat>())
+    {
+        Some(unsupported) => EvidenceStatus::UnsupportedFormat {
+            kind: unsupported.kind,
+            version: unsupported.version,
+        },
+        None => EvidenceStatus::Unreadable,
+    }
 }
 
 /// Persist the record atomically. The integrity hash is recomputed on every
@@ -638,11 +1039,18 @@ pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
         "verification-run.json",
         &state_path(worktree),
         &serialized,
-    )
+    )?;
+    // Diagnostic only: gates continue to read the trusted copy. Atomic rename
+    // also keeps a killed shell redirection from leaving this path empty.
+    let diagnostic_path = worktree.join(".gwt/tmp/verify-run.json");
+    if let Err(error) = gwt_github::cache::write_atomic(&diagnostic_path, &serialized) {
+        tracing::warn!(?error, path = %diagnostic_path.display(), "verification diagnostic mirror write failed");
+    }
+    Ok(())
 }
 
 /// Compute the worktree fingerprint at **content level**: sha256 over
-/// HEAD (skipping canonical Work shard addition-only commits), the full
+/// HEAD (skipping canonical Work shard additions and source-identical merges), the full
 /// `git diff HEAD` content (staged and
 /// unstaged tracked changes), and every untracked file's path and bytes —
 /// all with `.gwt/` excluded (the coordination bookkeeping under `.gwt/`
@@ -767,14 +1175,18 @@ fn validate_quarantine_requests(
     Ok(())
 }
 
-/// PR metadata adds immutable shards after verification. Skip only regular-file
-/// shard additions, never source changes, rewrites, empty commits or merges.
+/// PR metadata commits and base merges share one rule: the first-parent diff
+/// must contain only canonical regular-file Work shard additions. A merge with
+/// an identical tree also qualifies. All repository source is conservatively
+/// treated as verification input, so ANY source change invalidates evidence,
+/// even when the feature branch's own diff against its base is unchanged.
+/// Shard rewrites/deletions and ordinary empty commits remain invalidating.
 /// If Git cannot prove the exception, retain the commit as the freshness anchor.
 fn verification_head(worktree: &Path, head: &str) -> String {
     let mut anchor = head.trim().to_string();
     while let Ok(line) = git_stdout(worktree, &["rev-list", "--parents", "-n", "1", &anchor]) {
         let parents: Vec<_> = line.split_whitespace().collect();
-        if parents.len() != 2 {
+        if parents.len() < 2 {
             break;
         }
         let Ok(diff) = gwt_core::process::hidden_command("git")
@@ -793,7 +1205,14 @@ fn verification_head(worktree: &Path, head: &str) -> String {
         else {
             break;
         };
-        if !diff.status.success() || diff.stdout.is_empty() {
+        if !diff.status.success() {
+            break;
+        }
+        if diff.stdout.is_empty() {
+            if parents.len() > 2 {
+                anchor = parents[1].to_string();
+                continue;
+            }
             break;
         }
         let Some(bytes) = diff.stdout.strip_suffix(&[0]) else {
@@ -807,7 +1226,7 @@ fn verification_head(worktree: &Path, head: &str) -> String {
                 && metadata[0] == b":000000"
                 && matches!(metadata[1], b"100644" | b"100755")
                 && metadata[4] == b"A"
-                && is_canonical_bucketed_work_event_shard(entry[1])
+                && classify_path(entry[1]) == DeliveryPath::WorkEventShard
         });
         if !additions_only || !remainder.is_empty() {
             break;
@@ -815,6 +1234,26 @@ fn verification_head(worktree: &Path, head: &str) -> String {
         anchor = parents[1].to_string();
     }
     format!("{anchor}\n")
+}
+
+/// Reuse the fingerprint's strict bookkeeping normalization for a later PR
+/// snapshot. Equivalent ancestors or sibling histories cannot advance a run.
+pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &str) -> bool {
+    if head == verified {
+        return true;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", verified, head])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && verification_head(&worktree, verified) == verification_head(&worktree, head)
+        // A source-identical merge can contain a product commit and its revert
+        // on another parent. Reuse the PR history proof without granting a
+        // base-sync exemption to completion or unavailable-remote diagnostics.
+        && super::pr::head_check::product_changes_since(&worktree, verified, head, verified)
+            .is_ok_and(|(commits, _)| commits.is_empty())
 }
 
 pub(crate) fn worktree_fingerprint_excluding(
@@ -839,7 +1278,7 @@ pub(crate) fn worktree_fingerprint_excluding(
         "HEAD".to_string(),
         "--".to_string(),
         ".".to_string(),
-        ":(exclude).gwt".to_string(),
+        BOOKKEEPING_GIT_EXCLUDE.to_string(),
     ];
     diff_args.extend(
         generated_outputs
@@ -862,7 +1301,7 @@ pub(crate) fn worktree_fingerprint_excluding(
         "-uall".to_string(),
         "--".to_string(),
         ".".to_string(),
-        ":(exclude).gwt".to_string(),
+        BOOKKEEPING_GIT_EXCLUDE.to_string(),
     ];
     status_args.extend(
         generated_outputs
@@ -1275,7 +1714,8 @@ fn refresh_unpersisted_pending_record(
 /// previous open obligation remains open across refreshes until the exact
 /// event path is clean and HEAD is confirmed on the configured upstream
 /// remote. Refreshes and duplicate opens do not replace the originating
-/// session provenance.
+/// session provenance. A closed pending delivery remains audit evidence on
+/// refresh; opening a new terminal obligation replaces that closed receipt.
 pub fn save_work_event_settlement_record(
     worktree: &Path,
     session_id: &str,
@@ -1285,7 +1725,10 @@ pub fn save_work_event_settlement_record(
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         let previous = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?;
-        if let Some(record) = previous.as_ref().filter(|record| record.obligation_open) {
+        if let Some(record) = previous
+            .as_ref()
+            .filter(|record| record.obligation_open || !open_obligation)
+        {
             if let Some(delivery) = pending_delivery_for_record(record) {
                 match pending_work_event_is_persisted(
                     worktree,
@@ -1310,7 +1753,7 @@ pub fn save_work_event_settlement_record(
         let pending_delivery = previous
             .as_ref()
             .filter(|record| {
-                record.obligation_open
+                (record.obligation_open || !open_obligation)
                     && record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
             })
             .and_then(pending_delivery_for_record);
@@ -1433,6 +1876,38 @@ fn persist_work_event_settlement_record_to_resolved_dir(
         WORK_EVENT_SETTLEMENT_RECORD_FILE,
         &bytes,
     )
+}
+
+/// #5216 / FR-026: verified delivery ends only its own bookkeeping obligation.
+/// Called under the owner write lease after the durable Completed transition.
+/// Preserve dirty/pending facts and immutable events as audit evidence; another
+/// Session or generation must still settle its own receipt independently.
+pub(crate) fn close_completed_work_event_obligation_locked(
+    worktree: &Path,
+    execution: &execution_state::ExecutionControlRecord,
+) -> io::Result<()> {
+    if execution.status != execution_state::ExecutionControlStatus::Completed
+        || execution.completion_evidence.is_none()
+        || !execution_state::integrity_ok(execution)
+    {
+        return Ok(());
+    }
+    let Some(mut receipt) = load_work_event_settlement_record(worktree)? else {
+        return Ok(());
+    };
+    if !receipt.obligation_open
+        || receipt.session_id != execution.primary_session_id
+        || !work_event_receipt_authorizes_current_generation(worktree, &receipt)?
+    {
+        return Ok(());
+    }
+    receipt.obligation_open = false;
+    receipt.updated_at = Utc::now();
+    if !receipt.status.is_settled() {
+        tracing::warn!(status = ?receipt.status, "verified delivery retains unsettled Work bookkeeping for audit");
+    }
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &receipt)
 }
 
 pub(crate) fn pending_shard_refresh_failure_must_block(record: &WorkEventSettlementRecord) -> bool {
@@ -2202,7 +2677,7 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         None => reason,
     };
     format!(
-        "Work event settlement is not closed: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
         identity_gate_escape_suffix(identity_gate_closed)
     )
 }
@@ -2217,7 +2692,147 @@ fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
     " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
+/// Only the successful PR mutation path calls this with the event returned by
+/// its writer. A kind:pr payload alone is not producer provenance. Keep the
+/// exact canonical bytes outside the checkout, scoped to this worktree.
+pub(crate) fn certify_pr_delivery_event(
+    worktree: &Path,
+    event: &gwt_core::workspace_projection::WorkEvent,
+) -> io::Result<()> {
+    if event.kind != gwt_core::workspace_projection::WorkEventKind::Pr {
+        return Err(io::Error::other("delivery certificate requires a PR event"));
+    }
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id);
+    let mut bytes = serde_json::to_vec(event)?;
+    bytes.push(b'\n');
+    if fs::read(&path)? != bytes {
+        return Err(io::Error::other(
+            "PR delivery event changed before certification",
+        ));
+    }
+    let name = format!(
+        "pr-delivery-{}",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    let Some(trusted_dir) = super::trusted_store::trusted_dir_for_worktree(worktree) else {
+        // Legacy/unmanaged repositories without a trusted scope retain their
+        // existing PR behavior and receive no settlement exemption.
+        return Ok(());
+    };
+    // This is a complete per-event write, not shared read-modify-write state.
+    // Ready PR dispatch already holds the non-reentrant trusted-store lease.
+    super::trusted_store::write_to_resolved_dir(&trusted_dir, &name, &bytes)?;
+    let saved = super::trusted_store::read_from_resolved_dir(&trusted_dir, &name)?
+        .ok_or_else(|| io::Error::other("PR delivery certificate disappeared"))?;
+    if saved.as_bytes() != bytes {
+        return Err(io::Error::other(
+            "PR delivery certificate readback mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
+    if classify_path(relative) != DeliveryPath::WorkEventShard {
+        return false;
+    }
+    let Ok(relative) = std::str::from_utf8(relative) else {
+        return false;
+    };
+    let path = worktree.join(relative);
+    if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return false;
+    }
+    let name = format!(
+        "pr-delivery-{}",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    match (super::trusted_store::read(worktree, &name), fs::read(path)) {
+        (Ok(Some(certified)), Ok(actual)) => certified.as_bytes() == actual,
+        _ => false,
+    }
+}
+
+/// Preserve uncommitted Work history before releasing a defunct execution.
+pub(crate) fn archive_untracked_work_events_for_recovery(worktree: &Path) -> io::Result<usize> {
+    use gwt_core::workspace_projection::{
+        preserve_workspace_work_event_log_as_shards, workspace_work_event_shard_matches, WorkEvent,
+    };
+
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let dirty = work_event_dirty_paths(worktree)
+        .map_err(|()| io::Error::other("cannot inspect Work events before execution recovery"))?;
+    let archive_dir = gwt_core::paths::gwt_project_dir_for_repo_path(worktree)
+        .join("recovered-work-events")
+        .join("events");
+    let mut archived = 0;
+    for dirty in dirty {
+        if dirty.state != WorkEventPathState::Untracked
+            || classify_path(dirty.path.as_bytes()) != DeliveryPath::WorkEventShard
+        {
+            continue;
+        }
+        let source = worktree.join(&dirty.path);
+        let original = fs::read(&source)?;
+        let Ok(event) = serde_json::from_slice::<WorkEvent>(&original) else {
+            continue;
+        };
+        if source != gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id)
+            || !workspace_work_event_shard_matches(worktree, &event).map_err(io::Error::other)?
+        {
+            continue;
+        }
+        let copies = preserve_workspace_work_event_log_as_shards(&source, &archive_dir)
+            .map_err(io::Error::other)?;
+        if copies.len() != 1 || fs::read(&copies[0])? != original || fs::read(&source)? != original
+        {
+            return Err(io::Error::other(
+                "Work event changed during execution recovery",
+            ));
+        }
+        fs::remove_file(&source)?;
+        archived += 1;
+    }
+    if archived > 0 {
+        tracing::info!(archived, path = %archive_dir.display(), "preserved Work events before execution recovery");
+    }
+    Ok(archived)
+}
+
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
+    let mut states = work_event_dirty_paths(worktree)?
+        .into_iter()
+        .map(|dirty| dirty.state)
+        .collect::<Vec<_>>();
+    states.sort_unstable();
+    states.dedup();
+    Ok(states)
+}
+
+/// Why a Work event path was judged dirty (Issue #5072 AC-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventDirtyBasis {
+    /// Reported by `git status --porcelain=v1`.
+    GitStatusPorcelain,
+    /// An ignored canonical shard that `git status` hides; gwt still requires
+    /// it to be force-added and delivered.
+    GwtIgnoredShard,
+}
+
+/// One concrete dirty Work event path and the evidence behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkEventDirtyPath {
+    pub path: String,
+    pub state: WorkEventPathState,
+    pub basis: WorkEventDirtyBasis,
+}
+
+/// Live scan of the Work event store: every dirty path with its basis.
+/// An empty list means `git status` is clean for the store and no ignored
+/// canonical shard is pending.
+pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDirtyPath>, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args([
             "status",
@@ -2234,25 +2849,35 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
         return Err(());
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_| ())?;
-    let mut states = Vec::new();
+    let mut dirty = Vec::new();
     for line in stdout.lines() {
         let bytes = line.as_bytes();
         if bytes.len() < 3 {
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        let mut push = |state| {
+            dirty.push(WorkEventDirtyPath {
+                path: line[3..].to_string(),
+                state,
+                basis: WorkEventDirtyBasis::GitStatusPorcelain,
+            });
+        };
         if index == b'?' && worktree_state == b'?' {
-            states.push(WorkEventPathState::Untracked);
+            if is_certified_pr_delivery_event(worktree, &bytes[3..]) {
+                continue;
+            }
+            push(WorkEventPathState::Untracked);
             continue;
         }
         if index == b'D' || worktree_state == b'D' {
-            states.push(WorkEventPathState::Deleted);
+            push(WorkEventPathState::Deleted);
         }
         if index != b' ' && index != b'D' {
-            states.push(WorkEventPathState::Staged);
+            push(WorkEventPathState::Staged);
         }
         if worktree_state != b' ' && worktree_state != b'D' {
-            states.push(WorkEventPathState::Unstaged);
+            push(WorkEventPathState::Unstaged);
         }
     }
     let ignored = gwt_core::process::hidden_command("git")
@@ -2271,53 +2896,22 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
     if !ignored.status.success() {
         return Err(());
     }
-    if ignored
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .any(is_canonical_bucketed_work_event_shard)
-    {
-        states.push(WorkEventPathState::Untracked);
-    }
-    states.sort_unstable();
-    states.dedup();
-    Ok(states)
-}
-
-fn is_canonical_bucketed_work_event_shard(path: &[u8]) -> bool {
-    let mut components = path.split(|byte| *byte == b'/');
-    let Some(gwt) = components.next() else {
-        return false;
-    };
-    let Some(work) = components.next() else {
-        return false;
-    };
-    let Some(events) = components.next() else {
-        return false;
-    };
-    let Some(bucket) = components.next() else {
-        return false;
-    };
-    let Some(file_name) = components.next() else {
-        return false;
-    };
-    if components.next().is_some()
-        || (gwt, work, events) != (b".gwt", b"work", b"events")
-        || bucket.len() != 2
-        || !bucket
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
-    {
-        return false;
-    }
-    let Some(digest) = file_name.strip_suffix(b".jsonl") else {
-        return false;
-    };
-    digest.len() == 64
-        && digest
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f'))
-        && bucket == &digest[..2]
+    dirty.extend(
+        ignored
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .filter(|path| {
+                classify_path(path) == DeliveryPath::WorkEventShard
+                    && !is_certified_pr_delivery_event(worktree, path)
+            })
+            .map(|path| WorkEventDirtyPath {
+                path: String::from_utf8_lossy(path).into_owned(),
+                state: WorkEventPathState::Untracked,
+                basis: WorkEventDirtyBasis::GwtIgnoredShard,
+            }),
+    );
+    Ok(dirty)
 }
 
 fn event_commit_has_non_bookkeeping_change(
@@ -2354,7 +2948,10 @@ fn event_commit_has_non_bookkeeping_change(
                 .is_some_and(|suffix| suffix.first() == Some(&b'/'))
         {
             saw_event_path = true;
-        } else if !path.starts_with(b".gwt/") {
+        } else if matches!(
+            classify_path(path),
+            DeliveryPath::Product | DeliveryPath::TaskNotes
+        ) {
             saw_non_bookkeeping = true;
         }
     }
@@ -2631,7 +3228,9 @@ fn is_env_assignment_key(key: &str) -> bool {
 /// binary literally named `RUSTDOCFLAGS=-D warnings` (#3698). Quotes are
 /// already gone by the time [`split_command_line`] hands the tokens over, so
 /// `FOO="bar baz"` arrives as the single token `FOO=bar baz`.
-fn take_env_assignments(tokens: Vec<String>) -> Result<(EnvAssignments, Vec<String>), String> {
+pub(crate) fn take_env_assignments(
+    tokens: Vec<String>,
+) -> Result<(EnvAssignments, Vec<String>), String> {
     let mut env = Vec::new();
     let mut rest = tokens.into_iter().peekable();
     while let Some(token) = rest.peek() {
@@ -2672,19 +3271,31 @@ const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 /// reproduce: a command that passes in the terminal but fails under
 /// `verify.run` reads as a real RED and sends its owner after a bug that is
 /// not there.
-fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
-    vec![
+fn child_environment_contract() -> Vec<(String, Option<String>)> {
+    let mut environment = vec![
         // Live GitHub opt-in must never cross the child boundary (SPEC #4093
         // FR-008, Issue #3850): a `cargo test` child that inherits it spends
         // the real budget from every fixture-free test.
-        (LIVE_GITHUB_OPT_IN_ENV, None),
-        // A test that fetches an unreachable remote makes Windows'
-        // `git-credential-manager` ask for input, and a child with no console
-        // waits on that prompt forever — taking the host-wide verification
-        // lease down with it (#4182 AC-7). GitHub's runners set this for
-        // every step, which is precisely why CI never sees the hang.
-        ("GIT_TERMINAL_PROMPT", Some("0")),
-    ]
+        (LIVE_GITHUB_OPT_IN_ENV.to_string(), None),
+        // Launch ownership belongs to the caller, not the command's fixtures.
+        // Legacy markers otherwise misclassify manual sessions (Issue #4878).
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+            None,
+        ),
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+            None,
+        ),
+    ];
+    // Share the test defaults with both inherited and daemon-hosted children.
+    // Terminal suppression alone does not disable credential helpers or GCM.
+    environment.extend(
+        gwt_core::process::noninteractive_git_environment()
+            .into_iter()
+            .map(|(key, value)| (key, Some(value))),
+    );
+    environment
 }
 
 fn apply_child_environment_contract(process: &mut std::process::Command) {
@@ -2697,6 +3308,7 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
 }
 
 use crate::cli::daemon::verification_host::VerificationHost;
+use crate::cli::verification_lease::CommandProgress;
 
 /// The exact environment a `verify.run` child receives, as a complete list.
 ///
@@ -2709,10 +3321,10 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
     for (key, value) in child_environment_contract() {
         match value {
             Some(value) => {
-                env.insert(key.to_string(), value.to_string());
+                env.insert(key, value);
             }
             None => {
-                env.remove(key);
+                env.remove(&key);
             }
         }
     }
@@ -2729,108 +3341,716 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical matrix is library-only because the running gwtd.exe
-    // cannot be replaced (#4182). That matrix does not overwrite the binary.
-    if cfg!(windows)
-        || !commands.iter().any(|command| {
-            split_command_line(command).is_ok_and(|args| {
+    // The verification driver is pinned outside Cargo's artifacts on Windows,
+    // so restoring the operational executable is safe there too (Issue #5480).
+    if !commands.iter().any(|command| {
+        split_command_line(command)
+            .and_then(take_env_assignments)
+            .is_ok_and(|(_, args)| {
                 args.first().map(String::as_str) == Some("cargo")
-                    && args.get(1).map(String::as_str) == Some("test")
+                    && (args.get(1).map(String::as_str) == Some("test")
+                        || (args.get(1).map(String::as_str) == Some("nextest")
+                            && args.get(2).map(String::as_str) == Some("run")))
             })
-        })
-    {
+    }) {
         return None;
     }
-    let manifest =
-        |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
-    let workspace = manifest(&worktree.join("Cargo.toml"))?;
-    if !workspace
-        .get("workspace")?
-        .get("members")?
-        .as_array()?
-        .iter()
-        .any(|member| member.as_str() == Some("crates/gwt"))
-    {
-        return None;
-    }
-    let package = manifest(&worktree.join("crates/gwt/Cargo.toml"))?;
-    if package.get("package")?.get("name")?.as_str()? != "gwt"
-        || package.get("features")?.get("test-gh-guard").is_none()
-        || !package.get("bin")?.as_array()?.iter().any(|binary| {
-            binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
-                && binary.get("path").and_then(toml::Value::as_str) == Some("src/bin/gwtd.rs")
-        })
-    {
-        return None;
-    }
-    Some("cargo build -p gwt --bin gwtd")
+    gwtd_artifact_restore_command(worktree)
 }
 
+fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
+}
+
+/// Identify this repository without comparing another project's HEAD to gwt's.
+pub(super) fn is_gwt_checkout(worktree: &Path) -> bool {
+    let manifest =
+        |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
+    let Some(workspace) = manifest(&worktree.join("Cargo.toml")) else {
+        return false;
+    };
+    if !workspace
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|member| member.as_str() == Some("crates/gwt"))
+        })
+    {
+        return false;
+    }
+    let Some(package) = manifest(&worktree.join("crates/gwt/Cargo.toml")) else {
+        return false;
+    };
+    package
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        == Some("gwt")
+        && package
+            .get("features")
+            .and_then(|features| features.get("test-gh-guard"))
+            .is_some()
+        && package
+            .get("bin")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|binaries| {
+                binaries.iter().any(|binary| {
+                    binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
+                        && binary.get("path").and_then(toml::Value::as_str)
+                            == Some("src/bin/gwtd.rs")
+                })
+            })
+}
+
+/// Keep recovery (including failures) in the deferred admission diagnostic,
+/// without presenting unexecuted commands as passing verification evidence.
+#[cfg(all(test, not(windows)))]
+fn restore_gwtd_after_deferral(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> String {
+    restore_gwtd_after_deferral_cancellable(worktree, host, artifacts, None)
+}
+
+fn restore_gwtd_after_deferral_cancellable(
+    worktree: &Path,
+    host: &VerificationHost,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
+) -> String {
+    let Some(command) = gwtd_artifact_restore_command(worktree) else {
+        return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
+    };
+    match execute_command_with_artifact_guard_cancellable(
+        worktree, command, true, None, host, None, artifacts, check,
+    ) {
+        Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
+        Ok((code, _, output, _)) => format!(
+            "gwtd artifact restoration: failed (`{command}`, exit {code}); \
+             restore from the checkout root before GitHub operations: {output}"
+        ),
+        Err(error) => format!("gwtd artifact restoration: failed (`{command}`): {error}"),
+    }
+}
+
+/// Assemble once for both local and daemon launches (Issue #4830).
+fn verification_command_arguments(
+    args: &[String],
+    capture: Option<&headed_e2e::Capture>,
+) -> Vec<String> {
+    let mut args = args.to_vec();
+    if let Some(capture) = capture {
+        args.extend(capture.arguments());
+    }
+    #[cfg(windows)]
+    {
+        use base64::Engine;
+        let executable = Path::new(&args[0])
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if executable.eq_ignore_ascii_case("pwsh") || executable.eq_ignore_ascii_case("powershell")
+        {
+            if let Some(file) = args
+                .iter()
+                .take_while(|arg| {
+                    ![
+                        "-Command",
+                        "-c",
+                        "-EncodedCommand",
+                        "-e",
+                        "-ec",
+                        "-CommandWithArgs",
+                        "-cwa",
+                    ]
+                    .iter()
+                    .any(|mode| arg.eq_ignore_ascii_case(mode))
+                        && !arg.to_ascii_lowercase().ends_with(".ps1")
+                })
+                .position(|arg| arg.eq_ignore_ascii_case("-File"))
+            {
+                if let Some(script) = args.get(file + 1).filter(|script| script.as_str() != "-") {
+                    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+                    // -File parses unknown switches at ':' before the script sees them.
+                    // Invoke the script in PowerShell instead, quoting literal arguments.
+                    // Named script parameters retain their binding, while --reporter=...
+                    // remains a literal. No command text travels over an ASCII stdin pipe.
+                    let mut source = format!(
+                        "[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [Text.UTF8Encoding]::new($false); & {}",
+                        quote(script)
+                    );
+                    for arg in &args[file + 2..] {
+                        source.push(' ');
+                        let (name, value) = arg
+                            .split_once(':')
+                            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+                        let named = name.strip_prefix('-').is_some_and(|name| {
+                            !name.is_empty()
+                                && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+                        });
+                        if named {
+                            source.push_str(name);
+                            if let Some(value) = value {
+                                source.push(':');
+                                // -File recognizes only boolean literals here, not arbitrary
+                                // PowerShell expressions such as $env:NAME.
+                                source.push_str(&if value.eq_ignore_ascii_case("$true")
+                                    || value.eq_ignore_ascii_case("$false")
+                                {
+                                    value.to_string()
+                                } else {
+                                    quote(value)
+                                });
+                            }
+                        } else {
+                            source.push_str(&quote(arg));
+                        }
+                    }
+                    source.push_str("; if ($?) { exit 0 } elseif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }");
+                    let bytes: Vec<u8> = source.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                    args.truncate(file);
+                    args.extend([
+                        "-EncodedCommand".to_string(),
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    ]);
+                }
+            }
+        }
+    }
+    args
+}
+
+#[cfg(test)]
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
     host: &VerificationHost,
-) -> Result<(i32, String), String> {
+    progress: Option<&CommandProgress>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+    )
+}
+
+type CancellationCheck<'a> = dyn Fn() -> Result<bool, String> + Sync + 'a;
+
+fn check_cancellation(check: Option<&CancellationCheck<'_>>) -> Result<(), String> {
+    if check.map(|check| check()).transpose()?.unwrap_or(false) {
+        Err("verification attempt canceled".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_command_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        None,
+        check,
+    )
+}
+
+fn command_timeout(
+    command: &str,
+    progress: Option<&CommandProgress>,
+) -> Option<std::time::Duration> {
+    crate::cli::verification_lease::short_non_cargo_timeout(command)
+        .or_else(|| progress.and_then(CommandProgress::timeout))
+}
+
+#[cfg(test)]
+fn execute_command_with_artifact_guard(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_command_with_artifact_guard_cancellable(
+        worktree,
+        command,
+        isolated_baseline,
+        capture,
+        host,
+        progress,
+        artifacts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_command_with_artifact_guard_cancellable(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    artifacts: Option<&crate::cli::verification_lease::BuildArtifactGuard>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
     let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
-    match host {
-        VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
+    // Auxiliary baseline proofs and artifact restoration do not produce
+    // canonical command rows, so do not leave unreferenced output artifacts.
+    let output_worktree = (!isolated_baseline).then_some(worktree);
+    // Heavy admission already holds this guard. Light Cargo and operational
+    // artifact restoration participate in the same GC boundary without a slot.
+    let _artifacts = if progress.is_none() {
+        match crate::cli::verification_lease::effective_cargo_target(
             worktree,
             command,
-            &args,
-            &assignments,
             isolated_baseline,
-            capture,
-            endpoint,
-        ),
+        )? {
+            Some(target) => {
+                let protected = artifacts
+                    .map(|guard| guard.protects(&target))
+                    .transpose()
+                    .map_err(|error| format!("build artifact coordination failed: {error}"))?
+                    .unwrap_or(false);
+                if protected {
+                    None
+                } else {
+                    Some(if check.is_some() {
+                        loop {
+                            check_cancellation(check)?;
+                            if let Some(guard) =
+                                crate::cli::verification_lease::try_lock_build_artifacts(&target)
+                                    .map_err(|error| {
+                                        format!("build artifact coordination failed: {error}")
+                                    })?
+                            {
+                                break guard;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    } else {
+                        crate::cli::verification_lease::lock_build_artifacts(&target).map_err(
+                            |error| format!("build artifact coordination failed: {error}"),
+                        )?
+                    })
+                }
+            }
+            None if Path::new(&args[0])
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                == Some("cargo")
+                && !matches!(
+                    crate::cli::verification_lease::cargo_subcommand(&args),
+                    Some("fmt" | "metadata")
+                ) =>
+            {
+                return Err(
+                    "Cargo artifact target is unresolved; refusing slotless execution without \
+                     the build artifact/GC lock. Run `cargo metadata --offline --no-deps \
+                     --format-version 1` with this command's configuration, fix its failure, \
+                     and retry verify.run."
+                        .to_string(),
+                );
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let temporary_base = crate::cli::verification_lease::command_temporary_base(worktree, command)?;
+    fs::create_dir_all(&temporary_base).map_err(|error| error.to_string())?;
+    let temp = tempfile::Builder::new()
+        .prefix("gwt-verify-")
+        .tempdir_in(temporary_base)
+        .map_err(|error| error.to_string())?;
+    let result = match host {
+        VerificationHost::Daemon(endpoint) => {
+            let mut request = delegated_spawn_request(
+                worktree,
+                &args,
+                &assignments,
+                isolated_baseline,
+                capture,
+                temp.path().join("stdout"),
+                temp.path().join("stderr"),
+            );
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                request
+                    .env
+                    .retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+                request
+                    .env
+                    .push((key.to_string(), temp.path().to_string_lossy().into_owned()));
+            }
+            execute_command_on_daemon(
+                command,
+                &request,
+                endpoint,
+                progress,
+                output_worktree,
+                check,
+            )
+        }
         VerificationHost::Inherit => {
+            let args = verification_command_arguments(&args, capture);
             let mut process = gwt_core::process::hidden_command(&args[0]);
             process.args(&args[1..]).current_dir(worktree);
             apply_child_environment_contract(&mut process);
             if let Some(capture) = capture {
-                capture.configure(&mut process);
+                let (key, value) = capture.environment();
+                process.env(key, value);
             }
             // After the contract, so a command that names one of its
             // variables still gets the value it asked for.
             for (key, value) in &assignments {
                 process.env(key, value);
             }
+            for key in ["TMPDIR", "TEMP", "TMP"] {
+                process.env(key, temp.path());
+            }
             if isolated_baseline {
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
-            process
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            // Issue #4405: this process runs inside the agent tree, whose
-            // launch policy lowers priority; the workload must not inherit
-            // that. Issue #4409 removes the inheritance at its source by
-            // launching from the daemon instead, but this branch is still
-            // taken whenever the launcher is already at baseline priority or
-            // has declared that it accepts its own.
-            let output = match gwt_core::process_tree::spawn_at_normal_priority(&mut process)
-                .and_then(|spawned| {
-                    let priority = spawned.priority.clone();
-                    spawned.wait_with_output().map(|output| (output, priority))
-                }) {
-                Ok(output) => output,
-                Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
-            };
-            let (output, priority) = output;
-            let exit_code = output.status.code().unwrap_or(-1);
-            let mut tail = String::new();
-            if !priority.restored {
-                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
-            }
-            tail.push_str(&render_streams(&[
-                ("stdout", &output.stdout),
-                ("stderr", &output.stderr),
-            ]));
-            Ok((exit_code, tail))
+            execute_inherited_command_cancellable(
+                &mut process,
+                temp.path(),
+                command,
+                command_timeout(command, progress),
+                progress,
+                output_worktree,
+                std::time::Instant::now,
+                check,
+            )
+        }
+    };
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let retained = temp.keep();
+            Err(format!(
+                "{error}; command capture retained at {}",
+                retained.display()
+            ))
         }
     }
+}
+
+#[cfg(test)]
+fn execute_inherited_command(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    now: impl FnMut() -> std::time::Instant,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    execute_inherited_command_cancellable(
+        process,
+        temporary_directory,
+        command,
+        timeout,
+        progress,
+        output_worktree,
+        now,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_inherited_command_cancellable(
+    process: &mut std::process::Command,
+    temporary_directory: &Path,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    mut now: impl FnMut() -> std::time::Instant,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    check_cancellation(check)?;
+    // Issue #4405: this process runs inside the agent tree, whose
+    // launch policy lowers priority; the workload must not inherit
+    // that. Issue #4409 removes the inheritance at its source by
+    // launching from the daemon instead, but this branch is still
+    // taken whenever the launcher is already at baseline priority or
+    // has declared that it accepts its own.
+    let output = (|| -> io::Result<_> {
+        // Issue #4746 (earlier instance #4105): a grandchild can
+        // inherit stdout/stderr beyond the direct child's lifetime.
+        // Files let us wait for that child without waiting for EOF.
+        let stdout = temporary_directory.join("stdout");
+        let stderr = temporary_directory.join("stderr");
+        process
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::File::create(&stdout)?)
+            .stderr(fs::File::create(&stderr)?);
+        let stdout_reader = fs::File::open(stdout)?;
+        let stderr_reader = fs::File::open(stderr)?;
+        let mut spawned = InheritedVerificationChild::spawn(process)?;
+        let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
+        let (status, stopped) = spawned.wait_cancellable(timeout, &mut now, check)?;
+        let output = std::process::Output {
+            status,
+            stdout: captured_output_snapshot(&stdout_reader),
+            stderr: captured_output_snapshot(&stderr_reader),
+        };
+        Ok((output, spawned.spawned.priority.clone(), stopped))
+    })();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => return Err(err.to_string()),
+        Err(err) => return spawn_failure_result(output_worktree, command, &err.to_string()),
+    };
+    let (output, priority, stopped) = output;
+    let (exit_code, signal, mut tail) = match stopped {
+        Some(InheritedCommandStop::TimedOut) => command_timeout_result(
+            command,
+            timeout.expect("a timed-out command has a deadline"),
+        ),
+        Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)) => {
+            interactive_authentication_result(&diagnostic)
+        }
+        None => (
+            output.status.code().unwrap_or(-1),
+            terminating_signal(output.status),
+            String::new(),
+        ),
+    };
+    if !priority.restored {
+        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+    }
+    let (streams_tail, output_streams) = render_streams(
+        output_worktree,
+        &[("stdout", &output.stdout), ("stderr", &output.stderr)],
+    )?;
+    tail.push_str(&streams_tail);
+    Ok((exit_code, signal, tail, output_streams))
+}
+
+/// Every verification child owns its group/Job before descendants can run.
+struct InheritedVerificationChild {
+    spawned: gwt_core::process_tree::NormalPriorityChild,
+    reaped: bool,
+    #[cfg(windows)]
+    job: Option<gwt_core::process_tree::WindowsJobObject>,
+}
+
+enum InheritedCommandStop {
+    TimedOut,
+    InteractiveAuthentication(String),
+}
+
+impl InheritedVerificationChild {
+    fn spawn(process: &mut std::process::Command) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        #[cfg(windows)]
+        let (spawned, job) = {
+            use std::os::windows::process::CommandExt;
+            let mut job =
+                gwt_core::process_tree::WindowsJobObject::new().map_err(io::Error::other)?;
+            process.creation_flags(
+                gwt_core::process_tree::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS
+                    | gwt_core::process_tree::WINDOWS_NORMAL_PRIORITY_CLASS,
+            );
+            let mut child = process.spawn()?;
+            if let Err(error) = job.assign_and_resume(child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(error));
+            }
+            let spawned = gwt_core::process_tree::NormalPriorityChild {
+                child,
+                priority: gwt_core::process_tree::ChildPriorityReport {
+                    restored: true,
+                    detail: "normal priority class".to_string(),
+                },
+            };
+            (spawned, Some(job))
+        };
+        #[cfg(not(windows))]
+        let spawned = gwt_core::process_tree::spawn_at_normal_priority(process)?;
+        Ok(Self {
+            spawned,
+            reaped: false,
+            #[cfg(windows)]
+            job,
+        })
+    }
+
+    fn wait_cancellable(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
+        let mut detector = interactive_process::InteractiveProcessDetector::default();
+        self.wait_cancellable_with_detector(timeout, now, check, &mut |pid| detector.detect(pid))
+    }
+
+    fn wait_cancellable_with_detector(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+        now: &mut impl FnMut() -> std::time::Instant,
+        check: Option<&CancellationCheck<'_>>,
+        detect: &mut impl FnMut(u32) -> Option<String>,
+    ) -> io::Result<(std::process::ExitStatus, Option<InheritedCommandStop>)> {
+        let deadline = timeout.map(|timeout| now() + timeout);
+        loop {
+            if let Err(error) = check_cancellation(check) {
+                self.reclaim();
+                let _ = self.spawned.child.wait();
+                self.reaped = true;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, error));
+            }
+            if let Some(diagnostic) = detect(self.spawned.child.id()) {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((
+                    status,
+                    Some(InheritedCommandStop::InteractiveAuthentication(diagnostic)),
+                ));
+            }
+            #[cfg(unix)]
+            let completed = if self.exited_without_reaping()? {
+                // Keep the exited leader waitable until its group is reclaimed:
+                // reaping first would allow its PID/PGID to be recycled.
+                self.reclaim();
+                Some(self.spawned.child.wait()?)
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let completed = self.spawned.child.try_wait()?;
+            if let Some(status) = completed {
+                self.reaped = true;
+                return Ok((status, None));
+            }
+            if deadline.is_some_and(|deadline| now() >= deadline) {
+                self.reclaim();
+                let status = self.spawned.child.wait()?;
+                self.reaped = true;
+                return Ok((status, Some(InheritedCommandStop::TimedOut)));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    fn exited_without_reaping(&mut self) -> io::Result<bool> {
+        // SAFETY: zero-initialized siginfo_t is valid; waitid writes into this
+        // live buffer and WNOWAIT leaves the exact owned child unreaped.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            if libc::waitid(
+                libc::P_PID,
+                self.spawned.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            ) == -1
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    return Ok(false);
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    // Lost wait ownership cannot authorize a group signal.
+                    self.reaped = true;
+                }
+                return Err(error);
+            }
+            Ok(info.si_pid() != 0)
+        }
+    }
+
+    fn reclaim(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: the bounded child leads this group and has not been reaped,
+        // so its id cannot have been recycled to an unrelated workload.
+        unsafe {
+            libc::killpg(self.spawned.child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            let _ = job.terminate();
+        }
+        let _ = self.spawned.child.kill();
+    }
+}
+
+impl Drop for InheritedVerificationChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            self.reclaim();
+            let _ = self.spawned.child.wait();
+        }
+    }
+}
+
+fn command_timeout_result(
+    command: &str,
+    timeout: std::time::Duration,
+) -> (i32, Option<i32>, String) {
+    let diagnostic = bounded_output_tail(
+        format!(
+            "verification command '{command}' timed out after {}s; reclaiming its owned workload. \
+         Check the command and retry verify.run.",
+            timeout.as_secs(),
+        )
+        .as_bytes(),
+    );
+    (124, None, format!("--- timeout ---\n{diagnostic}\n"))
+}
+
+fn interactive_authentication_result(diagnostic: &str) -> (i32, Option<i32>, String) {
+    (
+        1,
+        None,
+        format!("--- interactive authentication ---\n{diagnostic}\n"),
+    )
+}
+
+fn captured_output_snapshot(file: &fs::File) -> Vec<u8> {
+    use std::io::Read;
+
+    // A surviving writer may still append. Read only the length observed
+    // after the direct child exited, never chase a growing file to EOF.
+    let read = || -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        file.take(file.metadata()?.len()).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    // Capture failure must not replace the already observed child exit code.
+    read().unwrap_or_else(|error| format!("failed to read captured output: {error}\n").into_bytes())
 }
 
 /// Build the request that describes one delegated command to the daemon.
@@ -2854,10 +4074,10 @@ fn delegated_spawn_request(
     stdout_path: std::path::PathBuf,
     stderr_path: std::path::PathBuf,
 ) -> gwt_core::daemon::VerificationSpawnRequest {
-    let mut child_args = args[1..].to_vec();
+    let command_args = verification_command_arguments(args, capture);
+    let child_args = command_args[1..].to_vec();
     let mut env = resolved_child_environment(isolated_baseline);
     if let Some(capture) = capture {
-        child_args.extend(capture.arguments());
         let (key, value) = capture.environment();
         env.retain(|(existing, _)| existing != &key);
         env.push((key, value));
@@ -2881,71 +4101,113 @@ fn delegated_spawn_request(
 
 /// Run one command through the daemon and read back what it produced.
 fn execute_command_on_daemon(
-    worktree: &Path,
     command: &str,
-    args: &[String],
-    assignments: &[(String, String)],
-    isolated_baseline: bool,
-    capture: Option<&headed_e2e::Capture>,
+    request: &gwt_core::daemon::VerificationSpawnRequest,
     endpoint: &gwt_core::daemon::DaemonEndpoint,
-) -> Result<(i32, String), String> {
-    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let stdout_path = temp.path().join("stdout");
-    let stderr_path = temp.path().join("stderr");
-    let request = delegated_spawn_request(
-        worktree,
-        args,
-        assignments,
-        isolated_baseline,
-        capture,
-        stdout_path.clone(),
-        stderr_path.clone(),
+    progress: Option<&CommandProgress>,
+    output_worktree: Option<&Path>,
+    check: Option<&CancellationCheck<'_>>,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
+    use crate::cli::daemon::verification_host::DelegatedRunError;
+
+    let delegated = crate::cli::daemon::verification_host::run_cancellable(
+        endpoint,
+        request,
+        |pid| progress.map(|progress| progress.start(pid)),
+        command_timeout(command, progress),
+        check,
     );
-    let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
-        Ok(delegated) => delegated,
-        // A daemon that cannot take the command is a spawn failure like any
-        // other: the record must be written with the partial transcript, not
-        // abandoned. It is emphatically *not* a reason to retry in-process —
-        // that is the implicit fallback AC-5 forbids.
-        Err(error) => return Ok(spawn_failure_result(command, &error)),
+    let (exit_code, signal, mut tail, mut output_streams) = match delegated {
+        Err(DelegatedRunError::Cancelled) => {
+            return Err("verification attempt canceled".to_string())
+        }
+        Ok(delegated) => {
+            let mut tail = String::new();
+            if let Some(reason) = &delegated.accepted.nice_reason {
+                tail.push_str(&format!("--- priority ---\n{reason}\n"));
+            }
+            if delegated.reclaimed_survivors {
+                tail.push_str(
+                    "--- reclaimed ---\nthe command left descendants running after it exited; the \
+                     daemon killed its process group (Issue #3845)\n",
+                );
+            }
+            (delegated.exit_code, delegated.signal, tail, Vec::new())
+        }
+        Err(DelegatedRunError::TimedOut(timeout)) => {
+            let (exit_code, signal, tail) = command_timeout_result(command, timeout);
+            (exit_code, signal, tail, Vec::new())
+        }
+        // Keep partial output on errors too; never retry in the caller's tree.
+        Err(DelegatedRunError::InteractiveAuthentication(diagnostic)) => {
+            let (exit_code, signal, tail) = interactive_authentication_result(&diagnostic);
+            (exit_code, signal, tail, Vec::new())
+        }
+        Err(DelegatedRunError::Failed(error)) => {
+            spawn_failure_result(output_worktree, command, &error)?
+        }
     };
-    let mut tail = String::new();
-    // AC-6: what the child actually got, recorded even when it is not
-    // baseline. An environment that refuses nice 0 is not the caller's to fix,
-    // so the run continues and says so.
-    if let Some(reason) = &delegated.accepted.nice_reason {
-        tail.push_str(&format!("--- priority ---\n{reason}\n"));
-    }
-    if delegated.reclaimed_survivors {
-        tail.push_str(
-            "--- reclaimed ---\nthe command left descendants running after it exited; the \
-             daemon killed its process group (Issue #3845)\n",
-        );
-    }
-    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
-    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
-    tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
-    Ok((delegated.exit_code, tail))
+    let snapshot = |path| {
+        fs::File::open(path)
+            .map(|file| captured_output_snapshot(&file))
+            .unwrap_or_default()
+    };
+    let stdout = snapshot(&request.stdout_path);
+    let stderr = snapshot(&request.stderr_path);
+    let (streams_tail, captured_streams) =
+        render_streams(output_worktree, &[("stdout", &stdout), ("stderr", &stderr)])?;
+    tail.push_str(&streams_tail);
+    output_streams.extend(captured_streams);
+    Ok((exit_code, signal, tail, output_streams))
 }
 
-fn spawn_failure_result(command: &str, error: &str) -> (i32, String) {
+fn spawn_failure_result(
+    worktree: Option<&Path>,
+    command: &str,
+    error: &str,
+) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     let diagnostic = format!("failed to spawn '{command}': {error}");
-    let clipped = bounded_output_tail(diagnostic.as_bytes());
-    (-1, format!("--- spawn error ---\n{clipped}\n"))
+    let (tail, output_streams) =
+        render_streams(worktree, &[("spawn error", diagnostic.as_bytes())])?;
+    Ok((-1, None, tail, output_streams))
 }
 
-fn render_streams(streams: &[(&str, &[u8])]) -> String {
+fn render_streams(
+    worktree: Option<&Path>,
+    streams: &[(&str, &[u8])],
+) -> Result<(String, Vec<VerificationOutputStream>), String> {
     let mut tail = String::new();
+    let mut output_streams = Vec::new();
+    let directory = worktree.map(|worktree| {
+        super::trusted_store::trusted_dir_for_worktree(worktree)
+            .unwrap_or_else(|| state_path(worktree).parent().unwrap().to_path_buf())
+    });
+    let capture_id = uuid::Uuid::new_v4().simple().to_string();
     for (label, bytes) in streams {
         if bytes.is_empty() {
             continue;
+        }
+        let complete = sanitized_output(bytes);
+        if let Some(directory) = &directory {
+            let name = format!("verification-output-{capture_id}-{label}.log");
+            super::trusted_store::write_to_resolved_dir(directory, &name, complete.as_bytes())
+                .map_err(|error| format!("failed to persist verification {label}: {error}"))?;
+            let path =
+                dunce::canonicalize(directory.join(name)).map_err(|error| error.to_string())?;
+            output_streams.push(VerificationOutputStream {
+                stream: label.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                sha256: format!("{:x}", Sha256::digest(complete.as_bytes())),
+                bytes: complete.len(),
+                tail_start_byte: output_tail_start(&complete),
+            });
         }
         let clipped = bounded_output_tail(bytes);
         if !clipped.is_empty() {
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
-    tail
+    Ok((tail, output_streams))
 }
 
 fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
@@ -2983,6 +4245,8 @@ fn measure_baseline(
     merge_base_sha: &str,
     request: &VerificationQuarantineRequest,
     host: &VerificationHost,
+    progress: Option<&CommandProgress>,
+    check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3005,8 +4269,15 @@ fn measure_baseline(
             std::ffi::OsStr::new(merge_base_sha),
         ],
     )?;
-    let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true, None, host)?;
+    let (exit_code, _, output, _) = execute_command_cancellable(
+        &checkout,
+        &request.baseline_command,
+        true,
+        None,
+        host,
+        progress,
+        check,
+    )?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -3019,22 +4290,31 @@ fn measure_baseline(
     Ok((exit_code, result_line))
 }
 
-fn bounded_output_tail(bytes: &[u8]) -> String {
+fn sanitized_output(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let stripped = gwt_core::process_console::strip_ansi(&text);
     let control_safe: String = stripped
         .chars()
         .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
         .collect();
-    let redacted = gwt_core::process_console::redact_line(control_safe.trim_end());
-    if redacted.len() <= OUTPUT_TAIL_LIMIT {
-        return redacted;
-    }
+    gwt_core::process_console::redact_line(control_safe.trim_end())
+}
+
+fn output_tail_start(output: &str) -> usize {
     // Snap the cut to a char boundary — runner output is frequently
     // multibyte (Japanese cargo messages) and a raw byte slice would panic.
-    let mut start = redacted.len() - OUTPUT_TAIL_LIMIT;
-    while start < redacted.len() && !redacted.is_char_boundary(start) {
+    let mut start = output.len().saturating_sub(OUTPUT_TAIL_LIMIT);
+    while !output.is_char_boundary(start) {
         start += 1;
+    }
+    start
+}
+
+fn bounded_output_tail(bytes: &[u8]) -> String {
+    let redacted = sanitized_output(bytes);
+    let start = output_tail_start(&redacted);
+    if start == 0 {
+        return redacted;
     }
     format!("...[truncated]\n{}", &redacted[start..])
 }
@@ -3130,10 +4410,13 @@ pub fn run_verification(
         RunOptions::default(),
         || {},
     )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Default)]
 struct RunOptions<'a> {
+    attempt: Option<&'a cancellation::Attempt>,
+    driver: Option<driver::DriverProvenance>,
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
     /// Where this run launches its commands from (Issue #4409). It belongs
@@ -3141,8 +4424,20 @@ struct RunOptions<'a> {
     /// is resolved once for the whole run, and every caller that has an
     /// opinion about the other options has one about this too.
     host: VerificationHost,
+    command_progress: Option<&'a CommandProgress>,
     on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
+    /// Lease the run was admitted under, recorded as its provenance.
+    lease_id: Option<String>,
+    watch_runner: bool,
+    admit_command: Option<&'a mut AdmitCommand<'a>>,
 }
+
+type AdmitCommand<'a> = dyn FnMut(
+        &str,
+        &VerificationHost,
+    )
+        -> Result<Option<crate::cli::verification_lease::admission::Admission>, VerificationError>
+    + 'a;
 
 fn run_verification_for_caller(
     worktree: &Path,
@@ -3151,14 +4446,14 @@ fn run_verification_for_caller(
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
     options: RunOptions<'_>,
-) -> Result<(VerificationRunRecord, String), String> {
+) -> Result<(VerificationRunRecord, String), VerificationError> {
     // Issue #4544 AC-3: canonical verification is the evidence every later
     // gate settles on. A session that stopped at a provider permission prompt
     // did not run unattended, so a passing record from it would assert
     // something nobody observed. Refused before the commands run rather than
     // after, because the run itself costs the host lease.
     if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(worktree) {
-        return Err(format!("verification refused: {reason}"));
+        return Err(format!("verification refused: {reason}").into());
     }
     run_verification_inner(
         worktree,
@@ -3169,6 +4464,38 @@ fn run_verification_for_caller(
         options,
         || {},
     )
+}
+
+/// A registered plan must describe the caller's current source before host
+/// admission and again before dispatch. Unplanned runs remain permitted.
+fn validate_plan_run_context(
+    plan: Option<&VerificationPlanRecord>,
+    session_id: &str,
+    owner_number: Option<u64>,
+    execution_binding: Option<&ExecutionBindingIdentity>,
+    fingerprint: &str,
+) -> io::Result<()> {
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let mismatch = if plan.session_id != session_id {
+        "session"
+    } else if plan.owner_number != owner_number
+        || plan.execution_binding.as_ref() != execution_binding
+    {
+        "binding (owner or execution generation)"
+    } else if plan.worktree_fingerprint != fingerprint {
+        "fingerprint"
+    } else {
+        return Ok(());
+    };
+    Err(io::Error::new(
+        ErrorKind::InvalidInput,
+        format!(
+            "verify.run refused: registered verification plan {mismatch} mismatch; \
+             re-register the current matrix with `verify.plan`, then retry `verify.run`"
+        ),
+    ))
 }
 
 // The parameters are the run's inputs, each independently optional in a
@@ -3183,7 +4510,7 @@ fn run_verification_inner<F>(
     prepared_quarantines: &[PreparedQuarantineRequest],
     mut options: RunOptions<'_>,
     after_commands: F,
-) -> Result<(VerificationRunRecord, String), String>
+) -> Result<(VerificationRunRecord, String), VerificationError>
 where
     F: FnOnce(),
 {
@@ -3192,49 +4519,312 @@ where
         .iter()
         .any(|command| !commands.contains(command))
     {
-        return Err("headed_e2e_commands must name exact entries in commands".to_string());
+        return Err("headed_e2e_commands must name exact entries in commands"
+            .to_string()
+            .into());
+    }
+    // Keep the operational artifact restore as the final matrix occurrence.
+    let mut effective_commands = commands.to_vec();
+    let restoration = gwtd_artifact_restoration(worktree, commands);
+    if let Some(restoration) = restoration {
+        effective_commands.push(restoration.to_string());
+    }
+    let commands = effective_commands.as_slice();
+    let restoration_index = restoration.map(|_| commands.len() - 1);
+    let request = authority.map(|authority| {
+        continuation::Continuation::new(commands, options.headed_e2e_commands, authority)
+    });
+    // Preview only chooses which command needs admission. The trusted snapshot
+    // below rechecks all inputs after waiting; no reused result is trusted yet.
+    let preview = (|| -> io::Result<Option<VerificationRunRecord>> {
+        let Some(request) = &request else {
+            return Ok(None);
+        };
+        let plan = load_plan(worktree)?;
+        let fingerprint = worktree_fingerprint_excluding(
+            worktree,
+            plan.as_ref()
+                .map(|plan| plan.generated_outputs.as_slice())
+                .unwrap_or_default(),
+        )?;
+        Ok(load(worktree)?.filter(|record| {
+            continuation::eligible(
+                worktree,
+                record,
+                session_id,
+                authority.and_then(|a| a.owner_number),
+                authority.and_then(|a| a.execution_binding.as_ref()),
+                plan.as_ref(),
+                &fingerprint,
+                request,
+            )
+        }))
+    })()
+    .unwrap_or(None);
+    let preview_first = preview
+        .as_ref()
+        .and_then(|record| record.continuation.as_ref())
+        .and_then(|context| context.remaining(true).first().copied())
+        .unwrap_or(0);
+    let mut started_at = Utc::now();
+    // Admit before the strict snapshot check so a live same-worktree runner
+    // follows the normal wait/deferred path. Never wait under the write lease.
+    // A first-command timeout still writes no record.
+    let mut first_admission = match (commands.get(preview_first), options.admit_command.as_mut()) {
+        (Some(command), Some(admit)) => admit(command, &options.host)?,
+        _ => None,
+    };
+    if let Some(admission) = &first_admission {
+        options.lease_id = admission.lease_id().map(str::to_owned);
     }
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
-    let (owner_number, execution_binding, plan_snapshot, fingerprint_before) =
-        crate::cli::trusted_store::with_write_lease(worktree, || {
-            let (owner_number, execution_binding) = if let Some(authority) = authority {
-                (authority.owner_number, authority.execution_binding.clone())
-            } else {
-                current_execution_context(worktree)?
-            };
-            let plan = load_plan(worktree)?;
-            let generated_outputs = plan
-                .as_ref()
-                .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
-                .transpose()?
-                .unwrap_or_default();
-            let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
-            if let Some(authority) = authority {
-                revalidate_verification_caller_authority(worktree, session_id, authority)?;
-            }
-            Ok((owner_number, execution_binding, plan, fingerprint))
-        })
-        .map_err(|err| {
-            if err.kind() == ErrorKind::PermissionDenied {
-                err.to_string()
-            } else {
-                format!("failed to snapshot verification state: {err}")
-            }
-        })?;
+    let (
+        owner_number,
+        execution_binding,
+        plan_snapshot,
+        fingerprint_before,
+        verified_head,
+        predecessor,
+    ) = crate::cli::trusted_store::with_write_lease(worktree, || {
+        let (owner_number, execution_binding) = if let Some(authority) = authority {
+            (authority.owner_number, authority.execution_binding.clone())
+        } else {
+            current_execution_context(worktree)?
+        };
+        let plan = load_plan(worktree)?;
+        let generated_outputs = plan
+            .as_ref()
+            .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+            .transpose()?
+            .unwrap_or_default();
+        let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
+        if let Some(authority) = authority {
+            revalidate_verification_caller_authority(worktree, session_id, authority)?;
+            validate_plan_run_context(
+                plan.as_ref(),
+                session_id,
+                owner_number,
+                execution_binding.as_ref(),
+                &fingerprint,
+            )?;
+        }
+        let verified_head = current_head_sha(worktree).ok();
+        if let Some(driver) = &options.driver {
+            driver::validate_for_head(worktree, verified_head.as_deref(), &driver.source_head)?;
+        }
+        interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
+        let predecessor = match (&preview, &request) {
+            (Some(preview), Some(request)) => load(worktree)?.filter(|record| {
+                record.record_id == preview.record_id
+                    && record.content_hash == preview.content_hash
+                    && continuation::eligible(
+                        worktree,
+                        record,
+                        session_id,
+                        owner_number,
+                        execution_binding.as_ref(),
+                        plan.as_ref(),
+                        &fingerprint,
+                        request,
+                    )
+            }),
+            _ => None,
+        };
+        Ok((
+            owner_number,
+            execution_binding,
+            plan,
+            fingerprint,
+            verified_head,
+            predecessor,
+        ))
+    })
+    .map_err(|err| {
+        if err.kind() == ErrorKind::PermissionDenied {
+            err.to_string()
+        } else {
+            format!("failed to snapshot verification state: {err}")
+        }
+    })?;
     if commands.is_empty()
         && !plan_snapshot
             .as_ref()
             .is_some_and(is_canonical_trivial_plan)
     {
         return Err(
-            "verify.run with no commands requires a canonical trivial derived plan".to_string(),
+            "verify.run with no commands requires a canonical trivial derived plan"
+                .to_string()
+                .into(),
         );
     }
-    let started_at = Utc::now();
-    let mut results: Vec<VerificationCommandResult> = Vec::new();
+    let mut continuation = request;
+    let mut results = Vec::new();
     let mut transcript = String::new();
+    if let Some(previous) = &predecessor {
+        let context = continuation.as_mut().expect("resumption has exact inputs");
+        context.command_indices = previous
+            .continuation
+            .as_ref()
+            .expect("resumable context")
+            .command_indices
+            .clone();
+        context.previous = Some(continuation::PreviousRun {
+            record_id: previous.record_id.clone(),
+            content_hash: previous.content_hash.clone(),
+            reused_commands: previous.commands.len(),
+        });
+        results = previous.commands.clone();
+        started_at = previous.started_at.expect("resumable measurement start");
+        transcript.push_str(&format!(
+            "verify: continuation — {} passed command(s) retained from {} ({})\n",
+            results.len(),
+            previous.record_id,
+            previous.content_hash
+        ));
+        options.lease_id = previous.lease_id.clone();
+    }
+    let execution_indices = continuation
+        .as_ref()
+        .map(|context| context.remaining(predecessor.is_some()))
+        .unwrap_or_else(|| (0..commands.len()).collect());
+    if execution_indices.first().copied().unwrap_or(0) != preview_first {
+        // Inputs changed while admission waited: discard all carried evidence
+        // and obtain the first fresh command's own admission.
+        drop(first_admission.take());
+        first_admission = match (execution_indices.first(), options.admit_command.as_mut()) {
+            (Some(index), Some(admit)) => admit(&commands[*index], &options.host)?,
+            _ => None,
+        };
+    }
+    let record_id = format!("vrr-{}", uuid::Uuid::new_v4().simple());
+    if let Some(attempt) = options.attempt {
+        attempt
+            .mark_running(&record_id)
+            .map_err(|error| error.to_string())?;
+    }
+    let watchdog_token = uuid::Uuid::new_v4().simple().to_string();
+    // The companion must be ready before commands start. It never inherits
+    // the runner's host/target locks (Command uses close-on-exec descriptors).
+    let _watchdog = options
+        .watch_runner
+        .then(|| {
+            let watchdog_executable = options
+                .driver
+                .as_ref()
+                .map(|driver| Ok(driver.fixed_path.clone()))
+                .unwrap_or_else(std::env::current_exe)?;
+            interruption::Watchdog::start(
+                worktree,
+                &record_id,
+                &watchdog_token,
+                &watchdog_executable,
+            )
+        })
+        .transpose()
+        .map_err(|error| format!("failed to start verification watchdog: {error}"))?;
+    let mut running = VerificationRunRecord::from(VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
+        continuation,
+        record_id: record_id.clone(),
+        lifecycle: Some(interruption::RunLifecycle::running(&watchdog_token)),
+        session_id: session_id.to_string(),
+        user_verification_result: options.user_verification_result.map(str::to_owned),
+        owner_number,
+        execution_binding: execution_binding.clone(),
+        lease_id: options.lease_id.clone(),
+        worktree_fingerprint: fingerprint_before.clone(),
+        verified_head: verified_head.clone(),
+        driver: options.driver.clone(),
+        commands: results.clone(),
+        all_passed: false,
+        quarantined_failures: Vec::new(),
+        adjudications: Vec::new(),
+        started_at: Some(started_at),
+        created_at: started_at,
+        plan_covered: false,
+        planned_missing: commands.to_vec(),
+        skipped_after_failure: Vec::new(),
+        verification_plan_snapshot: plan_snapshot.clone(),
+        verification_plan_hash: plan_snapshot
+            .as_ref()
+            .map(|plan| plan.content_hash.clone())
+            .unwrap_or_default(),
+        plan_derived: plan_snapshot.as_ref().is_some_and(|plan| plan.derived),
+        content_hash: String::new(),
+    });
+    if let Some(previous) = &predecessor {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["commands"] =
+            serde_json::to_value(previous).map_err(|error| error.to_string())?["commands"].clone();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
+    }
+    if let Some(context) = &running.continuation {
+        running.planned_missing = context.missing();
+    }
+    if let Some(attempt) = options.attempt {
+        let mut document = serde_json::to_value(&running).map_err(|error| error.to_string())?;
+        document["verification_attempt_id"] = attempt.id().into();
+        running = serde_json::from_value(document).map_err(|error| error.to_string())?;
+    }
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        if let Some(authority) = authority {
+            revalidate_verification_caller_authority(worktree, session_id, authority)?;
+            let current_plan = load_plan(worktree)?;
+            let fingerprint = worktree_fingerprint_excluding(
+                worktree,
+                plan_snapshot
+                    .as_ref()
+                    .map(|plan| plan.generated_outputs.as_slice())
+                    .unwrap_or_default(),
+            )?;
+            validate_plan_run_context(
+                current_plan.as_ref(),
+                session_id,
+                owner_number,
+                execution_binding.as_ref(),
+                &fingerprint,
+            )?;
+            if predecessor.is_some() && current_plan != plan_snapshot {
+                return Err(io::Error::new(ErrorKind::InvalidInput,
+                    "continuation plan changed during admission; retry verify.run for a fresh matrix"));
+            }
+            if fingerprint != fingerprint_before {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "verification inputs changed during admission; rerun verify.run",
+                ));
+            }
+        }
+        if let Some(previous) = &predecessor {
+            let current = load(worktree)?
+                .ok_or_else(|| io::Error::other("continuation predecessor disappeared"))?;
+            if current.record_id != previous.record_id
+                || current.content_hash != previous.content_hash
+            {
+                return Err(io::Error::other(
+                    "continuation predecessor changed during admission; rerun verify.run",
+                ));
+            }
+            continuation::archive(worktree, previous)?;
+        }
+        // Recheck while replacing the prior record: a concurrent watchdog may
+        // have settled it since the initial snapshot.
+        running
+            .lifecycle
+            .as_mut()
+            .expect("unfinished run")
+            .external_terminations =
+            interruption::previous_external_terminations(worktree, verified_head.as_deref())?;
+        if let Some(attempt) = options.attempt {
+            attempt.retain_termination_budget_under_lease(
+                running.lifecycle.as_ref().and_then(|life| life.external_terminations),
+            )?;
+        }
+        save(worktree, &running)
+    })
+    .map_err(|error| format!("failed to save verification start: {error}"))?;
     if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
         transcript.push_str(
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
@@ -3244,21 +4834,88 @@ where
     // the same result path so an unusable artifact can never report PASS
     // (Issue #4317). Appending it to the run's own command list keeps it on
     // the progress count and in the persisted results.
-    let restored;
-    let commands = match gwtd_artifact_restoration(worktree, commands) {
-        Some(restoration) => {
-            let mut extended = commands.to_vec();
-            extended.push(restoration.to_string());
-            restored = extended;
-            restored.as_slice()
-        }
-        None => commands,
-    };
     let commands_started = std::time::Instant::now();
     if let Some(on_progress) = options.on_progress.as_mut() {
-        on_progress(0, commands.len(), std::time::Duration::ZERO);
+        on_progress(results.len(), commands.len(), std::time::Duration::ZERO);
     }
-    for command in commands {
+    // Issue #5094: once a blocking raw FAIL settles the run as non-PASS,
+    // later commands neither wait for admission nor occupy a host slot.
+    let mut failed_raw: Option<String> = None;
+    let mut skipped_after_failure = Vec::new();
+    for (position, index) in execution_indices.iter().copied().enumerate() {
+        if let Some(attempt) = options.attempt {
+            attempt.ensure_active().map_err(|error| error.to_string())?;
+        }
+        let command = &commands[index];
+        if failed_raw.is_some() && Some(index) != restoration_index {
+            skipped_after_failure.push(command.clone());
+            continue;
+        }
+        let admission = if position == 0 {
+            first_admission.take()
+        } else if let Some(admit) = options.admit_command.as_mut() {
+            match admit(command, &options.host) {
+                Ok(admission) => admission,
+                Err(mut error) => {
+                    if let VerificationError::Deferred(deferral) = &mut error {
+                        running.planned_missing = running
+                            .continuation
+                            .as_ref()
+                            .map(continuation::Continuation::missing)
+                            .unwrap_or_else(|| commands[index..].to_vec());
+                        let lifecycle = running.lifecycle.as_mut().expect("unfinished run");
+                        lifecycle.status = interruption::RunStatus::Deferred;
+                        lifecycle.reason = Some(deferral.to_string());
+                        lifecycle.current_command = Some(command.clone());
+                        interruption::checkpoint(worktree, &running).map_err(|err| {
+                            format!("failed to save deferred verification: {err}")
+                        })?;
+                        let canonical_path =
+                            super::trusted_store::trusted_dir_for_worktree(worktree)
+                                .map(|directory| directory.join("verification-run.json"))
+                                .unwrap_or_else(|| state_path(worktree));
+                        let mut references = format!(
+                            "\nRetained canonical run {}: {} (mirror: {})\n",
+                            running.record_id,
+                            canonical_path.display(),
+                            state_path(worktree).display()
+                        );
+                        for result in &running.commands {
+                            for stream in &result.output_streams {
+                                references
+                                    .push_str(&format!("{}: {}\n", stream.stream, stream.path));
+                            }
+                        }
+                        deferral.output_suffix.push_str(&references);
+                        return Err(error);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let command_admission = admission.as_ref().map(|granted| {
+            transcript.push_str(&format!("{}\n", granted.summary()));
+            granted.publish_progress(0, 1, std::time::Duration::ZERO);
+            CommandAdmission {
+                lease_id: granted.lease_id().unwrap_or_default().to_string(),
+                queue_wait_ms: granted.queue_wait_ms(),
+            }
+        });
+        if options.lease_id.is_none() {
+            options.lease_id = command_admission
+                .as_ref()
+                .map(|value| value.lease_id.clone());
+        }
+        running.lease_id = options.lease_id.clone();
+        running
+            .lifecycle
+            .as_mut()
+            .expect("unfinished run")
+            .current_command = Some(command.clone());
+        interruption::checkpoint(worktree, &running)
+            .map_err(|error| format!("failed to save verification progress: {error}"))?;
         transcript.push_str(&format!("$ {command}\n"));
         let capture = options
             .headed_e2e_commands
@@ -3266,34 +4923,194 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let (exit_code, tail) = execute_command_with_isolation(
-            worktree,
+        let (_, args) = take_env_assignments(split_command_line(command)?)?;
+        let nextest_capture = (args.starts_with(&["cargo".into(), "nextest".into(), "run".into()])
+            && args
+                .windows(2)
+                .any(|args| args == ["--profile", "gwt-verify"]))
+        .then(|| nextest::Capture::new(worktree))
+        .transpose()?;
+        let execution_command = match &nextest_capture {
+            Some(capture) => format!("{command} --config-file \"{}\"", capture.arguments()[1]),
+            None => command.clone(),
+        };
+        let command_started = std::time::Instant::now();
+        let check_cancelled = || {
+            options
+                .attempt
+                .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                .unwrap_or(Ok(false))
+        };
+        // Only canonical headed commands imply performance verification;
+        // low-level reporter fixtures have no authoritative caller. Explicit
+        // performance assignments also work for non-browser commands.
+        let measurement_capture = measurement::Capture::prepare(
             command,
-            false,
-            capture.as_ref(),
-            &options.host,
-        )?;
+            capture.is_some() && authority.is_some(),
+            command_admission
+                .as_ref()
+                .map_or(0, |admission| admission.queue_wait_ms),
+        );
+        let measurement_ready = measurement_capture
+            .as_ref()
+            .is_none_or(|capture| capture.ready());
+        let executed = if measurement_ready {
+            execute_command_cancellable(
+                worktree,
+                &execution_command,
+                false,
+                capture.as_ref(),
+                &options.host,
+                admission
+                    .as_ref()
+                    .map(|granted| granted.command_progress())
+                    .or(options.command_progress),
+                options
+                    .attempt
+                    .map(|_| &check_cancelled as &CancellationCheck<'_>),
+            )
+        } else {
+            Ok((
+                125,
+                None,
+                measurement_capture
+                    .as_ref()
+                    .expect("incompatible environment")
+                    .diagnostic(),
+                Vec::new(),
+            ))
+        };
+        if let Some(granted) = &admission {
+            granted.publish_progress(1, 1, command_started.elapsed());
+        }
+        let (mut exit_code, terminated_by_signal, mut tail, mut output_streams) = executed?;
+        let measurement = measurement_capture
+            .map(|capture| capture.finish(measurement_ready.then_some(exit_code)));
+        // The observer's last native readback precedes release/restoration.
+        drop(admission);
+        if let Some(evidence) = &measurement {
+            let json = serde_json::to_vec_pretty(evidence).map_err(|error| error.to_string())?;
+            let (diagnostic, streams) = render_streams(Some(worktree), &[("measurement", &json)])?;
+            tail.push_str(&diagnostic);
+            output_streams.extend(streams);
+            if evidence.incompatible() {
+                tail.push_str(&format!(
+                    "\nENVIRONMENT_INCOMPATIBLE: {}\n",
+                    evidence
+                        .reason
+                        .as_deref()
+                        .unwrap_or("measurement environment is unreadable")
+                ));
+                exit_code = 125;
+            }
+        }
+        let nextest = nextest_capture
+            .as_ref()
+            .and_then(|capture| match capture.evidence() {
+                Ok(evidence) => {
+                    tail.push_str("\n--- nextest: 20 slowest tests (seconds) ---\n");
+                    for test in &evidence.slowest {
+                        tail.push_str(&format!(
+                            "{} {}::{}\n",
+                            test.duration_seconds, test.classname, test.name
+                        ));
+                    }
+                    Some(evidence)
+                }
+                Err(error) => {
+                    tail.push_str(&format!(
+                        "\nnextest JUnit evidence missing or invalid: {error}\n"
+                    ));
+                    if exit_code == 0 {
+                        exit_code = -1;
+                    }
+                    None
+                }
+            });
         let headed_e2e = capture.as_ref().map(|capture| {
             capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
                 chromium_dark_passed: 0,
                 chromium_light_passed: 0,
                 failed: 0,
-                status: "missing".to_string(),
+                status: if exit_code != 0 && capture.reporter_argument_was_split(&tail) {
+                    "wrapper_defect"
+                } else {
+                    "missing"
+                }
+                .to_string(),
+                artifacts: Vec::new(),
             })
         });
+        if headed_e2e
+            .as_ref()
+            .is_some_and(|evidence| evidence.status == "wrapper_defect")
+        {
+            tail.push_str("verification wrapper defect: the reporter drive path was split before Playwright started; repair argument forwarding and rerun canonical verification.\n");
+        }
         transcript.push_str(&tail);
-        transcript.push_str(&format!("exit: {exit_code}\n"));
+        match terminated_by_signal {
+            Some(signal) => transcript.push_str(&format!(
+                "exit: {exit_code} (terminated by external signal {signal})\n"
+            )),
+            None => transcript.push_str(&format!("exit: {exit_code}\n")),
+        }
+        let environment_incompatible = measurement
+            .as_ref()
+            .is_some_and(measurement::Evidence::incompatible);
         results.push(VerificationCommandResult {
+            admission: command_admission,
+            measurement,
             command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
+            output_streams,
             headed_e2e,
+            nextest,
+            terminated_by_signal,
         });
+        // A failure a plan-bound quarantine may still waive keeps the matrix
+        // going; its verdict is decided after every command has run.
+        let quarantine_candidate = !environment_incompatible
+            && terminated_by_signal.is_none()
+            && prepared_quarantines.iter().any(|prepared| {
+                prepared.request.failed_command == *command
+                    && plan_snapshot
+                        .as_ref()
+                        .is_some_and(|plan| plan.quarantines.contains(&prepared.request))
+            });
+        if exit_code != 0
+            && failed_raw.is_none()
+            && Some(index) != restoration_index
+            && !quarantine_candidate
+        {
+            failed_raw = Some(command.clone());
+        }
+        if let Some(context) = running.continuation.as_mut() {
+            context.command_indices.push(index);
+            running.planned_missing = context.missing();
+        }
+        running.commands = results.clone();
+        running
+            .lifecycle
+            .as_mut()
+            .expect("unfinished run")
+            .current_command = None;
+        interruption::checkpoint(worktree, &running)
+            .map_err(|error| format!("failed to save verification progress: {error}"))?;
         if let Some(on_progress) = options.on_progress.as_mut() {
             on_progress(results.len(), commands.len(), commands_started.elapsed());
         }
     }
     after_commands();
+    if let Some(failed) = &failed_raw {
+        if !skipped_after_failure.is_empty() {
+            transcript.push_str(&format!(
+                "verify: fail-fast — {} command(s) skipped after raw FAIL of `{failed}`: {}; fix the failure and rerun the full registered matrix with verify.run\n",
+                skipped_after_failure.len(),
+                skipped_after_failure.join(", ")
+            ));
+        }
+    }
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
     let visual_passed = headed_e2e_passed(&results);
     if has_headed_e2e {
@@ -3306,14 +5123,32 @@ where
             }
         ));
     }
-    let all_passed =
-        results.iter().all(|result| result.exit_code == 0) && (!has_headed_e2e || visual_passed);
+    let all_passed = results.len() == commands.len()
+        && results.iter().all(|result| result.exit_code == 0)
+        && (!has_headed_e2e || visual_passed);
     let mut quarantined_failures = Vec::new();
     if !all_passed {
         let head_sha = current_head_sha(worktree);
         let merge_base_sha = crate::cli::verify_derivation::integration_merge_base(worktree)
             .ok_or_else(|| "integration merge-base is unavailable".to_string());
         for result in results.iter().filter(|result| result.exit_code != 0) {
+            if result
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+            {
+                transcript.push_str("quarantine: measurement environment is incompatible; repair the environment and rerun instead\n");
+                continue;
+            }
+            // Issue #4528: a killed run's output is cut short, so it cannot
+            // be read as a verdict about one test.
+            if let Some(signal) = result.terminated_by_signal {
+                transcript.push_str(&format!(
+                    "quarantine: '{}' was terminated by external signal {signal}; rerun it instead\n",
+                    result.command
+                ));
+                continue;
+            }
             let Some(inventory) = parse_libtest_failure_inventory(&result.output_tail) else {
                 transcript.push_str(&format!(
                     "quarantine: '{}' has no single complete libtest failure inventory; failure remains blocking\n",
@@ -3343,7 +5178,13 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host)
+                let check = || {
+                    options
+                        .attempt
+                        .map(|attempt| attempt.cancelled().map_err(|error| error.to_string()))
+                        .unwrap_or(Ok(false))
+                };
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host, options.command_progress, options.attempt.map(|_| &check as &CancellationCheck<'_>))
                 {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
@@ -3391,13 +5232,21 @@ where
             }
             _ => (false, Vec::new(), String::new(), false),
         };
-    let mut record = VerificationRunRecord {
-        record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
+    let continuation = running.continuation.take();
+    let mut record = running;
+    record.data = VerificationRunData {
+        format_version: Some(VERIFICATION_FORMAT_VERSION),
+        continuation,
+        record_id,
+        lifecycle: None,
         session_id: session_id.to_string(),
         user_verification_result: options.user_verification_result.map(str::to_owned),
         owner_number,
         execution_binding: execution_binding.clone(),
+        lease_id: options.lease_id.take(),
         worktree_fingerprint: fingerprint_before.clone(),
+        verified_head,
+        driver: options.driver.take(),
         commands: results,
         all_passed,
         quarantined_failures,
@@ -3406,12 +5255,18 @@ where
         created_at: Utc::now(),
         plan_covered,
         planned_missing,
+        skipped_after_failure,
+        verification_plan_snapshot: plan_snapshot
+            .clone()
+            .filter(|_| !verification_plan_hash.is_empty()),
         verification_plan_hash,
         plan_derived,
         content_hash: String::new(),
     };
 
     crate::cli::trusted_store::with_write_lease(worktree, || {
+        interruption::ensure_current(worktree, &record.record_id)?;
+        if let Some(attempt) = options.attempt { attempt.ensure_active()?; }
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
         }
@@ -3444,14 +5299,12 @@ where
         }
         let same_plan = match (plan_snapshot.as_ref(), current_plan.as_ref()) {
             (Some(before), Some(after)) => {
-                !before.content_hash.is_empty()
-                    && before.content_hash == after.content_hash
-                    && plan_integrity_ok(after)
+                same_plan_meaning(before, after)
             }
             (None, None) => true,
             _ => false,
         };
-        if !same_plan {
+        if !same_plan || (predecessor.is_some() && current_plan != plan_snapshot) {
             transcript.push_str(
                 "warning: the verification plan changed while verification ran — the record is invalidated; rerun `verify.run` against the current plan\n",
             );
@@ -3462,7 +5315,9 @@ where
         }
         record.created_at = Utc::now();
         record.content_hash = compute_content_hash(&record);
-        save(worktree, &record)
+        save(worktree, &record)?;
+        if let Some(attempt) = options.attempt { attempt.complete_under_lease()?; }
+        Ok(())
     })
     .map_err(|err| {
         if err.kind() == ErrorKind::PermissionDenied {
@@ -3496,6 +5351,46 @@ fn is_canonical_trivial_plan(plan: &VerificationPlanRecord) -> bool {
         )
 }
 
+/// Explain committed source drift without weakening the fingerprint decision.
+/// Legacy records, dirty-only edits and unavailable Git history retain the
+/// generic stale diagnosis. Never use this diagnostic diff to accept evidence.
+fn stale_fingerprint_status(worktree: &Path, verified_head: Option<&str>) -> EvidenceStatus {
+    let Some(head) = verified_head else {
+        return EvidenceStatus::StaleFingerprint;
+    };
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            head,
+            "HEAD",
+            "--",
+            ".",
+            ":(exclude).gwt",
+        ])
+        .current_dir(worktree)
+        .output();
+    let Ok(output) = output else {
+        return EvidenceStatus::StaleFingerprint;
+    };
+    if !output.status.success() {
+        return EvidenceStatus::StaleFingerprint;
+    }
+    let paths: Vec<_> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    if paths.is_empty() {
+        EvidenceStatus::StaleFingerprint
+    } else {
+        EvidenceStatus::StaleFingerprintFiles(paths)
+    }
+}
+
 /// Evidence status consumed by completion and PR handoff gates (T-111/T-112).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceStatus {
@@ -3506,13 +5401,23 @@ pub enum EvidenceStatus {
     /// revalidate the current PR reference before mutating or settling.
     FreshWithQuarantine,
     MissingRecord,
+    Running,
+    Interrupted,
+    Deferred,
     WrongSession,
     WrongOwner,
     /// The record belongs to a legacy/predecessor execution generation.
     WrongGeneration,
     StaleFingerprint,
+    /// Committed source changes since the recorded verification HEAD.
+    StaleFingerprintFiles(Vec<String>),
     Failing,
     Unreadable,
+    /// Authenticity cannot be interpreted by this reader's wire version.
+    UnsupportedFormat {
+        kind: &'static str,
+        version: u64,
+    },
     /// P9a (T-122): the stored integrity hash does not match the content —
     /// the record was edited outside `verify.run`.
     Tampered,
@@ -3522,12 +5427,14 @@ pub enum EvidenceStatus {
     /// The currently registered plan is not the exact immutable plan
     /// snapshot consumed by the run.
     PlanChanged,
+    /// The current plan differs in these named semantic fields.
+    PlanChangedFields(Vec<&'static str>),
 }
 
 impl EvidenceStatus {
     /// Human guidance for the gate message.
     #[must_use]
-    pub fn describe(&self) -> &'static str {
+    pub fn describe(&self) -> String {
         match self {
             Self::Fresh => "verification evidence is fresh",
             Self::FreshWithQuarantine => {
@@ -3536,6 +5443,9 @@ impl EvidenceStatus {
             Self::MissingRecord => {
                 "no verification run record exists — run the verification matrix through JSON operation `verify.run` with `params.commands:[...]`"
             }
+            Self::Running => "verification is still running — wait for its terminal result",
+            Self::Deferred => "verification admission timed out after partial execution; retained results are incomplete, not PASS — retry verify.run with the identical full matrix to continue strictly matching evidence; changed inputs run fresh",
+            Self::Interrupted => "the last verification run was interrupted before completion; this is not a test failure. Inspect lifecycle.reason: two consecutive external terminations on the same HEAD require infrastructure diagnosis and a corrected HEAD before retrying; otherwise rerun verify.run",
             Self::WrongSession => {
                 "the verification record belongs to another session — rerun `verify.run` from this session"
             }
@@ -3546,7 +5456,13 @@ impl EvidenceStatus {
                 "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
             }
             Self::StaleFingerprint => {
-                "the worktree changed after the last verification run (stale evidence): source/verification inputs or a commit other than canonical Work shard additions changed — rerun `verify.run`; pr.create shard-addition-only commits preserve evidence and do not require another run"
+                "the worktree changed after the last verification run (stale evidence): source/verification inputs or non-exempt history changed — rerun `verify.run`; pr.create/pr.edit/pr.ready shard-addition-only commits and base merges with identical trees or only canonical shard additions preserve evidence"
+            }
+            Self::StaleFingerprintFiles(paths) => {
+                return format!(
+                    "the worktree changed after the last verification run (stale evidence): committed files intersect verification inputs (all repository source): {} — rerun `verify.run`",
+                    paths.iter().map(|path| format!("{path:?}")).collect::<Vec<_>>().join(", ")
+                );
             }
             Self::Failing => {
                 "the last verification run has failing commands — fix the failures and rerun `verify.run`"
@@ -3554,6 +5470,10 @@ impl EvidenceStatus {
             Self::Unreadable => {
                 "the verification record is unreadable — rerun `verify.run` to rewrite it"
             }
+            Self::UnsupportedFormat { kind, version } => return UnsupportedFormat {
+                kind,
+                version: *version,
+            }.to_string(),
             Self::Tampered => {
                 "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
             }
@@ -3561,9 +5481,13 @@ impl EvidenceStatus {
                 "the last verification run does not cover a registered plan — declare the required matrix with `verify.plan` (params.commands), then run it in full through `verify.run`"
             }
             Self::PlanChanged => {
-                "the verification plan changed after the last run — rerun `verify.run` against the current plan"
+                "the verification plan changed after the last run (verification_plan_hash or plan snapshot unavailable) — rerun `verify.run` against the current plan"
             }
-        }
+            Self::PlanChangedFields(fields) => return format!(
+                "the verification plan changed after the last run: {} — register the intended plan and rerun `verify.run`",
+                fields.join(", ")
+            ),
+        }.to_string()
     }
 
     #[must_use]
@@ -3907,10 +5831,36 @@ fn evaluate_evidence_snapshot_inner(
     require_current_execution_binding: bool,
     allow_failing_commands: bool,
 ) -> EvidenceStatus {
+    if let Some(version) = record
+        .format_version
+        .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+    {
+        return EvidenceStatus::UnsupportedFormat {
+            kind: "run",
+            version: u64::from(version),
+        };
+    }
+    for plan in plan
+        .into_iter()
+        .chain(record.verification_plan_snapshot.as_ref())
+    {
+        if let Some(version) = plan
+            .format_version
+            .filter(|version| *version != VERIFICATION_FORMAT_VERSION)
+        {
+            return EvidenceStatus::UnsupportedFormat {
+                kind: "plan",
+                version: u64::from(version),
+            };
+        }
+    }
     if !record.quarantined_failures.is_empty() && record.content_hash.is_empty() {
         return EvidenceStatus::Tampered;
     }
     if !integrity_ok(record) {
+        return EvidenceStatus::Tampered;
+    }
+    if !continuation::chain_valid(worktree, record) {
         return EvidenceStatus::Tampered;
     }
     if record.session_id != session_id {
@@ -3932,12 +5882,59 @@ fn evaluate_evidence_snapshot_inner(
             return EvidenceStatus::WrongGeneration;
         }
     }
+    if let Some(lifecycle) = &record.lifecycle {
+        return match lifecycle.status {
+            interruption::RunStatus::Running => EvidenceStatus::Running,
+            interruption::RunStatus::Interrupted => EvidenceStatus::Interrupted,
+            interruption::RunStatus::Deferred => EvidenceStatus::Deferred,
+        };
+    }
+    match cancellation::finalized_status(worktree, record) {
+        Ok(None | Some(cancellation::AttemptStatus::Completed)) => {}
+        Ok(Some(cancellation::AttemptStatus::Interrupted)) => return EvidenceStatus::Interrupted,
+        Ok(Some(_)) => return EvidenceStatus::Running,
+        Err(error) => return evidence_read_error(&error),
+    }
+    if let Some(snapshot) = record.verification_plan_snapshot.as_ref() {
+        if record.content_hash.is_empty()
+            || snapshot.content_hash.is_empty()
+            || snapshot.content_hash != record.verification_plan_hash
+            || !plan_integrity_ok(snapshot)
+            || snapshot.session_id != record.session_id
+            || snapshot.owner_number != record.owner_number
+            || snapshot.execution_binding != record.execution_binding
+            || snapshot.derived != record.plan_derived
+        {
+            return EvidenceStatus::Tampered;
+        }
+    }
+    if !record.verification_plan_hash.is_empty() {
+        let Some(plan) = plan else {
+            return EvidenceStatus::PlanChangedFields(vec!["verification_plan (missing)"]);
+        };
+        if let Some(snapshot) = record.verification_plan_snapshot.as_ref() {
+            if plan.content_hash.is_empty() || !plan_integrity_ok(plan) {
+                return EvidenceStatus::PlanChangedFields(vec!["content_hash (integrity)"]);
+            }
+            let changed = changed_plan_fields(snapshot, plan);
+            if !changed.is_empty() {
+                return EvidenceStatus::PlanChangedFields(changed);
+            }
+        } else if plan.content_hash.is_empty()
+            || !plan_integrity_ok(plan)
+            || plan.session_id != session_id
+            || plan.owner_number != record.owner_number
+            || plan.execution_binding != record.execution_binding
+            || plan.worktree_fingerprint.is_empty()
+            || plan.worktree_fingerprint != record.worktree_fingerprint
+            || record.verification_plan_hash != plan.content_hash
+            || record.plan_derived != plan.derived
+        {
+            return EvidenceStatus::PlanChanged;
+        }
+    }
     let generated_outputs = plan
-        .filter(|plan| {
-            !record.verification_plan_hash.is_empty()
-                && plan.content_hash == record.verification_plan_hash
-                && plan_integrity_ok(plan)
-        })
+        .filter(|_| !record.verification_plan_hash.is_empty())
         .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
         .transpose();
     let Ok(generated_outputs) = generated_outputs else {
@@ -3947,7 +5944,19 @@ fn evaluate_evidence_snapshot_inner(
         worktree_fingerprint_excluding(worktree, generated_outputs.as_deref().unwrap_or_default())
             .unwrap_or_else(|_| "no-git".to_string());
     if record.worktree_fingerprint != current_fingerprint {
-        return EvidenceStatus::StaleFingerprint;
+        return stale_fingerprint_status(worktree, record.verified_head.as_deref());
+    }
+    // The consumed plan must cover the run's source, but source mutation
+    // during/after execution remains the primary stale-evidence diagnosis.
+    if record
+        .verification_plan_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| {
+            snapshot.worktree_fingerprint.is_empty()
+                || snapshot.worktree_fingerprint != record.worktree_fingerprint
+        })
+    {
+        return EvidenceStatus::PlanChangedFields(vec!["worktree_fingerprint"]);
     }
     // Missing or failing nominated browser evidence cannot be waived by
     // command quarantine or Board adjudication, even with a zero raw exit.
@@ -3956,6 +5965,18 @@ fn evaluate_evidence_snapshot_inner(
         .iter()
         .any(|command| command.headed_e2e.is_some())
         && !record.headed_e2e_passed()
+    {
+        return EvidenceStatus::Failing;
+    }
+    // Issue #5094: commands skipped after a raw FAIL never ran, so neither
+    // quarantine nor Board adjudication can turn the run into evidence.
+    if !record.skipped_after_failure.is_empty()
+        || record.commands.iter().any(|command| {
+            command
+                .measurement
+                .as_ref()
+                .is_some_and(measurement::Evidence::incompatible)
+        })
     {
         return EvidenceStatus::Failing;
     }
@@ -3971,23 +5992,6 @@ fn evaluate_evidence_snapshot_inner(
     } else {
         return EvidenceStatus::Failing;
     };
-    if !record.verification_plan_hash.is_empty() {
-        let Some(plan) = plan else {
-            return EvidenceStatus::PlanChanged;
-        };
-        if plan.content_hash.is_empty()
-            || !plan_integrity_ok(plan)
-            || plan.session_id != session_id
-            || plan.owner_number != record.owner_number
-            || plan.execution_binding != record.execution_binding
-            || plan.worktree_fingerprint.is_empty()
-            || plan.worktree_fingerprint != record.worktree_fingerprint
-            || record.verification_plan_hash != plan.content_hash
-            || record.plan_derived != plan.derived
-        {
-            return EvidenceStatus::PlanChanged;
-        }
-    }
     if !record.plan_covered {
         return EvidenceStatus::PlanNotCovered;
     }
@@ -4001,7 +6005,7 @@ fn evaluate_evidence_snapshot_inner(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct VerificationCallerAuthority {
     owner_number: Option<u64>,
     execution_binding: Option<ExecutionBindingIdentity>,
@@ -4046,6 +6050,17 @@ fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
 ) -> io::Result<VerificationCallerAuthority> {
+    snapshot_verification_caller_authority_with_session_loader(worktree, session_id, || {
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+        gwt_agent::Session::load(&session_path)
+    })
+}
+
+fn snapshot_verification_caller_authority_with_session_loader(
+    worktree: &Path,
+    session_id: &str,
+    load_session: impl FnOnce() -> io::Result<gwt_agent::Session>,
+) -> io::Result<VerificationCallerAuthority> {
     let Some(execution) =
         execution_state::load(worktree).map_err(|_| verification_caller_authority_error())?
     else {
@@ -4086,9 +6101,7 @@ fn snapshot_verification_caller_authority(
     }
     gwt_agent::validate_session_id_path_component(session_id)
         .map_err(|_| verification_caller_authority_error())?;
-    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    let session = gwt_agent::Session::load(&session_path)
-        .map_err(|_| verification_caller_authority_error())?;
+    let session = load_session().map_err(|_| verification_caller_authority_error())?;
     let session_binding = session
         .execution_binding
         .clone()
@@ -4289,6 +6302,31 @@ pub(crate) fn snapshot_current_generation_caller_binding(
     worktree: &Path,
     session_id: Option<&str>,
 ) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    snapshot_current_generation_caller_binding_with_session_loader(worktree, session_id, |id| {
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{id}.toml"));
+        gwt_agent::Session::load(&session_path)
+    })
+}
+
+/// Read-only projection diagnosis uses its already parsed Session snapshot.
+/// An absent snapshot remains absent; operation callers retain the disk loader.
+pub(crate) fn snapshot_current_generation_caller_binding_for_projection(
+    worktree: &Path,
+    session_id: Option<&str>,
+    session: Option<&gwt_agent::Session>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    snapshot_current_generation_caller_binding_with_session_loader(worktree, session_id, |_| {
+        session
+            .cloned()
+            .ok_or_else(verification_caller_authority_error)
+    })
+}
+
+fn snapshot_current_generation_caller_binding_with_session_loader(
+    worktree: &Path,
+    session_id: Option<&str>,
+    load_session: impl FnOnce(&str) -> io::Result<gwt_agent::Session>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
     let (_, current_binding) =
         current_execution_context(worktree).map_err(|_| verification_caller_authority_error())?;
     if current_binding.is_none() {
@@ -4298,7 +6336,10 @@ pub(crate) fn snapshot_current_generation_caller_binding(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(verification_caller_authority_error)?;
-    let authority = snapshot_verification_caller_authority(worktree, session_id)?;
+    let authority =
+        snapshot_verification_caller_authority_with_session_loader(worktree, session_id, || {
+            load_session(session_id)
+        })?;
     if authority.execution_binding != current_binding {
         return Err(verification_caller_authority_error());
     }
@@ -4333,11 +6374,11 @@ pub fn evaluate_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return EvidenceStatus::MissingRecord,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     let plan = match load_plan(worktree) {
         Ok(plan) => plan,
-        Err(_) => return EvidenceStatus::Unreadable,
+        Err(error) => return evidence_read_error(&error),
     };
     evaluate_evidence_snapshot(
         worktree,
@@ -4360,9 +6401,9 @@ pub(crate) fn evaluate_pr_ready_evidence(
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => return Err(EvidenceStatus::MissingRecord),
-        Err(_) => return Err(EvidenceStatus::Unreadable),
+        Err(error) => return Err(evidence_read_error(&error)),
     };
-    let plan = load_plan(worktree).map_err(|_| EvidenceStatus::Unreadable)?;
+    let plan = load_plan(worktree).map_err(|error| evidence_read_error(&error))?;
     let status = evaluate_evidence_snapshot_inner(
         worktree,
         session_id,
@@ -4420,6 +6461,13 @@ pub(crate) fn evaluate_pr_ready_evidence(
 /// Commands of the `verify.*` JSON operation family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyCommand {
+    Cancel {
+        attempt_id: String,
+        reason: String,
+    },
+    Status {
+        attempt_id: Option<String>,
+    },
     Run {
         commands: Vec<String>,
         /// Issue #3913: bound on the host admission wait (seconds).
@@ -4438,7 +6486,18 @@ pub enum VerifyCommand {
     /// T-130-lite: register the required verification matrix before running.
     /// Full T-130 core: `derive` classifies changed surfaces and derives the
     /// matrix when no explicit commands are given.
-    Plan { commands: Vec<String>, derive: bool },
+    Plan {
+        commands: Vec<String>,
+        derive: bool,
+    },
+    /// Explicit CI-backed pre-PR policy; existing full/explicit plans keep
+    /// their semantics and the trusted persisted record shape is unchanged.
+    PrePrPlan {
+        commands: Vec<String>,
+        acceptance_commands: Vec<String>,
+        generated_outputs: Vec<String>,
+        quarantines: Vec<VerificationQuarantineRequest>,
+    },
     /// Explicit plan with an exact generated-file allowlist.
     PlanWithOutputs {
         commands: Vec<String>,
@@ -4482,10 +6541,56 @@ pub(super) fn autonomous_confirmation_refusal(
     ))
 }
 
+pub(super) struct RunResponse {
+    pub status: &'static str,
+    pub data: serde_json::Value,
+}
+
+impl RunResponse {
+    fn for_record(record: &VerificationRunRecord, accepted: bool) -> Self {
+        let infrastructure_failure = record.commands.iter().find(|result| {
+            result.exit_code == -1
+                && result.terminated_by_signal.is_none()
+                && (result
+                    .output_streams
+                    .iter()
+                    .any(|stream| stream.stream == "spawn error")
+                    || (result.nextest.is_none()
+                        && result
+                            .output_tail
+                            .contains("nextest JUnit evidence missing or invalid:")))
+        });
+        let status = if accepted {
+            "passed"
+        } else if infrastructure_failure.is_some() {
+            "error"
+        } else {
+            "failed"
+        };
+        let mut data = serde_json::json!({"record_id": record.record_id});
+        if let Some(failure) = infrastructure_failure.filter(|_| !accepted) {
+            data["cause"] = failure.output_tail.clone().into();
+            data["recovery"] = serde_json::json!(
+                "Inspect verify.status and the reported execution/transport cause, repair it, then retry the identical full verify.run matrix."
+            );
+        }
+        Self { status, data }
+    }
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     command: VerifyCommand,
     out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    run_with_response(env, command, out, &mut None)
+}
+
+pub(super) fn run_with_response<E: CliEnv>(
+    env: &mut E,
+    command: VerifyCommand,
+    out: &mut String,
+    response: &mut Option<RunResponse>,
 ) -> Result<i32, SpecOpsError> {
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -4497,9 +6602,23 @@ pub(super) fn run<E: CliEnv>(
             ))
         })?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let VerifyCommand::Status { attempt_id } = &command {
+        let coordinator = crate::cli::verification_lease::open_coordinator()?;
+        let value =
+            cancellation::status(&worktree, &session_id, attempt_id.as_deref(), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+        out.push_str(&format!("{value}\n"));
+        return Ok(0);
+    }
     let authority =
         snapshot_verification_caller_authority(&worktree, &session_id).map_err(|err| {
-            SpecOpsError::from(ApiError::Unexpected(verification_entry_refusal(&err)))
+            SpecOpsError::from(ApiError::Unexpected(
+                if matches!(&command, VerifyCommand::Cancel { .. }) {
+                    format!("not your verification attempt: {err}")
+                } else {
+                    verification_entry_refusal(&err)
+                },
+            ))
         })?;
     let command = match command {
         VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
@@ -4511,6 +6630,56 @@ pub(super) fn run<E: CliEnv>(
         other => other,
     };
     match command {
+        VerifyCommand::Status { .. } => unreachable!("read-only status handled above"),
+        VerifyCommand::Cancel { attempt_id, reason } => {
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            cancellation::cancel_for_caller(
+                &worktree,
+                &session_id,
+                &attempt_id,
+                &reason,
+                &authority,
+                &coordinator,
+                &key,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let value =
+                cancellation::status(&worktree, &session_id, Some(&attempt_id), &coordinator)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            out.push_str(&format!("{value}\n"));
+            Ok(0)
+        }
+        VerifyCommand::PrePrPlan {
+            commands,
+            acceptance_commands,
+            generated_outputs,
+            quarantines,
+        } => {
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                &worktree,
+                &session_id,
+                generated_outputs,
+                quarantines,
+                &authority,
+                Some((&acceptance_commands, &commands)),
+            )
+            .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            out.push_str(&format!(
+                "verify: pre-pr derived matrix [{}]\n",
+                derived.surfaces.join(", ")
+            ));
+            for command in &derived.commands {
+                out.push_str(&format!("  - {command}\n"));
+            }
+            out.push_str(&format!(
+                "verify: plan registered — {} command(s) for session {} (owner {:?}, derived)\n",
+                plan.commands.len(),
+                session_id,
+                plan.owner_number
+            ));
+            Ok(0)
+        }
         VerifyCommand::PlanWithOutputs {
             commands,
             derive,
@@ -4530,6 +6699,7 @@ pub(super) fn run<E: CliEnv>(
                     generated_outputs,
                     quarantines,
                     &authority,
+                    None,
                 )
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
                 out.push_str(&format!(
@@ -4570,7 +6740,10 @@ pub(super) fn run<E: CliEnv>(
                 // plan leaves uncovered now, not after a heavy run. Derivation
                 // is best-effort here — an underivable change set is not a
                 // registration failure.
-                if let Ok(derived) = crate::cli::verify_derivation::derive(&worktree) {
+                if let Ok(derived) = crate::cli::verify_derivation::derive_excluding(
+                    &worktree,
+                    &plan.generated_outputs,
+                ) {
                     if let Some(note) = derived_coverage_note(&commands, &derived) {
                         out.push_str(&note);
                     }
@@ -4615,6 +6788,37 @@ pub(super) fn run<E: CliEnv>(
             user_verification_result,
             headed_e2e_commands,
         } => {
+            // Refuse exhausted retries before taking a host lease or starting
+            // a watchdog. The runner checks again under its write lease.
+            crate::cli::trusted_store::with_write_lease(&worktree, || {
+                revalidate_verification_caller_authority(&worktree, &session_id, &authority)?;
+                // #4953: invalid plans must not spend a host admission turn.
+                // The runner repeats this under its snapshot lease because
+                // admission may wait while the plan or source changes.
+                let plan = load_plan(&worktree)?;
+                if let Some(plan) = plan.as_ref() {
+                    let outputs = validate_generated_outputs(&worktree, &plan.generated_outputs)?;
+                    let fingerprint = worktree_fingerprint_excluding(&worktree, &outputs)?;
+                    validate_plan_run_context(
+                        Some(plan),
+                        &session_id,
+                        authority.owner_number,
+                        authority.execution_binding.as_ref(),
+                        &fingerprint,
+                    )?;
+                }
+                match interruption::previous_external_terminations(
+                    &worktree,
+                    current_head_sha(&worktree).ok().as_deref(),
+                ) {
+                    // A live predecessor must reach normal admission so heavy
+                    // runs retain their deferred/wait semantics. The runner
+                    // still refuses to overwrite it under the write lease.
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+                    result => result,
+                }
+            })
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             if let Some(refusal) = user_verification_result
                 .as_deref()
                 .and_then(|result| autonomous_confirmation_refusal(Some(&session_id), result))
@@ -4627,21 +6831,29 @@ pub(super) fn run<E: CliEnv>(
             // host-wide lease away from a claimant that could have used it.
             let (host, host_note) = crate::cli::daemon::verification_host::resolve(&worktree)
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?;
-            // SPEC #3576 / Issue #4196: only heavy canonical matrices claim
-            // an in-process lease. Classify the commands before admission;
-            // a budget overrun answers `deferred` without writing a record.
+            // Issue #4823: classify each command and hold admission only for
+            // its execution. The first-command timeout still writes no record;
+            // subsequent timeouts preserve the preceding command evidence.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
-            let admission = match crate::cli::verification_lease::first_heavy_command(&commands) {
+            let driver = driver::prepare(&worktree, &commands).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to fix verification driver: {error}"
+                )))
+            })?;
+            if let Some(driver) = &driver {
+                out.push_str(&format!(
+                    "verify: driver — {}; SHA256 {}; source HEAD {}\n",
+                    driver.fixed_path.display(),
+                    driver.sha256,
+                    driver.source_head
+                ));
+            }
+            match crate::cli::verification_lease::first_heavy_command(&commands) {
                 Some(heavy) => {
                     out.push_str(&format!(
-                        "verify: scope — heavy; `{heavy}` needs the host to itself\n"
+                        "verify: scope — heavy; admission is per command (first Heavy: `{heavy}`)\n"
                     ));
-                    let granted =
-                        crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
-                    out.push_str(&granted.summary());
-                    out.push('\n');
-                    Some(granted)
                 }
                 None => {
                     out.push_str(&format!(
@@ -4649,9 +6861,8 @@ pub(super) fn run<E: CliEnv>(
                          shares the host instead of claiming the lease\n",
                         count = commands.len()
                     ));
-                    None
                 }
-            };
+            }
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -4659,7 +6870,81 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            let key = crate::cli::verification_lease::verification_key(env)?;
+            let coordinator = crate::cli::verification_lease::open_coordinator()?;
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let attempt = cancellation::begin_for_caller(
+                &worktree,
+                &session_id,
+                &authority,
+                &key,
+                &commands,
+                &token,
+            )
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let mut attempt_watchdog = if cfg!(test) {
+                None
+            } else {
+                let executable = driver
+                    .as_ref()
+                    .map(|driver| Ok(driver.fixed_path.clone()))
+                    .unwrap_or_else(std::env::current_exe)
+                    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+                Some(
+                    interruption::Watchdog::start(&worktree, attempt.id(), &token, &executable)
+                        .map_err(|error| {
+                            SpecOpsError::from(ApiError::Unexpected(error.to_string()))
+                        })?,
+                )
+            };
+            out.push_str(&format!(
+                "verify: attempt — {} (inspect with verify.status; cancel with verify.cancel)\n",
+                attempt.id()
+            ));
+            let check_cancelled = || attempt.cancelled().map_err(Into::into);
+            let heavy_attempt = gwt_core::index_coordinator::HeavyAttempt {
+                id: attempt.id(),
+                check_cancelled: &check_cancelled,
+            };
             out.push_str(&host_note);
+            let mut admit_command = |command: &str, host: &VerificationHost| {
+                if crate::cli::verification_lease::classify_command(command)
+                    == crate::cli::verification_lease::CommandWeight::Light
+                {
+                    Ok(None)
+                } else {
+                    attempt
+                        .set_admission_waiting(true)
+                        .map_err(|error| error.to_string())?;
+                    let admission = crate::cli::verification_lease::admission::admit_for_attempt(
+                        env,
+                        &worktree,
+                        Some(command),
+                        max_wait,
+                        |artifacts| {
+                            let check = || attempt.cancelled().map_err(|error| error.to_string());
+                            restore_gwtd_after_deferral_cancellable(
+                                &worktree,
+                                host,
+                                artifacts,
+                                Some(&check),
+                            )
+                        },
+                        &heavy_attempt,
+                    )?;
+                    attempt
+                        .set_admission_waiting(false)
+                        .map_err(|error| error.to_string())?;
+                    if !cfg!(test) && admission.waited() >= std::time::Duration::from_secs(5) {
+                        if let Some(watchdog) = attempt_watchdog.as_mut() {
+                            if let Err(error) = watchdog.resume_when_idle() {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }
+                    }
+                    Ok(Some(admission))
+                }
+            };
             let run = run_verification_for_caller(
                 &worktree,
                 &session_id,
@@ -4667,6 +6952,11 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 RunOptions {
+                    attempt: Some(&attempt),
+                    driver,
+                    // Unit CLI fixtures are in-process, not a gwtd executable.
+                    // Real runner death is covered by verification_admission_cli_test.
+                    watch_runner: false,
                     user_verification_result: if crate::cli::execution_state::session_launch_route(
                         Some(&session_id),
                     ) == Some(gwt_agent::LaunchRoute::Autonomous)
@@ -4677,19 +6967,37 @@ pub(super) fn run<E: CliEnv>(
                     },
                     headed_e2e_commands: &headed_e2e_commands,
                     host,
-                    on_progress: Some(&mut |done, total, elapsed| {
-                        if let Some(admission) = admission.as_ref() {
-                            admission.publish_progress(done, total, elapsed);
-                        }
-                    }),
+                    admit_command: Some(&mut admit_command),
+                    ..RunOptions::default()
                 },
             );
-            // Release the in-process lease before the (lease-free) evidence
-            // evaluation so the next claimant starts as soon as the commands
-            // are done.
-            drop(admission);
-            let (record, transcript) =
-                run.map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            let run_error = run.as_ref().err().map(ToString::to_string);
+            attempt
+                .returned(run_error.as_deref(), &coordinator)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
+            let (record, transcript) = match run {
+                Ok(result) => result,
+                Err(VerificationError::Deferred(mut deferral)) => {
+                    attempt.ensure_active().map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(error.to_string()))
+                    })?;
+                    if let Some(watchdog) = attempt_watchdog.as_mut() {
+                        match watchdog.resume_after_deferral() {
+                            Ok(()) => deferral.resume_notification = Some("watchdog armed: capacity + own idle pane; one self-notification".to_string()),
+                            Err(error) => deferral.resume_notification = Some(format!("not armed: {error}; retry or declare issue.monitor.wait explicitly")),
+                        }
+                    }
+                    out.push_str(&format!("{deferral}\n"));
+                    *response = Some(RunResponse {
+                        status: "deferred",
+                        data: serde_json::to_value(deferral).expect("deferral must serialize"),
+                    });
+                    return Ok(0);
+                }
+                Err(VerificationError::Failed(error)) => {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(error)));
+                }
+            };
             // T-131 core: surface the coverage map of the plan this run
             // covered, so the rationale travels with the evidence output.
             if record.plan_covered {
@@ -4724,15 +7032,15 @@ pub(super) fn run<E: CliEnv>(
             }
             let command_outcome_accepted =
                 record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
+            *response = Some(RunResponse::for_record(&record, command_outcome_accepted));
+            out.push_str(&RunOutcomeCounts::of(&record.commands).summary());
             out.push_str(&format!(
                 "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
-                status = if record.all_passed {
-                    "PASS"
-                } else if evidence == EvidenceStatus::FreshWithQuarantine {
-                    "QUARANTINED"
-                } else {
-                    "FAIL"
-                },
+                status = run_status_label(
+                    record.all_passed,
+                    evidence == EvidenceStatus::FreshWithQuarantine,
+                    &record.commands,
+                ),
                 id = record.record_id,
                 count = record.commands.len(),
                 owner = record
@@ -4748,7 +7056,269 @@ pub(super) fn run<E: CliEnv>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn verify_transport_failure_returns_cause_and_recovery() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            gwt_core::daemon::RuntimeScope::from_project_root(
+                worktree.path(),
+                gwt_core::daemon::RuntimeTarget::Host,
+            )
+            .unwrap(),
+            std::process::id(),
+            if cfg!(windows) {
+                format!(r"\\.\pipe\gwt-5085-missing-{}", uuid::Uuid::new_v4())
+            } else {
+                worktree
+                    .path()
+                    .join("missing.sock")
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            "fixture-token".into(),
+            "fixture".into(),
+        );
+        let (record, _) = run_verification_inner(
+            worktree.path(),
+            "session-5085-transport",
+            &["git --version".into()],
+            None,
+            &[],
+            RunOptions {
+                host: VerificationHost::Daemon(Box::new(endpoint)),
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(record.commands[0].exit_code, -1);
+        let response = RunResponse::for_record(&record, false);
+        assert_eq!(response.status, "error");
+        assert!(response.data["cause"]
+            .as_str()
+            .unwrap()
+            .contains("failed to spawn"));
+        assert!(response.data["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("verify.run"));
+        assert!(!response
+            .data
+            .to_string()
+            .contains("unexpected server response"));
+    }
+
+    #[test]
+    fn nextest_evidence_collection_failure_is_an_execution_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut record, _) = run_verification(
+            directory.path(),
+            "session-5085-nextest",
+            &["git --version".into()],
+        )
+        .unwrap();
+        let diagnostic = "nextest JUnit evidence missing or invalid: report is absent";
+        record.commands[0].command = "cargo nextest run --profile gwt-verify".into();
+        record.commands[0].output_tail = diagnostic.into();
+        record.all_passed = false;
+        // Evidence collection replaces a successful exit with -1; it must
+        // not reclassify a raw nextest test failure that also lacks a report.
+        for (exit_code, expected_status) in [(-1, "error"), (100, "failed")] {
+            record.commands[0].exit_code = exit_code;
+            let response = RunResponse::for_record(&record, false);
+            assert_eq!(response.status, expected_status);
+            if expected_status == "error" {
+                assert_eq!(response.data["cause"], diagnostic);
+                assert!(response.data["recovery"]
+                    .as_str()
+                    .unwrap()
+                    .contains("verify.run"));
+            }
+        }
+    }
+
+    // A deadlock must fail this regression rather than hang the test runner.
+    // The deadline is only a watchdog; admission below uses Duration::ZERO.
+    fn bounded_artifact_lock_test(name: &str, exercise: impl FnOnce()) {
+        if std::env::var("GWT_ARTIFACT_LOCK_CHILD").as_deref() == Ok(name) {
+            exercise();
+            return;
+        }
+        let mut child = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("GWT_ARTIFACT_LOCK_CHILD", name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let timed_out = loop {
+            if child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                break true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !timed_out && output.status.success(),
+            "artifact lock regression: timed_out={timed_out}; {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_recovery_keeps_real_artifact_guard() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::timeout_recovery_keeps_real_artifact_guard",
+            || {
+                use crate::cli::verification_lease as lease;
+                use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+                use std::time::Duration;
+
+                let _env_lock = crate::env_test_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let original_home = dirs::home_dir().unwrap();
+                let _cargo_home = ScopedEnvVar::set(
+                    "CARGO_HOME",
+                    std::env::var_os("CARGO_HOME")
+                        .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+                );
+                let _rustup_home = ScopedEnvVar::set(
+                    "RUSTUP_HOME",
+                    std::env::var_os("RUSTUP_HOME")
+                        .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+                );
+                let _home_env = ScopedEnvVar::set("HOME", home.path());
+                fs::create_dir_all(home.path().join(".gwt")).unwrap();
+                fs::write(
+                    gwt_config::Settings::global_config_path_for_home(home.path()),
+                    "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+                )
+                .unwrap();
+                let worktree = tempfile::tempdir().unwrap();
+                let package = worktree.path().join("crates/gwt");
+                fs::create_dir_all(package.join("src/bin")).unwrap();
+                fs::write(
+                    worktree.path().join("Cargo.toml"),
+                    "[workspace]\nmembers=['crates/gwt']\nresolver='2'\n",
+                )
+                .unwrap();
+                fs::write(
+                    package.join("Cargo.toml"),
+                    "[package]\nname='gwt'\nversion='0.0.0'\nedition='2021'\n[features]\ntest-gh-guard=[]\n[[bin]]\nname='gwtd'\npath='src/bin/gwtd.rs'\n",
+                )
+                .unwrap();
+                fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
+                let coordinator = lease::open_coordinator().unwrap();
+                let JobAdmission::Owner(holder) = coordinator
+                    .request_job(
+                        &TargetKey::verification("other", "holder"),
+                        JobPriority::ManualRebuild,
+                        Duration::ZERO,
+                    )
+                    .unwrap()
+                else {
+                    panic!("private holder must be admitted");
+                };
+                let _heavy = holder
+                    .acquire_exclusive_heavy_with_disk_budget(
+                        Duration::ZERO,
+                        Duration::from_secs(60),
+                        &[],
+                    )
+                    .unwrap();
+                let target = worktree.path().join("target");
+                let independent = worktree.path().join("independent-target");
+                let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+                let recovery = |artifacts: Option<&lease::BuildArtifactGuard>| {
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    // Probe a fresh FD directly, so process-local bookkeeping
+                    // alone cannot satisfy the target/GC exclusion assertions.
+                    let lock_path = fs::read_dir(coordinator.root().join("build-artifacts"))
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path();
+                    let assert_kernel_held = || {
+                        let probe = fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&lock_path)
+                            .unwrap();
+                        let error = fs2::FileExt::try_lock_exclusive(&probe).unwrap_err();
+                        assert_eq!(
+                            error.raw_os_error(),
+                            fs2::lock_contended_error().raw_os_error()
+                        );
+                    };
+                    assert_kernel_held();
+                    let other = lease::lock_build_artifacts(&independent).unwrap();
+                    let restored = restore_gwtd_after_deferral(
+                        worktree.path(),
+                        &VerificationHost::Inherit,
+                        artifacts,
+                    );
+                    assert!(restored.contains("restoration: restored"), "{restored}");
+                    assert!(lease::try_lock_build_artifacts(&target).unwrap().is_none());
+                    assert_kernel_held();
+                    drop(other);
+                    restored
+                };
+                let error = lease::admission::admit(
+                    &mut env,
+                    worktree.path(),
+                    Some("cargo test --workspace --target-dir target"),
+                    Duration::ZERO,
+                    recovery,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("deferred"), "{error}");
+                assert!(target.join("debug/gwtd").is_file());
+                assert!(lease::try_lock_build_artifacts(&target).unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn duplicate_artifact_lock_reports_holder_instead_of_hanging() {
+        bounded_artifact_lock_test(
+            "cli::verification_record::tests::duplicate_artifact_lock_reports_holder_instead_of_hanging",
+            || {
+                use crate::cli::verification_lease as lease;
+                let home = tempfile::tempdir().unwrap();
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let target = home.path().join("target");
+                let held = lease::lock_build_artifacts(&target).unwrap();
+                let error = lease::lock_build_artifacts(&target).unwrap_err().to_string();
+                for expected in ["already", "verification_record.rs", "build-artifacts", "pid"] {
+                    assert!(error.contains(expected), "{error}");
+                }
+                #[cfg(unix)]
+                assert!(error.contains("fd"), "{error}");
+                #[cfg(windows)]
+                assert!(error.contains("handle"), "{error}");
+                drop(held);
+                assert!(lease::lock_build_artifacts(&target).is_ok());
+            },
+        );
+    }
 
     /// Register a plan for the commands, then run them (the standard
     /// T-130-lite flow used everywhere Fresh evidence is needed).
@@ -4763,7 +7333,8 @@ pub(crate) mod tests {
             .map(|record| record.owner_number);
         save_plan(
             worktree,
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: session.to_string(),
                 owner_number,
                 execution_binding: None,
@@ -4775,25 +7346,36 @@ pub(crate) mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         run_verification(worktree, session, commands).unwrap()
     }
 
-    fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
-        VerificationRunRecord {
+    pub(super) fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
+        VerificationRunRecord::from(VerificationRunData {
+            format_version: None,
+            continuation: None,
+            lifecycle: None,
             record_id: "vr-test".to_string(),
             user_verification_result: None,
             session_id: session.to_string(),
             owner_number: Some(3248),
             execution_binding: None,
+            lease_id: None,
             worktree_fingerprint: fingerprint.to_string(),
+            verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
+                admission: None,
+                measurement: None,
                 headed_e2e: None,
+                nextest: None,
+                terminated_by_signal: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
+                output_streams: Vec::new(),
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
@@ -4802,10 +7384,12 @@ pub(crate) mod tests {
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            skipped_after_failure: Vec::new(),
             verification_plan_hash: String::new(),
+            verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        }
+        })
     }
 
     /// An authority refusal must explain how ordinary development can proceed
@@ -4844,7 +7428,8 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-cov".to_string(),
                 owner_number: Some(3248),
                 execution_binding: None,
@@ -4856,7 +7441,7 @@ pub(crate) mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let loaded = load_plan(dir.path()).unwrap().unwrap();
@@ -4876,7 +7461,8 @@ pub(crate) mod tests {
 
     #[test]
     fn typed_quarantine_request_roundtrips_in_verification_plan() {
-        let mut value = serde_json::to_value(VerificationPlanRecord {
+        let mut value = serde_json::to_value(VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-plan-quarantine".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -4888,7 +7474,7 @@ pub(crate) mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        })
+        }))
         .unwrap();
         value["quarantines"] = serde_json::json!([{
             "failed_command": "cargo test -p gwt --all-features --lib",
@@ -4944,6 +7530,7 @@ pub(crate) mod tests {
             vec!["artifacts/report.json".to_string()],
             Vec::new(),
             &authority,
+            None,
         )
         .unwrap();
         assert!(!derived.surfaces.is_empty());
@@ -4956,6 +7543,142 @@ pub(crate) mod tests {
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
         assert!(plan_integrity_ok(&loaded));
+
+        // #5197: unknown sources register a conservative fallback; generated
+        // outputs remain excluded. Both reported extensions are in the change.
+        let unknown_paths = [
+            "scripts/pull-render-baseline.json",
+            "scripts/verify-fallback.spec.cjs",
+            "scripts/no-tests.mjs",
+        ];
+        for path in unknown_paths {
+            let source = dir.path().join(path);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(&source, "").unwrap();
+        }
+        let (derived, fallback) = derive_and_register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            vec!["artifacts/report.json".to_string()],
+            Vec::new(),
+            &authority,
+            None,
+        )
+        .expect("unknown source must register a workspace fallback");
+        for path in unknown_paths {
+            assert!(derived
+                .surfaces
+                .contains(&format!("fallback(workspace:{path})")));
+        }
+        assert!(!derived
+            .surfaces
+            .iter()
+            .any(|s| s.contains("artifacts/report.json")));
+        assert!(fallback.commands.iter().any(|c| c.contains("--workspace")));
+        assert!(plan_integrity_ok(&fallback));
+        assert_eq!(load_plan(dir.path()).unwrap().unwrap(), fallback);
+
+        let commands = vec!["git --version".to_string()];
+        register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            commands.clone(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let (record, _) = run_verification(dir.path(), "sess-cov", &commands).unwrap();
+        assert!(record.all_passed && record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-cov", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn pre_pr_context_read_allows_a_concurrent_trusted_writer() {
+        crate::cli::test_support::with_fake_gh("pre-pr-writer-probe", |worktree| {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .status()
+                .unwrap()
+                .success());
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(worktree)
+                .args(["checkout", "-q", "-b", "work/pre-pr-writer"])
+                .status()
+                .unwrap()
+                .success());
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            for path in [
+                "crates/gwt/Cargo.toml",
+                ".github/workflows/test.yml",
+                ".github/workflows/lint.yml",
+                ".github/workflows/coverage.yml",
+                ".github/workflows/coverage-ci.yml",
+            ] {
+                let destination = worktree.join(path);
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                fs::copy(root.join(path), destination).unwrap();
+            }
+            for args in [
+                vec!["add", "."],
+                vec!["commit", "-qm", "test: pre-pr baseline"],
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .current_dir(worktree)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            fs::write(worktree.join("crates/gwt/change.rs"), "// change\n").unwrap();
+            fs::create_dir_all(worktree.join("artifacts")).unwrap();
+            fs::write(worktree.join("artifacts/report.json"), "{}").unwrap();
+            // Initialize the same kernel lease that registration uses; fake gh
+            // attempts an independent writer while its API read is in progress.
+            crate::cli::trusted_store::with_write_lease(worktree, || Ok(())).unwrap();
+            let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+            fs::write(
+                std::env::var_os("GWT_FAKE_GH_STATE_FILE").unwrap(),
+                trusted.join(".write-lease").to_str().unwrap(),
+            )
+            .unwrap();
+            let authority =
+                snapshot_verification_caller_authority(worktree, "sess-pre-pr").unwrap();
+            let acceptance = vec!["git --version".to_string()];
+            let (derived, plan) = derive_and_register_plan_for_caller(
+                worktree,
+                "sess-pre-pr",
+                vec!["artifacts/report.json".to_string()],
+                Vec::new(),
+                &authority,
+                Some((&acceptance, &[])),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::cli::trusted_store::read(worktree, "pre-pr-writer-probe.json").unwrap(),
+                Some("written".into())
+            );
+            assert!(derived
+                .surfaces
+                .iter()
+                .any(|s| s.starts_with("ci-delegated(")));
+            assert!(plan.commands.contains(&acceptance[0]));
+            assert!(
+                !derived.surfaces.iter().any(|s| s.starts_with("fallback(")),
+                "{derived:?}"
+            );
+            assert!(plan_integrity_ok(&plan));
+            assert_eq!(load_plan(worktree).unwrap().unwrap(), plan);
+        });
     }
 
     // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
@@ -4981,7 +7704,8 @@ pub(crate) mod tests {
         gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
 
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -4993,7 +7717,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         save_plan(dir.path(), &plan).unwrap();
         // Forge a trivial (empty-matrix) plan in the mirror.
         let mut forged_plan = plan.clone();
@@ -5059,7 +7783,8 @@ pub(crate) mod tests {
         assert_eq!(load(dir.path()).unwrap(), None);
 
         // Same for a forged trivial plan.
-        let mut forged_plan = VerificationPlanRecord {
+        let mut forged_plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -5071,7 +7796,7 @@ pub(crate) mod tests {
             quarantines: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
-        };
+        });
         forged_plan.content_hash = compute_plan_hash(&forged_plan);
         let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
         gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
@@ -5167,6 +7892,110 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_script_preserves_headed_arguments_and_unicode() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("日本語 probe.ps1");
+        fs::write(&script, concat!(
+            "\u{feff}param([string]$Label, [string]$Data, [switch]$Enabled, [Parameter(ValueFromRemainingArguments=$true)][string[]]$Remaining)\n",
+            "@{label=$Label; data=$Data; enabled=$Enabled.IsPresent; args=$Remaining} | ConvertTo-Json -Compress | Set-Content -Encoding utf8 argv.json\n",
+            "'日本語' | node -e \"process.stdin.pipe(require('fs').createWriteStream('stdin.txt'))\"\n"
+        )).unwrap();
+        let capture = headed_e2e::Capture::new().unwrap();
+        for shell in ["pwsh", "powershell"] {
+            let reporter = r"--reporter=list,C:\日本語 path\reporter.cjs";
+            let command = format!(
+                "{shell} -NoProfile -File \"{}\" -Label \"日本語 label=1\" \"-Data:C:\\日本語 path\" -Enabled:$true \"{reporter}\"",
+                script.display()
+            );
+            let (code, _, output, _) = execute_command_with_isolation(
+                dir.path(),
+                &command,
+                false,
+                Some(&capture),
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{shell}: {output}");
+            let argv = fs::read_to_string(dir.path().join("argv.json")).unwrap();
+            let argv: serde_json::Value =
+                serde_json::from_str(argv.trim_start_matches('\u{feff}')).unwrap();
+            assert_eq!(argv["label"], "日本語 label=1", "{shell}");
+            assert_eq!(argv["data"], r"C:\日本語 path", "{shell}");
+            assert_eq!(argv["enabled"], true, "{shell}");
+            let expected: Vec<_> = std::iter::once(reporter.to_string())
+                .chain(capture.arguments())
+                .collect();
+            assert_eq!(argv["args"], serde_json::json!(expected), "{shell}");
+            assert_eq!(
+                fs::read_to_string(dir.path().join("stdin.txt"))
+                    .unwrap()
+                    .trim(),
+                "日本語",
+                "{shell}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_command_arguments_are_not_file_host_options() {
+        let args = [
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "Write-Output $args",
+            "-File",
+            "literal.ps1",
+        ]
+        .map(str::to_string);
+        assert_eq!(verification_command_arguments(&args, None), args);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn split_reporter_launch_is_recorded_as_wrapper_defect() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = std::env::temp_dir()
+            .display()
+            .to_string()
+            .chars()
+            .next()
+            .unwrap();
+        let script = dir.path().join("broken-wrapper.ps1");
+        fs::write(
+            &script,
+            format!("[Console]::Error.WriteLine(\"Cannot find module '{drive}'`n    at resolveReporter (playwright/lib/program.js:326:18)\"); exit 1"),
+        )
+        .unwrap();
+        let commands = vec![format!("pwsh -NoProfile -File \"{}\"", script.display())];
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "wrapper-probe",
+            &commands,
+            None,
+            &[],
+            RunOptions {
+                headed_e2e_commands: &commands,
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert!(!record.all_passed);
+        assert_eq!(
+            record.commands[0].headed_e2e.as_ref().unwrap().status,
+            "wrapper_defect",
+            "{transcript}"
+        );
+        assert!(
+            record.commands[0].output_tail.contains("wrapper defect"),
+            "{transcript}"
+        );
+    }
+
     #[test]
     fn legacy_command_result_without_output_tail_remains_compatible() {
         let legacy = r#"{"command":"git --version","exit_code":0}"#;
@@ -5194,9 +8023,11 @@ pub(crate) mod tests {
             all_passed: bool,
             created_at: DateTime<Utc>,
             plan_covered: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            verification_plan_snapshot: Option<VerificationPlanData>,
         }
 
-        let legacy = LegacyVerificationRunRecord {
+        let mut legacy = LegacyVerificationRunRecord {
             record_id: "vrr-legacy",
             session_id: "sess-legacy",
             owner_number: 3248,
@@ -5210,6 +8041,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             plan_covered: true,
+            verification_plan_snapshot: None,
         };
         let serialized = serde_json::to_vec(&legacy).unwrap();
         let hash = format!("{:x}", Sha256::digest(&serialized));
@@ -5220,6 +8052,145 @@ pub(crate) mod tests {
         assert!(integrity_ok(&loaded));
         assert_eq!(compute_content_hash(&loaded), hash);
         assert!(loaded.commands[0].output_tail.is_empty());
+
+        // A legacy embedded plan must keep struct order too, rather than
+        // acquiring the sorted object order of the versioned wire adapter.
+        legacy.verification_plan_snapshot = Some(VerificationPlanData {
+            format_version: None,
+            session_id: "sess-legacy".to_string(),
+            owner_number: Some(3248),
+            execution_binding: None,
+            commands: vec!["git --version".to_string()],
+            derived: false,
+            surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
+            quarantines: Vec::new(),
+            worktree_fingerprint: String::new(),
+            created_at: legacy.created_at,
+            content_hash: String::new(),
+        });
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+        let mut value = serde_json::to_value(legacy).unwrap();
+        value["content_hash"] = serde_json::json!(hash);
+        let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(integrity_ok(&loaded));
+        assert_eq!(compute_content_hash(&loaded), hash);
+    }
+
+    #[test]
+    fn verification_wire_roundtrip_preserves_unknown_fields_and_hash() {
+        let mut value = serde_json::to_value(passing_record("skew", "abc")).unwrap();
+        value["format_version"] = serde_json::json!(1);
+        value["future_record_field"] = serde_json::json!({"nested": [1, 2]});
+        value["commands"][0]["future_command_field"] = serde_json::json!("measured");
+        value["quarantined_failures"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test", "owner_issue": 5064,
+            "head_sha": "head", "merge_base_sha": "base", "baseline_command": "cargo test",
+            "baseline_exit_code": 1, "baseline_result_line": "FAILED", "pr_number": 1,
+            "future_failure": "opaque",
+            "pr_reference": {"kind": "body", "marker": "marker", "future_reference": true}
+        }]);
+        value.as_object_mut().unwrap().remove("content_hash");
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+        value["content_hash"] = serde_json::json!(hash);
+
+        let record: VerificationRunRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
+        assert!(integrity_ok(&record));
+        assert_eq!(compute_content_hash(&record), hash);
+
+        let mut edited = record;
+        edited.commands[0].exit_code = 1;
+        assert!(!integrity_ok(&edited), "known fields remain hash-covered");
+        value["future_record_field"]["nested"][0] = serde_json::json!(3);
+        let edited: VerificationRunRecord = serde_json::from_value(value).unwrap();
+        assert!(!integrity_ok(&edited), "unknown fields remain hash-covered");
+    }
+
+    #[test]
+    fn verification_wire_n_minus_one_reader_accepts_writer_continuation() {
+        // Freeze a v1 reader projection from before continuation was known.
+        #[derive(Serialize, Deserialize)]
+        struct PreviousReader {
+            format_version: u32,
+            record_id: String,
+            commands: Vec<VerificationCommandResult>,
+        }
+        let mut writer = passing_record("skew", "abc");
+        writer.format_version = Some(VERIFICATION_FORMAT_VERSION);
+        writer.continuation = Some(continuation::Continuation {
+            commands: vec!["git --version".to_string()],
+            headed_e2e_commands: Vec::new(),
+            authority_hash: "test-authority".to_string(),
+            command_indices: vec![0],
+            previous: None,
+        });
+        writer.content_hash = compute_content_hash(&writer);
+        let produced = serde_json::to_value(&writer).unwrap();
+        let reader: wire::WireRecord<PreviousReader> =
+            serde_json::from_value(produced.clone()).unwrap();
+        let mut roundtrip = serde_json::to_value(reader).unwrap();
+        assert_eq!(roundtrip, produced);
+        roundtrip.as_object_mut().unwrap().remove("content_hash");
+        assert_eq!(wire::canonical_hash(&roundtrip), writer.content_hash);
+    }
+
+    #[test]
+    fn verification_wire_plan_extensions_are_integrity_and_meaning_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        plan_and_run(dir.path(), "skew", &["git --version".to_string()]);
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let mut value = serde_json::to_value(plan).unwrap();
+        value["future_input"] = serde_json::json!({"checks": ["new"]});
+        value["quarantines"] = serde_json::json!([{
+            "failed_command": "cargo test", "test_identity": "test",
+            "baseline_command": "cargo test", "owner_issue": 5064, "pr_number": 1,
+            "future_request": "opaque"
+        }]);
+        assert!(
+            serde_json::from_value::<VerificationQuarantineRequest>(
+                value["quarantines"][0].clone()
+            )
+            .is_err(),
+            "user input remains strict"
+        );
+        value.as_object_mut().unwrap().remove("content_hash");
+        value["content_hash"] = serde_json::json!(wire::canonical_hash(&value));
+        let extended: VerificationPlanRecord = serde_json::from_value(value.clone()).unwrap();
+        assert!(plan_integrity_ok(&extended));
+        assert_eq!(serde_json::to_value(&extended).unwrap(), value);
+
+        value["future_input"]["checks"][0] = serde_json::json!("changed");
+        let edited: VerificationPlanRecord = serde_json::from_value(value).unwrap();
+        assert!(!plan_integrity_ok(&edited));
+        assert_eq!(
+            changed_plan_fields(&extended, &edited),
+            vec!["unknown_fields"]
+        );
+    }
+
+    #[test]
+    fn verification_wire_newer_format_reports_version_instead_of_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(passing_record("skew", "no-git")).unwrap();
+        value["format_version"] = serde_json::json!(999);
+        // A newer format may change even recognized nested fields. Diagnose
+        // the version before attempting to decode that payload.
+        value["commands"] = serde_json::json!("newer command representation");
+        fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();
+        fs::write(state_path(dir.path()), serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let status = evaluate_evidence(dir.path(), "skew", Some(3248));
+        let message = status.describe();
+        assert!(
+            message.contains("format version 999"),
+            "{status:?}: {message}"
+        );
+        assert!(message.contains("upgrade"), "{message}");
+        assert!(
+            !message.contains("tamper") && !message.contains("rerun"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -5232,6 +8203,619 @@ pub(crate) mod tests {
         assert!(record.commands[0].output_tail.is_empty());
         let serialized = serde_json::to_value(&record.commands[0]).unwrap();
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    #[test]
+    fn verification_timeout_fixture() {
+        let Ok(directory) = std::env::var("GWT_VERIFY_TIMEOUT_FIXTURE") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let mut grandchild = if std::env::var_os("GWT_VERIFY_TIMEOUT_GRANDCHILD").is_some() {
+            fs::write(
+                directory.join("grandchild.pid"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+            None
+        } else {
+            let grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::verification_record::tests::verification_timeout_fixture",
+                ])
+                .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+                .spawn()
+                .unwrap();
+            let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !directory.join("grandchild.pid").exists() {
+                assert!(
+                    std::time::Instant::now() < safety,
+                    "grandchild did not start"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            println!("partial-stdout");
+            eprintln!("partial-stderr");
+            fs::write(directory.join("ready"), "ready").unwrap();
+            Some(grandchild)
+        };
+        if grandchild.is_some() && std::env::var_os("GWT_VERIFY_TIMEOUT_LEADER_EXIT").is_some() {
+            // Leave the grandchild to the bounded runner's completion cleanup.
+            std::process::exit(0);
+        }
+        let safety = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !directory.join("release").exists() && std::time::Instant::now() < safety {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !directory.join("release").exists() {
+            fs::write(directory.join("fixture-deadline-elapsed"), "elapsed").unwrap();
+        }
+        if let Some(grandchild) = &mut grandchild {
+            grandchild.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn command_timeout_bounds_unknown_exclusive_work_and_preserves_short_gates() {
+        use std::time::Duration;
+
+        let shared = CommandProgress::default();
+        let exclusive = CommandProgress::with_exclusive_timeout();
+        assert_eq!(command_timeout("python runner.py", None), None);
+        assert_eq!(command_timeout("python runner.py", Some(&shared)), None);
+        assert_eq!(
+            command_timeout("python runner.py", Some(&exclusive)),
+            Some(Duration::from_secs(20 * 60))
+        );
+        for progress in [None, Some(&shared), Some(&exclusive)] {
+            assert_eq!(
+                command_timeout("git diff --check", progress),
+                Some(Duration::from_secs(60))
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_interactive_authentication_reclaims_only_its_command_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = InheritedVerificationChild::spawn(&mut process).unwrap();
+        let child_pid = child.spawned.child.id();
+        let mut detected_pid = None;
+        let (_, stopped) = child
+            .wait_cancellable_with_detector(None, &mut Instant::now, None, &mut |pid| {
+                if !root.join("ready").exists() {
+                    return None;
+                }
+                detected_pid = Some(pid);
+                Some("interactive authentication fixture".to_string())
+            })
+            .unwrap();
+        let unrelated_survived = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild_pid = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline OS process reclamation has no completion event available to this fixture.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline Observe actual process death; this does not decide the command timeout.
+        while crate::process::is_process_alive(grandchild_pid) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(detected_pid, Some(child_pid));
+        assert!(
+            matches!(stopped, Some(InheritedCommandStop::InteractiveAuthentication(message))
+            if message == "interactive authentication fixture")
+        );
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(
+            unrelated_survived,
+            "only the owned command tree may be reclaimed"
+        );
+    }
+
+    #[test]
+    fn inherited_short_command_timeout_keeps_output_and_reclaims_its_tree() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let fixture = "cli::verification_record::tests::verification_timeout_fixture";
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let unrelated_directory = tempfile::tempdir().unwrap();
+        let mut unrelated = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args(["--exact", fixture, "--nocapture"])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", unrelated_directory.path())
+            .env("GWT_VERIFY_TIMEOUT_GRANDCHILD", "1")
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                let safety = Instant::now() + Duration::from_secs(30);
+                while !root.join("ready").exists() {
+                    assert!(Instant::now() < safety, "the fixture did not start");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                started + Duration::from_secs(60)
+            },
+        )
+        .unwrap();
+        let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(30);
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(result.2.contains("timed out after 60s"), "{}", result.2);
+        assert!(result.2.contains("retry"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(unrelated_alive, "reclamation must stay in the owned tree");
+    }
+
+    #[test]
+    fn inherited_known_node_gate_timeout_reclaims_its_tree_after_five_minutes() {
+        use std::time::{Duration, Instant};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        let command = r#"node --test "scripts/coverage-summary.test.mjs""#;
+        let timeout = command_timeout(command, None).expect("known Node gate must be bounded");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            command,
+            Some(timeout),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                if clock_calls == 2 {
+                    // test-hygiene: allow-wall-clock-deadline Bounds OS child readiness; the execution deadline uses the injected clock.
+                    let safety = Instant::now() + Duration::from_secs(30);
+                    while !root.join("ready").exists() {
+                        // test-hygiene: allow-wall-clock-deadline This safety assertion guards OS startup, not the injected 299/301s budget.
+                        assert!(Instant::now() < safety, "the fixture did not start");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return started + Duration::from_secs(299);
+                }
+                let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap();
+                assert!(
+                    crate::process::is_process_alive(grandchild),
+                    "owned child tree did not survive the 299s deadline check"
+                );
+                started + Duration::from_secs(301)
+            },
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds real process reaping after timeout; the 300s budget uses the injected clock.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline This OS reap watchdog prevents a hung test; cleanup is asserted separately below.
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            clock_calls, 3,
+            "known Node gate must survive 299s and reach the 301s sample: {}",
+            result.2
+        );
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("timed out after 300s"), "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(
+            !root.join("fixture-deadline-elapsed").exists(),
+            "owned child tree escaped timeout reclamation"
+        );
+    }
+
+    #[test]
+    fn inherited_short_command_completion_reclaims_descendants() {
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root)
+            .env("GWT_VERIFY_TIMEOUT_LEADER_EXIT", "1");
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            "git diff --check",
+            Some(Duration::from_secs(60)),
+            None,
+            None,
+            Instant::now,
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let safety = Instant::now() + Duration::from_secs(45);
+        while crate::process::is_process_alive(grandchild)
+            && !root.join("fixture-deadline-elapsed").exists()
+            && Instant::now() < safety
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // A natural fixture exit is not proof that the runner reclaimed it.
+        let survived = crate::process::is_process_alive(grandchild)
+            || root.join("fixture-deadline-elapsed").exists();
+        fs::write(root.join("release"), "release").unwrap();
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(result.0, 0, "{}", result.2);
+        assert_eq!(result.1, None, "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!survived, "bounded completion left its descendant running");
+    }
+
+    #[test]
+    fn canonical_output_retains_inventory_before_long_stdout_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        for stream in ["stdout", "stderr"] {
+            fs::write(
+                dir.path().join(format!(".gwt/{stream}-fixture")),
+                format!(
+                    "failures:\n    {stream}_inventory_before_noise\n{}\nAuthorization: Bearer ghp_abcdef0123456789abcdef\n",
+                    "診断".repeat(10_000)
+                ),
+            )
+            .unwrap();
+        }
+        #[cfg(unix)]
+        let command = "sh -c 'cat .gwt/stdout-fixture; cat .gwt/stderr-fixture >&2; printf %s \"$TMPDIR\" > .gwt/child-temp; exit 1'";
+        #[cfg(windows)]
+        let command = r#"powershell -NoProfile -Command "[Console]::Out.Write([IO.File]::ReadAllText('.gwt/stdout-fixture')); [Console]::Error.Write([IO.File]::ReadAllText('.gwt/stderr-fixture')); [IO.File]::WriteAllText('.gwt/child-temp',$env:TEMP); exit 1""#;
+        let (record, _) =
+            run_verification(dir.path(), "sess-inventory", &[command.into()]).unwrap();
+        assert!(!record.all_passed);
+        let persisted = load(dir.path()).unwrap().unwrap();
+        let result = serde_json::to_value(&persisted.commands[0]).unwrap();
+        let streams = result["output_streams"]
+            .as_array()
+            .expect("canonical records must reference complete stdout/stderr");
+        assert_eq!(streams.len(), 2);
+        for stream in streams {
+            let text = fs::read_to_string(stream["path"].as_str().unwrap()).unwrap();
+            let name = stream["stream"].as_str().unwrap();
+            assert!(text.contains(&format!("{name}_inventory_before_noise")));
+            assert!(!text.contains("ghp_abcdef0123456789abcdef"));
+            assert_eq!(stream["bytes"].as_u64().unwrap(), text.len() as u64);
+            let start = stream["tail_start_byte"].as_u64().unwrap() as usize;
+            assert!(start > 0 && text.is_char_boundary(start));
+            assert!(text.len() - start <= OUTPUT_TAIL_LIMIT);
+            assert_eq!(
+                stream["sha256"],
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+        }
+        let child_temp = fs::read_to_string(dir.path().join(".gwt/child-temp")).unwrap();
+        assert!(!Path::new(&child_temp).exists());
+        assert!(!persisted.commands[0]
+            .output_tail
+            .contains("inventory_before_noise"));
+    }
+
+    #[test]
+    fn canonical_output_save_failure_retains_command_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        fs::write(dir.path().join(".gwt/skill-state"), "not a directory").unwrap();
+        #[cfg(unix)]
+        let command =
+            "sh -c 'printf inventory_before_save_failure; printf %s \"$TMPDIR\" > .gwt/child-temp'";
+        #[cfg(windows)]
+        let command = r#"powershell -NoProfile -Command "[Console]::Out.Write('inventory_before_save_failure'); [IO.File]::WriteAllText('.gwt/child-temp',$env:TEMP)""#;
+        let error = execute_command_with_isolation(
+            dir.path(),
+            command,
+            false,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap_err();
+        let captured = fs::read_to_string(dir.path().join(".gwt/child-temp")).unwrap();
+        assert!(
+            error.contains("failed to persist verification stdout"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&captured),
+            "capture recovery path must be reported: {error}"
+        );
+        assert!(fs::read_to_string(Path::new(&captured).join("stdout"))
+            .unwrap()
+            .contains("inventory_before_save_failure"));
+        fs::remove_dir_all(captured).unwrap();
+    }
+
+    #[test]
+    fn auxiliary_baseline_output_does_not_create_unreferenced_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, _, output, streams) = execute_command_with_isolation(
+            dir.path(),
+            "git --version",
+            true,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(streams.is_empty());
+        assert!(!dir.path().join(".gwt/skill-state").exists());
+    }
+
+    #[test]
+    fn command_children_have_distinct_temporary_directories() {
+        let worktree = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let command = r#"pwsh -NoProfile -Command 'Write-Output ($env:TEMP + "|" + $env:TMP + "|" + $env:TMPDIR)'"#;
+        #[cfg(unix)]
+        let command = r#"sh -c 'printf "%s|%s|%s" "$TEMP" "$TMP" "$TMPDIR"'"#;
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let (code, _, output, _) = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{output}");
+            let line = output.lines().find(|line| line.contains('|')).unwrap();
+            let directories: Vec<_> = line.trim().split('|').collect();
+            assert_eq!(directories.len(), 3, "{output}");
+            assert!(!directories[0].is_empty());
+            assert_eq!(directories[0], directories[1]);
+            assert_eq!(directories[0], directories[2]);
+            paths.push(directories[0].to_string());
+        }
+        assert_ne!(
+            paths[0], paths[1],
+            "canonical children must not share test temp names"
+        );
+        assert!(paths.iter().all(|path| !Path::new(path).exists()));
+    }
+
+    #[test]
+    fn non_admitted_cargo_reports_failed_target_resolution() {
+        let worktree = tempfile::tempdir().unwrap();
+        fs::write(worktree.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        for (command, isolated_baseline) in [
+            ("cargo test -p target-fixture --lib regression", false),
+            ("cargo build -p gwt --bin gwtd --target-dir target", true),
+        ] {
+            let error = execute_command_with_isolation(
+                worktree.path(),
+                command,
+                isolated_baseline,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains("Cargo target resolution failed"), "{error}");
+            assert!(error.contains("Cargo.toml"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_admitted_cargo_rejects_unresolved_artifact_target() {
+        let worktree = tempfile::tempdir().unwrap();
+        let cargo = worktree.path().join("cargo");
+        gwt_core::test_support::write_executable_script(
+            &cargo,
+            "#!/bin/sh\ncase \"$*\" in metadata*--format-version*) if [ -f metadata.json ]; then cat metadata.json; exit 0; else exit 1; fi;; esac\nprintf '%s\\n' \"$*\" >> executed\n",
+        )
+        .unwrap();
+        let execute = |arguments: &str| {
+            execute_command_with_isolation(
+                worktree.path(),
+                &format!("{} {arguments}", serde_json::to_string(&cargo).unwrap()),
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        };
+
+        for arguments in [
+            "build -p gwt --bin gwtd --target-dir target",
+            "doc --no-deps",
+            "--config fmt test -p metadata",
+        ] {
+            let result = execute(arguments);
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "unresolved artifact command must not spawn: {arguments} / {result:?}"
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("Cargo target resolution failed"),
+                "{arguments}"
+            );
+        }
+        for (metadata, diagnostic) in [
+            ("not JSON", "invalid metadata JSON"),
+            ("{}", "target_directory"),
+            (r#"{"target_directory":42}"#, "target_directory"),
+            (r#"{"target_directory":""}"#, "target_directory"),
+        ] {
+            fs::write(worktree.path().join("metadata.json"), metadata).unwrap();
+            let error = execute("build -p gwt --bin gwtd").unwrap_err();
+            assert!(error.contains(diagnostic), "{error}");
+            assert!(
+                !worktree.path().join("executed").exists(),
+                "invalid metadata must not spawn the artifact workload"
+            );
+        }
+        for arguments in ["--config test fmt --all --check", "metadata --no-deps"] {
+            assert_eq!(execute(arguments).unwrap().0, 0, "{arguments}");
+        }
+        assert_eq!(
+            fs::read_to_string(worktree.path().join("executed")).unwrap(),
+            "--config test fmt --all --check\nmetadata --no-deps\n"
+        );
+    }
+
+    #[test]
+    fn non_admitted_cargo_holds_the_build_artifact_boundary() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(worktree.path().join("src")).unwrap();
+        fs::write(
+            worktree.path().join("Cargo.toml"),
+            "[package]\nname='resource-boundary-fixture'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("src/lib.rs"),
+            "#[test] fn resource_fixture() {}",
+        )
+        .unwrap();
+        fs::write(
+            worktree.path().join("build.rs"),
+            r#"fn main() {
+                let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+                std::fs::write(root.join("entered"), "").unwrap();
+                while !root.join("release").exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }"#,
+        )
+        .unwrap();
+        let root = worktree.path().to_path_buf();
+        let child_home = home.path().to_path_buf();
+        let child = std::thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(child_home);
+            execute_command_with_isolation(
+                &root,
+                "cargo t --lib resource_fixture --target-dir target",
+                false,
+                None,
+                &VerificationHost::Inherit,
+                None,
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !worktree.path().join("entered").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let entered = worktree.path().join("entered").exists();
+        let protected = entered
+            && crate::cli::verification_lease::try_lock_build_artifacts(
+                &worktree.path().join("target"),
+            )
+            .unwrap()
+            .is_none();
+        // Release the real build child before asserting, including on RED.
+        fs::write(worktree.path().join("release"), "").unwrap();
+        let (code, _, output, _) = child.join().unwrap().unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            entered,
+            "the Cargo build script must exercise the execution interval"
+        );
+        assert!(
+            protected,
+            "non-admitted Cargo must participate in the GC target boundary"
+        );
     }
 
     /// Issue #4409: the daemon-hosted path assembles its child from an
@@ -5412,6 +8996,9 @@ pub(crate) mod tests {
 
     #[test]
     fn failed_cargo_test_output_is_bounded_and_persisted() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Cargo.toml"),
@@ -5462,9 +9049,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nextest_restores_gwtd_only_in_the_gwt_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = ["cargo nextest run -p gwt --lib".to_string()];
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"unrelated\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(gwtd_artifact_restoration(dir.path(), &commands), None);
+
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &commands),
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(
+                dir.path(),
+                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
+            ),
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn default_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::create_dir_all(package.join("tests")).unwrap();
+        fs::create_dir_all(dir.path().join(".config")).unwrap();
+        fs::write(
+            dir.path().join(".config/nextest.toml"),
+            "[profile.gwt-verify]\nretries = 0\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n\
+             [dev-dependencies]\ngwt = { path = \".\", features = [\"test-gh-guard\"] }\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            package.join("src/bin/gwtd.rs"),
+            "fn main() { println!(\"{}\", if cfg!(feature = \"test-gh-guard\") { \"guarded\" } else { \"operational\" }); }\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("tests/artifact_state.rs"),
+            r#"#[test]
+fn default_integration_test_builds_a_guarded_binary() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gwtd")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "guarded");
+}
+"#,
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-default",
+            &[
+                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
+        let output = gwt_core::process::hidden_command(
+            dir.path()
+                .join("target/debug")
+                .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (
+                String::from_utf8(output.stdout).unwrap().trim(),
+                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+            ),
+            ("operational", Some(1)),
+            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+        );
+        assert_eq!(
+            record.commands[3].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn gwtd_artifact_restoration_failure_is_recorded_after_passing_tests() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src")).unwrap();
@@ -5492,11 +9206,153 @@ mod tests {
 
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
         assert!(!persisted.commands[1].output_tail.is_empty());
+        let recovery = restore_gwtd_after_deferral(dir.path(), &VerificationHost::Inherit, None);
+        assert!(
+            recovery.contains("gwtd artifact restoration: failed"),
+            "{recovery}"
+        );
+        assert!(
+            recovery.contains("cargo build -p gwt --bin gwtd"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("gwtd.rs"), "{recovery}");
+        assert_eq!(load(dir.path()).unwrap().unwrap(), persisted);
+    }
+
+    // Issue #5094 AC-2: fail-fast still restores the operational gwtd.
+    #[cfg(not(windows))]
+    #[test]
+    fn raw_failure_still_runs_gwtd_artifact_restoration() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/bin/gwtd.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            package.join("src/lib.rs"),
+            "#[test] fn fails() { panic!() }\n",
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-fail",
+            &[
+                "cargo test -p gwt --lib".to_string(),
+                "git --version".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
+        assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        assert_eq!(record.skipped_after_failure, vec!["git --version"]);
+    }
+
+    // Re-entered in child processes so this regression also runs on Windows.
+    #[test]
+    fn verification_output_holder_fixture() {
+        let Ok(directory) = std::env::var("GWT_VERIFY_OUTPUT_HOLDER") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        if std::env::var_os("GWT_VERIFY_OUTPUT_GRANDCHILD").is_some() {
+            fs::write(directory.join("holding"), "ready").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !directory.join("release").exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            fs::write(directory.join("released"), "done").unwrap();
+            return;
+        }
+        // Exit while the grandchild holds output. The runner owns its tree;
+        // the parent test also has a release fallback for a broken runner.
+        #[allow(clippy::zombie_processes)]
+        let _grandchild = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_output_holder_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_OUTPUT_GRANDCHILD", "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !directory.join("holding").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("direct child stdout");
+        eprintln!("direct child stderr");
+        std::process::exit(7);
+    }
+
+    #[test]
+    fn verification_records_exit_while_grandchild_holds_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().to_path_buf();
+        let executable = std::env::current_exe().unwrap();
+        let command = format!(
+            "GWT_VERIFY_OUTPUT_HOLDER='{}' '{}' --exact \
+             cli::verification_record::tests::verification_output_holder_fixture --nocapture",
+            worktree.display(),
+            executable.display(),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result = run_verification(&worktree, "sess-output-holder", &[command]);
+            let _ = sender.send(result);
+        });
+        // Release only AFTER observing completion (or the failure deadline).
+        // Thus no sleep duration determines when the grandchild closes output.
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(45));
+        fs::write(directory.path().join("release"), "release").unwrap();
+        runner.join().unwrap();
+        // Successful completion reclaims the grandchild, so it need not
+        // survive long enough to acknowledge the fallback release file.
+        let (record, transcript) = result
+            .expect("verification must finish without waiting for grandchild output EOF")
+            .unwrap();
+        assert_eq!(record.commands[0].exit_code, 7, "{transcript}");
+        let persisted = load(directory.path()).unwrap().unwrap();
+        assert_eq!(persisted.commands[0].exit_code, 7);
+        assert!(persisted.commands[0]
+            .output_tail
+            .contains("direct child stdout"));
+        assert!(persisted.commands[0]
+            .output_tail
+            .contains("direct child stderr"));
     }
 
     // Spawn failures are recorded as failed results, never dropped runs.
@@ -5517,6 +9373,160 @@ mod tests {
         assert_eq!(record.commands[1].exit_code, -1);
         assert!(transcript.contains("spawn error"), "{transcript}");
         assert!(load(dir.path()).unwrap().is_some(), "record must persist");
+    }
+
+    /// Issue #4528 AC-2/AC-3: a command killed from outside (the #3566
+    /// `exit -1`) is not a test failure. It is recorded and counted apart,
+    /// while spawn failures — which also report `-1` — stay failures, and the
+    /// run itself still does not pass.
+    #[cfg(unix)]
+    #[test]
+    fn external_signal_termination_is_counted_apart_from_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = [
+            r#"sh -c "kill -TERM $$""#.to_string(),
+            "false".to_string(),
+            "definitely-not-a-real-binary-xyz".to_string(),
+            "git --version".to_string(),
+        ];
+        let (record, transcript) = run_verification(dir.path(), "sess-signal", &commands).unwrap();
+
+        assert!(!record.all_passed, "an interrupted run must never pass");
+        assert_eq!(record.commands.len(), 1, "{transcript}");
+        assert_eq!(record.skipped_after_failure, commands[1..]);
+        assert_eq!(record.commands[0].exit_code, -1);
+        assert_eq!(record.commands[0].terminated_by_signal, Some(15));
+        // Fail-fast stops this matrix; observe the other outcome types in
+        // independent runs without weakening their accounting assertions.
+        let mut results = record.commands.clone();
+        for command in &commands[1..] {
+            let independent_dir = tempfile::tempdir().unwrap();
+            let (independent, output) = run_verification(
+                independent_dir.path(),
+                "sess-single-outcome",
+                std::slice::from_ref(command),
+            )
+            .unwrap();
+            assert_eq!(independent.commands.len(), 1, "{output}");
+            results.extend(independent.commands.iter().cloned());
+        }
+        assert_eq!(results[1].terminated_by_signal, None);
+        assert_eq!(results[2].exit_code, -1);
+        assert_eq!(results[2].terminated_by_signal, None);
+        assert!(
+            transcript.contains("exit: -1 (terminated by external signal 15)"),
+            "{transcript}"
+        );
+        let counts = RunOutcomeCounts::of(&results);
+        assert_eq!(
+            (counts.passed, counts.failed, counts.interrupted),
+            (1, 2, 1)
+        );
+        let persisted = load(dir.path()).unwrap().unwrap();
+        assert_eq!(persisted.commands[0].terminated_by_signal, Some(15));
+        assert!(integrity_ok(&persisted));
+    }
+
+    #[test]
+    fn run_status_separates_interruption_from_failure() {
+        let result = |exit_code, terminated_by_signal| VerificationCommandResult {
+            admission: None,
+            measurement: None,
+            command: "cmd".to_string(),
+            exit_code,
+            output_tail: String::new(),
+            output_streams: Vec::new(),
+            headed_e2e: None,
+            nextest: None,
+            terminated_by_signal,
+        };
+        let interrupted = [result(0, None), result(-1, Some(9))];
+        let mixed = [result(1, None), result(-1, Some(9))];
+
+        assert_eq!(run_status_label(true, false, &interrupted), "PASS");
+        assert_eq!(run_status_label(false, true, &mixed), "QUARANTINED");
+        assert_eq!(run_status_label(false, false, &interrupted), "INTERRUPTED");
+        assert_eq!(run_status_label(false, false, &mixed), "FAIL");
+        assert_eq!(
+            RunOutcomeCounts::of(&mixed).summary(),
+            "verify: outcome — 0 passed, 1 failed, 1 interrupted by external signal\n"
+        );
+    }
+
+    #[test]
+    fn performance_environment_is_not_reported_as_a_product_failure() {
+        let result: VerificationCommandResult = serde_json::from_value(serde_json::json!({
+            "command": "GWT_VERIFY_PERFORMANCE=1 git --version",
+            "exit_code": 125,
+            "measurement": {
+                "status": "environment_incompatible",
+                "reason": "ancestor Job remains capped at 8%",
+                "admission_wait_ms": 100,
+                "cap_relief_wait_ms": 15000,
+                "raw_exit_code": null,
+                "targets": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            run_status_label(false, false, std::slice::from_ref(&result)),
+            "ENVIRONMENT_INCOMPATIBLE"
+        );
+        assert_eq!(RunOutcomeCounts::of(&[result]).failed, 0);
+    }
+
+    #[test]
+    fn performance_commands_persist_pid_and_environment_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let command = "GWT_VERIFY_PERFORMANCE=1 git --version".to_string();
+        let (record, _) = run_verification(dir.path(), "sess-measurement", &[command]).unwrap();
+        let value = serde_json::to_value(&record.commands[0]).unwrap();
+        let measurement = &value["measurement"];
+        assert!(measurement.is_object(), "{value}");
+        assert!(measurement["cap_relief_wait_ms"].is_u64());
+        assert!(measurement["admission_wait_ms"].is_u64());
+        assert_eq!(measurement["targets"][0]["pid"], std::process::id());
+        assert!(measurement["targets"][0]["cpu_time_ms"].is_u64());
+        assert!(measurement["targets"][0]["job_caps"].is_array());
+        #[cfg(not(windows))]
+        assert!(
+            record.all_passed,
+            "an uncapped performance command must remain valid"
+        );
+        let saved = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&saved));
+        assert_eq!(serde_json::to_value(&saved.commands[0]).unwrap(), value);
+    }
+
+    /// Issue #4528 AC-1/AC-3: the lease a heavy run was admitted under is part
+    /// of the integrity-covered record, and a light run records none.
+    #[test]
+    fn run_record_keeps_the_admitting_lease_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, _) = run_verification_inner(
+            dir.path(),
+            "sess-lease",
+            &["git --version".to_string()],
+            None,
+            &[],
+            RunOptions {
+                lease_id: Some("lease-4528".to_string()),
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(record.lease_id.as_deref(), Some("lease-4528"));
+        let persisted = load(dir.path()).unwrap().unwrap();
+        assert_eq!(persisted.lease_id.as_deref(), Some("lease-4528"));
+        assert!(integrity_ok(&persisted));
+
+        let (light, _) =
+            run_verification(dir.path(), "sess-lease", &["git --version".to_string()]).unwrap();
+        assert_eq!(light.lease_id, None);
+        let serialized = serde_json::to_value(&light).unwrap();
+        assert!(serialized.get("lease_id").is_none(), "{serialized}");
     }
 
     #[test]
@@ -5550,18 +9560,29 @@ mod tests {
     fn record_roundtrips_and_missing_is_none() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), None);
-        let record = VerificationRunRecord {
+        let record = VerificationRunRecord::from(VerificationRunData {
+            format_version: Some(1),
+            continuation: None,
+            lifecycle: None,
             record_id: "vrr-test".to_string(),
             user_verification_result: None,
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
+            lease_id: None,
             worktree_fingerprint: "abc".to_string(),
+            verified_head: None,
+            driver: None,
             commands: vec![VerificationCommandResult {
+                admission: None,
+                measurement: None,
                 headed_e2e: None,
+                nextest: None,
+                terminated_by_signal: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
+                output_streams: Vec::new(),
             }],
             all_passed: true,
             quarantined_failures: Vec::new(),
@@ -5570,10 +9591,12 @@ mod tests {
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            skipped_after_failure: Vec::new(),
             verification_plan_hash: String::new(),
+            verification_plan_snapshot: None,
             plan_derived: false,
             content_hash: String::new(),
-        };
+        });
         save(dir.path(), &record).unwrap();
         let loaded = load(dir.path()).unwrap().unwrap();
         assert!(integrity_ok(&loaded));
@@ -5587,7 +9610,8 @@ mod tests {
     /// SPEC #4093 AC-11 (Issue #3850): the live GitHub opt-in set in the
     /// operator's shell must not reach the `cargo test` child, whose fixtures
     /// rely on the gh guard failing closed. The child re-enters this test
-    /// binary and checks its own environment.
+    /// binary and checks its own environment. Issue #4878: autonomous launch
+    /// markers must not misclassify a manual fixture in that child either.
     #[test]
     fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
         const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
@@ -5599,6 +9623,11 @@ mod tests {
                 std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
+            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("never"));
+            for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+                assert!(std::env::var_os(key).is_none(), "inherited {key}");
+            }
+            assert!(autonomous_confirmation_refusal(None, "confirmed").is_none());
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -5612,10 +9641,19 @@ mod tests {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
+        let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(
+            std::env::var("GWT_AUTONOMOUS_EXECUTION").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(std::env::var("GWT_AUTONOMOUS_ISSUE").as_deref(), Ok("4878"));
+        assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
             1,
@@ -5634,14 +9672,34 @@ mod tests {
     // hangs on it again.
     #[test]
     fn verify_run_child_environment_contract_is_declared_in_one_place() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
         assert_eq!(
-            child_environment_contract(),
+            child_environment_contract()
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_deref()))
+                .collect::<Vec<_>>(),
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
+                ("GWT_AUTONOMOUS_EXECUTION", None),
+                ("GWT_AUTONOMOUS_ISSUE", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("GIT_ASKPASS", Some("")),
+                ("GCM_INTERACTIVE", Some("never")),
+                ("GIT_CONFIG_PARAMETERS", Some("'credential.helper='")),
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
+        // The daemon gets a complete environment from the same contract.
+        for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+            assert!(!resolved_child_environment(false)
+                .iter()
+                .any(|(existing, _)| existing == key));
+        }
     }
 
     // #4182 AC-7: a test that fetches an unreachable remote makes Windows'
@@ -5662,12 +9720,141 @@ mod tests {
             Some(Some(std::ffi::OsStr::new("0"))),
             "verify.run children must never be able to open a credential prompt"
         );
+        assert_eq!(
+            process
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("GCM_INTERACTIVE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("never"))),
+            "credential manager must fail instead of opening a GUI or TTY prompt"
+        );
+        assert!(resolved_child_environment(false)
+            .contains(&("GCM_INTERACTIVE".to_string(), "never".to_string())));
+    }
+
+    #[test]
+    fn verify_run_fake_remote_fetch_fails_without_invoking_credentials() {
+        use std::io::{Read, Write};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("helper-invoked");
+        let askpass_marker = dir.path().join("askpass-invoked");
+        let askpass = dir.path().join("fixture-askpass");
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho invoked > '{}'\n",
+                askpass_marker.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _askpass = ScopedEnvVar::set("GIT_ASKPASS", &askpass);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(gwt_core::deadline_budget::HANG_GUARD))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        // A helper that records its invocation without risking a real prompt.
+        let helper = format!(
+            "!echo invoked > '{}'",
+            marker.to_string_lossy().replace('\\', "/")
+        );
+        // Git -c settings inherited through hooks outrank GIT_CONFIG_COUNT.
+        let _parameters = ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            format!(
+                "'credential.helper={}'",
+                helper.replace('\\', "\\\\").replace('\'', "'\\''")
+            ),
+        );
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["config", "credential.helper", &helper])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let command = format!("git -c http.proxy= fetch http://{address}/missing.git");
+        let mut process = gwt_core::process::hidden_command("git");
+        apply_child_environment_contract(&mut process);
+        process
+            .args([
+                "-c",
+                "http.proxy=",
+                "fetch",
+                &format!("http://{address}/missing.git"),
+            ])
+            .current_dir(dir.path());
+        let result = execute_inherited_command(
+            &mut process,
+            dir.path(),
+            &command,
+            Some(std::time::Duration::from_secs(30)),
+            None,
+            None,
+            std::time::Instant::now,
+        );
+        // Wake accept if Git failed before connecting; the request assertion
+        // then reports that failure instead of leaving the fixture waiting.
+        let _ = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1));
+        server.join().unwrap();
+        let (exit_code, signal, transcript, _) = result.unwrap();
+        assert_ne!(exit_code, 0, "{transcript}");
+        assert_eq!(signal, None, "{transcript}");
+        assert!(
+            transcript.contains("terminal prompts disabled"),
+            "{transcript}"
+        );
+        assert!(!transcript.contains("timed out"), "{transcript}");
+        assert!(
+            !marker.exists(),
+            "credential helper was invoked: {transcript}"
+        );
+        assert!(
+            !askpass_marker.exists(),
+            "inherited askpass was invoked: {transcript}"
+        );
     }
 
     // record is written even when a command fails.
     #[test]
     fn run_verification_records_pass_and_fail() {
         let dir = tempfile::tempdir().unwrap();
+        // The documented recovery for unreadable verification evidence is
+        // rerunning verify.run; retry admission must preserve that contract.
+        crate::cli::trusted_store::write_with_mirror(
+            dir.path(),
+            "verification-run.json",
+            &state_path(dir.path()),
+            b"not-json",
+        )
+        .unwrap();
+        assert_eq!(load(dir.path()).unwrap_err().kind(), ErrorKind::InvalidData);
         let (record, transcript) =
             run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
         assert!(record.all_passed, "{transcript}");
@@ -5688,6 +9875,125 @@ mod tests {
         assert_ne!(record.commands[1].exit_code, 0);
         // Latest record persisted.
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+    }
+
+    // Issue #5094: a raw FAIL already settles the run as non-PASS, so later
+    // commands must neither wait for admission nor occupy a host slot.
+    #[test]
+    fn raw_failure_stops_admitting_and_running_later_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec![
+            "git --version".to_string(),
+            "git definitely-not-a-subcommand".to_string(),
+            "git --exec-path".to_string(),
+        ];
+        let mut admitted = Vec::new();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            admitted.push(command.to_string());
+            Ok(None)
+        };
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-fail-fast",
+            &commands,
+            None,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(admitted, commands[..2].to_vec());
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert!(!record.all_passed);
+        assert_eq!(record.skipped_after_failure, vec!["git --exec-path"]);
+        assert!(
+            transcript.contains("skipped after raw FAIL"),
+            "{transcript}"
+        );
+        assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
+    }
+
+    // Issue #5094 AC-3: Board adjudication of the failing command cannot turn
+    // a truncated matrix into Ready evidence; the skipped commands never ran.
+    #[test]
+    fn truncated_run_is_rejected_even_with_adjudication() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let command = "git definitely-not-a-subcommand".to_string();
+        let (record, _) = plan_and_run(
+            dir.path(),
+            "sess-truncated",
+            &[command.clone(), "git --version".to_string()],
+        );
+        let decision = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "PM",
+            gwt_core::coordination::BoardEntryKind::Decision,
+            format!(
+                "Verification record: {}\nFailing command: {command}\nReason: unrelated known failure",
+                record.record_id
+            ),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decision_id = decision.id.clone();
+        gwt_core::coordination::post_entry(dir.path(), decision).unwrap();
+        run_verify_cli_as(
+            dir.path(),
+            "sess-truncated",
+            VerifyCommand::Adjudicate {
+                record_id: record.record_id.clone(),
+                command,
+                board_entry_id: decision_id,
+            },
+        )
+        .expect("attach Board decision");
+        assert_eq!(
+            evaluate_pr_ready_evidence(dir.path(), "sess-truncated", None),
+            Err(EvidenceStatus::Failing)
+        );
+    }
+
+    #[test]
+    fn diagnostic_mirror_failure_does_not_reverse_the_recorded_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        // An unwritable diagnostic destination cannot invalidate a successful
+        // authoritative write or turn the CLI result into a different verdict.
+        fs::create_dir_all(dir.path().join(".gwt/tmp/verify-run.json")).unwrap();
+        let (record, _) = run_verification(dir.path(), "sess-1", &["git --version".into()])
+            .expect("diagnostic mirror is best effort");
+        assert!(record.all_passed);
+        assert_eq!(load(dir.path()).unwrap().unwrap(), record);
+    }
+
+    #[test]
+    fn an_older_runner_cannot_overwrite_a_replacement_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let replacement = passing_record("replacement", "no-git");
+        let result = run_verification_inner(
+            dir.path(),
+            "sess-1",
+            &["git --version".into()],
+            None,
+            &[],
+            RunOptions::default(),
+            || save(dir.path(), &replacement).unwrap(),
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("replaced or interrupted"));
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().record_id,
+            replacement.record_id
+        );
     }
 
     // Issue #3841 / SPEC #3248 FR-036/FR-053: typed quarantine evidence is
@@ -5839,7 +10145,8 @@ mod tests {
 
         let plan_result = save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -5851,7 +10158,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         );
         let run_result = run_verification(dir.path(), "sess-1", &["git --version".to_string()]);
         release_tx.send(()).unwrap();
@@ -5905,7 +10212,16 @@ mod tests {
     // typed owner/base/PR disposition receives its own delivery status.
     #[test]
     fn typed_quarantine_is_distinct_from_raw_pass_and_plain_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='quarantine-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
         let test_identity = "app_runtime::tests::bounded_sync";
         let command = "cargo test -p definitely-missing-package --lib".to_string();
         let baseline_command = format!("{command} {test_identity} -- --exact");
@@ -5944,7 +10260,9 @@ mod tests {
             pr_number: 3854,
         }];
         save_plan(dir.path(), &plan).unwrap();
-        record.verification_plan_hash = load_plan(dir.path()).unwrap().unwrap().content_hash;
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        record.verification_plan_hash = plan.content_hash.clone();
+        record.verification_plan_snapshot = Some(plan);
         record.content_hash.clear();
         save(dir.path(), &record).unwrap();
 
@@ -6069,7 +10387,8 @@ mod tests {
             owner_issue: 3755,
             pr_number: 3854,
         };
-        let plan = VerificationPlanRecord {
+        let plan = VerificationPlanRecord::from(VerificationPlanData {
+            format_version: Some(1),
             session_id: "sess".to_string(),
             owner_number: Some(3841),
             execution_binding: None,
@@ -6081,7 +10400,7 @@ mod tests {
             worktree_fingerprint: "fingerprint".to_string(),
             created_at: Utc::now(),
             content_hash: "hash".to_string(),
-        };
+        });
         let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
         env.pr_quarantine_contexts.insert(
             3854,
@@ -6096,6 +10415,7 @@ mod tests {
         assert!(diagnostics.contains("owner Issue #3755"));
 
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: IssueNumber(3755),
             title: "Flaky bounded sync".to_string(),
             body: String::new(),
@@ -6232,7 +10552,8 @@ mod tests {
         };
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-quarantine-runner".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6244,7 +10565,7 @@ mod tests {
                 worktree_fingerprint: worktree_fingerprint(dir.path()),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let prepared = PreparedQuarantineRequest {
@@ -6395,6 +10716,102 @@ mod tests {
             .contains("pr.create"));
     }
 
+    #[test]
+    fn fingerprint_fixture_preserves_completed_evidence_across_home_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", original_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", original_home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let commands = ["git --version".to_string()];
+        plan_and_run(&fixture.repo, "sess-home", &commands);
+
+        let other_home = tempfile::tempdir().unwrap();
+        let mut changed_home = None;
+        // Force the parallel HOME writer's interleaving at the existing seam:
+        // Running is already persisted, but Completed has not been written.
+        let (record, _) = run_verification_inner(
+            &fixture.repo,
+            "sess-home",
+            &commands,
+            None,
+            &[],
+            RunOptions::default(),
+            || {
+                changed_home = Some((
+                    ScopedEnvVar::set("HOME", other_home.path()),
+                    ScopedEnvVar::set("USERPROFILE", other_home.path()),
+                ));
+            },
+        )
+        .unwrap();
+        drop(changed_home);
+
+        assert!(record.all_passed);
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-home", None),
+            EvidenceStatus::Fresh,
+            "the fixture must read Completed, not an earlier HOME's Running checkpoint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_preserves_base_merges_without_source_changes() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.git_ok(&["branch", "develop"]);
+        fixture.git_ok(&["commit", "--allow-empty", "-qm", "feature history"]);
+        plan_and_run(&fixture.repo, "sess-merge", &["git --version".to_string()]);
+        let record = load(&fixture.repo).unwrap().unwrap();
+
+        fixture.git_ok(&["checkout", "-q", "develop"]);
+        fixture.git_ok(&["commit", "--allow-empty", "-qm", "base history"]);
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.git_ok(&["merge", "--no-ff", "-qm", "sync base", "develop"]);
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-merge", None),
+            EvidenceStatus::Fresh,
+            "a base merge with an identical tree must preserve verification"
+        );
+
+        fixture.git_ok(&["checkout", "-q", "develop"]);
+        fixture.write_event_shard("base-delivery", b"{\"id\":\"base-delivery\"}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): base delivery");
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.git_ok(&["merge", "--no-ff", "-qm", "sync base delivery", "develop"]);
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-merge", None),
+            EvidenceStatus::Fresh,
+            "base merges and pr.create must share the shard-addition rule"
+        );
+        assert_eq!(load(&fixture.repo).unwrap().unwrap(), record);
+    }
+
+    #[test]
+    fn fingerprint_rejects_base_merge_source_changes_and_names_paths() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.git_ok(&["branch", "develop"]);
+        fixture.git_ok(&["commit", "--allow-empty", "-qm", "feature history"]);
+        plan_and_run(&fixture.repo, "sess-merge", &["git --version".to_string()]);
+        fixture.git_ok(&["checkout", "-q", "develop"]);
+        fs::write(fixture.repo.join("src.txt"), "changed base source\n").unwrap();
+        fixture.git_ok(&["add", "src.txt"]);
+        fixture.commit("fix: change base source");
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.git_ok(&["merge", "--no-ff", "-qm", "sync changed base", "develop"]);
+
+        let status = evaluate_evidence(&fixture.repo, "sess-merge", None);
+        assert_ne!(status, EvidenceStatus::Fresh);
+        assert!(
+            status.describe().contains("src.txt"),
+            "{}",
+            status.describe()
+        );
+        assert!(status.describe().contains("verify.run"));
+    }
+
     // Freshness: a tracked-file change after the run invalidates evidence,
     // while .gwt/ bookkeeping churn does not.
     #[test]
@@ -6498,7 +10915,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-generated".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6510,7 +10928,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -6524,6 +10942,9 @@ mod tests {
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
+                let mut plan = load_plan(dir.path()).unwrap().unwrap();
+                plan.created_at += chrono::Duration::seconds(1);
+                save_plan(dir.path(), &plan).unwrap();
             },
         )
         .unwrap();
@@ -6532,6 +10953,16 @@ mod tests {
             evaluate_evidence(dir.path(), "sess-generated", None),
             EvidenceStatus::Fresh
         );
+
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        let mut changed = plan.clone();
+        changed.commands = vec!["git --exec-path".to_string()];
+        save_plan(dir.path(), &changed).unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-generated", None),
+            EvidenceStatus::PlanChangedFields(vec!["commands"])
+        );
+        save_plan(dir.path(), &plan).unwrap();
 
         fs::write(dir.path().join("src.txt"), "v2").unwrap();
         assert_eq!(
@@ -6620,7 +11051,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-mixed".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6632,7 +11064,7 @@ mod tests {
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -6674,7 +11106,8 @@ mod tests {
         // Plan with two commands; running only one is not covered.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6686,7 +11119,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, transcript) =
@@ -6718,7 +11151,8 @@ mod tests {
         // Another session's plan does not count for this session's run.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-other".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6730,7 +11164,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (record, _) =
@@ -6738,15 +11172,75 @@ mod tests {
         assert!(!record.plan_covered);
     }
 
-    // FR-195 / AS-177: Fresh evidence is bound to the exact plan snapshot
-    // used by the run. Re-registering any plan invalidates the old run.
+    #[test]
+    fn evidence_preserves_pass_after_identical_plan_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec!["git --version".to_string()];
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-1").unwrap();
+        let register = || {
+            register_plan_for_caller(
+                dir.path(),
+                "sess-1",
+                commands.clone(),
+                Vec::new(),
+                Vec::new(),
+                false,
+                &authority,
+            )
+            .unwrap()
+        };
+        register();
+        let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
+        assert!(run.all_passed);
+        let mut plan = register();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        // Change metadata deterministically; no sleep or clock deadline.
+        plan.created_at += chrono::Duration::seconds(1);
+        save_plan(dir.path(), &plan).unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        // Registration metadata is not the verification target. The run's
+        // source fingerprint is still checked against the actual worktree.
+        plan.worktree_fingerprint = "registration-metadata".to_string();
+        save_plan(dir.path(), &plan).unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+        assert_eq!(load(dir.path()).unwrap().unwrap(), run);
+    }
+
+    #[test]
+    fn identical_registration_preserves_legacy_pass_without_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
+        run.verification_plan_snapshot = None;
+        save(dir.path(), &run).unwrap();
+        let previous = load_plan(dir.path()).unwrap().unwrap();
+        let mut plan = previous.clone();
+        plan.created_at += chrono::Duration::seconds(1);
+        save_plan(dir.path(), &plan).unwrap();
+        assert_eq!(load_plan(dir.path()).unwrap().unwrap(), previous);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    // #4707: changed verification content still invalidates the old run.
     #[test]
     fn evidence_rejects_plan_replacement_after_run() {
         let dir = tempfile::tempdir().unwrap();
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6758,7 +11252,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
@@ -6775,7 +11269,8 @@ mod tests {
 
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6787,12 +11282,15 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
-        assert_eq!(
-            evaluate_evidence(dir.path(), "sess-1", None),
-            EvidenceStatus::PlanChanged
+        let status = evaluate_evidence(dir.path(), "sess-1", None);
+        assert!(!status.is_delivery_acceptable());
+        assert!(
+            status.describe().contains("commands"),
+            "{}",
+            status.describe()
         );
     }
 
@@ -6812,7 +11310,8 @@ mod tests {
         let commands = vec!["git --version".to_string()];
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6824,7 +11323,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         fs::write(dir.path().join("new-rust-surface.rs"), "fn added() {}\n").unwrap();
@@ -6836,7 +11335,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
-            EvidenceStatus::PlanChanged
+            EvidenceStatus::PlanChangedFields(vec!["worktree_fingerprint"])
         );
     }
 
@@ -6875,6 +11374,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let _node_options = ScopedEnvVar::unset("NODE_OPTIONS");
         let home = tempfile::tempdir().unwrap();
         let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
 
@@ -6897,15 +11397,46 @@ mod tests {
             )
             .unwrap();
 
-        // Narrowed to one named integration test of one package, and pointed
-        // at a directory with no manifest so cargo answers immediately: the
+        // Narrowed to one named integration test of one package. Metadata
+        // resolves the target, but the missing test answers immediately: the
         // command's outcome is irrelevant here, its classification is not.
         let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='gwt'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
+        // #5086: execute the real short gates while a Heavy holder is active.
+        fs::create_dir(dir.path().join("scripts")).unwrap();
+        fs::write(
+            dir.path().join("scripts/check-coverage-threshold.mjs"),
+            include_str!("../../../../scripts/check-coverage-threshold.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("summary.json"),
+            r#"{"data":[{"files":[{"filename":"fixture.rs","summary":{"lines":{"covered":100,"count":100}}}]}]}"#,
+        )
+        .unwrap();
+        let short_gates = [
+            "git diff --check",
+            "node scripts/check-coverage-threshold.mjs summary.json 90",
+        ];
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
         let (_code, out) = crate::cli::run_collect(
             &mut env,
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
-                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                // The absent target fails raw, so it runs last: #5094 skips
+                // every command after a blocking raw FAIL.
+                commands: short_gates
+                    .into_iter()
+                    .chain(std::iter::once(
+                        "cargo test -p gwt --test issue-4196-absent",
+                    ))
+                    .map(str::to_owned)
+                    .collect(),
                 headed_e2e_commands: vec![],
                 max_wait_secs: Some(0),
                 user_verification_result: None,
@@ -6920,6 +11451,419 @@ mod tests {
             !out.contains("host admission"),
             "a light matrix must not claim the host lease: {out}"
         );
+        let record = load(dir.path()).unwrap().unwrap();
+        for command in short_gates {
+            let result = record
+                .commands
+                .iter()
+                .find(|result| result.command == command)
+                .unwrap();
+            assert_eq!(result.exit_code, 0, "{}", result.output_tail);
+            assert!(
+                result.admission.is_none(),
+                "short gates must bypass Heavy admission"
+            );
+        }
+
+        // #4953: a stale plan must be diagnosed before even attempting the
+        // occupied host lease. max_wait=0 observes admission without sleeping.
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-light").unwrap();
+        let mut plan = register_plan_for_caller(
+            dir.path(),
+            "sess-light",
+            vec!["cargo test -p gwt --all-features".to_string()],
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        plan.worktree_fingerprint = "stale-source".to_string();
+        save_plan(dir.path(), &plan).unwrap();
+        assert_eq!(
+            crate::cli::verification_lease::first_heavy_command(&plan.commands),
+            plan.commands.first(),
+        );
+        let before = verification_artifact_bytes(dir.path());
+        let error = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: plan.commands.clone(),
+                headed_e2e_commands: Vec::new(),
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("fingerprint"), "{error}");
+        assert!(error.contains("verify.plan"), "{error}");
+        assert!(!error.contains("deferred"), "{error}");
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+    }
+
+    #[test]
+    fn verify_run_rejects_plan_mismatches_without_executing_commands() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-preflight");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let marker = home.path().join("command-ran");
+        let commands = vec![format!(
+            "git config --file \"{}\" fixture.ran yes",
+            marker.display()
+        )];
+        let authority =
+            snapshot_verification_caller_authority(dir.path(), "sess-preflight").unwrap();
+        let plan = register_plan_for_caller(
+            dir.path(),
+            "sess-preflight",
+            commands.clone(),
+            vec!["generated-report.json".to_string()],
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        for mismatch in ["session", "owner", "binding", "fingerprint"] {
+            let mut stale = plan.clone();
+            let diagnosis = match mismatch {
+                "session" => {
+                    stale.session_id = "other-session".to_string();
+                    "session"
+                }
+                "owner" => {
+                    stale.owner_number = Some(4953);
+                    "binding"
+                }
+                "binding" => {
+                    stale.execution_binding = Some(ExecutionBindingIdentity {
+                        generation_id: "previous-generation".to_string(),
+                        binding_id: "previous-binding".to_string(),
+                        ledger_head_hash: "previous-head".to_string(),
+                    });
+                    "binding"
+                }
+                _ => {
+                    fs::write(dir.path().join("source.txt"), "changed").unwrap();
+                    "fingerprint"
+                }
+            };
+            crate::cli::trusted_store::with_write_lease(dir.path(), || {
+                save_plan_unleased(dir.path(), &stale)
+            })
+            .unwrap();
+            let before = verification_artifact_bytes(dir.path());
+            let result = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                    commands: commands.clone(),
+                    headed_e2e_commands: Vec::new(),
+                    max_wait_secs: Some(0),
+                    user_verification_result: None,
+                }),
+            );
+            assert!(
+                !marker.exists(),
+                "{mismatch}: a refused plan must execute no commands"
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(diagnosis), "{error}");
+            assert!(error.contains("verify.plan"), "{error}");
+            assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+            // Recheck at dispatch too: admission may have waited while the
+            // plan or source changed.
+            let error = run_verification_for_caller(
+                dir.path(),
+                "sess-preflight",
+                &commands,
+                &authority,
+                &[],
+                RunOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains(diagnosis) && error.contains("verify.plan"),
+                "{error}"
+            );
+            assert!(!marker.exists());
+            assert_eq!(verification_artifact_bytes(dir.path()), before);
+        }
+        // The advertised recovery must allow legitimate work immediately.
+        register_plan_for_caller(
+            dir.path(),
+            "sess-preflight",
+            commands.clone(),
+            plan.generated_outputs.clone(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        fs::write(dir.path().join("generated-report.json"), "{}").unwrap();
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands,
+                headed_e2e_commands: Vec::new(),
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(marker.exists());
+        assert!(load(dir.path()).unwrap().unwrap().plan_covered);
+    }
+
+    #[test]
+    fn mixed_matrix_keeps_light_results_when_heavy_admission_defers() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-mixed");
+        let original_home = dirs::home_dir().unwrap();
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .unwrap_or_else(|| original_home.join(".cargo").into_os_string());
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .unwrap_or_else(|| original_home.join(".rustup").into_os_string());
+        let _cargo_home = ScopedEnvVar::set("CARGO_HOME", cargo_home);
+        let _rustup_home = ScopedEnvVar::set("RUSTUP_HOME", rustup_home);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
+        let coordinator = IndexCoordinator::open_default_verification().unwrap();
+        let other = TargetKey::verification("other-repo", "other-worktree");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(
+                &other,
+                JobPriority::ManualRebuild,
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap()
+        else {
+            panic!("private owner");
+        };
+        let lease = guard
+            .acquire_heavy_with_ttl(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let commands = vec![
+            "cargo fmt --version".to_string(),
+            "git --version".to_string(),
+        ];
+        let run = || {
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: commands.clone(),
+                headed_e2e_commands: vec![],
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            })
+        };
+        let (code, output) = crate::cli::run_collect(&mut env, run()).unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("deferred"), "{output}");
+        let record = load(dir.path())
+            .unwrap()
+            .expect("partial results must survive deferral");
+        assert_eq!(record.commands.len(), 1);
+        assert_eq!(record.commands[0].command, commands[0]);
+        assert!(!record.all_passed && !record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-mixed", None),
+            EvidenceStatus::Deferred
+        );
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["lifecycle"]["status"],
+            "deferred"
+        );
+        drop(lease);
+        drop(guard);
+        // Issue #4998: a concurrent fork may retain the legacy heavy lock
+        // after its owner drops it. Observe kernel release before ZERO retry.
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(coordinator.heavy_lock_path())
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Err(error) = fs2::FileExt::try_lock_exclusive(&probe) {
+            assert_eq!(
+                error.raw_os_error(),
+                fs2::lock_contended_error().raw_os_error(),
+                "heavy release probe failed: {error}"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "legacy heavy lock still held after release"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Unlock explicitly so inherited copies cannot retain the probe lock.
+        fs2::FileExt::unlock(&probe).unwrap();
+        crate::cli::run_collect(&mut env, run()).unwrap();
+        let retried = load(dir.path()).unwrap().unwrap();
+        assert_eq!(retried.commands.len(), 2, "retry runs the entire matrix");
+        assert!(retried.commands[0].admission.is_none());
+        assert!(retried.commands[1].admission.is_some());
+        assert!(retried.lifecycle.is_none());
+        assert!(!coordinator.heavy_lease_status().unwrap().held);
+    }
+
+    #[test]
+    fn admission_deferred_continuation_skips_passes_and_prioritizes_remaining_light() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::create_dir_all(dir.path().join(".gwt")).unwrap();
+        fs::write(
+            dir.path().join(".gwt/passed-inventory"),
+            format!(
+                "test passed_inventory_before_noise ... ok\n{}",
+                "x".repeat(20_000)
+            ),
+        )
+        .unwrap();
+        let commands = vec![
+            if cfg!(windows) {
+                r#"powershell -NoProfile -Command "[IO.File]::AppendAllText('.gwt/command-count','x'); [Console]::Out.Write([IO.File]::ReadAllText('.gwt/passed-inventory'))""#
+            } else {
+                "sh -c 'printf x >> .gwt/command-count; cat .gwt/passed-inventory'"
+            }
+            .to_string(),
+            "git --version".to_string(),
+            "cargo fmt --version".to_string(),
+        ];
+        let authority = snapshot_verification_caller_authority(dir.path(), "sess-resume").unwrap();
+        register_plan_for_caller(
+            dir.path(),
+            "sess-resume",
+            commands.clone(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            &authority,
+        )
+        .unwrap();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            if command == commands[1] {
+                Err(VerificationError::Deferred(Box::new(
+                    super::super::verification_lease::admission::Deferral::new(
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        std::time::Duration::ZERO,
+                        "admission timeout",
+                        None,
+                    ),
+                )))
+            } else {
+                Ok(None)
+            }
+        };
+        let error = run_verification_for_caller(
+            dir.path(),
+            "sess-resume",
+            &commands,
+            &authority,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("deferred"));
+        assert!(
+            error.contains(&state_path(dir.path()).display().to_string()),
+            "{error}"
+        );
+        let mut predecessor = load(dir.path()).unwrap().unwrap();
+        let result = serde_json::to_value(&predecessor.commands[0]).unwrap();
+        let saved_path = result["output_streams"][0]["path"].as_str().unwrap();
+        assert!(fs::read_to_string(saved_path)
+            .unwrap()
+            .contains("passed_inventory_before_noise"));
+        assert!(
+            error.contains(saved_path),
+            "deferred response must expose retained transcript: {error}"
+        );
+        let mut document = serde_json::to_value(&predecessor).unwrap();
+        document["commands"][0]["future_measurement"] = serde_json::json!({"count": 7});
+        predecessor = serde_json::from_value(document).unwrap();
+        save(dir.path(), &predecessor).unwrap();
+        let predecessor = load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-resume", None),
+            EvidenceStatus::Deferred
+        );
+        let mut admitted = Vec::new();
+        let mut admit = |command: &str, _: &VerificationHost| {
+            admitted.push(command.to_string());
+            Ok(None)
+        };
+        let (record, transcript) = run_verification_for_caller(
+            dir.path(),
+            "sess-resume",
+            &commands,
+            &authority,
+            &[],
+            RunOptions {
+                admit_command: Some(&mut admit),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(dir.path().join(".gwt/command-count")).unwrap(),
+            b"x",
+            "a successful Heavy command must not run twice"
+        );
+        assert_eq!(admitted, vec![commands[2].clone(), commands[1].clone()]);
+        assert_eq!(record.started_at, predecessor.started_at);
+        assert_eq!(record.commands[0], predecessor.commands[0]);
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["commands"][0]["future_measurement"],
+            serde_json::json!({"count": 7})
+        );
+        assert!(transcript.contains(&predecessor.record_id));
+        assert!(record.all_passed && record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-resume", None),
+            EvidenceStatus::Fresh
+        );
     }
 
     #[test]
@@ -6927,7 +11871,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-trivial".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -6939,7 +11884,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 
@@ -6972,6 +11917,16 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _home_env = ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
             .unwrap();
@@ -6998,7 +11953,8 @@ mod tests {
         // Registered plan + covering run settles.
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-ob".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -7010,7 +11966,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
@@ -7035,6 +11991,7 @@ mod tests {
     const WORK_EVENT_SHARDS_PATH: &str = ".gwt/work/events";
 
     pub(crate) struct WorkEventGitFixture {
+        _gwt_home: Option<ScopedGwtHome>,
         _root: tempfile::TempDir,
         pub(crate) repo: PathBuf,
         remote: PathBuf,
@@ -7046,7 +12003,10 @@ mod tests {
         }
 
         fn tracked_shards() -> Self {
-            let fixture = Self::new(false);
+            let mut fixture = Self::new(false);
+            // These fixtures read trusted verification state while sibling
+            // tests change HOME. Pin the store for the fixture's whole life.
+            fixture._gwt_home = Some(ScopedGwtHome::set(fixture._root.path()));
             fixture.write_event_shard(
                 "base",
                 br#"{"id":"base"}
@@ -7090,6 +12050,7 @@ mod tests {
             );
 
             let fixture = Self {
+                _gwt_home: None,
                 _root: root,
                 repo,
                 remote,
@@ -7771,6 +12732,12 @@ mod tests {
                 probe.governance.cause,
                 Some(crate::cli::governance::GovernanceCause::Authority)
             );
+            let reason = probe.reason.as_deref().unwrap_or_default();
+            assert!(
+                reason.contains("unavailable is a consequence")
+                    && reason.contains("recover the owning Session authority"),
+                "authority loss must explain verification unavailability and recovery: {probe:?}"
+            );
         }
     }
 
@@ -7783,6 +12750,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("blocked generation recovery repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -7853,6 +12826,12 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("ledgerless compatibility repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -8022,7 +13001,7 @@ mod tests {
         .expect("register plan before run race");
         let authority = snapshot_verification_caller_authority(dir.path(), session_id)
             .expect("snapshot verification caller before run");
-        let artifacts_before = verification_artifact_bytes(dir.path());
+        let mut artifacts_before_rotation = None;
         let session_for_hook = session_id.to_string();
 
         let error = run_verification_inner(
@@ -8032,11 +13011,13 @@ mod tests {
             Some(&authority),
             &[],
             RunOptions::default(),
-            move || {
+            || {
+                artifacts_before_rotation = Some(verification_artifact_bytes(dir.path()));
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },
         )
-        .expect_err("capability rotation before run commit must fail closed");
+        .expect_err("capability rotation before run commit must fail closed")
+        .to_string();
         assert!(
             error.contains("current verification authority"),
             "run commit denial must be actionable: {error}"
@@ -8047,8 +13028,8 @@ mod tests {
         );
         assert_eq!(
             verification_artifact_bytes(dir.path()),
-            artifacts_before,
-            "capability race must leave plan/run evidence byte-equivalent"
+            artifacts_before_rotation.expect("snapshot immediately before authority rotation"),
+            "revoked capability must leave the running evidence byte-equivalent"
         );
     }
 
@@ -8083,6 +13064,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -8119,6 +13101,44 @@ mod tests {
             evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
             EvidenceStatus::WrongGeneration,
             "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+
+        // Simulate a GUI restart that lost both runner and watchdog, followed
+        // by another host process reusing the old runner's PID.
+        let mut unfinished = run;
+        unfinished.lifecycle = Some(interruption::RunLifecycle::running("old-runner"));
+        let mut document = serde_json::to_value(unfinished).unwrap();
+        document["lifecycle"]["runner_started_at"] =
+            (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+        save(dir.path(), &serde_json::from_value(document).unwrap()).unwrap();
+        persist_generation_scoped_session(dir.path(), "session-successor", successor.clone(), 1);
+        run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .unwrap();
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Run {
+                commands,
+                max_wait_secs: Some(0),
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let completed = load(dir.path()).unwrap().unwrap();
+        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert!(completed.all_passed);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-successor", Some(2359)),
+            EvidenceStatus::Fresh
         );
     }
 
@@ -8692,6 +13712,12 @@ mod tests {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty { states })
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+        let WorkEventSettlementStatus::Blocked(blocker) = &status else {
+            unreachable!()
+        };
+        let message = work_event_settlement_blocker_description_with_gate(blocker, false, None);
+        assert!(message.contains("bookkeeping delivery"), "{message}");
+        assert!(message.contains("verification evidence"), "{message}");
     }
 
     #[test]
@@ -8741,6 +13767,59 @@ mod tests {
         let deleted = WorkEventGitFixture::tracked_shards();
         fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
         assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn issue_5535_recovery_archives_only_untracked_canonical_work_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            "recovery-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&event);
+        let source = fixture.event_shard_path(&event.id);
+        let original = fs::read(&source).unwrap();
+        fixture.write_event_shard("invalid-event", b"{}\n");
+        let staged = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "staged-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&staged);
+        fixture.git_ok(&[
+            "add",
+            "--",
+            fixture.event_shard_path(&staged.id).to_str().unwrap(),
+        ]);
+        fs::write(fixture.repo.join("source.rs"), "uncommitted source").unwrap();
+
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            1
+        );
+        let archive = gwt_core::paths::gwt_work_event_shard_path(
+            &gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.repo)
+                .join("recovered-work-events")
+                .join("events"),
+            &event.id,
+        );
+        assert_eq!(fs::read(archive).unwrap(), original);
+        assert!(!source.exists());
+        assert!(fixture.event_shard_path("invalid-event").exists());
+        assert!(fixture.event_shard_path(&staged.id).exists());
+        assert_eq!(
+            fs::read_to_string(fixture.repo.join("source.rs")).unwrap(),
+            "uncommitted source"
+        );
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            0
+        );
+        assert_eq!(work_event_dirty_paths(&fixture.repo).unwrap().len(), 2);
     }
 
     #[test]
@@ -9762,6 +14841,17 @@ mod tests {
             !refusal.contains("dirty") && refusal.contains("has not been persisted"),
             "{refusal}"
         );
+
+        // #5216: verified delivery can close this obligation independently of
+        // bookkeeping. Later refreshes must retain the unpersisted identity.
+        let mut completed = refreshed;
+        completed.obligation_open = false;
+        persist_work_event_settlement_record(&fixture.repo, &completed).unwrap();
+        assert_eq!(
+            save_work_event_settlement_record(&fixture.repo, session_id, false).unwrap(),
+            completed,
+            "completion must preserve the pending event as audit evidence"
+        );
     }
 
     #[test]
@@ -10716,23 +15806,42 @@ mod tests {
 
     // Issue #4349 (AC-1): the run record itself binds the superset run to the
     // registered (derived) plan, so the completion gate never sees
-    // plan_not_covered / plan_changed for it. The commands fail fast here
-    // (no Cargo.toml in the fixture) — coverage is independent of exit codes.
+    // plan_not_covered / plan_changed for it. The missing packages fail fast
+    // here — coverage is independent of exit codes, with a resolved target.
     #[test]
     fn verify_run_covers_derived_plan_with_package_superset() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_home = dirs::home_dir().unwrap();
+        let _cargo_home = ScopedEnvVar::set(
+            "CARGO_HOME",
+            std::env::var_os("CARGO_HOME")
+                .unwrap_or_else(|| original_home.join(".cargo").into_os_string()),
+        );
+        let _rustup_home = ScopedEnvVar::set(
+            "RUSTUP_HOME",
+            std::env::var_os("RUSTUP_HOME")
+                .unwrap_or_else(|| original_home.join(".rustup").into_os_string()),
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='superset-target-fixture'\nversion='0.0.0'\n[lib]\npath='lib.rs'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "").unwrap();
+        fs::write(dir.path().join(".gitignore"), "/target\nCargo.lock\n").unwrap();
         let planned = "cargo test -p gwt --all-features".to_string();
         let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
         save_plan(
             dir.path(),
-            &VerificationPlanRecord {
+            &VerificationPlanRecord::from(VerificationPlanData {
+                format_version: Some(1),
                 session_id: "sess-4349".to_string(),
                 owner_number: None,
                 execution_binding: None,
@@ -10744,7 +15853,7 @@ mod tests {
                 quarantines: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
-            },
+            }),
         )
         .unwrap();
 

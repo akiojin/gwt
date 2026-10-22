@@ -40,6 +40,7 @@ pub struct AcceptanceCriteria {
     /// (`(visual)`), so review-time judgment must include visual assessment.
     pub visual_surface: bool,
     /// Criterion ids whose checklist box is not `[x]` (Issue #3917 AC-2).
+    /// Unnumbered unchecked items in an explicitly numbered block retain their text.
     /// Kept beside `ids` on purpose: [`AcceptanceSnapshot`] compares the id
     /// set only, so ticking a box is completion evidence, never drift.
     pub unchecked: Vec<String>,
@@ -232,10 +233,19 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         text.contains("(visual)") || text.contains("[visual]")
     });
     // Issue #3917 AC-2: an item without a ticked box is outstanding work.
-    let unchecked: Vec<String> = accepted
+    let unchecked: Vec<String> = items
         .iter()
-        .filter(|(_, checked, _)| !*checked)
-        .map(|(id, _, _)| id.clone())
+        .enumerate()
+        .filter(|(_, (_, checked, _))| !*checked)
+        .map(|(index, (id, _, text))| {
+            id.clone().unwrap_or_else(|| {
+                if has_explicit_ids {
+                    text.clone()
+                } else {
+                    format!("AC-{}", index + 1)
+                }
+            })
+        })
         .collect();
     let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
@@ -298,6 +308,9 @@ pub struct AutonomousGateInputs {
     pub reviewed_sha: String,
     /// The current branch HEAD SHA that would be merged.
     pub head_sha: String,
+    /// Issue #4726: whether GitHub can merge the PR as it stands. An armed
+    /// auto-merge never gets past a conflicting or behind branch on its own.
+    pub mergeability: gwt_git::pr_status::PrMergeability,
 }
 
 /// SPEC #3200 T-083/T-064/T-065/T-066 (FR-009..FR-016): the strong automated
@@ -308,7 +321,8 @@ pub struct AutonomousGateInputs {
 /// 2. CI is a real, non-vacuous success covering every required check,
 /// 3. the independent review verdict is `Pass`,
 /// 4. the acceptance criteria are unchanged since launch (no tamper),
-/// 5. the reviewed SHA equals the head SHA and is non-empty (TOCTOU binding).
+/// 5. the reviewed SHA equals the head SHA and is non-empty (TOCTOU binding),
+/// 6. the PR is neither conflicting nor behind its base (Issue #4726).
 ///
 /// Any divergence ⇒ [`GateDecision::Fail`] (fail-closed). This is the only
 /// function permitted to authorize `skipped(autonomous-mode)`.
@@ -361,7 +375,25 @@ pub fn evaluate_autonomous_gate(inputs: &AutonomousGateInputs) -> GateDecision {
         ));
     }
 
+    if let Some(reason) = unmergeable_reason(inputs.mergeability) {
+        return GateDecision::Fail(reason.to_string());
+    }
+
     GateDecision::Pass
+}
+
+/// Issue #4726: why GitHub will not merge a PR in this state, if it will not.
+/// `Unknown` is not a refusal: GitHub is still computing, and the Delivering
+/// merge-watch re-reads it every scan.
+pub fn unmergeable_reason(
+    mergeability: gwt_git::pr_status::PrMergeability,
+) -> Option<&'static str> {
+    use gwt_git::pr_status::PrMergeability;
+    match mergeability {
+        PrMergeability::Conflicting => Some("PR has merge conflicts with its base branch"),
+        PrMergeability::Behind => Some("PR branch is behind its base branch"),
+        PrMergeability::Mergeable | PrMergeability::Unknown => None,
+    }
 }
 
 /// Classify a `gh pr view --json statusCheckRollup` body against the set of
@@ -478,6 +510,8 @@ pub enum GateAction {
 ///   fresh attempt implements the moved spec against a new snapshot);
 /// - HEAD advanced past the reviewed SHA ⇒ [`GateAction::Remediate`] (re-review
 ///   the new SHA, bounded by attempts);
+/// - PR conflicting or behind its base ⇒ [`GateAction::Remediate`] (Issue #4726:
+///   an armed auto-merge would sit on it forever; a fresh attempt updates it);
 /// - CI still pending ⇒ [`GateAction::WaitForCi`] (no attempt consumed);
 /// - CI failed or review rejected ⇒ [`GateAction::Remediate`] (bounded fix loop).
 pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
@@ -497,6 +531,9 @@ pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
         return GateAction::Remediate(
             "HEAD advanced past the reviewed SHA — re-review".to_string(),
         );
+    }
+    if let Some(reason) = unmergeable_reason(inputs.mergeability) {
+        return GateAction::Remediate(format!("{reason} — update the branch"));
     }
     if matches!(inputs.ci, CiOutcome::Pending) {
         return GateAction::WaitForCi;
@@ -665,6 +702,13 @@ mod tests {
                     - [ ] AC-3: also real\n";
         let c = classify_acceptance_criteria(body);
         assert_eq!(c.ids, vec!["AC-1", "AC-3"]);
+        // Issue #5126: preserving snapshot IDs must not hide unchecked work.
+        let mixed = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [x] AC-1: done\n- [ ] remaining check\n",
+        );
+        assert_eq!(mixed.ids, vec!["AC-1"]);
+        assert_eq!(mixed.unchecked, vec!["remaining check"]);
+        assert!(!mixed.all_checked());
     }
 
     #[test]
@@ -791,7 +835,34 @@ mod tests {
                 acceptance_unchanged: true,
                 reviewed_sha: "abc123".to_string(),
                 head_sha: "abc123".to_string(),
+                mergeability: gwt_git::pr_status::PrMergeability::Mergeable,
             }
+        }
+
+        /// Issue #4726 AC-1: CI green and review Pass must not arm an
+        /// auto-merge GitHub will never carry out.
+        #[test]
+        fn conflicting_or_behind_pr_is_never_delivered() {
+            use gwt_git::pr_status::PrMergeability;
+            for mergeability in [PrMergeability::Conflicting, PrMergeability::Behind] {
+                let inputs = AutonomousGateInputs {
+                    mergeability,
+                    ..all_pass_inputs()
+                };
+                assert!(
+                    matches!(evaluate_autonomous_gate(&inputs), GateDecision::Fail(_)),
+                    "{mergeability:?} must fail the gate"
+                );
+                assert!(
+                    matches!(route_autonomous_gate(&inputs), GateAction::Remediate(_)),
+                    "{mergeability:?} must route to Remediate"
+                );
+            }
+            let unknown = AutonomousGateInputs {
+                mergeability: PrMergeability::Unknown,
+                ..all_pass_inputs()
+            };
+            assert_eq!(route_autonomous_gate(&unknown), GateAction::Deliver);
         }
 
         #[test]

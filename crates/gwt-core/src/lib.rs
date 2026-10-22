@@ -12,9 +12,11 @@ pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod daemon_pipe_name;
+pub mod deadline_budget;
 pub mod error;
 pub mod error_ledger;
 pub mod fd_limit;
+pub mod feedback;
 pub mod github_budget;
 pub mod github_quota;
 pub mod index;
@@ -25,6 +27,10 @@ pub mod migration;
 pub mod named_pipe;
 pub mod operation_deadline;
 pub mod paths;
+pub mod pm_authorization;
+pub mod pm_peer;
+pub mod pm_report;
+pub mod pm_status;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;
@@ -39,13 +45,16 @@ pub mod skill_state;
 pub mod test_support;
 pub mod update;
 pub mod usage;
+pub mod user_instruction;
 pub mod verification_priority;
 pub mod work_events_intake;
 pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
-pub use error::{GwtError, JsonDecodeKind, Result};
+pub use error::{
+    GwtError, JsonDecodeKind, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind,
+};
 
 #[cfg(test)]
 mod canonical_naming_tests {

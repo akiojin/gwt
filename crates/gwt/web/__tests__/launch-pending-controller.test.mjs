@@ -222,7 +222,7 @@ test("workspace Resume errors settle exactly before sticky feedback and cache-fi
   );
   assert.match(
     settledBlock,
-    /scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    /scheduleKnowledgeRelatedWorkRefresh\(true\)/,
     "an exact Resume failure must refresh Related Work through its cache-first scheduler",
   );
   assert.equal(
@@ -231,7 +231,7 @@ test("workspace Resume errors settle exactly before sticky feedback and cache-fi
     "the Resume error case must not show feedback outside the exact-settle guard",
   );
   assert.equal(
-    errorCase.match(/scheduleKnowledgeRelatedWorkRefresh\(\)/g)?.length,
+    errorCase.match(/scheduleKnowledgeRelatedWorkRefresh\(true\)/g)?.length,
     1,
     "the Resume error case must not refresh outside the exact-settle guard",
   );
@@ -334,10 +334,11 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
   const timers = createFakeTimers();
   const pending = createLaunchPendingController(timers);
   const sent = [];
+  let operationCount = 0;
   const dispatcher = createContinueWorkDispatcher({
     launchPending: pending,
     send: (message) => sent.push(message),
-    createOperationId: () => "continue-operation-1",
+    createOperationId: () => `continue-operation-${++operationCount}`,
   });
   const bounds = { x: 10, y: 20, width: 800, height: 600 };
 
@@ -367,6 +368,27 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
     "continue-operation-1",
     "a timeout retry preserves the idempotency key",
   );
+  dispatcher.handleOutcome({
+    kind: "continue_work_outcome",
+    operation_id: "continue-operation-1",
+    work_id: "work-opaque-1",
+    outcome: "failed",
+    error_code: "continuation_reconciliation_required",
+    retryable: true,
+  });
+  assert.equal(pending.isPending("continue:work-opaque-1"), false);
+  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(sent[2].operation_id, "continue-operation-1");
+  dispatcher.handleOutcome({
+    kind: "continue_work_outcome",
+    operation_id: "continue-operation-1",
+    work_id: "work-opaque-1",
+    outcome: "failed",
+    error_code: "candidate_launch_failed",
+    retryable: true,
+  });
+  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(sent[3].operation_id, "continue-operation-2");
 });
 
 test("Continue work dispatcher ignores stale outcomes and settles only strong exact correlation", () => {

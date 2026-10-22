@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
-const workspaceSource = readFileSync(resolve(here, "../workspace-kanban-surface.js"), "utf8");
+const workspaceSource = readFileSync(resolve(here, "../issue-other-surface.js"), "utf8");
 const releaseNotesSource = readFileSync(resolve(here, "../release-notes-window.js"), "utf8");
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
@@ -14,7 +14,7 @@ const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "u
 test("Workspace Overview is governed by Quiet Work UI list filters + Detail", () => {
   assert.match(workspaceSource, /workspace-overview-root/);
   assert.match(workspaceSource, /workspace-overview-list-pane/);
-  assert.match(workspaceSource, /workspace-overview-filter-bar/);
+  assert.match(workspaceSource, /issue-other-summary/);
   assert.match(workspaceSource, /workspace-overview-list/);
   assert.match(workspaceSource, /workspace-overview-detail-pane/);
   assert.doesNotMatch(
@@ -94,7 +94,6 @@ test("Core readable surfaces opt into the text-first app-wide format bridge", ()
     ".workspace-detail-agent",
     ".workspace-detail-event",
     ".terminal-overlay",
-    ".file-tree-viewer-body",
     ".board-panel",
     ".logs-panel",
     ".knowledge-panel",

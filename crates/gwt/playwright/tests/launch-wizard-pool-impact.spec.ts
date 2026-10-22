@@ -65,7 +65,7 @@ test.describe("Launch Wizard — Issue Monitor candidate pool impact", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, SETTINGS_WIZARD);
     const modal = page.locator("#wizard-modal");
@@ -97,7 +97,7 @@ test.describe("Launch Wizard — Issue Monitor candidate pool impact", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, {
       ...SETTINGS_WIZARD,

@@ -65,6 +65,8 @@ pub struct ManagedHookHealth {
     pub pending_goal: Option<PendingHookGoal>,
     pub slow_handlers: Vec<HookProfileEvidence>,
     pub issues: Vec<String>,
+    /// Advisory conflicts never change managed hook readiness.
+    pub external_skill_conflicts: super::external_skill_conflicts::ConflictReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +115,8 @@ pub struct ManagedHookRepairOutcome {
 struct RuntimeStateReadModel {
     pub status: String,
     pub updated_at: String,
+    // Keep the required string in the input contract even though health does not
+    // read it; removing it would accept missing or incorrectly typed runtime state.
     #[allow(dead_code)]
     pub last_activity_at: String,
     #[serde(default)]
@@ -144,6 +148,8 @@ pub struct ManagedHookFailureSnapshot {
     surface_audits: Arc<SurfaceAuditCounters>,
     /// Issue #4257: bare hook binaries resolved during this projection.
     hook_binaries: HookBinaryResolutionCache,
+    /// Session selection, health and recovery share one runtime read per projection.
+    runtime_states: RefCell<HashMap<PathBuf, Arc<CachedRuntimeState>>>,
 }
 
 /// Memo of bare hook-binary resolution for one projection.
@@ -223,6 +229,7 @@ impl ManagedHookFailureSnapshot {
             by_worktree,
             surface_audits: Arc::default(),
             hook_binaries: HookBinaryResolutionCache::default(),
+            runtime_states: RefCell::default(),
         }
     }
 
@@ -242,6 +249,25 @@ impl ManagedHookFailureSnapshot {
             refreshed: self.surface_audits.refreshed.load(Ordering::Relaxed),
             reused: self.surface_audits.reused.load(Ordering::Relaxed),
         }
+    }
+
+    /// Session ordering uses the same JSON snapshot as its eventual health read.
+    pub fn runtime_state_updated_at(
+        &self,
+        path: &Path,
+    ) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        self.runtime_state(path).updated_at
+    }
+
+    fn runtime_state(&self, path: &Path) -> Arc<CachedRuntimeState> {
+        if let Some(state) = self.runtime_states.borrow().get(path) {
+            return Arc::clone(state);
+        }
+        let state = cached_runtime_state(path);
+        self.runtime_states
+            .borrow_mut()
+            .insert(path.to_path_buf(), Arc::clone(&state));
+        state
     }
 }
 
@@ -270,11 +296,13 @@ fn read_managed_hook_health_with(
         }),
         slow_handlers: Vec::new(),
         issues: Vec::new(),
+        external_skill_conflicts: Default::default(),
     };
 
     let surface = cached_surface_audit(input, failures);
     health.status = surface.status;
     health.issues = surface.issues;
+    health.external_skill_conflicts = surface.external_skill_conflicts;
     audit_hook_profile(input, &mut health);
     audit_hook_failures(input, failures, &mut health);
 
@@ -286,23 +314,24 @@ fn read_managed_hook_health_with(
         return health;
     };
 
-    if !runtime_state_path.exists() {
+    let runtime = failures.runtime_state(runtime_state_path);
+    let Some(state) = runtime.state.as_ref() else {
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
         }
         apply_self_healed_marker(input, &mut health);
         return health;
-    }
+    };
 
-    match read_runtime_state(runtime_state_path) {
+    match state {
         Ok(runtime_state) => {
-            if let Some(source_event) = runtime_state.source_event {
-                health.last_event = Some(source_event);
-                health.last_event_at = Some(runtime_state.updated_at);
+            if let Some(source_event) = runtime_state.source_event.as_ref() {
+                health.last_event = Some(source_event.clone());
+                health.last_event_at = Some(runtime_state.updated_at.clone());
             } else if health.status == ManagedHookHealthStatus::Ready {
                 health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
             }
-            health.pending_discussion = runtime_state.pending_discussion;
+            health.pending_discussion = runtime_state.pending_discussion.clone();
             if runtime_state.status == "Stopped" && health.status == ManagedHookHealthStatus::Ready
             {
                 health.status = ManagedHookHealthStatus::Inactive;
@@ -431,7 +460,7 @@ fn audit_hook_failures(
         let completed_at = input
             .runtime_state_path
             .as_deref()
-            .and_then(read_last_completed_hook_event_at);
+            .and_then(|path| failures.runtime_state(path).completed_at);
         let recovered = completed_at.is_some_and(|at| at > row.recorded_at);
         let state = if recovered { "recovered" } else { "unresolved" };
         let issue = describe_hook_failure(row, state);
@@ -464,21 +493,12 @@ fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str)
     )
 }
 
-fn read_last_completed_hook_event_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
-    let raw = fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
-    let at = value.get("last_completed_hook_event_at")?.as_str()?;
-    chrono::DateTime::parse_from_rfc3339(at)
-        .ok()
-        .map(|at| at.with_timezone(&chrono::Utc))
-}
-
 fn comparable_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Environment that decides how a bare hook binary such as `gwtd` resolves.
-const SURFACE_AUDIT_ENV: &[&str] = &["PATH", "GWT_BIN_PATH"];
+const SURFACE_AUDIT_ENV: &[&str] = &["PATH", "GWT_BIN_PATH", "HOME", "USERPROFILE"];
 
 /// Managed hook surface audits reused across projections (Issue #4370).
 ///
@@ -514,6 +534,7 @@ struct CachedSurfaceAudit {
 struct SurfaceAudit {
     status: ManagedHookHealthStatus,
     issues: Vec<String>,
+    external_skill_conflicts: super::external_skill_conflicts::ConflictReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,6 +583,7 @@ fn cached_surface_audit(
         pending_goal: None,
         slow_handlers: Vec::new(),
         issues: Vec::new(),
+        external_skill_conflicts: Default::default(),
     };
     let mut dependencies = Vec::new();
     audit_managed_hook_configs(
@@ -570,12 +592,22 @@ fn cached_surface_audit(
         &mut scratch,
         &mut dependencies,
     );
+    scratch.external_skill_conflicts =
+        super::external_skill_conflicts::scan_worktree(&input.worktree_root);
+    dependencies.extend(
+        scratch
+            .external_skill_conflicts
+            .watched_paths
+            .iter()
+            .cloned(),
+    );
     fingerprint
         .files
         .extend(dependencies.iter().map(|path| file_stamp(path)));
     let audit = SurfaceAudit {
         status: scratch.status,
         issues: scratch.issues,
+        external_skill_conflicts: scratch.external_skill_conflicts,
     };
     counters.refreshed.fetch_add(1, Ordering::Relaxed);
     cache.lock().unwrap_or_else(PoisonError::into_inner).insert(
@@ -589,8 +621,36 @@ fn cached_surface_audit(
     audit
 }
 
+/// File inputs for the Work projection's hook health snapshot. Runtime state
+/// and the error ledger are fingerprinted separately by the projection.
+pub fn managed_hook_health_dependency_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = watched_surface_paths(worktree);
+    paths.extend([
+        worktree.join(SELF_HEALED_MARKER),
+        gwt_core::paths::gwt_work_notes_discussions_path(worktree),
+        worktree.join(crate::discussion_resume::CANONICAL_DISCUSSIONS_DISPLAY_PATH),
+        worktree.join(crate::discussion_resume::DISCUSSION_RELATIVE_PATH),
+    ]);
+    let input = ManagedHookHealthInput::new(worktree);
+    let key = SurfaceAuditKey {
+        worktree: input.worktree_root,
+        expected_hook_bin: input.expected_hook_bin,
+    };
+    if let Some(cache) = SURFACE_AUDITS.get() {
+        if let Some(cached) = cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            paths.extend(cached.dependencies.iter().cloned());
+        }
+    }
+    paths
+}
+
 /// Every path whose presence or content decides the surface audit.
 fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
+    let external_paths = super::external_skill_conflicts::discovery_paths(worktree);
     let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
     let worktree = runtime.as_deref().unwrap_or(worktree);
     let mut paths = vec![
@@ -599,6 +659,7 @@ fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
         worktree.join(".codex"),
         worktree.join(".codex/hooks.json"),
     ];
+    paths.extend(external_paths);
     for hooks in crate::managed_assets::managed_codex_hook_paths(worktree) {
         paths.push(codex_root_of(&hooks));
         paths.push(hooks);
@@ -763,21 +824,11 @@ fn audit_managed_git_hooks(
 
 /// The binary a config at `path` is expected to fall back to.
 ///
-/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
-/// config and the absolute install path into a machine-local one, so the
-/// auditor has to ask the same question. Auditing a tracked config against the
-/// running binary's absolute path reported "binary skew" forever, and startup
-/// self-heal answered it by rewriting the tracked file on every boot — the loop
-/// that kept every worktree permanently dirty.
-fn expected_hook_bin_for_config_path<'a>(
-    path: &Path,
-    configured: Option<&'a str>,
-) -> Option<&'a str> {
-    configured?;
-    if gwt_skills::managed_hook_config_is_git_tracked(path) {
-        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
-    }
-    configured
+/// Use the same destination policy as generation and trust registration.
+/// Otherwise a canonical shared-root config looks skewed against the writer's
+/// install pin, causing startup to self-heal it on every boot (#3567, #5270).
+fn expected_hook_bin_for_config_path(path: &Path, configured: Option<&str>) -> Option<String> {
+    configured.map(|bin| gwt_skills::settings_local::sanitize_hook_bin_for_config_path(path, bin))
 }
 
 fn audit_hook_json_config(
@@ -804,7 +855,27 @@ fn audit_hook_json_config(
     };
 
     for event in MANAGED_EVENTS {
-        let commands = hook_commands_for_event(&root, event);
+        let raw_commands = hook_commands_for_event(&root, event);
+        for command in &raw_commands {
+            if is_managed_event_command(command, event)
+                && command.starts_with("powershell ")
+                && command.contains(" -Command \"")
+            {
+                needs_attention(
+                    health,
+                    format!(
+                        "managed hook PowerShell transport unsafe: {}",
+                        path.display()
+                    ),
+                );
+            }
+        }
+        let commands: Vec<_> = raw_commands
+            .into_iter()
+            .map(|command| {
+                gwt_skills::decode_powershell_encoded_command(&command).unwrap_or(command)
+            })
+            .collect();
         if !commands
             .iter()
             .any(|command| is_managed_event_command(command, event))
@@ -835,7 +906,7 @@ fn audit_hook_json_config(
                 );
             }
         }
-        if let Some(expected) = expected_hook_bin {
+        if let Some(expected) = expected_hook_bin.as_deref() {
             for command in commands {
                 if !is_managed_event_command(&command, event) {
                     continue;
@@ -872,7 +943,15 @@ fn audit_provider_hook_config(
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
-    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
+    // Provider generators keep explicit pins; only Claude/Codex JSON writers
+    // use the destination sanitizer. Preserve the provider audit contract.
+    let expected_hook_bin = expected_hook_bin.map(|bin| {
+        if gwt_skills::managed_hook_config_is_git_tracked(path) {
+            gwt_skills::CANONICAL_HOOK_BIN
+        } else {
+            bin
+        }
+    });
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -1158,9 +1237,63 @@ fn push_unique_issue(health: &mut ManagedHookHealth, issue: String) {
     }
 }
 
-fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&raw).map_err(|error| error.to_string())
+/// Issue #5120: unchanged runtime files reuse their decoded result across projections.
+static RUNTIME_STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CachedRuntimeState>>>> = OnceLock::new();
+
+#[derive(Debug)]
+struct CachedRuntimeState {
+    stamp: Option<FileStamp>,
+    updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Missing files remain distinct from malformed or unreadable files.
+    state: Option<Result<RuntimeStateReadModel, String>>,
+}
+
+fn cached_runtime_state(path: &Path) -> Arc<CachedRuntimeState> {
+    // Stamp before reading so a concurrent rewrite is noticed next projection.
+    let stamp = file_stamp(path);
+    let cache = RUNTIME_STATES.get_or_init(Mutex::default);
+    if let Some(cached) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+    {
+        if cached.stamp == stamp {
+            return Arc::clone(cached);
+        }
+    }
+    let mut runtime = CachedRuntimeState {
+        stamp,
+        updated_at: None,
+        completed_at: None,
+        state: None,
+    };
+    if stamp.is_some() {
+        let value = fs::read(path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| {
+                serde_json::from_slice::<Value>(&raw).map_err(|error| error.to_string())
+            });
+        runtime.state = Some(value.and_then(|value| {
+            // Preserve selection/recovery timestamps even when typed health is invalid.
+            let timestamp = |field| {
+                value
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            };
+            runtime.updated_at = timestamp("updated_at");
+            runtime.completed_at =
+                timestamp("last_completed_hook_event_at").map(|at| at.with_timezone(&chrono::Utc));
+            serde_json::from_value(value).map_err(|error| error.to_string())
+        }));
+    }
+    let runtime = Arc::new(runtime);
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf(), Arc::clone(&runtime));
+    runtime
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
@@ -1188,6 +1321,18 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
 #[cfg(test)]
 mod tests {
     use super::hook_command_binary_fallback;
+
+    #[test]
+    fn shared_root_codex_health_expects_the_canonical_fallback() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let path = repo.path().join(".codex/hooks.json");
+        assert_eq!(
+            super::expected_hook_bin_for_config_path(&path, Some("/installed/gwtd")).as_deref(),
+            Some(gwt_skills::CANONICAL_HOOK_BIN)
+        );
+        assert!(super::expected_hook_bin_for_config_path(&path, None).is_none());
+    }
 
     #[test]
     fn posix_two_stage_runtime_fallback_decodes_embedded_apostrophes() {

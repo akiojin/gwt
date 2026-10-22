@@ -48,6 +48,23 @@ function createFixture() {
   return { document };
 }
 
+test("dispose cancels pending or visible overlays and prevents later reconnect UI", () => {
+  for (const visible of [false, true]) {
+    const { document } = createFixture();
+    const timers = createFakeTimers();
+    const overlay = createConnectionOverlay({ document, ...timers });
+    overlay.setConnected(false);
+    if (visible) timers.fireAll();
+    overlay.dispose();
+    assert.equal(timers.size(), 0);
+    assert.equal(document.querySelector('.connection-overlay'), null);
+    overlay.setConnected(false);
+    timers.fireAll();
+    assert.equal(timers.size(), 0);
+    assert.equal(document.querySelector('.connection-overlay'), null);
+  }
+});
+
 test("disconnect shows the overlay only after the grace period", () => {
   const fixture = createFixture();
   const timers = createFakeTimers();
@@ -125,4 +142,24 @@ test("repeated disconnect notifications do not stack overlays or timers", () => 
     1,
     "a single overlay element",
   );
+});
+
+test("discarded input is reported immediately and again after reconnect, independently of the overlay", () => {
+  const { document } = createFixture();
+  const timers = createFakeTimers();
+  const notices = [];
+  const overlay = createConnectionOverlay({ document, ...timers,
+    onInputDropped: (connected) => notices.push(connected),
+  });
+  overlay.setConnected(false);
+  overlay.reportInputDropped();
+  assert.deepEqual(notices, [false], "do not wait for the overlay grace timer");
+  assert.equal(document.querySelector(".connection-overlay"), null);
+  timers.fireAll();
+  overlay.setConnected(true);
+  assert.deepEqual(notices, [false, true], "retain a retype reminder when the overlay disappears");
+  assert.equal(document.querySelector(".connection-overlay"), null);
+  overlay.setConnected(false);
+  overlay.setConnected(true);
+  assert.deepEqual(notices, [false, true], "a later outage without input adds no reminder");
 });

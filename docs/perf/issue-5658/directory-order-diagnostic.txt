@@ -1,0 +1,10 @@
+probe_pid=12304 root="\\\\?\\E:\\gwt\\work\\issue-5658\\target\\issue-5658-home-9d0cb3721c774a6abf7fa54f4197330d\\.gwt\\sessions\\runtime"
+ordered_paths=9327 namespaces=2647 sidecars=5698 bytes=2223746 full_path_hash=c8fa4e6329c39edb metadata_hash=0c7f6a8cbb0673e0
+proof variant=fullpath_sort_duplicate_path identical_full_order=true identical_metadata=true path_hash=c8fa4e6329c39edb metadata_hash=0c7f6a8cbb0673e0
+timing variant=fullpath_sort_duplicate_path rounds=20 wall_ms=4350.226 cpu_ms=3640.625 bytes_sum=44474920
+proof variant=filename_sort_duplicate_path identical_full_order=true identical_metadata=true path_hash=c8fa4e6329c39edb metadata_hash=0c7f6a8cbb0673e0
+timing variant=filename_sort_duplicate_path rounds=20 wall_ms=3091.206 cpu_ms=2875.000 bytes_sum=44474920
+proof variant=fullpath_sort_reuse_path identical_full_order=true identical_metadata=true path_hash=c8fa4e6329c39edb metadata_hash=0c7f6a8cbb0673e0
+timing variant=fullpath_sort_reuse_path rounds=20 wall_ms=4035.582 cpu_ms=3265.625 bytes_sum=44474920
+proof variant=filename_sort_reuse_path identical_full_order=true identical_metadata=true path_hash=c8fa4e6329c39edb metadata_hash=0c7f6a8cbb0673e0
+timing variant=filename_sort_reuse_path rounds=20 wall_ms=2789.157 cpu_ms=2718.750 bytes_sum=44474920

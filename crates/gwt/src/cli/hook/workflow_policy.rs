@@ -19,6 +19,7 @@ use std::{io::Read, path::Path};
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
+use gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_OPERATION;
 
 use crate::discussion_resume::PendingDiscussionGoal;
 use crate::pm_registry::pm_identity_exempt_session_for_worktree;
@@ -39,6 +40,12 @@ pub struct WorkflowContext {
     /// satisfy the identity gate. Decided by
     /// [`crate::pm_registry::pm_identity_exempt_session`].
     pub pm_session: bool,
+    /// Issue #4680 (AC-3): this PM has run `issue.spec.list` recently enough
+    /// for the registration it is about to make. Only meaningful together
+    /// with `pm_session`; every other session registers unconditionally,
+    /// because agents do not call `issue.create` at all (they post Issue
+    /// proposals to the Board and the PM registers them).
+    pub pm_spec_survey_fresh: bool,
 }
 
 impl WorkflowContext {
@@ -66,6 +73,11 @@ impl WorkflowContext {
 
     pub fn with_pm_session(mut self, pm_session: bool) -> Self {
         self.pm_session = pm_session;
+        self
+    }
+
+    pub fn with_pm_spec_survey_fresh(mut self, fresh: bool) -> Self {
+        self.pm_spec_survey_fresh = fresh;
         self
     }
 }
@@ -108,6 +120,11 @@ pub fn evaluate_with_context(
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
+    let spec_survey =
+        evaluate_pm_spec_survey_guard(event, context.pm_session && !context.pm_spec_survey_fresh)?;
+    if spec_survey != HookOutput::Silent {
+        return Ok(spec_survey);
+    }
     Ok(HookOutput::Silent)
 }
 
@@ -121,6 +138,16 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
         )
         .with_review_dispatch_session(crate::issue_monitor_review::review_dispatch_session_active())
         .with_pm_session(pm_identity_exempt_session_for_worktree(worktree_root));
+    // Issue #4680: the survey and the registration it covers arrive in two
+    // separate hook processes, so the observation has to be written here, on
+    // the way past, before the context is read. Recording first also means a
+    // PM that runs `issue.spec.list` and `issue.create` back to back is never
+    // denied by its own in-flight survey.
+    if event.command().is_some_and(is_spec_survey_command) {
+        super::pm_spec_survey::record_survey(worktree_root);
+    }
+    let context =
+        context.with_pm_spec_survey_fresh(super::pm_spec_survey::survey_is_fresh(worktree_root));
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -148,6 +175,13 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    agent_workspace_identity_missing(worktree_root, &session)
+}
+
+fn agent_workspace_identity_missing(
+    worktree_root: &Path,
+    session: &Session,
+) -> Result<bool, HookError> {
     // The title requirement is meaningful only for the same Session/container
     // that workspace.update itself can mutate. A stale ambient Session must
     // not brick an unrelated cwd, repository, or branch before the user can
@@ -162,6 +196,13 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     } else {
         worktree_root
     };
+    // Issue #5078 (AC-4): a restored window of a Completed execution has no
+    // work left to label, and the Host refuses its `workspace.update`. Holding
+    // the gate there only loops; the window must reach settlement and close.
+    // An explicit relaunch opens an Active successor, which the gate covers.
+    if crate::cli::execution_state::is_completed(projection_root) {
+        return Ok(false);
+    }
     let Some(projection) = load_workspace_projection(projection_root)? else {
         return Ok(false);
     };
@@ -198,7 +239,7 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
-    if is_identity_gate_exempt_event(event) {
+    if is_identity_gate_exempt_event(event) || is_escalation_event(event) {
         return Ok(HookOutput::Silent);
     }
 
@@ -214,7 +255,7 @@ Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
 workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
-While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -328,6 +369,53 @@ Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{
         ));
     }
     Ok(HookOutput::Silent)
+}
+
+/// Issue #4680 (AC-3 / AC-4): the PM registers a new Issue only after it has
+/// established which `gwt-spec` owns the area.
+///
+/// The gate asks whether the PM looked, never what it found. An Issue that
+/// belongs to no spec registers exactly as before — the remedy for a denial
+/// is one read-only `issue.spec.list`, whose answer may well be "none owns
+/// this". That is why this is a gate and not a classifier: classifying the
+/// area would have to be right, and a wrong classification would block real
+/// work (the failure mode SPEC #3245 removed the owner guard for).
+///
+/// Only PM sessions are gated. Implementation agents never call
+/// `issue.create`: they post Issue proposals to the Board and the PM registers
+/// them, so gating them would deny an operation they do not perform.
+fn evaluate_pm_spec_survey_guard(
+    event: &HookEvent,
+    survey_required: bool,
+) -> Result<HookOutput, HookError> {
+    if !survey_required {
+        return Ok(HookOutput::Silent);
+    }
+    if !is_issue_registration_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(HookOutput::pre_tool_use_permission(
+        "establish the owning gwt-spec before registering",
+        "Run JSON operation `issue.spec.list` first, then register.\n\n\
+It returns every open `gwt-spec` with its scope in one call, so it cannot miss the owner the way a keyword phrasing can. `gwt-search` is the supporting step: an empty search result does not establish that no spec owns the area, because the result turns on the words you chose.\n\n\
+Read the candidate owner's body, spec/plan/tasks, and all addenda, corrections, and comments. Compare them with current develop, source code, tests, merged PRs, and closed Issues before deciding what remains. Update the existing owner's FR/AC, or justify an independently deliverable child Issue that names its parent.\n\n\
+For `issue.create`, supply `params.owner_check`: `owner_spec` is a positive spec number with a nonempty `reason` for the child, or null with nonempty `search_queries` when no spec owns the area. Record the rationale and search queries in one to three lines. No owner remains a valid outcome; this survey gate asks whether you looked, not what you found."
+            .to_string(),
+    ))
+}
+
+/// The two operations that put a new Issue into the backlog.
+fn is_issue_registration_event(event: &HookEvent) -> bool {
+    event.command().is_some_and(is_issue_registration_command)
+}
+
+fn is_issue_registration_command(command: &str) -> bool {
+    is_json_envelope_operation(command, &["issue.create", "issue.spec.create"])
+}
+
+/// The read-only survey whose execution the gate above is waiting for.
+fn is_spec_survey_command(command: &str) -> bool {
+    is_json_envelope_operation(command, &["issue.spec.list"])
 }
 
 /// SPEC-3248 P9a (T-120): the execution/evidence state files are written
@@ -523,11 +611,17 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
     if event.tool_name.as_deref() != Some("Bash") {
         return false;
     }
-    event
-        .command()
-        .and_then(json_envelope_operation)
+    let Some(command) = event.command() else {
+        return false;
+    };
+    json_envelope_operation(command)
         .as_deref()
-        .is_some_and(is_identity_gate_exempt_operation)
+        .is_some_and(|operation| {
+            is_identity_gate_exempt_operation(operation)
+                // Naming must not carry a file write past the identity gate.
+                && (operation != PANE_NAME_FIRST_ACTION_OPERATION
+                    || !has_file_output_redirection(command))
+        })
 }
 
 /// Issue #4533: the operations a session may run while the Agent Workspace
@@ -553,11 +647,10 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 ///   It does not claim delivery. `execution.complete` and `build.abort`
 ///   remain gated: completion and discarding Work are not blocker reporting.
 ///
-/// `available_recoveries` can also name `verify.plan` / `verify.run`, and
-/// those stay gated on purpose: they take the host-wide verification lease and
-/// mint a session-bound evidence record, which is exactly the anonymous
+/// `verify.plan` / `verify.run` stay gated on purpose: they take the verification
+/// lease and mint a session-bound evidence record, which is exactly the anonymous
 /// side effect the gate exists to prevent. They are reachable the moment the
-/// gate lifts, which the escape above always does.
+/// gate lifts. Closed-gate diagnosis omits them from `available_recoveries`.
 ///
 /// AC-2 — a bookkeeping-only `git commit` is deliberately **not** exempted.
 /// The `chore(work):` convention bounds the subject line, never the index: a
@@ -570,9 +663,11 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
 /// now spells out in the refusal itself (AC-1).
 pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "execution.adopt"
+    // Issue #5705: the canonical startup operation must run before identity.
+    operation == PANE_NAME_FIRST_ACTION_OPERATION
+        || matches!(
+            operation,
+            "execution.adopt"
             | "execution.repair"
             | "execution.reopen"
             | "execution.release_prepared"
@@ -585,9 +680,48 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // is exactly the kind that cannot set a title yet needs to settle.
             | "execution.no_action"
             | "execution.no-action"
+            // Both typed exits authenticate their subject and exact proof
+            // internally; neither requires a verification lease or Work title.
+            | "execution.settle_delivered"
+            | "pr.create_from_ci"
             | "execution.blocked"
             | "memory.add"
-    )
+            // Feedback retains its own source identity and native consent.
+            // A broken Work assignment must not prevent reporting that fault.
+            | "feedback.create"
+            | "feedback.process"
+            | "feedback.retry"
+        )
+}
+
+/// Issue #5078 (AC-3): the PM escalation path never waits for the identity.
+///
+/// A session trapped by the gate must be able to say so: `board.post` with
+/// `kind:"blocked"` reaches the PM, and `issue.comment` leaves the durable
+/// record on the owner Issue. Neither touches version control, Work, or a
+/// lease. Other Board kinds stay gated so the exemption cannot carry ordinary
+/// progress reporting past an unlabeled window.
+fn is_escalation_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    let Some(envelope) = event.command().and_then(json_envelope) else {
+        return false;
+    };
+    match envelope
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("issue.comment") => true,
+        Some("board.post") => {
+            envelope
+                .get("params")
+                .and_then(|params| params.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("blocked")
+        }
+        _ => false,
+    }
 }
 
 /// Issue #4533 (AC-1): whether the identity gate would currently deny this
@@ -601,6 +735,32 @@ pub(crate) fn identity_gate_closed(worktree_root: &Path) -> bool {
         return false;
     }
     current_agent_workspace_identity_missing(worktree_root).unwrap_or(false)
+}
+
+/// Issue #5078 (AC-2): [`identity_gate_closed`] for an explicit Session, so
+/// `execution.status` can judge the caller it diagnoses rather than the
+/// ambient environment.
+pub(crate) fn identity_gate_closed_for_session(worktree_root: &Path, session_id: &str) -> bool {
+    if crate::issue_monitor_review::review_dispatch_session_active()
+        || pm_identity_exempt_session_for_worktree(worktree_root)
+    {
+        return false;
+    }
+    let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
+    Session::load_and_migrate(&session_path)
+        .ok()
+        .is_some_and(|session| {
+            agent_workspace_identity_missing(worktree_root, &session).unwrap_or(false)
+        })
+}
+
+/// Issue #5078 (AC-2): whether the identity gate lets this canonical operation
+/// run while it is closed. `execution.status` advertises only these while the
+/// gate is closed, so a listed recovery is never refused by the gate.
+pub(crate) fn identity_gate_admits_operation(operation: &str) -> bool {
+    matches!(operation, "workspace.ensure" | "workspace.update")
+        || is_identity_gate_exempt_operation(operation)
+        || is_read_only_json_envelope_operation(operation)
 }
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
@@ -693,9 +853,14 @@ pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
 }
 
 pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+    if operation == "pm.approval.status" {
+        return true;
+    }
     matches!(
         operation,
         "workspace.candidates"
+            | "feedback.status"
+            | "workspace.receipt"
             | "workspace.projection_list"
             | "workspace.projection-list"
             | "board.show"
@@ -711,11 +876,14 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.list"
             | "issue.spec.audit"
             | "issue.monitor.status"
+            | "update.settings.status"
             | "issue.monitor.profiles"
+            | "issue.monitor.tiers"
             | "pr.current"
             | "pr.list"
             | "github.budget"
             | "pr.view"
+            | "pr.head_check"
             | "pr.checks"
             | "pr.reviews"
             | "pr.review_threads"
@@ -723,6 +891,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "actions.logs"
             | "actions.job_logs"
             | "actions.job-logs"
+            | "actions.queued"
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
@@ -734,7 +903,10 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "perf.summary"
             | "perf.startup"
             | "perf.violations"
+            | "pm.capabilities"
+            | "pm.plan.status"
             | "pm.status"
+            | "pm.report.list"
             | "search"
     )
 }
@@ -1134,6 +1306,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1167,6 +1341,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         }
     }
@@ -1259,6 +1435,8 @@ mod tests {
                     "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             let output =
@@ -1349,6 +1527,8 @@ mod tests {
                     "content": "cycle notes",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
             HookEvent {
@@ -1359,6 +1539,8 @@ mod tests {
                     "new_string": "b",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
         ];
@@ -1534,6 +1716,8 @@ mod tests {
                     "file_path": format!("E:/work/repo/{state_file}")
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1552,6 +1736,8 @@ mod tests {
                 "file_path": "E:\\work\\repo\\.gwt\\skill-state\\execution-control.json"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert!(matches!(
@@ -1571,6 +1757,8 @@ mod tests {
                 tool_name: Some("Write".to_string()),
                 tool_input: Some(serde_json::json!({ "file_path": trusted_path })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1589,6 +1777,8 @@ mod tests {
                 "file_path": "E:/work/repo/crates/gwt/src/main.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1599,6 +1789,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": "cargo test" })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1616,6 +1808,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1689,6 +1883,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -1702,6 +1898,8 @@ mod tests {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({ "file_path": path })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         // Worktree bookkeeping (any extension) and the OS temp scratchpad
@@ -1744,8 +1942,64 @@ mod tests {
     }
 
     #[test]
+    fn feedback_is_reportable_when_workspace_identity_is_unavailable() {
+        let repo = tempfile::tempdir().unwrap();
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        for operation in [
+            "feedback.create",
+            "feedback.process",
+            "feedback.retry",
+            "feedback.status",
+        ] {
+            let command = envelope_command(operation, "{}");
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), repo.path(), &context).unwrap(),
+                HookOutput::Silent,
+                "{operation}"
+            );
+        }
+        assert!(is_read_only_json_envelope_operation("feedback.status"));
+        assert!(!is_read_only_json_envelope_operation("feedback.create"));
+    }
+
+    #[test]
+    fn issue_4188_queued_diagnostic_is_read_only_through_the_hook() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let command = envelope_command("actions.queued", "{}");
+        assert_eq!(
+            evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
+            HookOutput::Silent,
+            "a GET-only Actions diagnostic must stay available before Work identity is set"
+        );
+        assert!(!is_read_only_json_envelope_operation("actions.cancel"));
+    }
+
+    #[test]
+    fn workspace_receipt_is_read_only_before_title_identity_is_set() {
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let command = envelope_command(
+            "workspace.receipt",
+            r#"{"operation_id":"aafc5f24-e5a5-4270-956d-86ac31dafb88"}"#,
+        );
+        assert_eq!(
+            evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
+            HookOutput::Silent,
+            "receipt recovery must stay available before Work identity is set"
+        );
+    }
+
+    #[test]
     fn issue_monitor_json_operations_have_the_expected_policy_classification() {
         assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        assert!(is_read_only_json_envelope_operation("issue.monitor.tiers"));
+        assert!(!is_read_only_json_envelope_operation(
+            "issue.monitor.tiers.set"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "issue.monitor.tier.set"
+        ));
         // SPEC #3914 FR-011: reading the candidate pool mutates nothing.
         assert!(is_read_only_json_envelope_operation(
             "issue.monitor.profiles"
@@ -1792,6 +2046,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({"command": command})),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -1811,6 +2067,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
@@ -1833,6 +2091,8 @@ mod tests {
                 "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1850,6 +2110,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1871,6 +2133,23 @@ mod tests {
             evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_rejects_work_attached_to_pane_name() {
+        let name = envelope_command("pane.name", "{}");
+        for command in [
+            format!("{name}\ncargo test -p gwt"),
+            name.replacen("gwtd", "gwtd > source.txt", 1),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "startup exemption must not admit work: {command}"
+            );
+        }
     }
 
     #[test]
@@ -1898,6 +2177,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1915,6 +2196,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1932,6 +2215,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON\n&& cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1949,6 +2234,8 @@ mod tests {
                 "command": "rg -n title_summary crates/gwt/src"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1966,6 +2253,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.view\",\"params\":{\"number\":3253}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1983,6 +2272,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2002,6 +2293,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2009,6 +2302,30 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn pm_plan_operations_preserve_identity_and_mutation_boundaries() {
+        for (operation, admitted) in [("pm.plan.status", true), ("pm.plan.apply", false)] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": envelope_command(operation, "{}")
+                })),
+                transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
+                cwd: None,
+            };
+            assert_eq!(is_read_only_json_envelope_operation(operation), admitted);
+            assert_eq!(identity_gate_admits_operation(operation), admitted);
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output")
+                    == HookOutput::Silent,
+                admitted,
+                "{operation}"
+            );
+        }
     }
 
     /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in
@@ -2021,6 +2338,14 @@ mod tests {
             envelope_command("execution.adopt", r#"{"reason":"relaunch takeover"}"#),
             envelope_command("execution.repair", r#"{"reason":"integrity failure"}"#),
             envelope_command("execution.reopen", r#"{"reason":"blocker resolved"}"#),
+            envelope_command(
+                "execution.settle_delivered",
+                r#"{"reason":"closed owner is already pushed"}"#,
+            ),
+            envelope_command(
+                "pr.create_from_ci",
+                r#"{"base":"develop","head":"work/issue-4214","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"fix: delivery","body":"User Verification Result: n/a (autonomous)"}"#,
+            ),
             envelope_command(
                 "execution.release_prepared",
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
@@ -2071,6 +2396,27 @@ mod tests {
             HookOutput::Silent,
             "{command}"
         );
+    }
+
+    /// Issue #5078 (AC-3): the PM escalation path is never closed by the gate,
+    /// while ordinary Board reporting still waits for the identity.
+    #[test]
+    fn title_summary_guard_allows_pm_escalation_before_identity_is_set() {
+        for command in [
+            envelope_command("board.post", r#"{"kind":"blocked","body":"stuck"}"#),
+            envelope_command("issue.comment", r#"{"number":5078,"body":"stuck"}"#),
+        ] {
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+        let status = envelope_command("board.post", r#"{"kind":"status","body":"progress"}"#);
+        assert!(matches!(
+            evaluate_title_summary_guard(&bash_event(&status), true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     /// Issue #4533 (AC-2): the recorded decision is that a bookkeeping-only
@@ -2201,6 +2547,8 @@ mod tests {
                 "command": "git config --list --show-origin"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2218,6 +2566,8 @@ mod tests {
                 "command": "git remote -v"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2240,6 +2590,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2276,6 +2628,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2295,6 +2649,8 @@ mod tests {
                 "command": "sed -i '' 's/a/b/' README.md"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2312,6 +2668,8 @@ mod tests {
                 "command": "find target -name '*.tmp' -delete"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2329,6 +2687,8 @@ mod tests {
                 "command": "git config user.name Codex"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2346,6 +2706,8 @@ mod tests {
                 "command": "git remote add origin https://example.com/repo.git"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2371,6 +2733,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2392,6 +2756,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Starting implementation\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2409,6 +2775,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2437,6 +2805,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2466,6 +2836,8 @@ mod tests {
             tool_name: Some("create_goal".to_string()),
             tool_input: Some(serde_json::json!({})),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -2487,6 +2859,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(

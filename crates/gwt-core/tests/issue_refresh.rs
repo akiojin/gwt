@@ -208,7 +208,12 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
     let python = tmp.path().join("fake-python.sh");
     std::fs::write(
         &python,
-        format!("#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\ncp \"{}\" \"{}\"\necho \"$@\" >> \"{}\"\nexit 0\n",
+            coordinator_root.join("heavy.ticket.json").display(),
+            tmp.path().join("runner-ticket.json").display(),
+            log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -243,6 +248,16 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
     assert!(contents.contains("--action index-issues"), "{contents}");
     assert!(contents.contains("--qos background"), "{contents}");
     assert!(contents.contains("cafe0123cafe0123"), "{contents}");
+    let ticket: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tmp.path().join("runner-ticket.json")).expect("holder ticket recorded"),
+    )
+    .unwrap();
+    assert_eq!(
+        ticket["holder_context"]["project_root"],
+        tmp.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(ticket["holder_context"]["action"], "index-issues");
+    assert_eq!(ticket["holder_context"]["qos"], "background");
 }
 
 /// Issue #4140 AC-5: while the issues index runner is still running, a

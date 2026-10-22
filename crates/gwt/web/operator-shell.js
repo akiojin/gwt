@@ -26,7 +26,7 @@ export function initOperatorShell(deps = {}) {
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
   safeWire("legacy chrome keys", () => removeLegacyChromeKeys(win), markDegraded);
   safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
-  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc, win }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
@@ -131,7 +131,7 @@ function wireRailCommands({ doc }) {
 // Status Strip — live clock + counters
 // ------------------------------------------------------------
 
-function wireStatusStripClock({ doc }) {
+export function wireStatusStripClock({ doc, win = doc.defaultView }) {
   const clock = doc.getElementById("op-strip-clock");
   if (!clock) return;
 
@@ -139,7 +139,6 @@ function wireStatusStripClock({ doc }) {
   // mission-control "blink" effect can target only the separators while the
   // numbers stay rock-steady. Clears + rebuilds via DOM nodes (no innerHTML
   // because the security hook flags textContent-as-template-string).
-  const reduced = matchReduced(doc);
   const setClock = (h, m, s) => {
     while (clock.firstChild) clock.removeChild(clock.firstChild);
     const append = (text, isColon) => {
@@ -154,25 +153,18 @@ function wireStatusStripClock({ doc }) {
     append(":", true);
     append(pad2(s), false);
   };
+  let timer = null;
   const tick = () => {
-    const now = new Date();
+    if (timer !== null) win.clearTimeout(timer);
+    timer = null;
+    if (doc.hidden) return;
+    const now = new win.Date();
     setClock(now.getHours(), now.getMinutes(), now.getSeconds());
+    // Re-align on every tick, including callbacks delayed by a busy renderer.
+    timer = win.setTimeout(tick, 1000 - now.getMilliseconds());
   };
+  doc.addEventListener("visibilitychange", tick);
   tick();
-
-  if (reduced.matches) {
-    setInterval(tick, 1000);
-  } else {
-    let last = 0;
-    const loop = (t) => {
-      if (t - last >= 1000) {
-        last = t;
-        tick();
-      }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }
 }
 
 export function applyTelemetryCounts(doc, counts = {}) {
@@ -301,7 +293,7 @@ function issueMonitorStatusStripView(status = {}) {
   }
   const queue = Math.max(0, Number(status.queue_len || 0));
   const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
+  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
 
   if (state === "disabled") {
     return {
@@ -520,6 +512,12 @@ const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
 const RUNTIME_HEALTH_CPU_UNITS =
   "Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%.";
 let runtimeHealthHideTimer = null;
+
+export function subscribeRuntimeHealth(doc, model, options = {}) {
+  return model.subscribeFrame(snapshot => snapshot, snapshot => {
+    if (snapshot) applyRuntimeHealth(doc, snapshot, options);
+  });
+}
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
@@ -1330,8 +1328,7 @@ function createActionRegistry(doc) {
     // the keyboard-reachable entry to PM settings.
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
-    { id: "open-branches", label: "Open Workspace", hint: "Execute · existing branch", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
+    { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
   ];

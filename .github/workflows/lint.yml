@@ -1,8 +1,20 @@
 name: Lint
 
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop, main]
+  # Issue #4872: retain merge-queue compatibility for organization repositories.
+  # Issue #5169: this User-owned repository uses non-strict protection and
+  # develop push CI. The queue re-tests
+  # each pull request on the latest base under this event, and a required
+  # check nobody reports for it stays pending forever, so every job here runs
+  # for the queue exactly as it does for a pull request. Pinned by
+  # crates/gwt/tests/ci_concurrency_contract_test.rs; the settings this pairs
+  # with are recorded in AGENTS.md ("Merge queue").
+  merge_group:
+    types: [checks_requested]
 
 # Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
 # update-branch `synchronize` starts a fresh run, and without this group the
@@ -11,7 +23,7 @@ on:
 # only this PR's older run of this workflow. Pinned by
 # crates/gwt/tests/ci_concurrency_contract_test.rs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
 jobs:
@@ -20,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
@@ -29,6 +41,8 @@ jobs:
         run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
+    # Issue #5173: coverage / Rust Coverage is required independently, so
+    # Clippy can start alongside coverage without weakening its thresholds.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -57,20 +71,31 @@ jobs:
       - name: Install tray + GTK dependencies (Linux)
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: linux-workspace
         continue-on-error: true
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete@0.9.2
+      - name: Check unused dependencies
+        run: cargo machete --with-metadata crates
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Compile coverage build stamp tests
+        run: rustc --edition=2021 --test crates/gwt/build.rs -o "$RUNNER_TEMP/gwt-build-stamp-tests"
+      - name: Check coverage build stamps
+        run: '"$RUNNER_TEMP/gwt-build-stamp-tests"'
       - name: Check rustdoc warnings
         # The codebase is at 0 rustdoc warnings post-PR #2331; this
         # gate keeps it that way by failing CI if a future PR
@@ -81,6 +106,8 @@ jobs:
         run: cargo doc --workspace --no-deps --document-private-items
       - name: Check frontend bundle syntax
         run: bash scripts/check-frontend-bundle.sh
+      - name: Check unused frontend modules and exports
+        run: bash scripts/run-node-tests-with-linkedom.sh crates/gwt/web/__tests__/unused-code.test.mjs
       - name: Check release flow contract
         run: bash scripts/check-release-flow.sh
       # SPEC #3576: the Git hook contract, including the rule that `git push`
@@ -105,11 +132,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: windows-workspace
         continue-on-error: true
       - name: Run Windows Clippy
@@ -150,11 +178,12 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: macos-workspace
         continue-on-error: true
       # 45 and not the Windows job's 30: `Check (macOS)` runs 1-2 min warm, and
@@ -169,7 +198,8 @@ jobs:
   commitlint:
     name: Commit Message Lint
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Issue #4872: a job skipped by event name reports Success, so the queue
+    # would count this required check without running it.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -178,8 +208,8 @@ jobs:
       - name: Validate commit messages
         continue-on-error: true
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.event.after }}
         run: |
           MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_SHA" || true)
           LAST_BASE_MERGE=$(
@@ -198,3 +228,10 @@ jobs:
           else
             bunx --package @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi
+
+  report-post-merge-failure:
+    needs: [audit, lint, lint-windows, lint-macos, commitlint]
+    if: ${{ github.event_name == 'push' && failure() }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml

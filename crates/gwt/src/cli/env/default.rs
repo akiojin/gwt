@@ -6,7 +6,7 @@
 use std::{
     fs,
     io::{self},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, OnceLock},
 };
@@ -60,6 +60,14 @@ impl LazyIssueClient {
 }
 
 impl IssueClient for LazyIssueClient {
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<gwt_github::client::LabelAssignment>, gwt_github::client::ApiError> {
+        self.resolve()?.fetch_label_assignment(number, label)
+    }
+
     fn fetch(
         &self,
         number: IssueNumber,
@@ -186,7 +194,7 @@ impl DefaultCliEnv {
             owner,
             repo,
             repo_path,
-            Arc::new(HttpIssueClient::from_gh_auth),
+            Arc::new(HttpIssueClient::from_runtime_environment),
         )
     }
 
@@ -294,6 +302,13 @@ impl CliEnv for DefaultCliEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         crate::cli::pr::fetch_current_pr_via_gh(&self.repo_path)
     }
+
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        crate::cli::pr::fetch_completion_pr_candidates_via_gh(&self.repo_path, number)
+    }
     fn create_pr(
         &mut self,
         base: &str,
@@ -318,9 +333,156 @@ impl CliEnv for DefaultCliEnv {
             &request,
         )
     }
+    fn fetch_ci_delivery_snapshot(
+        &mut self,
+        base: &str,
+        head: &str,
+    ) -> io::Result<crate::cli::pr::ci_delivery::CiSnapshot> {
+        crate::cli::pr::ci_delivery::fetch(
+            &self.repo_path,
+            &format!("{}/{}", self.owner, self.repo),
+            base,
+            head,
+        )
+    }
+    fn compare_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: Option<&str>,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        let verified = verified.ok_or_else(|| io::Error::other("Ready PR refused: no verified HEAD exists. Register verify.plan and execute verify.run before retrying pr.create."))?;
+        // Managed callers already hold the execution/verification dispatch
+        // guard. Legacy callers without an execution still need passing,
+        // integrity-checked evidence, not just a SHA saved by a failed run.
+        if crate::cli::execution_state::load(&self.repo_path)?.is_none() {
+            let session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
+            let evidence =
+                crate::cli::verification_record::evaluate_evidence(&self.repo_path, &session, None);
+            if evidence != crate::cli::verification_record::EvidenceStatus::Fresh {
+                return Err(io::Error::other(format!("Ready PR refused: {}. Register verify.plan and execute verify.run before retrying pr.create.", evidence.describe())));
+            }
+        }
+        self.inspect_pr_head(base, head, verified)
+    }
+
+    fn inspect_pr_head(
+        &mut self,
+        base: &str,
+        head: Option<&str>,
+        verified: &str,
+    ) -> io::Result<Option<crate::cli::pr::head_check::HeadCheck>> {
+        let current;
+        let head = match head {
+            Some(head) => head,
+            None => {
+                let output = gwt_core::process::hidden_command("git")
+                    .args(["branch", "--show-current"])
+                    .current_dir(&self.repo_path)
+                    .output()?;
+                current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                current.as_str()
+            }
+        };
+        let (owner, branch) = head.split_once(':').unwrap_or((&self.owner, head));
+        let base_remote = preferred_pr_remote_url(
+            &self.repo_path,
+            &format!("https://github.com/{}/{}.git", self.owner, self.repo),
+        )?;
+        let check = if owner == self.owner {
+            crate::cli::pr::head_check::compare(
+                &self.repo_path,
+                &base_remote,
+                branch,
+                base,
+                verified,
+            )?
+        } else {
+            let head_remote = crate::cli::pr::resolve_pr_fork_url_via_gh(
+                &format!("{}/{}", self.owner, self.repo),
+                &self.repo_path,
+                owner,
+            )?;
+            let head_remote = preferred_pr_remote_url(&self.repo_path, &head_remote)?;
+            crate::cli::pr::head_check::compare_remotes(
+                &self.repo_path,
+                &head_remote,
+                &base_remote,
+                branch,
+                base,
+                verified,
+            )?
+        };
+        Ok(Some(check))
+    }
+    fn fetch_pr_head_sha(&mut self, number: u64) -> io::Result<Option<String>> {
+        crate::cli::pr::fetch_pr_head_sha_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
+            .map_err(io::Error::other)
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        use gwt_git::pr_status::{self, PrAutoMergeRemoteState};
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        let remote = pr_status::fetch_pr_auto_merge_remote_state_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .ok_or_else(|| {
+            io::Error::other("auto-merge remote state is unknown; no mutation attempted")
+        })?;
+        let outcome = pr_status::arm_pr_auto_merge_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+            reviewed_head_sha,
+            &remote,
+        );
+        if !outcome.is_success() {
+            return Err(io::Error::other(format!(
+                "external fork auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+            )));
+        }
+        match pr_status::fetch_pr_auto_merge_remote_state_in_repository(&self.repo_path, &repository, number) {
+            Some(PrAutoMergeRemoteState::Open { head_sha, auto_merge_requested: true })
+                if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":true,"state":"OPEN"})),
+            Some(PrAutoMergeRemoteState::Merged { head_sha }) if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":false,"state":"MERGED"})),
+            _ => Err(io::Error::other("auto-merge result is unconfirmed or head changed; inspect the remote PR before retrying")),
+        }
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_completion_snapshot_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
@@ -330,14 +492,35 @@ impl CliEnv for DefaultCliEnv {
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
+            base,
             title,
             body,
             add_labels,
         )
     }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::close_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+            comment,
+        )
+    }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
-        gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
-            .map_err(|err| io::Error::other(err.to_string()))
+        let repo_slug = format!("{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_status(&repo_slug, number).map_err(|error| {
+            if crate::cli::pr::number_is_issue_via_gh(&repo_slug, &self.repo_path, number) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Issue #{number} is an issue, not a pull request. Use `issue.view` instead."
+                    ),
+                )
+            } else {
+                io::Error::other(error.to_string())
+            }
+        })
     }
     fn fetch_pr_quarantine_context(
         &mut self,
@@ -446,6 +629,146 @@ impl CliEnv for DefaultCliEnv {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
     }
+
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        let identity = gwt_core::repo_hash::detect_repo_identity(&self.repo_path)
+            .ok_or_else(|| io::Error::other("project repository identity is unavailable"))?;
+        let expected = gwt_core::repo_hash::compute_repo_hash(&format!(
+            "https://github.com/{}/{}",
+            self.owner, self.repo
+        ));
+        if identity.hash != expected {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"PM settings operations require the project's canonical GitHub repository; repository overrides cannot select another target"));
+        }
+        Ok((self.owner.clone(), self.repo.clone()))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_snapshot(operation, params)
+            .map_err(api_to_io)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_mutate(operation, params, before)
+            .map_err(api_to_io)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .create_github_discussion(category, title, body)
+            .map_err(api_to_io)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .required_status_checks(branch)
+            .map_err(api_to_io)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .update_required_status_checks(branch, settings)
+            .map_err(api_to_io)
+    }
+    fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
+        use gwt_config::Settings;
+        crate::cli::actions::validate_dispatch_call(&call)
+            .map_err(|_| io::Error::other("invalid workflow dispatch selector or ref"))?;
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        let config_path = gwt_core::paths::gwt_home().join("config.toml");
+        let settings = if config_path.exists() {
+            Settings::load_from_path(&config_path)
+                .map_err(|_| io::Error::other("cannot read allowed_workflows from config.toml"))?
+        } else {
+            Settings::default()
+        };
+        let repo_key = format!("{}/{}", self.owner, self.repo);
+        let allowed = settings
+            .allowed_workflows
+            .get(&repo_key)
+            .filter(|names| !names.is_empty())
+            .ok_or_else(|| {
+                io::Error::other(
+                    "workflow dispatch denied: configure allowed_workflows for this repository",
+                )
+            })?;
+        let filename = if call.workflow.parse::<u64>().is_ok() {
+            let path = self
+                .client
+                .resolve()
+                .map_err(api_to_io)?
+                .workflow_path(&call.workflow)
+                .map_err(api_to_io)?;
+            path.strip_prefix(".github/workflows/")
+                .filter(|name| crate::cli::actions::is_workflow_filename(name))
+                .ok_or_else(|| io::Error::other("workflow ID does not resolve to a workflow file"))?
+                .to_string()
+        } else {
+            call.workflow.clone()
+        };
+        if !allowed.contains(&filename) {
+            return Err(io::Error::other(format!(
+                "workflow dispatch denied: filename is not in allowed_workflows for this repository; allowed filenames: {}",
+                allowed.iter().filter(|name| crate::cli::actions::is_workflow_filename(name)).cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        if !gwt_core::paths::resolve_current_worktree_root(&self.repo_path)
+            .join(".github/workflows")
+            .join(&filename)
+            .is_file()
+        {
+            return Err(io::Error::other(
+                "workflow file does not exist in checkout .github/workflows",
+            ));
+        }
+        let client = self.client.resolve().map_err(api_to_io)?;
+        let definition = client
+            .workflow_definition(&filename, &call.git_ref)
+            .map_err(api_to_io)?;
+        crate::cli::actions::validate_dispatch_inputs(&definition, &call.inputs)?;
+        client
+            .dispatch_workflow(&filename, &call.git_ref, &call.inputs)
+            .map_err(api_to_io)?;
+        Ok("workflow dispatch requested".into())
+    }
+
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::cancel_actions_via_gh(&self.owner, &self.repo, &self.repo_path, run_id)
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        crate::cli::actions::fetch_queued_actions_via_gh(&self.owner, &self.repo, &self.repo_path)
+    }
     fn run_internal_command(
         &mut self,
         args: &[String],
@@ -476,4 +799,204 @@ impl CliEnv for DefaultCliEnv {
 
 fn api_to_io(err: gwt_github::client::ApiError) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+fn preferred_pr_remote_url(repo_path: &Path, canonical_url: &str) -> io::Result<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["remote", "-v"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Failed to inspect configured PR remotes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let remotes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (name, url) = (parts.next()?, parts.next()?);
+            (parts.next()? == "(fetch)").then(|| (name.to_string(), url.to_string()))
+        })
+        .collect::<Vec<_>>();
+    Ok(select_pr_remote_url(canonical_url, &remotes))
+}
+
+fn select_pr_remote_url(canonical_url: &str, remotes: &[(String, String)]) -> String {
+    let Some((owner, repo)) = crate::cli::pr::parse_pr_remote_url(canonical_url) else {
+        return canonical_url.to_string();
+    };
+    let matches_target = |(_, url): &&(String, String)| {
+        crate::cli::pr::parse_pr_remote_url(url).is_some_and(|(remote_owner, remote_repo)| {
+            owner.eq_ignore_ascii_case(&remote_owner) && repo.eq_ignore_ascii_case(&remote_repo)
+        })
+    };
+    remotes
+        .iter()
+        .find(|remote| remote.0 == "origin" && matches_target(remote))
+        .or_else(|| remotes.iter().find(matches_target))
+        .map(|(_, url)| url.clone())
+        .unwrap_or_else(|| canonical_url.to_string())
+}
+
+#[cfg(test)]
+mod runtime_factory_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn pr_head_remote_selection_preserves_matching_origin_ssh_transport() {
+        let remotes = vec![
+            (
+                "mirror".to_string(),
+                "https://github.com/upstream/project.git".to_string(),
+            ),
+            (
+                "origin".to_string(),
+                "ssh://git@github.com/upstream/project.git".to_string(),
+            ),
+        ];
+        assert_eq!(
+            select_pr_remote_url("https://github.com/upstream/project.git", &remotes),
+            "ssh://git@github.com/upstream/project.git"
+        );
+    }
+
+    #[test]
+    fn pr_head_remote_selection_uses_exact_resolved_fork_identity() {
+        let remotes = vec![
+            (
+                "origin".to_string(),
+                "git@github.com:upstream/project.git".to_string(),
+            ),
+            (
+                "fork".to_string(),
+                "git@github.com:contributor/renamed-fork.git".to_string(),
+            ),
+        ];
+        assert_eq!(
+            select_pr_remote_url("https://github.com/contributor/renamed-fork.git", &remotes),
+            "git@github.com:contributor/renamed-fork.git"
+        );
+        assert_eq!(
+            select_pr_remote_url("https://github.com/contributor/project.git", &remotes),
+            "https://github.com/contributor/project.git"
+        );
+    }
+
+    #[test]
+    fn issue_4979_failed_unmanaged_verification_cannot_supply_a_ready_head() {
+        use crate::cli::verification_record as verification;
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "failed-head-session");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let commands = vec!["git --invalid-verification-command".to_string()];
+        verification::save_plan(
+            &repo,
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
+                session_id: "failed-head-session".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            }),
+        )
+        .unwrap();
+        let (record, _) =
+            verification::run_verification(&repo, "failed-head-session", &commands).unwrap();
+        assert!(!record.all_passed);
+        let mut env = DefaultCliEnv::new("fixture", "repo", repo);
+        // This invalid ref also proves evidence is checked before any remote IO.
+        let error = env
+            .compare_pr_head(
+                "develop",
+                Some("invalid..branch"),
+                record.verified_head.as_deref(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("verification") && error.to_string().contains("failing"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn runtime_factory_override_cli_rejects_partial_and_reaches_loopback() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::io::{Read, Write};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set("GH_TOKEN", "fixture-only-token");
+        let _no_proxy = ScopedEnvVar::set("NO_PROXY", "127.0.0.1,localhost");
+        let _no_proxy_lower = ScopedEnvVar::set("no_proxy", "127.0.0.1,localhost");
+        let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
+        let _rest = ScopedEnvVar::unset("GWT_OWNER_GITHUB_REST_BASE");
+        let _graphql = ScopedEnvVar::unset("GWT_OWNER_GITHUB_GRAPHQL_URL");
+        let _owner_token = ScopedEnvVar::unset("GWT_OWNER_GITHUB_TOKEN");
+        let repo = tempfile::tempdir().expect("repo");
+        let env = DefaultCliEnv::new("fixture", "repo", repo.path().to_path_buf());
+        // Check construction first: the old factory must fail this assertion
+        // before this test is allowed to issue any HTTP request.
+        assert!(matches!(
+            (env.client_factory)("fixture", "repo"),
+            Err(gwt_github::client::ApiError::TestOverrideRejected { .. })
+        ));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _rest = ScopedEnvVar::set("GWT_OWNER_GITHUB_REST_BASE", &base);
+        let _graphql = ScopedEnvVar::set("GWT_OWNER_GITHUB_GRAPHQL_URL", format!("{base}/graphql"));
+        let _owner_token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-token");
+        if !cfg!(debug_assertions) {
+            assert!(matches!(
+                (env.client_factory)("fixture", "repo"),
+                Err(gwt_github::client::ApiError::TestOverrideRejected { .. })
+            ));
+            return;
+        }
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept loopback");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let count = stream.read(&mut bytes).expect("request");
+                assert_ne!(count, 0, "complete request headers");
+                request.extend_from_slice(&bytes[..count]);
+            }
+            let request = String::from_utf8(request).expect("ASCII headers");
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+        let env = DefaultCliEnv::new("fixture", "repo", repo.path().to_path_buf());
+        env.client()
+            .delete_comment(gwt_github::client::CommentId(42))
+            .expect("local mutation");
+        let request = server.join().expect("server");
+        assert!(request.starts_with("DELETE /repos/fixture/repo/issues/comments/42 "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer loopback-token"));
+    }
 }

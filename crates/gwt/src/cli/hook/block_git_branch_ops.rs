@@ -188,35 +188,55 @@ fn targets_origin_main(segment: &str) -> bool {
 }
 
 fn mentions_checkout_or_switch(segment: &str) -> bool {
-    // Mirrors `/\b(checkout|switch)\b/`.
-    word_present(segment, "checkout") || word_present(segment, "switch")
+    // Issue #4888: match the subcommand, not the whole segment.
+    //
+    // This read `word_present(segment, "checkout") || word_present(segment,
+    // "switch")`, a `\b(checkout|switch)\b` over everything after `git`. A
+    // hyphen is not a word character, so the repository's own
+    // `crates/gwt/playwright/tests/kill-switch.spec.ts` made every
+    // `git diff`/`git log` naming that file read as a branch switch, and no
+    // agent could inspect its own change to it. Rules 3 and 4 below already
+    // key off the subcommand position; this is the one rule that did not.
+    matches!(git_subcommand(segment), Some("checkout" | "switch"))
 }
 
-fn word_present(haystack: &str, word: &str) -> bool {
-    // Cheap `\b<word>\b` substitute — avoids compiling a regex per call.
-    let bytes = haystack.as_bytes();
-    let wbytes = word.as_bytes();
-    if wbytes.is_empty() || bytes.len() < wbytes.len() {
-        return false;
+/// The git subcommand in `segment`, skipping the global options that may sit
+/// between `git` and it.
+///
+/// `None` when the segment is not a `git` invocation or carries no subcommand
+/// (a bare `git`, or `git --version`). Callers get the token as written, so
+/// comparisons stay exact rather than substring matches.
+fn git_subcommand(segment: &str) -> Option<&str> {
+    let mut tokens = segment.split_whitespace();
+    if tokens.next()? != "git" {
+        return None;
     }
-    let mut i = 0;
-    while i + wbytes.len() <= bytes.len() {
-        if &bytes[i..i + wbytes.len()] == wbytes {
-            let left_ok = i == 0 || !is_word_char(bytes[i - 1]);
-            let right_idx = i + wbytes.len();
-            let right_ok = right_idx == bytes.len() || !is_word_char(bytes[right_idx]);
-            if left_ok && right_ok {
-                return true;
-            }
+    while let Some(token) = tokens.next() {
+        if !token.starts_with('-') {
+            return Some(token);
         }
-        i += 1;
+        // A global option that takes a separate value swallows the next token,
+        // which would otherwise be read as the subcommand: `git -C /tmp/switch
+        // diff` must not resolve to `/tmp/switch`.
+        if GIT_GLOBAL_OPTIONS_TAKING_A_VALUE.contains(&token) {
+            tokens.next();
+        }
     }
-    false
+    None
 }
 
-fn is_word_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
+/// Global options whose value is a separate token. The `--opt=value` spellings
+/// need no entry here because they carry their value in the same token.
+const GIT_GLOBAL_OPTIONS_TAKING_A_VALUE: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--super-prefix",
+    "--config-env",
+];
 
 fn is_file_level_checkout(segment: &str) -> bool {
     let has_conflict = re_checkout_conflict_flag().is_match(segment);

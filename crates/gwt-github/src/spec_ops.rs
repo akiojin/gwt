@@ -14,7 +14,7 @@ use crate::{
     cache::{Cache, CacheError},
     client::{
         ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
-        IssueState, UpdatedAt,
+        UpdatedAt,
     },
     routing::{decide_routing, split_section_into_parts},
     sections::SectionName,
@@ -448,6 +448,33 @@ impl<C: IssueClient> SpecOps<C> {
         Ok(())
     }
 
+    /// Repair section artifacts whose markers were doubled by a failed write.
+    ///
+    /// Deliberately bypasses the cached-index integrity guard: the cached parse
+    /// error is the very condition this call exists to clear, so gating on it
+    /// would make the operation refuse every Issue it is meant to fix. Only the
+    /// one shape [`crate::sections::repair_duplicated_markers`] recognises is
+    /// rewritten; anything else is reported untouched so a human decides.
+    pub fn repair_sections(&self, number: IssueNumber) -> Result<Vec<String>, SpecOpsError> {
+        let snapshot = self.fetch_fresh(number)?;
+        let mut repaired: Vec<String> = Vec::new();
+
+        if let Some(body) = crate::sections::repair_duplicated_markers(&snapshot.body) {
+            self.client.patch_body(number, &body)?;
+            repaired.push("body".to_string());
+        }
+        for comment in &snapshot.comments {
+            if let Some(fixed) = crate::sections::repair_duplicated_markers(&comment.body) {
+                self.client.patch_comment(comment.id, &fixed)?;
+                repaired.push(format!("comment:{}", comment.id.0));
+            }
+        }
+
+        // Re-read unconditionally so the cache drops the stale parse error.
+        self.force_refresh_cache(number)?;
+        Ok(repaired)
+    }
+
     /// Conditionally refetch the Issue so the cache reflects the latest labels
     /// and body before a caller inspects them (a pre-write guard, for one).
     pub fn refresh_cache(&self, number: IssueNumber) -> Result<(), SpecOpsError> {
@@ -636,8 +663,3 @@ fn render_body(
 
     out
 }
-
-// Keep these types used so clippy does not complain about unused imports in
-// configurations where only some of them are touched.
-#[allow(dead_code)]
-fn _keep_types_used(_c: BodyComment, _s: IssueState) {}

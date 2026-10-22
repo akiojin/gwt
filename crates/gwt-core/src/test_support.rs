@@ -8,19 +8,86 @@
 //! `test-support` cargo feature from their dev-dependencies. gwt-only
 //! machinery (the fake `gh` harness and CLI fixtures) stays in
 //! `crates/gwt/src/cli/test_support.rs`.
+//!
+//! # Event waits (SPEC #4740)
+//!
+//! Prefer an existing completion/ready acknowledgement over polling or sleeps.
+//! Use [`recv_event`] for a channel notification of a condition or explicit
+//! synchronization point. If completion already guarantees a queued message,
+//! assert with `try_recv` instead: waiting would hide a broken acknowledgement.
+//! Async fixtures should await their existing channel, notification or task.
+//!
+//! A retained wall-clock wait must carry this marker on its line or the line
+//! immediately before it: `// test-hygiene: allow-wall-clock-deadline <reason>`.
+//! The nonempty reason identifies an external observation with no usable
+//! event, or the real timeout contract being tested. Historical polling is
+//! not a reason. Enforcement belongs to the SPEC's Phase 4 hygiene gate.
+//! A hang guard detects a stuck fixture; never assert elapsed time against it.
 
 use std::{
     cell::{Cell, RefCell},
     ffi::OsString,
     marker::PhantomData,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
+
+/// A short root for socket fixtures, independent of verification's nested TMPDIR.
+/// Windows fixtures retain the normal temporary directory for named pipes.
+pub fn socket_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    {
+        tempfile::tempdir_in("/tmp")
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::tempdir()
+    }
+}
+
+/// Validate fixture paths before either std or Tokio binds a Unix socket.
+///
+/// Use the macOS/BSD limit even on Linux so a regression fails on both hosts.
+/// Named pipes do not have this limit. Tests probing the kernel's actual path
+/// boundary bind directly with a reasoned hygiene exception.
+#[track_caller]
+pub fn checked_socket_path(path: &Path) -> &Path {
+    #[cfg(unix)]
+    assert!(
+        path.as_os_str().len() <= 103,
+        "socket fixture path exceeds 103 bytes ({}): {}; use test_support::socket_tempdir()",
+        path.as_os_str().len(),
+        path.display()
+    );
+    path
+}
+
+/// Receive a fixture event, with the shared hang guard for stuck producers.
+///
+/// The event determines success. Production deadline pins and load-mode zero
+/// do not shorten this guard. `event` names the synchronization point in a
+/// failure diagnostic. Sender disconnection fails immediately.
+///
+/// # Panics
+/// Panics if every sender disconnects or the fixture exhausts the hang guard.
+#[track_caller]
+pub fn recv_event<T>(receiver: &std::sync::mpsc::Receiver<T>, event: &str) -> T {
+    match receiver.recv_timeout(crate::deadline_budget::HANG_GUARD) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("waiting for {event}: sender disconnected")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("waiting for {event}: fixture exceeded the hang guard")
+        }
+    }
+}
 #[cfg(windows)]
 use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::PathBuf,
     process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -111,39 +178,8 @@ impl Drop for EnvLockGuard {
     }
 }
 
-thread_local! {
-    static GWT_HOME_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Returns the thread-local gwt home override used by tests.
-pub fn gwt_home_override() -> Option<PathBuf> {
-    GWT_HOME_OVERRIDE.with(|value| value.borrow().clone())
-}
-
-/// RAII guard that overrides the gwt home root for the current test thread.
-///
-/// Prefer this over mutating `HOME` for in-process tests. Environment
-/// variables are process-global, so changing them in one parallel test can
-/// make unrelated tests write into the real user home.
-pub struct ScopedGwtHome {
-    previous: Option<PathBuf>,
-}
-
-impl ScopedGwtHome {
-    pub fn set(path: impl AsRef<Path>) -> Self {
-        let next = path.as_ref().to_path_buf();
-        let previous = GWT_HOME_OVERRIDE.with(|value| value.replace(Some(next)));
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedGwtHome {
-    fn drop(&mut self) {
-        GWT_HOME_OVERRIDE.with(|value| {
-            value.replace(self.previous.take());
-        });
-    }
-}
+// One lower-layer override must drive both core paths and global settings.
+pub use gwt_config::home::{gwt_home_override, ScopedGwtHome};
 
 /// RAII guard that sets or removes one environment variable and restores the
 /// previous value on drop. Hold the [`env_lock`] mutex for the guard's whole
@@ -514,7 +550,7 @@ impl WindowsNpmRegistryFixture {
 
         let connect_timeout = remaining_timeout()?;
         let mut stream = TcpStream::connect_timeout(&self.address, connect_timeout)
-            .map_err(&normalize_timeout_error)?;
+            .map_err(normalize_timeout_error)?;
         let request = format!(
             "GET /-/gwt-health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.address
@@ -525,7 +561,7 @@ impl WindowsNpmRegistryFixture {
             stream.set_write_timeout(Some(write_timeout))?;
             let count = stream
                 .write(&request.as_bytes()[written..])
-                .map_err(&normalize_timeout_error)?;
+                .map_err(normalize_timeout_error)?;
             if count == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -540,7 +576,7 @@ impl WindowsNpmRegistryFixture {
         loop {
             let read_timeout = remaining_timeout()?;
             stream.set_read_timeout(Some(read_timeout))?;
-            let count = stream.read(&mut buffer).map_err(&normalize_timeout_error)?;
+            let count = stream.read(&mut buffer).map_err(normalize_timeout_error)?;
             if count == 0 {
                 break;
             }
@@ -643,6 +679,11 @@ impl WindowsRealGwtFixture {
             .trim_end_matches('/')
             .to_string()
             + "/ws"
+    }
+
+    /// The exact child owned by this fixture, for cleanup assertions.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running gwt child").id()
     }
 
     pub fn stderr(&self) -> String {
@@ -849,8 +890,10 @@ const hookSpawnOptions = {{\n\
 // Windows) — running it through cmd.exe here is what let a Windows-only\n\
 // PowerShell hook command pass this boundary while it was silently dead in\n\
 // production. Codex keeps the native shell (Issue #3810).\n\
+// Issue #5102: PATH's bash can be WSL, which drops Windows launch identity.\n\
+const claudeShell = process.env.CLAUDE_CODE_GIT_BASH_PATH || path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe');\n\
 const hook = packageName === '@anthropic-ai/claude-code'\n\
-  ? childProcess.spawnSync('bash', ['-c', hookCommand], hookSpawnOptions)\n\
+  ? childProcess.spawnSync(claudeShell, ['-c', hookCommand], hookSpawnOptions)\n\
   : childProcess.spawnSync(hookCommand, [], Object.assign({{ shell: true }}, hookSpawnOptions));\n\
 const receipt = {{\n\
   argv: process.argv.slice(2),\n\
@@ -1111,6 +1154,64 @@ pub fn summarize_pty_output_for_diagnostics(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_tempdir_ignores_long_tmpdir_and_binds() {
+        const CHILD: &str = "GWT_TEST_LONG_SOCKET_TMPDIR";
+        if std::env::var_os(CHILD).is_some() {
+            let ambient = std::env::temp_dir();
+            assert!(ambient.as_os_str().len() > 103);
+            let root = socket_tempdir().unwrap();
+            assert!(!root.path().starts_with(ambient));
+            let path = root.path().join("daemon.sock");
+            let _listener =
+                std::os::unix::net::UnixListener::bind(checked_socket_path(&path)).unwrap();
+            return;
+        }
+
+        let ambient = tempfile::tempdir().unwrap();
+        let nested = ambient.path().join("gwt-verify-".repeat(12));
+        std::fs::create_dir_all(&nested).unwrap();
+        let output = crate::process::hidden_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "test_support::tests::socket_tempdir_ignores_long_tmpdir_and_binds",
+            ])
+            .env("TMPDIR", &nested)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated socket fixture test failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "socket fixture path exceeds 103 bytes")]
+    fn socket_path_rejects_overlong_utf8_bytes_before_bind() {
+        checked_socket_path(Path::new(&format!("/tmp/{}", "é".repeat(50))));
+    }
+
+    #[test]
+    fn recv_event_observes_producer_completion() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || tx.send(String::from("ready")).unwrap());
+        assert_eq!(recv_event(&rx, "producer ready"), "ready");
+        producer.join().unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "waiting for producer ready: sender disconnected")]
+    fn recv_event_reports_disconnected_producer() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        recv_event(&rx, "producer ready");
+    }
 
     #[cfg(windows)]
     #[test]

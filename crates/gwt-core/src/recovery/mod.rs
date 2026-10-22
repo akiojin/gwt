@@ -23,7 +23,8 @@ use crate::{
         sanitize_board_terms, AuthorKind, BoardEntry, BoardEntryKind, BoardMention,
         BoardWorktreeForm,
     },
-    paths::{gwt_project_dir_for_repo_path, project_scope_hash},
+    paths::{gwt_project_dir, gwt_project_dir_for_repo_path, project_scope_hash},
+    repo_hash::RepoHash,
 };
 
 const RECOVERY_SCHEMA_VERSION: u32 = 1;
@@ -231,6 +232,8 @@ struct PersistedBoardPayloadV1 {
     origin_branch: Option<String>,
     origin_session_id: Option<String>,
     origin_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_agent_name: Option<String>,
     origin_worktree_form: Option<BoardWorktreeForm>,
     origin_recovery_id: Option<String>,
     target_owners: Vec<String>,
@@ -259,6 +262,7 @@ impl From<&BoardEntry> for PersistedBoardPayloadV1 {
             origin_branch: entry.origin_branch.clone(),
             origin_session_id: entry.origin_session_id.clone(),
             origin_agent_id: entry.origin_agent_id.clone(),
+            origin_agent_name: entry.origin_agent_name.clone(),
             origin_worktree_form: entry.origin_worktree_form,
             origin_recovery_id: entry.origin_recovery_id.clone(),
             target_owners: entry.target_owners.clone(),
@@ -288,6 +292,7 @@ impl PersistedBoardPayloadV1 {
             origin_branch: self.origin_branch,
             origin_session_id: self.origin_session_id,
             origin_agent_id: self.origin_agent_id,
+            origin_agent_name: self.origin_agent_name,
             origin_worktree_form: self.origin_worktree_form,
             origin_recovery_id: self.origin_recovery_id,
             target_owners: self.target_owners,
@@ -501,6 +506,56 @@ impl RecoveryStore {
         Self::new(recovery_root.join("intents"), authority)
     }
 
+    /// Open an existing authority without materializing empty recovery storage.
+    /// Missing storage is distinct from unreadable or malformed storage.
+    pub fn open_for_repo_if_exists(
+        repo_root: impl AsRef<Path>,
+        session_id: impl Into<String>,
+    ) -> RecoveryResult<Option<Self>> {
+        let project_hash = project_scope_hash(repo_root.as_ref());
+        Self::open_for_project_if_exists(&project_hash, session_id)
+    }
+
+    /// Open one saved project/session authority without resolving a repository
+    /// path or materializing storage. The project identity remains valid after
+    /// its producing worktree has moved or been removed.
+    pub fn open_for_project_if_exists(
+        project_hash: &RepoHash,
+        session_id: impl Into<String>,
+    ) -> RecoveryResult<Option<Self>> {
+        let authority = RecoveryAuthority::new(project_hash.as_str(), session_id)?;
+        let project_root = gwt_project_dir(project_hash);
+        match fs::symlink_metadata(&project_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let recovery_root = project_root.join("recovery");
+        match fs::symlink_metadata(&recovery_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let intents_root = recovery_root.join("intents");
+        match fs::symlink_metadata(&intents_root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RecoveryError::Storage),
+        }
+        let root = intents_root.join(authority_storage_key(&authority));
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                Ok(Some(Self { root, authority }))
+            }
+            Ok(_) => Err(RecoveryError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(RecoveryError::Storage),
+        }
+    }
+
     pub fn authority(&self) -> &RecoveryAuthority {
         &self.authority
     }
@@ -654,12 +709,36 @@ impl RecoveryStore {
             .map(|revision| revision.record.clone()))
     }
 
+    /// Check emptiness without locking, repairing, or writing recovery records.
+    /// Any entry, including incomplete or unrecognized evidence, is retained.
+    pub fn has_no_records(&self) -> RecoveryResult<bool> {
+        fs::read_dir(&self.root)
+            .map_err(|_| RecoveryError::Storage)?
+            .next()
+            .transpose()
+            .map(|entry| entry.is_none())
+            .map_err(|_| RecoveryError::Storage)
+    }
+
     pub fn list(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
+        self.list_records(false)
+    }
+
+    /// Read committed records without creating files, changing permissions, or
+    /// repairing missing heads. Missing or busy record locks fail closed.
+    pub fn list_read_only(&self) -> RecoveryResult<Vec<RecoveryRecord>> {
+        self.list_records(true)
+    }
+
+    fn list_records(&self, read_only: bool) -> RecoveryResult<Vec<RecoveryRecord>> {
         let mut records = Vec::new();
         let entries = fs::read_dir(&self.root).map_err(|_| RecoveryError::Storage)?;
         for entry in entries {
             let entry = entry.map_err(|_| RecoveryError::Storage)?;
             let file_type = entry.file_type().map_err(|_| RecoveryError::Storage)?;
+            if read_only && file_type.is_symlink() {
+                return Err(RecoveryError::Storage);
+            }
             if !file_type.is_dir() {
                 continue;
             }
@@ -670,7 +749,11 @@ impl RecoveryStore {
             if !is_storage_key(key) {
                 continue;
             }
-            let locked = self.lock_record_dir(entry.path())?;
+            let locked = if read_only {
+                self.lock_record_dir_read_only(entry.path())?
+            } else {
+                self.lock_record_dir(entry.path())?
+            };
             if let Some(latest) = locked.revisions.last() {
                 records.push(latest.record.clone());
             }
@@ -722,8 +805,52 @@ impl RecoveryStore {
         let heads_dir = record_dir.join("heads");
         ensure_private_dir(&heads_dir)?;
         let lock = open_private_lock(&record_dir.join(".lock"))?;
+        // Issue #4686 AC-5 deliberately leaves this one site on the bare lock.
+        // `NamedFileLock` opens the lock file with default permissions and
+        // writes a sibling `.holder.json` carrying a pid and an operation name,
+        // while this store enforces private mode on every node it creates. The
+        // holder diagnostics are not worth widening the authority store's
+        // permissions or publishing which process is editing a record, so a
+        // contended deadline here stays anonymous on purpose.
         crate::operation_deadline::lock_exclusive(&lock).map_err(|_| RecoveryError::Storage)?;
-        let revisions = load_revisions(&revisions_dir, &heads_dir, &record_dir, &self.authority)?;
+        let revisions = load_revisions(
+            &revisions_dir,
+            &heads_dir,
+            &record_dir,
+            &self.authority,
+            true,
+        )?;
+        Ok(LockedRecord {
+            _lock: lock,
+            revisions_dir,
+            heads_dir,
+            revisions,
+        })
+    }
+
+    fn lock_record_dir_read_only(&self, record_dir: PathBuf) -> RecoveryResult<LockedRecord> {
+        let revisions_dir = record_dir.join("revisions");
+        let heads_dir = record_dir.join("heads");
+        for directory in [&record_dir, &revisions_dir, &heads_dir] {
+            let metadata = fs::symlink_metadata(directory).map_err(|_| RecoveryError::Storage)?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(RecoveryError::Storage);
+            }
+        }
+        let lock_path = record_dir.join(".lock");
+        let metadata = fs::symlink_metadata(&lock_path).map_err(|_| RecoveryError::Storage)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(RecoveryError::Storage);
+        }
+        let lock = File::open(lock_path).map_err(|_| RecoveryError::Storage)?;
+        fs2::FileExt::try_lock_shared(&lock).map_err(|_| RecoveryError::Storage)?;
+        let revisions = load_revisions(
+            &revisions_dir,
+            &heads_dir,
+            &record_dir,
+            &self.authority,
+            false,
+        )?;
         Ok(LockedRecord {
             _lock: lock,
             revisions_dir,
@@ -865,6 +992,7 @@ fn validate_sanitized_entry(
         || !optional_string_is_canonical(&entry.origin_branch)
         || !optional_string_is_canonical(&entry.origin_session_id)
         || !optional_string_is_canonical(&entry.origin_agent_id)
+        || !optional_string_is_canonical(&entry.origin_agent_name)
         || !optional_string_is_canonical(&entry.origin_recovery_id)
         || entry.resolves_entry_ids != sanitize_board_terms(&entry.resolves_entry_ids)
         || entry.related_topics != sanitize_board_terms(&entry.related_topics)
@@ -896,6 +1024,7 @@ fn board_entry_is_public_safe(entry: &BoardEntry) -> bool {
         && optional_text_is_safe(&entry.origin_branch)
         && optional_text_is_safe(&entry.origin_session_id)
         && optional_text_is_safe(&entry.origin_agent_id)
+        && optional_text_is_safe(&entry.origin_agent_name)
         && optional_text_is_safe(&entry.origin_recovery_id)
         && entry.mentions.iter().all(|mention| {
             recovery_text_is_public_safe(&mention.target) && optional_text_is_safe(&mention.label)
@@ -1272,6 +1401,7 @@ fn load_revisions(
     heads_dir: &Path,
     record_dir: &Path,
     authority: &RecoveryAuthority,
+    repair_missing_heads: bool,
 ) -> RecoveryResult<Vec<RevisionEnvelope>> {
     let storage_key = record_dir
         .file_name()
@@ -1350,7 +1480,7 @@ fn load_revisions(
         )?;
         revisions.push(envelope);
     }
-    reconcile_revision_heads(heads_dir, &revisions)?;
+    reconcile_revision_heads(heads_dir, &revisions, repair_missing_heads)?;
     Ok(revisions)
 }
 
@@ -1395,6 +1525,7 @@ fn validate_revision_transition(
 fn reconcile_revision_heads(
     heads_dir: &Path,
     revisions: &[RevisionEnvelope],
+    repair_missing_heads: bool,
 ) -> RecoveryResult<()> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(heads_dir).map_err(|_| RecoveryError::Storage)? {
@@ -1442,8 +1573,10 @@ fn reconcile_revision_heads(
         }
     }
 
-    for revision in revisions.iter().skip(paths.len()) {
-        persist_revision_head(heads_dir, revision)?;
+    if repair_missing_heads {
+        for revision in revisions.iter().skip(paths.len()) {
+            persist_revision_head(heads_dir, revision)?;
+        }
     }
     Ok(())
 }
@@ -1661,4 +1794,79 @@ fn sync_directory(path: &Path) -> RecoveryResult<()> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> RecoveryResult<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_board_payload_preserves_the_agent_name_snapshot() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let legacy = serde_json::to_value(PersistedBoardPayloadV1::from(&entry)).unwrap();
+        assert!(legacy.get("origin_agent_name").is_none());
+        let mut named = legacy.clone();
+        named["origin_agent_name"] = serde_json::json!("ミオ");
+        let payload: PersistedBoardPayloadV1 = serde_json::from_value(named).unwrap();
+        assert_eq!(
+            serde_json::to_value(payload.into_board_entry()).unwrap()["origin_agent_name"],
+            "ミオ"
+        );
+        let payload: PersistedBoardPayloadV1 = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(payload.into_board_entry())
+            .unwrap()
+            .get("origin_agent_name")
+            .is_none());
+    }
+
+    #[test]
+    fn opening_an_absent_recovery_authority_does_not_materialize_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(dir.path().join("home"));
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let root = gwt_project_dir_for_repo_path(&repo).join("recovery");
+
+        assert!(
+            RecoveryStore::open_for_repo_if_exists(&repo, "absent-session")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.exists());
+
+        let existing = RecoveryStore::for_repo(&repo, "existing-session").unwrap();
+        let entries_before = fs::read_dir(root.join("intents")).unwrap().count();
+        assert!(
+            RecoveryStore::open_for_repo_if_exists(&repo, "another-session")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read_dir(root.join("intents")).unwrap().count(),
+            entries_before
+        );
+        let reopened = RecoveryStore::open_for_repo_if_exists(&repo, "existing-session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.authority(), existing.authority());
+
+        fs::remove_dir_all(&root).unwrap();
+        fs::write(&root, "regular file at the recovery directory path").unwrap();
+        assert!(RecoveryStore::open_for_repo_if_exists(&repo, "absent-session").is_err());
+
+        fs::remove_file(&root).unwrap();
+        let project = root.parent().unwrap();
+        fs::remove_dir(project).unwrap();
+        fs::write(project, "regular file at the project directory path").unwrap();
+        assert!(RecoveryStore::open_for_repo_if_exists(&repo, "absent-session").is_err());
+    }
 }

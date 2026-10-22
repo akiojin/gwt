@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -222,21 +222,82 @@ pub(super) fn run<E: CliEnv>(
     Ok(0)
 }
 
-/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
-/// the canvas, read from the same live source `pane.list` reads.
-///
-/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
-/// whole failure it recovers from is a durable snapshot that disagrees with the
-/// windows that are actually running.
-pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
+/// Close one Work through the capability-authenticated Host connection.
+pub(super) fn close_work(work_id: &str, close_kind: &str) -> Result<Value, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create Work close runtime: {err}"))?;
+    runtime.block_on(close_work_async(&ws_url, work_id, close_kind))
+}
+
+async fn close_work_async(ws_url: &str, work_id: &str, close_kind: &str) -> Result<Value, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(
+        &mut socket,
+        json!({"kind":"close_work","work_id":work_id,"close_kind":close_kind}),
+    )
+    .await?;
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        loop {
+            let result = next_backend_json_unbounded(&mut socket).await?;
+            if result["kind"] != "work_close_result"
+                || result["work_id"] != work_id
+                || result["close_kind"] != close_kind
+            {
+                continue;
+            }
+            if result["ok"].as_bool().is_none()
+                || (result["ok"] == true && result["changed"].as_bool().is_none())
+            {
+                return Err(
+                    "invalid Host Work close result; inspect Work state before retrying".into(),
+                );
+            }
+            return Ok(result);
+        }
+    })
+    .await
+    .map_err(|_| "Work close outcome unavailable; inspect Work state before retrying".to_string())?
+}
+
+pub(super) fn live_windows(
+    default_project_root: &Path,
+) -> Result<Vec<PersistedWindowState>, String> {
     let ws_url = pane_websocket_url_from_env()?;
     let project_root = project_root_for_pane(default_project_root);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("failed to create pane runtime: {err}"))?;
-    let windows = runtime.block_on(request_window_list(&ws_url, &project_root))?;
-    Ok(windows.into_iter().map(|window| window.id).collect())
+    runtime.block_on(request_window_list(&ws_url, &project_root))
+}
+
+/// Admission companions use the existing self-only authenticated route. A
+/// busy pane is left alone; an ambiguous send is never retried automatically.
+pub(super) fn notify_verification_resume(
+    worktree: &Path,
+    session: &str,
+    text: &str,
+    still_current: impl Fn() -> bool,
+) -> Result<bool, String> {
+    if std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() != Some(session) {
+        return Err("verification resume Session changed".to_string());
+    }
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(worktree);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        send_pane_input_guarded(&ws_url, &project_root, None, text, &|window| {
+            window.status == WindowState::Idle && still_current()
+        })
+        .await
+        .map(|sent| sent.is_some())
+    })
 }
 
 async fn run_async(
@@ -249,6 +310,7 @@ async fn run_async(
             let windows = request_window_list(ws_url, project_root).await?;
             Ok(render_pane_list(&windows))
         }
+        PaneCommand::Name { candidate } => name_pane(ws_url, &candidate).await,
         PaneCommand::Read { id, lines } => {
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
@@ -267,6 +329,37 @@ async fn run_async(
             text,
         } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
     }
+}
+
+async fn name_pane(ws_url: &str, candidate: &str) -> Result<String, String> {
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        let mut socket = connect_pane_websocket(ws_url).await?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        send_frontend_event(&mut socket, json!({
+            "kind": "pane_name", "candidate": candidate, "request_id": request_id,
+        })).await?;
+        loop {
+            let value = next_backend_json_unbounded(&mut socket).await?;
+            if value.get("kind").and_then(Value::as_str) != Some("pane_name_result")
+                || value.get("request_id").and_then(Value::as_str) != Some(request_id.as_str())
+            {
+                continue;
+            }
+            let ok = value.get("ok").and_then(Value::as_bool)
+                .ok_or_else(|| "pane_name_result missing ok".to_string())?;
+            if !ok {
+                let error = value.get("error").and_then(Value::as_str)
+                    .unwrap_or("backend returned no rejection reason");
+                return Err(format!("pane.name refused: {error}"));
+            }
+            let assigned_name = value.get("agent_name").and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "pane_name_result missing the assigned agent_name".to_string())?;
+            return Ok(format!("{assigned_name}\n"));
+        }
+    }).await.map_err(|_| {
+        "pane.name timed out waiting for its assigned name; run execution.status to check current producing authority, then retry pane.name (assignment is idempotent)".to_string()
+    })?
 }
 
 /// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
@@ -352,8 +445,16 @@ async fn send_pm_pane_input(
                 // one. The input reached the pane; only the target's
                 // acknowledgement is still outstanding, so this must never
                 // read as "the message did not arrive".
-                "unverified" => Err(format!(
-                    "pm message delivery is unverified: {}",
+                //
+                // SPEC #4778 AC-4: and so it is not an error either. Handing
+                // the caller an `Err` invites the one recovery that actually
+                // does harm — sending again, which injects the line twice into
+                // a pane that already has it. The operation's job is to get the
+                // line in front of the agent, and that part succeeded; whether
+                // the agent has acknowledged it yet is the agent's business.
+                "unverified" => Ok(format!(
+                    "pm message submitted to {window_id}; acknowledgement outstanding ({}). \
+                     Do not send it again — the line is already in the pane.\n",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
                 )),
                 "refused" => Err(format!(
@@ -392,6 +493,18 @@ async fn send_pane_input(
     requested_id: Option<&str>,
     text: &str,
 ) -> Result<String, String> {
+    send_pane_input_guarded(ws_url, project_root, requested_id, text, &|_| true)
+        .await?
+        .ok_or_else(|| "pane send was withheld".to_string())
+}
+
+async fn send_pane_input_guarded(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: Option<&str>,
+    text: &str,
+    can_send: &dyn Fn(&PersistedWindowState) -> bool,
+) -> Result<Option<String>, String> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -412,6 +525,12 @@ async fn send_pane_input(
     if scoped_window_id != window_id {
         return Err("pane send target changed while establishing the authenticated scope".into());
     }
+    if !scoped_windows
+        .iter()
+        .any(|window| window.id == scoped_window_id && can_send(window))
+    {
+        return Ok(None);
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -424,10 +543,10 @@ async fn send_pane_input(
             continue;
         };
         return if reply.ok {
-            Ok(format!(
+            Ok(Some(format!(
                 "sent input to {}\n",
                 reply.window_id.unwrap_or(window_id)
-            ))
+            )))
         } else {
             Err(format!(
                 "pane send rejected: {}",
@@ -622,8 +741,9 @@ fn plan_pane_recovery(
                     .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
                     .count()
                     != 1
-                || i64::try_from(session.child_started_at)
+                || chrono::DateTime::parse_from_rfc3339(&session.started_at)
                     .ok()
+                    .map(|started| started.timestamp())
                     .is_none_or(|started| started < after || started > before)
             {
                 return None;
@@ -896,7 +1016,7 @@ fn pane_socket_closed_error(frame: Option<&CloseFrame>) -> String {
     match frame {
         Some(frame) if frame.reason == "execution binding is no longer current" => format!(
             "pane operation was refused by the gwt instance: {} — this session's execution \
-             is settled, so pane mutation (close/send) is refused while pane observation \
+             is settled, so pane mutation (close/send/name) is refused while pane observation \
              (list/read) remains available",
             frame.reason
         ),
@@ -1184,6 +1304,16 @@ fn parse_pane_close_acceptance(
     expected_request_id: &str,
     expected_window_id: &str,
 ) -> Result<bool, String> {
+    if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+        && value.get("window_id").and_then(Value::as_str) == Some(expected_window_id)
+        && value.get("ok").and_then(Value::as_bool) == Some(false)
+    {
+        return Err(value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("backend refused the correlated self-close")
+            .to_string());
+    }
     if value.get("kind").and_then(Value::as_str) != Some("pane_close_accepted") {
         return Ok(false);
     }
@@ -1632,6 +1762,22 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
+        let current_title = window
+            .dynamic_title
+            .as_deref()
+            .or(window.purpose_title.as_deref())
+            .unwrap_or(&window.title);
+        let assigned_name = window.agent_name.as_deref().filter(|_| !window.is_pm);
+        let title = assigned_name.map_or_else(
+            || current_title.to_string(),
+            |name| {
+                if current_title.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} — {current_title}")
+                }
+            },
+        );
         out.push_str(&format!(
             "{}\t{}\t{}\t{}",
             window.id,
@@ -1640,17 +1786,15 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
                 .agent_id
                 .as_deref()
                 .unwrap_or_else(|| preset_label(window.preset)),
-            window
-                .dynamic_title
-                .as_deref()
-                .or(window.purpose_title.as_deref())
-                .unwrap_or(&window.title)
+            title
         ));
+        let mut review_dispatch = false;
         if let Some(session) = window.session_id.as_deref().and_then(|id| {
             gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
                 .ok()
                 .filter(|session| session.id == id)
         }) {
+            review_dispatch = session.review_dispatch;
             let origin = serde_json::to_value(session.launch_origin)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
@@ -1667,8 +1811,13 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
         } else {
             out.push_str("\torigin=unknown");
         }
+        if let Some(name) = assigned_name {
+            out.push_str(&format!("\tagent_name={name}"));
+        }
         out.push_str(if window.is_pm {
             "\trole=pm\n"
+        } else if review_dispatch {
+            "\trole=review_agent\n"
         } else {
             "\trole=implementation_agent\n"
         });
@@ -1748,6 +1897,7 @@ fn status_label(status: WindowState) -> &'static str {
         WindowState::Waiting => "waiting",
         WindowState::Stopped => "stopped",
         WindowState::Error => "error",
+        WindowState::Interrupted => "interrupted",
     }
 }
 
@@ -1803,6 +1953,7 @@ mod tests {
             placement: WindowPlacement::Canvas,
             persist: true,
             agent_id: agent_id.map(str::to_string),
+            agent_name: None,
             agent_color: None,
             worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -1810,6 +1961,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }
@@ -1863,6 +2015,7 @@ mod tests {
             SessionObservation {
                 session_id: id.to_string(),
                 issue_number: Some(4305),
+                execution_binding_missing: false,
                 agent_id: "codex".to_string(),
                 worktree_path: "/repo/work/issue-4305".into(),
                 worktree_exists: exists,
@@ -2399,6 +2552,25 @@ mod tests {
     }
 
     #[test]
+    fn pane_name_list_exposes_assigned_name_before_current_purpose() {
+        let mut pane = window("tab::agent", WindowPreset::Codex, Some("codex"));
+        pane.purpose_title = Some("Resolve queue delay".to_string());
+        pane.dynamic_title = Some("Investigating lease contention".to_string());
+        let mut raw = serde_json::to_value(pane).unwrap();
+        raw["agent_name"] = json!("Aster");
+        let pane: PersistedWindowState = serde_json::from_value(raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(
+            output.starts_with(
+                "tab::agent\trunning\tcodex\tAster — Investigating lease contention\t"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("\tagent_name=Aster\t"), "{output}");
+    }
+
+    #[test]
     fn pm_pane_list_preserves_wire_role_without_persisting_it() {
         let mut pm = window("tab::pm", WindowPreset::Codex, Some("codex"));
         pm.is_pm = true;
@@ -2424,6 +2596,18 @@ mod tests {
             "{}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn review_pane_list_uses_durable_session_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = gwt_agent::Session::new(temp.path(), "review", gwt_agent::AgentId::Codex);
+        session.review_dispatch = true;
+        session.save(temp.path()).unwrap();
+        let mut review = window("tab::review", WindowPreset::Codex, Some("codex"));
+        review.session_id = Some(session.id);
+        let rows = render_pane_list_with_sessions(&[review], temp.path());
+        assert!(rows.trim_end().ends_with("\trole=review_agent"), "{rows}");
     }
 
     #[test]
@@ -3651,6 +3835,42 @@ mod tests {
     /// Issue #3629 AC-12: a backend that answers with `pane_close_result`
     /// settles the close without any workspace readback round.
     #[test]
+    fn workspace_close_waits_for_the_exact_host_result_and_propagates_refusal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token =
+            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-close-capability");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "pm-session");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for (ok, changed) in [(false, json!(false)), (true, json!("unknown")), (true, json!(false))] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(request, json!({"kind":"close_work","work_id":"work-1","close_kind":"discarded"}));
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"other","close_kind":"discarded","ok":true}).to_string().into())).await.unwrap();
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"work-1","close_kind":"discarded","ok":ok,"changed":changed,"retryable":!ok,"error":if ok {None} else {Some("refresh and retry")} }).to_string().into())).await.unwrap();
+                }
+            });
+            let url = format!("ws://{address}/internal/pane-ws");
+            let refusal = close_work_async(&url, "work-1", "discarded").await.unwrap();
+            assert_eq!(refusal["ok"], false);
+            assert_eq!(refusal["retryable"], true);
+            assert_eq!(refusal["error"], "refresh and retry");
+            assert!(close_work_async(&url, "work-1", "discarded").await.unwrap_err().contains("invalid Host"));
+            assert_eq!(close_work_async(&url, "work-1", "discarded").await.unwrap()["changed"], false);
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
     fn non_self_pane_close_consumes_backend_close_result() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -3760,6 +3980,55 @@ mod tests {
                 received_kinds,
                 vec!["list_windows", "frontend_ready", "close_window"],
                 "self-close must not send a second frontend_ready after revocation"
+            );
+        });
+    }
+
+    #[test]
+    fn issue_3713_self_close_rejection_reports_board_read_recovery() {
+        let refusal = json!({"kind": "pane_close_result", "window_id": "tab::own", "ok": false,
+            "reason": "unread owner evidence; run board.show with all:true"});
+        let error = parse_pane_close_acceptance(&refusal, "request", "tab::own")
+            .expect_err("a direct self-close refusal must preserve its recovery reason");
+        assert!(error.contains("board.show"), "{error}");
+        assert_eq!(
+            parse_pane_close_acceptance(&refusal, "request", "tab::other"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn issue_3713_correlated_self_close_relays_the_direct_socket_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut own = window("tab::own", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".into());
+            let (url, server) = spawn_close_pane_result_mock(
+                "/repo/self",
+                own,
+                false,
+                Some("unread owner evidence; run board.show all:true"),
+            )
+            .await;
+            let error = close_pane(&url, "/repo/self", "own")
+                .await
+                .expect_err("read gate must refuse self-close");
+            assert!(error.contains("board.show"), "{error}");
+            let received = server.await.unwrap();
+            assert_eq!(
+                received,
+                vec!["list_windows", "frontend_ready", "close_window"]
             );
         });
     }
@@ -4119,10 +4388,11 @@ mod tests {
         });
     }
 
-    /// Issue #3608 (AC-2): "the acknowledgement never arrived" and "the input
-    /// never committed" are different answers and must not collapse into one
-    /// error. Folding them together is what made the PM read a delivered
-    /// message as undelivered.
+    /// Issue #3608 (AC-2) and SPEC #4778 (AC-4): "the acknowledgement never
+    /// arrived" and "the input never committed" are different answers and must
+    /// not collapse. #3608 separated them into two errors; #4778 finished the
+    /// job by making the first one a success, because an `Err` here invites a
+    /// resend that injects the same line into the pane twice.
     #[test]
     fn pm_message_unverified_and_failed_are_distinct_caller_outcomes() {
         let _env_lock = crate::env_test_lock()
@@ -4177,24 +4447,29 @@ mod tests {
                         .await
                         .expect("send PM outcome");
                 });
-                let error = send_pm_pane_input(
+                let outcome = send_pm_pane_input(
                     &format!("ws://{address}/internal/pane-ws"),
                     None,
                     "codex-1",
                     "one outcome body",
                 )
-                .await
-                .expect_err("a non-delivered outcome is not a success");
+                .await;
                 server.await.expect("PM outcome mock task");
-                outcomes.push(error);
+                // An unverified submit reached the pane, so it reports success;
+                // the other two did not, so they stay errors.
+                outcomes.push(match outcome {
+                    Ok(message) => message,
+                    Err(error) => error,
+                });
             }
 
             let unverified = &outcomes[0];
             let failed = &outcomes[1];
             let refused = &outcomes[2];
             assert!(
-                unverified.contains("unverified")
+                unverified.contains("acknowledgement outstanding")
                     && unverified.contains("submit was not acknowledged")
+                    && unverified.contains("Do not send it again")
                     && !unverified.contains("pm message failed")
                     && !unverified.contains("invalid status"),
                 "{unverified}"

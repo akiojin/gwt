@@ -115,7 +115,6 @@ fn a_producing_launch_with_no_saved_preference_is_forced_prompt_free() {
     for agent_id in [
         AgentId::Codex,
         AgentId::ClaudeCode,
-        AgentId::Gemini,
         AgentId::Copilot,
         AgentId::Antigravity,
         AgentId::OpenCode,

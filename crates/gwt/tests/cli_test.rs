@@ -11,7 +11,6 @@ use gwt_github::{
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache, SectionName,
 };
-use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -22,9 +21,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(std::string::ToString::to_string).collect()
 }
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -489,11 +487,72 @@ fn red_104b_parse_pr_edit() {
         cmd,
         CliCommand::Pr(PrCommand::Edit {
             number: 42,
+            base: None,
             title: Some("feat(hooks): updated title".into()),
             file: Some("/tmp/pr-body.md".into()),
             add_labels: vec!["release".into()],
         })
     );
+}
+
+#[test]
+fn issue_3693_pr_recovery_argv_accepts_base_only_edit_and_close() {
+    assert!(parse_pr_args(&argv(&["edit", "42", "--base", "develop"])).is_ok());
+    assert!(parse_pr_args(&argv(&["close", "42"])).is_ok());
+    assert!(parse_pr_args(&argv(&["close", "42", "--comment", "Wrong base"])).is_ok());
+    assert!(parse_pr_args(&argv(&["edit", "42", "--base", ""])).is_err());
+    assert!(parse_pr_args(&argv(&["close", "42", "--comment"])).is_err());
+}
+
+#[test]
+fn issue_3693_json_recovery_retargets_and_closes_wrong_base_pr() {
+    let _lock = env_test_lock();
+    let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_pr(
+        42,
+        PrStatus {
+            head_ref_name: "work/issue-3693".into(),
+            check_counts: None,
+            number: 42,
+            title: "Wrong base PR".into(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://example.com/pr/42".into(),
+            created_at: None,
+            ci_status: "FAILURE".into(),
+            mergeable: "MERGEABLE".into(),
+            merge_state_status: "BLOCKED".into(),
+            review_status: "UNKNOWN".into(),
+        },
+    );
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "pr.edit",
+        "params": {"number": 42, "base": "develop"}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &argv(&["gwtd"])), 0, "{:?}", env.stderr);
+    assert_eq!(env.pr_edit_call_log.len(), 1);
+    assert_eq!(env.pr_edit_call_log[0].base.as_deref(), Some("develop"));
+
+    env.stdout.clear();
+    env.stdin = serde_json::json!({
+        "schema_version": 1, "operation": "pr.close",
+        "params": {"number": 42, "comment": "Replaced after correcting the base"}
+    })
+    .to_string();
+    assert_eq!(dispatch(&mut env, &argv(&["gwtd"])), 0, "{:?}", env.stderr);
+    assert_eq!(
+        gwt::cli::CliEnv::fetch_pr(&mut env, 42).unwrap().state,
+        gwt_git::pr_status::PrState::Closed
+    );
+    assert_eq!(
+        env.pr_comments,
+        vec![(42, "Replaced after correcting the base".into())]
+    );
+    let response: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+    assert_eq!(response["ok"], true);
+    assert!(response["output"].as_str().unwrap().contains("[CLOSED]"));
 }
 
 #[test]
@@ -595,7 +654,29 @@ fn red_107_parse_actions_job_logs() {
     let cmd = parse_actions_args(&[s("job-logs"), s("--job"), s("202")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+        CliCommand::Actions(ActionsCommand::JobLogs {
+            job_id: 202,
+            failed_only: false,
+            context_lines: 5,
+        })
+    );
+    // Issue #4849 AC-2: the failures view and its context window.
+    let cmd = parse_actions_args(&[
+        s("job-logs"),
+        s("--job"),
+        s("202"),
+        s("--failed-only"),
+        s("--context"),
+        s("2"),
+    ])
+    .unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Actions(ActionsCommand::JobLogs {
+            job_id: 202,
+            failed_only: true,
+            context_lines: 2,
+        })
     );
 }
 
@@ -652,6 +733,7 @@ tasks=body\n\
 
 fn seed(env: &TestEnv, number: u64, spec: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Spec {number}"),
         body: mk_body_spec_and_tasks_in_body(spec, tasks),
@@ -732,6 +814,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     // Seed three SPECs in different phases.
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(1),
         title: "draft one".to_string(),
         body: String::new(),
@@ -741,6 +824,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(2),
         title: "impl two".to_string(),
         body: String::new(),
@@ -750,6 +834,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(3),
         title: "done three".to_string(),
         body: String::new(),
@@ -765,7 +850,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     );
     assert_eq!(code, 0);
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("#2"));
+    assert!(out.starts_with("Issue #2"), "{out}");
     assert!(out.contains("impl two"));
     assert!(!out.contains("draft one"));
     assert!(!out.contains("done three"));
@@ -864,6 +949,7 @@ fn red_87_dispatch_spec_rename_updates_issue_title_and_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "SPEC-42: Old title".to_string(),
         body: mk_body_spec_and_tasks_in_body("# Old title", "- [ ] T-001"),
@@ -1065,6 +1151,7 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Cached title".to_string(),
         body: "Cached body".to_string(),
@@ -1103,6 +1190,7 @@ fn red_98_dispatch_issue_view_refresh_fetches_and_rewrites_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let old_snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Old title".to_string(),
         body: "Old body".to_string(),
@@ -1147,6 +1235,7 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),
@@ -1222,6 +1311,7 @@ fn red_101_dispatch_issue_comment_refreshes_cache_after_write() {
         "New comment body".to_string(),
     );
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),
@@ -1295,6 +1385,7 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
         "warm cache path must not re-fetch linked PRs"
     );
     let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.starts_with("PR #10"), "{out}");
     assert!(out.contains("Cached linked PR"));
     assert!(!out.contains("Fresh linked PR"));
 }
@@ -1410,6 +1501,15 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
             review_status: "APPROVED".to_string(),
         },
     );
+    env.pr_quarantine_contexts.insert(
+        42,
+        serde_json::from_value(serde_json::json!({
+            "number": 42,
+            "body": "Original PR description",
+            "comments": []
+        }))
+        .unwrap(),
+    );
 
     let code = dispatch(
         &mut env,
@@ -1431,6 +1531,7 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
         env.pr_edit_call_log,
         vec![PrEditCall {
             number: 42,
+            base: None,
             title: Some("Updated PR".to_string()),
             body: Some("## Summary\n\nUpdated".to_string()),
             add_labels: vec!["release".to_string()],
@@ -1645,6 +1746,8 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
             ci_status: "FAILURE".to_string(),
             merge_status: "BEHIND".to_string(),
             review_status: "CHANGES_REQUESTED".to_string(),
+            check_counts: None,
+            required_pending_count: None,
             checks: vec![PrCheckItem {
                 name: "test".to_string(),
                 state: "COMPLETED".to_string(),
@@ -1653,6 +1756,7 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
                 started_at: "2026-04-10T00:00:00Z".to_string(),
                 completed_at: "2026-04-10T00:01:00Z".to_string(),
                 workflow: "CI".to_string(),
+                is_required: None,
             }],
         },
     );

@@ -15,12 +15,231 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
-  test("CTA -> downloading -> ready -> Later morphs CTA to ready", async ({ page }) => {
+  test("shared availability and auto-apply phases preserve cancel and supersession", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    // Record the local cancel action without touching the real updater.
+    await page.addInitScript(() => {
+      (window as any).__updateCancels = 0;
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "cancel_update_auto_apply") {
+          (window as any).__updateCancels++;
+          return;
+        }
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true, suppressProjectSurfaces: true, suppressUpdateApplyStart: true,
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    const available = { kind: "update_state", state: "available", current: "9.25.0", latest: "9.26.0" };
+    const autoApply = { kind: "update_auto_apply", version: "9.26.0" };
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    await inject(available);
+    await expect(cta).toHaveAttribute("data-status", "available");
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await inject({ ...autoApply, phase: "scheduled", grace_secs: 45 });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update v9.26.0 applies in 45 s — click to cancel");
+    await cta.click();
+    await expect.poll(() => page.evaluate(() => (window as any).__updateCancels)).toBe(1);
+    await expect(cta).toHaveText("Cancelling automatic update…");
+    await inject({ ...autoApply, phase: "cancelled" });
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await inject({ ...autoApply, phase: "postponed" });
+    await expect(cta).toHaveAttribute("data-status", "draining");
+    await inject({ ...autoApply, phase: "elevation_required" });
+    await inject(available);
+    await expect(cta).toHaveText(/Administrator privileges required/);
+    await cta.click();
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("role", "dialog");
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("aria-modal", "true");
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await expect(page.locator("[data-update-modal-release-notes]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-availability-${theme}.png`) });
+    await inject({ ...available, latest: "9.27.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update available: v9.27.0 - Click to update");
+    await inject({ ...autoApply, version: "9.27.0", phase: "applying" });
+    await expect(cta).toHaveText("Applying update v9.27.0…");
+    await expect(cta).toBeDisabled();
+    expect(errors).toEqual([]);
+  });
+
+  test("shared progress renders the saved snapshot on mount and subsequent updates", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
       suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    await inject({ kind: "update_state", state: "available", current: "9.25.0", latest: "9.26.0" });
+    await inject({ kind: "update_progress", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 });
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    const progress = page.locator("[data-update-modal-progress]");
+    const counter = page.locator("[data-update-modal-byte-counter]");
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "25");
+    await expect(counter).toHaveText("1.0 MB / 4.0 MB");
+    const burst = await page.evaluate(async () => {
+      const progress = document.querySelector("[data-update-modal-progress]")!;
+      const counter = document.querySelector("[data-update-modal-byte-counter]")!;
+      const focused = document.activeElement;
+      let renders = 0;
+      const observer = new MutationObserver(records => { renders += records.length; });
+      observer.observe(progress, { attributes: true, attributeFilter: ["aria-valuenow"] });
+      try {
+        for (let index = 1; index <= 50; index++) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "update_progress", downloaded: index * 1024 * 1024, total: 100 * 1024 * 1024,
+          } }));
+        }
+        const deferred = progress.getAttribute("aria-valuenow") === "25";
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { deferred, renders, percent: progress.getAttribute("aria-valuenow"),
+          bytes: counter.textContent, focusPreserved: document.activeElement === focused };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ deferred: true, renders: 1, percent: "50",
+      bytes: "50.0 MB / 100.0 MB", focusPreserved: true });
+    await testInfo.attach("update-progress-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+
+    const fallback = await page.evaluate(async () => {
+      const originalRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      const started = performance.now();
+      try {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "update_progress", downloaded: 60 * 1024 * 1024, total: 100 * 1024 * 1024,
+        } }));
+        const progress = document.querySelector("[data-update-modal-progress]")!;
+        await new Promise<void>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            if (progress.getAttribute("aria-valuenow") === "60") {
+              observer.disconnect(); clearTimeout(deadline); resolve();
+            }
+          });
+          const deadline = setTimeout(() => { observer.disconnect(); reject(new Error("progress fallback exceeded 1 second")); }, 1000);
+          observer.observe(progress, { attributes: true, attributeFilter: ["aria-valuenow"] });
+        });
+        return { elapsed: performance.now() - started,
+          bytes: document.querySelector("[data-update-modal-byte-counter]")!.textContent };
+      } finally { window.requestAnimationFrame = originalRaf; }
+    });
+    expect(fallback.elapsed).toBeLessThan(1000);
+    expect(fallback.bytes).toBe("60.0 MB / 100.0 MB");
+    await testInfo.attach("update-progress-frame-fallback", { body: JSON.stringify(fallback), contentType: "application/json" });
+    await inject({ kind: "update_progress", downloaded: 3 * 1024 * 1024, total: 4 * 1024 * 1024 });
+    await expect(progress).toHaveAttribute("aria-valuenow", "75");
+    await expect(counter).toHaveText("3.0 MB / 4.0 MB");
+    // Closing the failure panel preserves the latest progress for a remount.
+    await inject({ kind: "update_apply_error", reason: "Fixture failure" });
+    await page.locator("[data-update-modal-close]").click();
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "75");
+    await expect(counter).toHaveText("3.0 MB / 4.0 MB");
+    await inject({ kind: "update_progress", downloaded: 2 * 1024 * 1024, total: 4 * 1024 * 1024 });
+    await expect(progress).toHaveAttribute("aria-valuenow", "50");
+    await expect(counter).toHaveText("2.0 MB / 4.0 MB");
+    await expect.poll(() => progress.evaluate(node => Math.round(
+      node.querySelector(".update-modal__progress-fill")!.getBoundingClientRect().width
+      / node.getBoundingClientRect().width * 100,
+    ))).toBe(50);
+    await page.screenshot({ path: testInfo.outputPath(`update-progress-${theme}.png`) });
+    await page.evaluate(async () => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+        kind: "update_progress", downloaded: 99, total: 100,
+      } }));
+      (document.querySelector("[data-update-modal-cancel]") as HTMLButtonElement).click();
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    });
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "0");
+    await expect(counter).toHaveText("0.0 MB / 0.0 MB");
+    expect(errors).toEqual([]);
+  });
+
+  test("a newer release replaces the ready prompt without reopening a deferred same-version modal", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+    // The two releases are injected fixtures, so Later must not try to persist
+    // a nonexistent manifest on the isolated backend.
+    await page.addInitScript(() => {
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "apply_update_later") return;
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+      suppressUpdateApplyStart: true,
+    });
+    const inject = (detail: Record<string, unknown>) =>
+      page.evaluate((payload) => {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+      }, detail);
+    const available = { kind: "update_state", state: "available", current: "9.25.0" };
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+
+    await inject({ ...available, latest: "9.26.0" });
+    await cta.click();
+    await inject({ kind: "update_ready", version: "9.26.0", asset_path: "/tmp/fake-9.26.0" });
+    await expect(modal).toHaveAttribute("data-version", "9.26.0");
+    await page.locator("[data-update-modal-later]").click();
+    await inject({ ...available, latest: "9.26.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveAttribute("data-status", "ready");
+
+    // Reopen the staged release so supersession must remove its Restart action.
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await inject({ ...available, latest: "9.27.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update available: v9.27.0 - Click to update");
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await expect(modal).toHaveAttribute("data-version", "9.27.0");
+    await expect(page.locator("[data-update-modal-restart-now]")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("CTA -> downloading -> ready -> Later and persisted state share the staged release", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+      suppressUpdateApplyStart: true,
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     // Simulate `update_state available` arriving from backend.
     await page.evaluate(() => {
@@ -73,17 +292,45 @@ test.describe("Update modal", () => {
       );
     });
     await expect(modal).toHaveAttribute("data-state", "ready");
+    // Same-version replay must preserve the action button through a click.
+    expect(await page.evaluate(() => {
+      const later = document.querySelector("[data-update-modal-later]");
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_ready", version: "9.26.0" },
+      }));
+      return later === document.querySelector("[data-update-modal-later]");
+    })).toBe(true);
     await page.locator("[data-update-modal-later]").click();
     await expect(modal).toHaveCount(0);
     await expect(cta).toHaveText(/Update v9\.26\.0 ready.*Restart now/);
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_apply_pending_persisted", version: "9.27.0" },
+      }));
+    });
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toHaveText(/Update v9\.27\.0 ready.*Restart now/);
+    await page.screenshot({ path: testInfo.outputPath(`update-staged-cta-${theme}.png`) });
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await expect(modal.locator(".update-modal__version")).toHaveText("gwt v9.27.0 is ready to install.");
+    await expect(modal.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
+    await expect(page.locator("[data-update-modal-release-notes]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-staged-modal-${theme}.png`) });
+    expect(errors).toEqual([]);
   });
 
-  test("update_apply_error renders failed state with stage / reason / log", async ({ page }) => {
+  test("update_apply_error renders failed state with stage / reason / log", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
       suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -122,5 +369,26 @@ test.describe("Update modal", () => {
     await expect(page.locator("[data-update-modal-close]")).toBeVisible();
     await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "error");
     await expect(page.locator("#update-cta")).toContainText("Update failed: HTTP 503");
+    await expect(modal.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
+    await expect(page.locator("[data-update-modal-open-log]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-error-${theme}.png`) });
+    // The injected failure has no real download or log to act on. Retry is
+    // suppressed by the bridge; Open log is covered by the controller tests.
+    await page.locator("[data-update-modal-retry]").click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "applying");
+    await expect(page.locator("[data-update-modal-progress]")).toHaveAttribute("aria-valuenow", "0");
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_apply_error", message: "Legacy fixture failure" },
+      }));
+    });
+    await expect(modal).toHaveAttribute("data-state", "failed");
+    await expect(page.locator("[data-update-modal-reason]")).toHaveText("Legacy fixture failure");
+    await expect(page.locator("#update-cta")).toContainText("Update failed: Legacy fixture failure");
+    await page.locator("[data-update-modal-close]").click();
+    await expect(modal).toHaveCount(0);
+    await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "available");
+    expect(errors).toEqual([]);
   });
 });

@@ -1,12 +1,12 @@
 ---
-description: Unified semantic search over SPECs, Issues, project source files, memory, and precision all-terms matching
+description: Unified semantic search over SPECs, Issues, project source files, memory, PM reports, and precision all-terms matching
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # Search Command
 
-Unified semantic search over SPEC Issues, GitHub Issues, project source files, and reusable project memory using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
+Unified semantic search over SPEC Issues, GitHub Issues, project source files, reusable project memory, and durable PM reports using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
 
 ## Usage
 
@@ -15,7 +15,7 @@ Unified semantic search over SPEC Issues, GitHub Issues, project source files, a
 ```
 
 Allowed `scopes` values include `specs`, `issues`, `files`, `files_docs`,
-`memory`, `board`, and `discussions`. `match_mode` accepts `semantic` or
+`memory`, `board`, `discussions`, and `reports`. `match_mode` accepts `semantic` or
 `all_terms`.
 
 ## Steps

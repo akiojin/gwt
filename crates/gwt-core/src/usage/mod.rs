@@ -9,12 +9,15 @@
 //! and converts [`UsageSnapshot`] into frontend protocol views.
 
 pub mod api_error;
+pub mod cache;
 pub mod claude;
 pub mod codex;
 pub mod consumption;
 pub mod grok;
+pub(crate) mod incremental;
 pub mod limit_notice;
 pub mod model_context;
+pub mod snapshot_store;
 pub mod state;
 pub mod types;
 
@@ -23,6 +26,7 @@ pub use consumption::{ConsumptionBreakdown, DayConsumption, ProviderConsumption}
 pub use limit_notice::{
     describe_provider_limit_notice, detect_provider_limit_notice, ProviderLimitNotice,
 };
+pub use snapshot_store::{ProviderUsageReading, ProviderUsageWindowReading};
 pub use types::{
     ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState, UsageWindow, WindowKind,
 };

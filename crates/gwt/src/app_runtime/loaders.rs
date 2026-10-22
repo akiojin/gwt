@@ -144,6 +144,7 @@ impl AppRuntime {
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
+            self.issue_link_cache_dir.clone(),
         );
         Vec::new()
     }

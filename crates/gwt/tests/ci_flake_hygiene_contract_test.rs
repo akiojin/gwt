@@ -14,11 +14,11 @@
 //! - T-055 / AC-6: a separate job re-runs the changed crates' tests at default
 //!   parallelism and fails when the outcome is not stable across runs.
 //!
-//! The flake job must stay off the required-status-check list. Branch
-//! protection reports a skipped job as Success, so a required check gated on
-//! `changes` would let a PR merge without ever having run it — the same
-//! property `ci_concurrency_contract_test.rs` pins for the docs-only filter.
+//! The flake job is a develop required status check. No changed test targets
+//! intentionally means there is nothing to compare; changes with targets run
+//! the detector. Its name and bounded repetition policy are pinned below.
 
+use gwt_core::process::{resolved_command, ProcessPlanRequest};
 use serde_yaml::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,10 @@ const CHANGES_JOB: &str = "changes";
 const RUST_TEST_JOB: &str = "test";
 const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
+const CORE_STABILITY_JOB: &str = "test-windows-core-stability";
 
-/// SPEC #4551 plan: "N = 20, 対象は変更されたクレートの test target のみ, 毎 PR".
+/// Issue #5171: integration targets retain their ceiling of 20; libraries stop
+/// after the two runs required to compare outcomes.
 const REQUIRED_FLAKE_RUNS: u32 = 20;
 
 fn repo_root() -> PathBuf {
@@ -86,8 +88,8 @@ fn the_rust_test_job_checks_for_processes_the_suite_failed_to_reap() {
     let doc = test_workflow();
     let steps = run_steps(&job(&doc, RUST_TEST_JOB));
 
-    let suite = index_of_step_running(&steps, "cargo test --workspace")
-        .expect("`Test (Rust)` must keep the workspace `cargo test` step");
+    let suite = index_of_step_running(&steps, "cargo nextest run --workspace")
+        .expect("`Test (Rust)` must run the workspace with per-test timeouts");
     let orphan_check = index_of_step_running(&steps, ORPHAN_SCRIPT).unwrap_or_else(|| {
         panic!("`Test (Rust)` must run {ORPHAN_SCRIPT} (SPEC #4551 T-050 / AC-5)")
     });
@@ -162,6 +164,36 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
         index_of_step_running(&steps, FLAKE_SCRIPT).is_some(),
         "`{FLAKE_JOB}` must run {FLAKE_SCRIPT}"
     );
+    let detector = flake["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
+        .unwrap();
+    let job_steps = flake["steps"].as_sequence().unwrap();
+    let nextest = job_steps
+        .iter()
+        .position(|step| {
+            step["uses"].as_str() == Some("taiki-e/install-action@v2")
+                && step["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")
+        })
+        .expect("flake detection must install the nextest used by nested verification tests");
+    let detector_index = job_steps.iter().position(|step| step == detector).unwrap();
+    assert!(nextest < detector_index);
+    assert_ne!(
+        job_steps[nextest]["continue-on-error"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        detector["env"]["GWT_FLAKE_BASE_SHA"],
+        "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
+        "develop pushes must use changed-file selection too"
+    );
+    assert_eq!(
+        detector["env"]["GWT_FLAKE_HEAD_SHA"],
+        "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}",
+        "a merge checkout must select the owner's changes rather than newer base changes"
+    );
 
     let condition = flake
         .get("if")
@@ -177,10 +209,10 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
     );
 }
 
-/// The flake job is gated on `changes`, so it must never carry the name of a
-/// required status check: branch protection reads a skipped job as Success.
+/// Issue #5171 AC-3: preserve the live required check's name and describe its
+/// status consistently in the workflow.
 #[test]
-fn the_flake_detection_job_is_not_a_required_status_check() {
+fn the_flake_detection_job_keeps_its_required_status_check_name() {
     let doc = test_workflow();
     let name = job(&doc, FLAKE_JOB)
         .get("name")
@@ -188,23 +220,46 @@ fn the_flake_detection_job_is_not_a_required_status_check() {
         .unwrap_or(FLAKE_JOB)
         .to_string();
 
-    // Mirror of develop's `required_status_checks.contexts`; kept in step with
-    // `ci_concurrency_contract_test.rs::REQUIRED_CHECKS`.
-    const REQUIRED_CHECKS: &[&str] = &[
-        "Commit Message Lint",
-        "Clippy & Rustfmt",
-        "Test (Rust)",
-        "Build",
-        "Test (Python runner)",
-        "Test (Rust, Windows)",
-        "Cargo Deny (advisories + sources)",
-        "Check (Windows)",
-        "Check (macOS)",
-        "Clippy (macOS)",
-    ];
+    assert_eq!(name, "Flake detection (changed test targets)");
     assert!(
-        !REQUIRED_CHECKS.contains(&name.as_str()),
-        "`{FLAKE_JOB}` is gated on `{CHANGES_JOB}`, so `{name}` must not be a required check"
+        read(TEST_WORKFLOW).contains("Flake detection is a required status check"),
+        "the workflow must document the actual branch protection contract"
+    );
+}
+
+/// Issue #4998 AC-4: panic details remain downloadable after a red or cancelled run.
+#[test]
+fn the_flake_detection_job_preserves_diagnostic_logs() {
+    let flake = job(&test_workflow(), FLAKE_JOB);
+    let steps = flake.get("steps").and_then(Value::as_sequence).unwrap();
+    let detector = steps
+        .iter()
+        .position(|step| step.get("run").and_then(Value::as_str) == Some(FLAKE_SCRIPT))
+        .unwrap();
+    let log_dir = steps[detector]
+        .get("env")
+        .and_then(|env| env.get("GWT_FLAKE_LOG_DIR"))
+        .and_then(Value::as_str)
+        .expect("the detector must use a known directory for retained logs");
+    let upload = steps
+        .iter()
+        .position(|step| {
+            step.get("uses").and_then(Value::as_str) == Some("actions/upload-artifact@v7")
+        })
+        .expect("flake diagnostics must be uploaded as an artifact");
+    assert!(upload > detector);
+    assert_eq!(
+        steps[upload].get("if").and_then(Value::as_str),
+        Some("${{ always() }}"),
+        "upload retained logs after failure or cancellation too"
+    );
+    assert_eq!(
+        steps[upload]
+            .get("with")
+            .and_then(|with| with.get("path"))
+            .and_then(Value::as_str),
+        Some(log_dir),
+        "upload the exact directory the detector wrote"
     );
 }
 
@@ -223,6 +278,22 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
         !workflow.contains("GWT_FLAKE_RUNS"),
         "the workflow must not override the run count; keep N in {FLAKE_SCRIPT}"
     );
+    assert!(
+        script.contains("GWT_FLAKE_BUDGET_SECS:-600"),
+        "standalone detector budget defaults to 600 seconds"
+    );
+    let flake = job(&test_workflow(), FLAKE_JOB);
+    let detector = flake["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
+        .unwrap();
+    assert_eq!(detector["env"]["GWT_FLAKE_BUDGET_SECS"], "220");
+    for key in ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"] {
+        assert_eq!(detector["env"][key], "0");
+        assert!(flake["env"][key].is_null(), "keep the shared cache key");
+    }
 }
 
 /// A gate that cannot be reproduced outside CI gets disabled instead of fixed.
@@ -245,5 +316,395 @@ fn both_gate_scripts_are_executable() {
                 "{relative} must be executable, got mode {mode:o}"
             );
         }
+    }
+}
+
+/// SPEC #4740 AC-8: startup readiness is fixed; restore the complete core
+/// suite on native Windows without serializing, filtering, or retrying it.
+#[test]
+fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallelism() {
+    let doc = test_workflow();
+    let producer = job(&doc, "test-windows-core-build");
+    assert_eq!(producer["runs-on"].as_str(), Some("windows-latest"));
+    assert_eq!(producer["needs"].as_str(), Some("source-sync"));
+    assert_eq!(producer["if"].as_str(), Some("${{ !cancelled() }}"));
+    let producer_steps = run_steps(&producer);
+    assert_eq!(
+        producer_steps
+            .iter()
+            .filter(|(_, run)| run.contains("node scripts/ci-windows-tests.mjs build core"))
+            .count(),
+        1,
+        "build every core harness once before sharing it"
+    );
+    let doctests = &producer_steps
+        .iter()
+        .find(|(_, run)| run.contains("cargo test -p gwt-core --all-features --doc"))
+        .expect("prebuilt harnesses must retain all five Cargo doctest passes")
+        .1;
+    assert!(doctests.contains("1..5"));
+    assert!(doctests.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    let upload = producer["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .expect("share the complete core test artifacts");
+    assert_eq!(upload["with"]["name"].as_str(), Some("windows-core-tests"));
+    assert_eq!(upload["with"]["if-no-files-found"].as_str(), Some("error"));
+    let paths = upload["with"]["path"].as_str().unwrap();
+    assert!(paths.contains("target/debug/deps/*.exe"));
+    assert!(paths.contains("target/debug/deps/*.dll"));
+    assert!(paths.contains("target/ci-windows-tests-core.json"));
+    let core = job(&doc, CORE_STABILITY_JOB);
+    assert_eq!(
+        core.get("runs-on").and_then(Value::as_str),
+        Some("windows-latest")
+    );
+    // #5059: a failed/unknown source comparison still runs the producer.
+    // #5565: reject a failed producer even when it already uploaded artifacts.
+    assert_eq!(
+        core.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() && needs.test-windows-core-build.result == 'success' }}")
+    );
+    assert_eq!(
+        core["needs"],
+        serde_yaml::from_str::<Value>("[source-sync, test-windows-core-build]").unwrap()
+    );
+    assert!(core.get("continue-on-error").is_none());
+    assert!(
+        core.get("concurrency")
+            .and_then(|value| value.get("group"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("${{ matrix.run }}"),
+        "each matrix run must have independent concurrency admission"
+    );
+    let strategy = core.get("strategy").expect("five independent Windows runs");
+    assert_eq!(
+        strategy.get("fail-fast").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        strategy.get("max-parallel").and_then(Value::as_u64),
+        Some(5)
+    );
+    let runs: Vec<_> = strategy
+        .get("matrix")
+        .and_then(|matrix| matrix.get("run"))
+        .and_then(Value::as_sequence)
+        .expect("the matrix must schedule exactly five full-suite runs")
+        .iter()
+        .map(Value::as_u64)
+        .collect();
+    assert_eq!(runs, [Some(1), Some(2), Some(3), Some(4), Some(5)]);
+    let steps = run_steps(&core);
+    let download = core["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+        })
+        .expect("each stability run consumes the shared core build");
+    assert_eq!(
+        download["with"]["name"].as_str(),
+        Some("windows-core-tests")
+    );
+    assert!(
+        steps
+            .iter()
+            .all(|(_, run)| !run.contains("cargo test")
+                && !run.contains("ci-windows-tests.mjs build"))
+    );
+    let repeat = steps
+        .iter()
+        .position(|(_, run)| {
+            run.lines()
+                .any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run-core")
+        })
+        .expect("each matrix runner must use default test parallelism");
+    let run = &steps[repeat].1;
+    assert!(run.contains("Remove-Item Env:RUST_TEST_THREADS"));
+    let repeat_step = core
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap()
+        .iter()
+        .find(|step| step.get("run").and_then(Value::as_str) == Some(run.as_str()))
+        .unwrap();
+    assert_eq!(
+        repeat_step
+            .get("env")
+            .and_then(|env| env.get("CORE_STABILITY_RUN"))
+            .and_then(Value::as_str),
+        Some("${{ matrix.run }}")
+    );
+    assert!(
+        run.contains("Write-Host") && run.contains("$env:CORE_STABILITY_RUN"),
+        "report the matrix run number in CI logs"
+    );
+    assert!(run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    assert!(!run.contains("1..5") && !run.contains("ForEach-Object"));
+    let commands: Vec<_> = run
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("node scripts/ci-windows-tests.mjs"))
+        .collect();
+    assert_eq!(commands, ["node scripts/ci-windows-tests.mjs run-core"]);
+    assert!(!run.contains("--test-threads"));
+    assert!(steps
+        .iter()
+        .all(|(_, run)| !run.contains("ci-windows-tests.mjs run-core-index")));
+    let index_job = job(&doc, "test-windows-index-stability");
+    assert_eq!(index_job["runs-on"].as_str(), Some("windows-latest"));
+    assert_eq!(
+        index_job["needs"],
+        serde_yaml::from_str::<Value>("[source-sync, test-windows-core-build]").unwrap()
+    );
+    assert_eq!(
+        index_job["if"].as_str(),
+        Some("${{ !cancelled() && needs.test-windows-core-build.result == 'success' }}")
+    );
+    assert!(
+        index_job["strategy"].is_null(),
+        "keep all twenty runs on one host"
+    );
+    assert!(index_job["continue-on-error"].is_null());
+    let index_steps = index_job["steps"].as_sequence().unwrap();
+    assert!(index_steps.iter().any(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            && step["with"]["name"].as_str() == Some("windows-core-tests")
+    }));
+    let index = index_steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("ci-windows-tests.mjs run-core-index"))
+        })
+        .expect("retain twenty additional complete index coordinator runs");
+    assert!(index["if"].is_null());
+    assert!(index["continue-on-error"].is_null());
+    let index_run = index["run"].as_str().unwrap();
+    assert!(index_run.contains("1..20"));
+    assert!(index_run.contains("Remove-Item Env:RUST_TEST_THREADS"));
+    assert!(index_run.contains("if ($LASTEXITCODE -ne 0) { $failures++ }"));
+    assert!(index_run.contains("if ($failures -ne 0) { exit 1 }"));
+    assert!(!index_run.contains("--test-threads"));
+    assert!(
+        run_steps(&index_job)
+            .iter()
+            .all(|(_, run)| !run.contains("cargo test")
+                && !run.contains("ci-windows-tests.mjs build"))
+    );
+    assert!(core
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap()
+        .iter()
+        .all(|step| step.get("continue-on-error").is_none()
+            || step.get("uses").and_then(Value::as_str) == Some("Swatinem/rust-cache@v2")));
+}
+
+/// A failed or skipped stability job must fail the existing protected check,
+/// rather than letting GitHub treat a skipped dependent job as success.
+#[test]
+fn the_required_windows_check_requires_successful_core_stability() {
+    let doc = test_workflow();
+    let regressions = job(&doc, "test-windows-rust");
+    assert_eq!(
+        regressions.get("name").and_then(Value::as_str),
+        Some("Test (Windows regressions)")
+    );
+    assert_eq!(regressions["needs"].as_str(), Some("source-sync"));
+    assert_eq!(
+        regressions.get("if").and_then(Value::as_str),
+        Some("${{ !cancelled() }}")
+    );
+    let windows = job(&doc, "test-windows-required");
+    assert_eq!(
+        windows.get("name").and_then(Value::as_str),
+        Some("Test (Rust, Windows)")
+    );
+    assert_eq!(
+        windows.get("runs-on").and_then(Value::as_str),
+        Some("ubuntu-latest")
+    );
+    let needs: Vec<_> = windows
+        .get("needs")
+        .and_then(Value::as_sequence)
+        .expect("the protected check must aggregate every Windows workload")
+        .iter()
+        .map(|dependency| {
+            dependency
+                .as_str()
+                .expect("job dependency must be a string")
+        })
+        .collect();
+    assert_eq!(
+        needs,
+        [
+            CORE_STABILITY_JOB,
+            "test-windows-index-stability",
+            "test-windows-rust",
+            "test-windows-rust-lib",
+            "test-windows-warm",
+            "source-sync"
+        ]
+    );
+    assert_eq!(
+        windows.get("if").and_then(Value::as_str),
+        Some("${{ always() }}")
+    );
+    let guard = &windows.get("steps").and_then(Value::as_sequence).unwrap()[0];
+    assert_eq!(guard.get("shell").and_then(Value::as_str), Some("bash"));
+    assert_eq!(
+        guard
+            .get("env")
+            .and_then(|env| env.get("CORE_STABILITY_RESULT"))
+            .and_then(Value::as_str),
+        Some("${{ needs.test-windows-core-stability.result }}")
+    );
+    assert_eq!(
+        guard
+            .get("env")
+            .and_then(|env| env.get("WINDOWS_RESULT"))
+            .and_then(Value::as_str),
+        Some("${{ needs.test-windows-rust.result }}")
+    );
+    assert_eq!(
+        guard["env"]["INDEX_STABILITY_RESULT"].as_str(),
+        Some("${{ needs.test-windows-index-stability.result }}")
+    );
+    assert_eq!(
+        guard["env"]["WARM_RESULT"].as_str(),
+        Some("${{ needs.test-windows-warm.result }}")
+    );
+    let run = guard
+        .get("run")
+        .and_then(Value::as_str)
+        .expect("guard must run");
+    assert!(run.contains("echo"), "report the dependency result");
+    assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(run.contains("test \"$INDEX_STABILITY_RESULT\" = success"));
+    assert!(run.contains("test \"$WINDOWS_RESULT\" = success"));
+    assert!(run.contains("test \"$WARM_RESULT\" = success"));
+    assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
+}
+
+/// SPEC #4821 AC-7: changing one source file must not rerun unrelated unit tests
+/// or mistake a longer test name for an exact match.
+#[test]
+fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
+    let script = read(FLAKE_SCRIPT);
+    let code = script
+        .split_once("# changed-test-selection-begin\n")
+        .expect("the flake script must expose its changed-test selector")
+        .1
+        .split_once("# changed-test-selection-end\n")
+        .expect("the changed-test selector must have an end marker")
+        .0;
+    let repo = tempfile::tempdir().unwrap();
+    let source = repo.path().join("crates/gwt/src");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() {}\nfn helper() {}\n",
+    )
+    .unwrap();
+    fs::write(source.join("unrelated.rs"), "fn unrelated_test() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = resolved_command(ProcessPlanRequest::new("git"))
+            .expect("resolve git for the isolated fixture")
+            .args([
+                "-c",
+                "user.name=CI fixture",
+                "-c",
+                "user.email=ci@example.invalid",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("run git in the isolated fixture");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    fs::write(
+        source.join("changed.rs"),
+        "fn relevant_test() { assert!(true); }\nfn helper() {}\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change one source file"]);
+    let test_list = repo.path().join("test-list.txt");
+    fs::write(&test_list, "changed::tests::relevant_test: test\nunrelated::tests::unrelated_test: test\nhelper::tests::unrelated_test: test\nchanged::tests::relevant_test_extra: test\n").unwrap();
+    let select = |base: &str| {
+        resolved_command(ProcessPlanRequest::new(if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }))
+        .expect("resolve Python for the real selector")
+        .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+        .env("GWT_FLAKE_HEAD_SHA", "HEAD")
+        .current_dir(repo.path())
+        .output()
+        .expect("run the real Python selector")
+    };
+    let selected = select(base.trim());
+    assert!(
+        selected.status.success(),
+        "selector: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap(),
+        "changed::tests::relevant_test\n"
+    );
+    // A safely mapped file must not hide another changed file with external
+    // tests whose function names cannot be mapped from the source.
+    fs::write(source.join("external.rs"), "fn external_helper() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "change an unmapped source file"]);
+    let mixed = select(base.trim());
+    assert!(mixed.status.success());
+    assert_eq!(
+        mixed.stdout,
+        b"changed::tests::relevant_test\nchanged::tests::relevant_test_extra\nhelper::tests::unrelated_test\nunrelated::tests::unrelated_test\n",
+        "any unmapped changed source file must retain the full target"
+    );
+    fs::write(
+        &test_list,
+        "external::first_test: test\nexternal::second_test: test\n",
+    )
+    .unwrap();
+    let unmapped = select(base.trim());
+    assert!(unmapped.status.success());
+    assert_eq!(
+        unmapped.stdout,
+        b"external::first_test\nexternal::second_test\n"
+    );
+    for invalid_base in ["", "missing-base"] {
+        assert!(
+            !select(invalid_base).status.success(),
+            "an unavailable base must fail closed"
+        );
     }
 }

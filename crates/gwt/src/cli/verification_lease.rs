@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
     coordinator_root, verification_coordinator_root, HeavyHolderKind, HeavyLeaseStatus,
-    HeavyQueueEntry, IndexCoordinator, TargetKey,
+    HeavyQueueEntry, HeavySlotStatus, IndexCoordinator, TargetKey,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -29,13 +29,14 @@ use crate::cli::CliEnv;
 pub(crate) mod admission;
 /// Issue #4405: starved-versus-progressing reading of the lease holder.
 pub(crate) mod holder_activity;
+mod renewal;
+pub(crate) use renewal::CommandProgress;
 
 const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
 /// Flags that widen a `cargo test` past a single target, wherever they sit.
 const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
     "--workspace",
     "--all",
-    "--all-features",
     "--all-targets",
     "--benches",
     "--bins",
@@ -55,7 +56,7 @@ const CARGO_NAMED_TARGET_SELECTORS: &[&str] = &["--test", "--bin", "--example"];
 pub(crate) enum CommandWeight {
     /// Narrow enough that several worktrees can run it side by side.
     Light,
-    /// Builds or runs enough of the tree to need the host to itself.
+    /// Requires a host verification slot; unbounded resources stay exclusive.
     Heavy,
 }
 
@@ -66,29 +67,54 @@ pub(crate) enum CommandWeight {
 /// `--test <name>` queued behind `cargo test --workspace --all-features`, and
 /// the fleet's verification throughput was pinned at one window at a time. So
 /// the weight follows the scope the command will actually build — a widening
-/// flag is heavy, and a run narrowed to named targets of at most one package
-/// is light.
+/// flag is heavy, and a run narrowed to a named target or a filtered library
+/// of one package is light. Enabling features does not widen that selection.
 ///
 /// Anything this module cannot bound stays heavy. An unrecognized program may
 /// compile the world, and guessing light for it would trade one window's wait
 /// for the host-wide oversubscription the lease was built to prevent
 /// (Issue #3913).
 pub(crate) fn classify_command(command: &str) -> CommandWeight {
-    let Ok(args) = crate::cli::verification_record::split_command_line(command) else {
+    let Ok((assignments, args)) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+    else {
         return CommandWeight::Heavy;
     };
     let Some(program) = args.first() else {
         return CommandWeight::Heavy;
     };
-    if Path::new(program)
+    if is_short_non_cargo_gate(&args, &assignments) {
+        return CommandWeight::Light;
+    }
+    let program = Path::new(program)
         .file_stem()
-        .and_then(|stem| stem.to_str())
-        != Some("cargo")
-    {
+        .and_then(|stem| stem.to_str());
+    let lint_program = if matches!(program, Some("bunx" | "npx")) {
+        let package_index = match (program, args.get(1).map(String::as_str)) {
+            (Some("bunx"), Some("--bun")) | (Some("npx"), Some("--yes")) => 2,
+            _ => 1,
+        };
+        args.get(package_index).map(String::as_str)
+    } else {
+        program
+    };
+    if matches!(
+        lint_program,
+        Some("markdownlint" | "markdownlint-cli" | "markdownlint-cli2")
+    ) {
+        return CommandWeight::Light;
+    }
+    if program != Some("cargo") {
         return CommandWeight::Heavy;
     }
     // Cargo's own arguments end at a bare `--`; everything after it is the
-    // test binary's filter and says nothing about what cargo will build.
+    // test binary's filter. Keep that filter for library-run classification.
+    let test_filter = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map_or(Some(false), |separator| {
+            has_libtest_filter(&args[separator + 1..])
+        });
     let cargo_args: Vec<&str> = args[1..]
         .iter()
         .map(String::as_str)
@@ -117,10 +143,165 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
     if matches!(subcommand, "fmt" | "metadata") {
         return CommandWeight::Light;
     }
+    if subcommand == "doc" && args.clone().any(|arg| arg == "--no-deps") {
+        return CommandWeight::Light;
+    }
     if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
         return CommandWeight::Heavy;
     }
-    classify_cargo_scope(&cargo_args)
+    if subcommand == "nextest" && args.next() != Some("run") {
+        return CommandWeight::Heavy;
+    }
+    let Some(test_filter) = test_filter else {
+        return CommandWeight::Heavy;
+    };
+    classify_cargo_scope(
+        &args.collect::<Vec<_>>(),
+        test_filter,
+        subcommand == "nextest",
+    )
+}
+
+/// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
+/// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
+pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
+    if is_short_non_cargo_slot_gate(command) {
+        // Fixture subprocesses exceed two minutes on a saturated Windows host.
+        // Keep one ordinary slot and a finite limit without shortening the suite.
+        return Some(Duration::from_secs(300));
+    }
+    let (assignments, args) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+        .ok()?;
+    is_short_non_cargo_gate(&args, &assignments).then_some(Duration::from_secs(60))
+}
+
+/// Issue #5621: this fixture-backed Node test is bounded but still needs one
+/// ordinary host slot. Unknown files/options and preloads stay exclusive.
+pub(crate) fn is_short_non_cargo_slot_gate(command: &str) -> bool {
+    let Ok((assignments, args)) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+    else {
+        return false;
+    };
+    let [program, flag, script] = args.as_slice() else {
+        return false;
+    };
+    let script = script.replace('\\', "/");
+    matches!(
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("node" | "node.exe")
+    ) && flag == "--test"
+        && script.strip_prefix("./").unwrap_or(&script) == "scripts/coverage-summary.test.mjs"
+        && !has_node_options(&assignments)
+}
+
+fn has_node_options(assignments: &[(String, String)]) -> bool {
+    // The last explicit assignment overrides inherited Node preloads.
+    assignments
+        .iter()
+        .rev()
+        .find(|(key, _)| {
+            key == "NODE_OPTIONS" || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
+        })
+        .map_or_else(
+            || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
+            |(_, value)| !value.is_empty(),
+        )
+}
+
+fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) -> bool {
+    let program = args
+        .first()
+        .and_then(|program| Path::new(program).file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.strip_suffix(".exe").unwrap_or(name));
+    let subcommand = args.get(1).map(String::as_str);
+    let checks = |allowed_flags: &[&str]| {
+        let mut has_check = false;
+        for arg in args.iter().skip(2).take_while(|arg| arg.as_str() != "--") {
+            if arg == "--check" {
+                has_check = true;
+            } else if arg.starts_with('-') && !allowed_flags.contains(&arg.as_str()) {
+                // An unknown option may consume --check as its value.
+                return false;
+            }
+        }
+        has_check
+    };
+    match program {
+        Some("rustc") => subcommand == Some("--version") && args.len() == 2,
+        // Custom actionlint checkers may be arbitrary executable wrappers.
+        Some("actionlint") => !args.iter().skip(1).any(|arg| {
+            arg.starts_with('-')
+                && matches!(
+                    arg.trim_start_matches('-').split('=').next(),
+                    Some("shellcheck" | "pyflakes")
+                )
+        }),
+        Some("shellcheck" | "yamllint" | "typos") => true,
+        Some("git") => {
+            subcommand == Some("diff")
+                && checks(&["--cached", "--staged", "--no-ext-diff", "--no-textconv"])
+        }
+        Some("taplo") => subcommand == Some("check") || (subcommand == Some("fmt") && checks(&[])),
+        // This reader consumes an existing JSON, unlike coverage-summary.mjs
+        // which invokes llvm-cov. Do not classify node scripts by basename.
+        Some("node") => {
+            // NODE_OPTIONS can preload arbitrary modules before the reader.
+            // An explicit empty assignment disables inherited options.
+            !has_node_options(assignments)
+                && subcommand.is_some_and(|script| {
+                    script.replace('\\', "/").trim_start_matches("./")
+                        == "scripts/check-coverage-threshold.mjs"
+                })
+        }
+        _ => false,
+    }
+}
+
+/// None means unbounded or unknown, not merely the absence of a filter.
+/// Libtest ORs filters, so an empty filter wins over every non-empty filter.
+/// Option values such as `--skip some_test` are not positive filters.
+fn has_libtest_filter(args: &[String]) -> Option<bool> {
+    let mut has_filter = false;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg.is_empty() {
+            return None;
+        }
+        if !arg.starts_with('-') {
+            has_filter = true;
+            continue;
+        }
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(flag, value)| (flag, Some(value)));
+        if matches!(
+            flag,
+            "--skip" | "--test-threads" | "--format" | "--logfile" | "--color"
+        ) {
+            if inline_value.is_none() {
+                args.next()?;
+            }
+        } else if inline_value.is_some()
+            || !matches!(
+                flag,
+                "--exact"
+                    | "--ignored"
+                    | "--include-ignored"
+                    | "--nocapture"
+                    | "--show-output"
+                    | "--quiet"
+                    | "-q"
+            )
+        {
+            return None;
+        }
+    }
+    Some(has_filter)
 }
 
 /// Weigh a scoped `cargo test` by the selection it builds.
@@ -129,10 +310,15 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// workspace with `default-members`, so `cargo test --lib` with no package
 /// selects the lib target of *every* default member — the workspace-wide build
 /// this classification exists to catch, wearing a narrowing flag.
-fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
+fn classify_cargo_scope(
+    cargo_args: &[&str],
+    mut test_filter: bool,
+    nextest: bool,
+) -> CommandWeight {
     let mut named_targets = 0usize;
     let mut lib_target = false;
     let mut packages = 0usize;
+    let mut nextest_filterset = false;
     let mut args = cargo_args.iter().copied();
     while let Some(arg) = args.next() {
         // `--test=name` and `--test name` select the same target.
@@ -144,6 +330,20 @@ fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
         }
         if flag == "--lib" {
             lib_target = true;
+            continue;
+        }
+        if nextest && matches!(flag, "-E" | "--filterset") {
+            let Some(value) = inline_value.or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Nextest unions repeated filtersets. Only one simple equality
+            // is proven narrow here; general expressions stay fail-closed.
+            if nextest_filterset || !is_exact_nextest_filter(value) {
+                return CommandWeight::Heavy;
+            }
+            nextest_filterset = true;
+            test_filter = true;
+            continue;
         }
         let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
         let package = flag == "-p" || flag == "--package" || attached_package.is_some();
@@ -160,16 +360,68 @@ fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
             } else {
                 named_targets += 1;
             }
+            continue;
+        }
+        if matches!(
+            flag,
+            "--features"
+                | "-F"
+                | "--jobs"
+                | "-j"
+                | "--target"
+                | "--manifest-path"
+                | "--target-dir"
+                | "--profile"
+                | "--config"
+                | "--color"
+                | "--message-format"
+        ) {
+            if inline_value.or_else(|| args.next()).is_none() {
+                return CommandWeight::Heavy;
+            }
+        } else if !arg.is_empty() && !arg.starts_with('-') {
+            test_filter = true;
+        } else if !matches!(
+            flag,
+            "--all-features"
+                | "--no-default-features"
+                | "--no-run"
+                | "--no-fail-fast"
+                | "--release"
+                | "-r"
+                | "--locked"
+                | "--offline"
+                | "--frozen"
+                | "--quiet"
+                | "-q"
+                | "--verbose"
+                | "-v"
+                | "--keep-going"
+                | "--future-incompat-report"
+        ) {
+            return CommandWeight::Heavy;
         }
     }
     if packages > 1 || named_targets + usize::from(lib_target) > 1 {
         return CommandWeight::Heavy;
     }
-    if named_targets == 1 || (lib_target && packages == 1) {
+    if named_targets == 1 || (lib_target && packages == 1 && test_filter) {
         CommandWeight::Light
     } else {
         CommandWeight::Heavy
     }
+}
+
+fn is_exact_nextest_filter(value: &str) -> bool {
+    value
+        .strip_prefix("test(=")
+        .and_then(|name| name.strip_suffix(')'))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        })
 }
 
 /// The first command of a matrix that needs the host to itself, if any.
@@ -223,8 +475,25 @@ pub(super) fn run<E: CliEnv>(
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
-            observe_holder_activity(&mut status, &worktree);
-            render(out, "held", "free", &status);
+            observe_holder_activity(&mut status, &worktree)?;
+            status.caller_target = Some(verification_key(env)?.file_stem());
+            render(
+                out,
+                "held",
+                "free",
+                &status,
+                project_scope_hash(&worktree).as_str(),
+            );
+            // Placement can refuse before admission creates a holder. Report
+            // the current caller separately from the pool's holder (Issue #4473).
+            match crate::cli::daemon::verification_host::resolve(&worktree) {
+                Ok((host, _)) => {
+                    out.push_str(&format!("current_spawn_host: {}\n", host.label()));
+                }
+                Err(error) => out.push_str(&format!(
+                    "current_spawn_host: refused\ncurrent_spawn_error: {error}\n"
+                )),
+            }
             Ok(0)
         }
         VerificationLeaseCommand::Acquire { .. }
@@ -239,6 +508,7 @@ pub(super) fn run<E: CliEnv>(
         VerificationLeaseCommand::Release { lease_id, reason } => {
             let worktree = resolve_current_worktree_root(env.repo_path());
             release(
+                project_scope_hash(&worktree).as_str(),
                 &lease_id,
                 reason.as_deref(),
                 &mut SystemReclaimer::new(&worktree),
@@ -249,13 +519,24 @@ pub(super) fn run<E: CliEnv>(
 }
 
 fn release(
+    current_project: &str,
     lease_id: &str,
     reason: Option<&str>,
     reclaimer: &mut dyn OrphanReclaimer,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let snapshot = status_for_lease(lease_id)?.ok_or_else(|| missing_lease(lease_id))?;
+    let relation = holder_project_relation(snapshot.target.as_deref(), current_project);
+    if relation != HolderProjectRelation::SameProject {
+        return Err(unexpected(format!(
+            "verification lease {lease_id}: {}. You must not reclaim or stop this holder. \
+             Wait for it to finish; only the owning project may request canonical release. \
+             Do not bypass this refusal with kill or pkill.",
+            relation.reason()
+        )));
+    }
     let Some(control) = control_dir_for(lease_id) else {
-        return reclaim_orphan(lease_id, reason, reclaimer, out);
+        return reclaim_holder(current_project, lease_id, reason, reclaimer, out);
     };
     // Issue #4360: the holder waits for this file to exist and then reads the
     // reason out of it, so a plain write lets it read the empty moment between
@@ -275,13 +556,13 @@ fn release(
     if let Some(reason) = reason {
         out.push_str(&format!("reason: {reason}\n"));
     }
-    push_status_fields(out, &status()?);
+    push_status_fields(out, &status()?, current_project);
     Ok(0)
 }
 
-/// Issue #4633: how long a holder that looked orphaned is watched again
+/// How long a holder that looked reclaimable is watched again
 /// before it is ended. The first reading spans [`PROGRESS_WINDOW`]; this one
-/// has to show the same — parent gone, nothing of its own running, no CPU
+/// has to show the same — nothing of its own running, no CPU
 /// beyond noise — over a window long enough to cover the gap between two
 /// commands of a live matrix.
 ///
@@ -348,10 +629,29 @@ impl OrphanReclaimer for SystemReclaimer {
                 Err(format!("failed to signal holder pid {pid}: {err}"))
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // Hidden console children have no cooperative signal channel.
+            // Match daemon_supervisor's Windows termination, without /T:
+            // only the twice-observed holder is authorized for reclamation.
+            let _ = force;
+            let output = gwt_core::process::hidden_command("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output()
+                .map_err(|error| format!("failed to terminate holder pid {pid}: {error}"))?;
+            if output.status.success() || !crate::process::is_host_process_alive(pid) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "failed to terminate holder pid {pid}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ))
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (pid, force);
-            Err("reclaiming an orphaned verification holder is supported on Unix only".to_string())
+            Err("reclaiming a verification holder is unsupported on this platform".to_string())
         }
     }
 }
@@ -371,34 +671,32 @@ fn holder_workload(
     })
 }
 
-/// Issue #4633 AC-2/AC-3: free a canonical lease whose holder is orphaned.
+/// Free a canonical lease whose holder is orphaned or stalled without work.
 ///
 /// A canonical lease is a kernel lock inside its `verify.run`, so the only way
-/// to free it from outside is to end that process. That is allowed for one
-/// holder only: one whose requester is gone and which has nothing left to
-/// run, confirmed by two readings [`ORPHAN_CONFIRM_WINDOW`] apart. Every other
+/// to free it from outside is to end that process. An orphan, or an old
+/// in-tree driver with no remaining workload (#4746), must be confirmed by
+/// two readings [`ORPHAN_CONFIRM_WINDOW`] apart. Every other
 /// holder keeps the protection it had — the manual API cannot touch it.
-fn reclaim_orphan(
+fn reclaim_holder(
+    current_project: &str,
     lease_id: &str,
     reason: Option<&str>,
     reclaimer: &mut dyn OrphanReclaimer,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let coordinator = open_coordinator()?;
-    let held = |coordinator: &IndexCoordinator| {
-        coordinator
-            .heavy_lease_status()
-            .ok()
-            .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id))
-    };
+    let held =
+        |coordinator: &IndexCoordinator| holder_for_lease(coordinator, lease_id).ok().flatten();
     let Some(status) = held(&coordinator) else {
         return Err(missing_lease(lease_id));
     };
     let Some(owner) = status.owner.clone() else {
         return Err(canonical_refusal(lease_id, None));
     };
+    protect_renewed_holder(&status, lease_id)?;
     let first = reclaimer.observe(owner.pid, &status, Duration::ZERO);
-    let Some(first) = first.filter(holder_activity::HolderActivity::orphaned) else {
+    let Some(first) = first.filter(holder_activity::HolderActivity::reclaimable) else {
         return Err(canonical_refusal(
             lease_id,
             first.map(|activity| activity.describe()).as_deref(),
@@ -406,7 +704,7 @@ fn reclaim_orphan(
     };
     let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) else {
         return Err(unexpected(format!(
-            "verification lease {lease_id} is held by an orphaned holder ({}). Reclaiming it \
+            "verification lease {lease_id} is held by a reclaimable holder ({}). Reclaiming it \
              ends pid {} and is recorded in the lease ledger, so it needs a reason: pass \
              `params.reason`.",
             first.describe(),
@@ -414,11 +712,11 @@ fn reclaim_orphan(
         )));
     };
     let confirmed = reclaimer.observe(owner.pid, &status, ORPHAN_CONFIRM_WINDOW);
-    let Some(confirmed) = confirmed.filter(holder_activity::HolderActivity::orphaned) else {
+    let Some(confirmed) = confirmed.filter(holder_activity::HolderActivity::reclaimable) else {
         return Err(canonical_refusal(
             lease_id,
             Some(&format!(
-                "the holder looked orphaned, but a second reading {}s later did not confirm it: {}",
+                "the holder looked reclaimable, but a second reading {}s later did not confirm it: {}",
                 ORPHAN_CONFIRM_WINDOW.as_secs(),
                 confirmed
                     .map(|activity| activity.describe())
@@ -429,9 +727,11 @@ fn reclaim_orphan(
     // The lease must still be the same one, under the same owner, right
     // before its holder is ended: a pid is only a name, and ten seconds is
     // long enough for the lease to change hands.
-    if held(&coordinator).and_then(|status| status.owner) != Some(owner.clone()) {
+    let current = held(&coordinator).ok_or_else(|| missing_lease(lease_id))?;
+    if current.owner != Some(owner.clone()) {
         return Err(missing_lease(lease_id));
     }
+    protect_renewed_holder(&current, lease_id)?;
     reclaimer.terminate(owner.pid, false).map_err(unexpected)?;
     if await_settled(lease_id).is_err() {
         reclaimer.terminate(owner.pid, true).map_err(unexpected)?;
@@ -439,10 +739,12 @@ fn reclaim_orphan(
     }
     let target = status.target.as_deref().unwrap_or("unknown");
     let record = format!(
-        "orphaned holder pid {} reclaimed by pid {}: {reason}",
+        "{} holder pid {} reclaimed by pid {}: {reason}",
+        confirmed.state(),
         owner.pid,
         std::process::id()
     );
+    current.record_ttl_overrun(Some(confirmed.cpu_percent));
     coordinator.record_lease_reclaimed(lease_id, target, owner.clone(), &record);
     out.push_str("verification lease: reclaimed\n");
     out.push_str(&format!("lease_id: {lease_id}\n"));
@@ -453,8 +755,23 @@ fn reclaim_orphan(
         "recorded: {} (kind reclaimed)\n",
         coordinator.lease_event_log_path().display()
     ));
-    push_status_fields(out, &self::status()?);
+    push_status_fields(out, &self::status()?, current_project);
     Ok(0)
+}
+
+/// Renewal observes the exact command tree; a reclaimer's process sample can
+/// miss delegated work. Keep a renewed lease protected until that TTL expires.
+/// Expiry alone still does not authorize reclaiming it.
+fn protect_renewed_holder(status: &HeavyLeaseStatus, lease_id: &str) -> Result<(), SpecOpsError> {
+    // The diagnostic event ledger is best-effort. Only the atomically
+    // published ticket can establish that a valid TTL has not been renewed.
+    if status.expires_at_ms.is_some() && !status.expired && status.ttl_renewed != Some(false) {
+        return Err(canonical_refusal(
+            lease_id,
+            Some("the holder renewed its active TTL or its renewal state is unknown; wait for its verification to finish"),
+        ));
+    }
+    Ok(())
 }
 
 /// Issue #4633 AC-4: what a caller closing a pane in `worktree` should know
@@ -469,8 +786,13 @@ pub(crate) fn closing_pane_lease_note(worktree: &Path) -> Option<String> {
     let project = project_scope_hash(worktree);
     let worktree_hash = compute_worktree_hash(worktree).ok()?;
     let target = TargetKey::verification(project.as_str(), worktree_hash.as_str()).file_stem();
-    let status = open_coordinator().ok()?.heavy_lease_status().ok()?;
-    lease_note_for_target(&target, &status)
+    open_coordinator()
+        .ok()?
+        .heavy_pool_status()
+        .ok()?
+        .slots
+        .iter()
+        .find_map(|slot| lease_note_for_target(&target, &slot.status))
 }
 
 fn lease_note_for_target(target: &str, status: &HeavyLeaseStatus) -> Option<String> {
@@ -495,8 +817,7 @@ fn lease_note_for_target(target: &str, status: &HeavyLeaseStatus) -> Option<Stri
 fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
     let deadline = Instant::now() + CONTROL_ACK_TIMEOUT;
     loop {
-        let status = status()?;
-        if !status.held || status.lease_id.as_deref() != Some(lease_id) {
+        if status_for_lease(lease_id)?.is_none() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -509,8 +830,7 @@ fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
     }
 }
 
-/// Locate the control directory of a live lease. At most one lease is held
-/// host-wide, so this scan sees one candidate in practice. Only a *granted*
+/// Locate the control directory of a live legacy lease. Only a *granted*
 /// outcome may answer: a refusal snapshot names the lease it lost to, so
 /// matching on the lease id alone would route release requests to
 /// a directory with nobody listening. Pre-upgrade detached holders wrote
@@ -539,14 +859,165 @@ const HOLDER_STATE_ADVICE: &str = "holder_state is one sampled reading, not a ve
                                    reading saw no CPU and no process turnover; `unknown` means \
                                    the work runs outside the holder's tree and was not found; \
                                    `orphaned` means its parent exited with nothing of its own \
-                                   left running — `verify.lease.release` with a reason \
-                                   re-checks that and reclaims the lease. Confirm with \
-                                   `ps -eo pid,ppid,time,command` before acting.";
+                                   left running; `reclaimable` means an old in-tree driver has \
+                                   no remaining workload. `ps -eo pid,ppid,time,command` is diagnostic \
+                                   only; neither it nor repeated sampling grants permission to \
+                                   stop a holder. Follow holder_intervention; never bypass a \
+                                   canonical release refusal with kill or pkill.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HolderProjectRelation {
+    SameProject,
+    OtherProject,
+    Unknown,
+}
+
+impl HolderProjectRelation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SameProject => "same_project",
+            Self::OtherProject => "other_project",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SameProject => "held by this project",
+            Self::OtherProject => "held by another project",
+            Self::Unknown => "the holder's project could not be established",
+        }
+    }
+}
+
+fn holder_project_relation(target: Option<&str>, current_project: &str) -> HolderProjectRelation {
+    let Some((project, worktree)) = target.and_then(|target| target.split_once("--verification--"))
+    else {
+        return HolderProjectRelation::Unknown;
+    };
+    if project.is_empty() || worktree.is_empty() || current_project.is_empty() {
+        HolderProjectRelation::Unknown
+    } else if project == current_project {
+        HolderProjectRelation::SameProject
+    } else {
+        HolderProjectRelation::OtherProject
+    }
+}
+
+/// Issue #4358: one identity reading for admission and every status slot.
+/// Self-hold is diagnostic evidence, never permission to end a live holder.
+struct HolderDiagnostics {
+    exe: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    has_live_children: Option<bool>,
+    self_hold: bool,
+}
+
+fn holder_is_self(
+    status: &HeavyLeaseStatus,
+    caller_target: Option<&str>,
+    caller_session: Option<&str>,
+) -> bool {
+    status.held
+        && !status.holder_stale
+        && status.holder_alive != Some(false)
+        && status.holder_kind == Some(HeavyHolderKind::Verification)
+        && (caller_target.is_some_and(|target| status.target.as_deref() == Some(target))
+            || caller_session
+                .filter(|session| !session.is_empty())
+                .is_some_and(|session| {
+                    status
+                        .holder_context
+                        .as_ref()
+                        .and_then(|context| context.session_id.as_deref())
+                        == Some(session)
+                }))
+}
+
+impl HolderDiagnostics {
+    fn read(status: &HeavyLeaseStatus, caller_target: Option<&str>) -> Self {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let pid = status.owner.as_ref().map(|owner| Pid::from_u32(owner.pid));
+        if let Some(pid) = pid {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_exe(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always),
+            );
+        }
+        let process = pid.and_then(|pid| system.process(pid));
+        Self {
+            exe: process
+                .and_then(|process| process.exe())
+                .map(Path::to_path_buf),
+            cwd: process
+                .and_then(|process| process.cwd())
+                .map(Path::to_path_buf),
+            has_live_children: process.map(|_| {
+                system.processes().values().any(|child| {
+                    child.parent() == pid && child.status() != sysinfo::ProcessStatus::Zombie
+                })
+            }),
+            self_hold: process.is_some()
+                && holder_is_self(
+                    status,
+                    caller_target,
+                    std::env::var("GWT_SESSION_ID").ok().as_deref(),
+                ),
+        }
+    }
+
+    fn detail(&self, status: &HeavyLeaseStatus) -> String {
+        format!(
+            "holder_pid: {}, holder_exe: {}, acquired_at_ms: {}, holder_has_live_children: {}, self_hold: {}",
+            status.owner.as_ref().map_or_else(|| "unknown".into(), |owner| owner.pid.to_string()),
+            self.exe.as_ref().map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            status.acquired_at_ms.map_or_else(|| "unknown".into(), |at| at.to_string()),
+            self.has_live_children.map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        )
+    }
+
+    fn push_fields(&self, out: &mut String, prefix: &str) {
+        out.push_str(&format!(
+            "{prefix}holder_exe: {}\n{prefix}holder_has_live_children: {}\n{prefix}self_hold: {}\n",
+            self.exe
+                .as_ref()
+                .map_or_else(|| "unknown".into(), |exe| exe.display().to_string()),
+            self.has_live_children
+                .map_or_else(|| "unknown".into(), |children| children.to_string()),
+            self.self_hold,
+        ));
+    }
+}
 
 /// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
     held: bool,
+    #[serde(skip)]
+    caller_target: Option<String>,
+    /// Pool diagnostics are additive output, not part of legacy control outcomes.
+    #[serde(skip)]
+    capacity: Option<usize>,
+    #[serde(skip)]
+    running: usize,
+    #[serde(skip)]
+    available: usize,
+    #[serde(skip)]
+    slots: Vec<HeavySlotStatus>,
+    /// Derived from the live lease's control channel, never trusted from a
+    /// saved pre-upgrade outcome.
+    #[serde(skip)]
+    legacy_release_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,29 +1075,50 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
-    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
-        return;
-    };
-    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
-    // working set has to reach into the daemons that launched it.
-    let workload = holder_workload(
-        status.holder_spawn_host.as_deref(),
-        status.target.as_deref(),
-        worktree,
-    );
-    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
-        status.holder_held_ms = Some(activity.held_ms);
-        status.holder_cpu_percent = Some(activity.cpu_percent);
-        status.holder_state = Some(activity.state().to_string());
-        status.holder_state_detail = Some(activity.describe());
+fn observe_holder_activity(
+    status: &mut LeaseStatusSnapshot,
+    worktree: &Path,
+) -> Result<(), SpecOpsError> {
+    observe_holder_activity_with(status, |status| {
+        let pid = status.owner_pid.filter(|_| status.held)?;
+        // Daemon-hosted commands run outside the holder's own process tree.
+        let workload = holder_workload(
+            status.holder_spawn_host.as_deref(),
+            status.target.as_deref(),
+            worktree,
+        );
+        holder_activity::observe(pid, &workload, status.acquired_at_ms)
+    })
+}
+
+fn observe_holder_activity_with(
+    status: &mut LeaseStatusSnapshot,
+    observe: impl FnOnce(&LeaseStatusSnapshot) -> Option<holder_activity::HolderActivity>,
+) -> Result<(), SpecOpsError> {
+    let activity = observe(status);
+    // A process sample is historical evidence, not proof it still owns a lease.
+    let mut current = self::status()?;
+    if let Some(activity) = activity.filter(|_| {
+        current.held
+            && current.lease_id == status.lease_id
+            && current.owner_pid == status.owner_pid
+            && current.target == status.target
+            && current.acquired_at_ms == status.acquired_at_ms
+    }) {
+        current.holder_held_ms = Some(activity.held_ms);
+        current.holder_cpu_percent = Some(activity.cpu_percent);
+        current.holder_state = Some(activity.state().to_string());
+        current.holder_state_detail = Some(activity.describe());
     }
+    *status = current;
+    Ok(())
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
     fn from(status: HeavyLeaseStatus) -> Self {
         Self {
             held: status.held,
+            legacy_release_available: false,
             lease_id: status.lease_id,
             target: status.target,
             owner_pid: status.owner.map(|owner| owner.pid),
@@ -648,6 +1140,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_alive: status.holder_alive,
             holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
             holder_stale: status.holder_stale,
+            ..Self::default()
         }
     }
 }
@@ -666,22 +1159,484 @@ struct LeaseOutcome {
 /// reported in its place (Issue #4285 transition); index jobs and searches
 /// on the model lane are never verification holders.
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
-    let status = open_coordinator()?
-        .heavy_lease_status()
+    let pool = open_coordinator()?
+        .heavy_pool_status()
         .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
-    if status.held || status.pending > 0 {
-        return Ok(status.into());
+    let status = pool
+        .slots
+        .iter()
+        .find(|slot| slot.status.held)
+        .or_else(|| pool.slots.iter().find(|slot| slot.status.holder_stale))
+        .map(|slot| slot.status.clone())
+        .unwrap_or_default();
+    let legacy = if pool.used == 0 && pool.queue.is_empty() {
+        IndexCoordinator::open_default()
+            .and_then(|coordinator| coordinator.heavy_lease_status())
+            .ok()
+            .filter(|legacy| {
+                legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification)
+            })
+    } else {
+        None
+    };
+    let mut snapshot = LeaseStatusSnapshot::from(legacy.clone().unwrap_or(status));
+    snapshot.capacity = Some(pool.capacity);
+    snapshot.running = pool.used.max(usize::from(legacy.is_some()));
+    snapshot.available = if legacy.is_some() { 0 } else { pool.available };
+    snapshot.slots = pool.slots;
+    if let Some(status) = legacy {
+        snapshot.slots.push(HeavySlotStatus { slot: None, status });
     }
-    let legacy = IndexCoordinator::open_default()
-        .and_then(|coordinator| coordinator.heavy_lease_status())
-        .ok()
-        .filter(|legacy| legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification));
-    Ok(legacy.unwrap_or(status).into())
+    snapshot.pending = pool.queue.len();
+    snapshot.queue = pool.queue;
+    snapshot.legacy_release_available = snapshot.held
+        && snapshot
+            .lease_id
+            .as_deref()
+            .and_then(control_dir_for)
+            .is_some();
+    Ok(snapshot)
+}
+
+/// A representative holder is unsuitable for control and renewal: another
+/// slot can remain active after that representative changes or finishes.
+pub(super) fn holder_for_lease(
+    coordinator: &IndexCoordinator,
+    lease_id: &str,
+) -> Result<Option<HeavyLeaseStatus>, gwt_core::index_coordinator::CoordinatorError> {
+    let pool = coordinator.heavy_pool_status()?;
+    let mut status = pool
+        .slots
+        .into_iter()
+        .map(|slot| slot.status)
+        .find(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
+    if let Some(status) = &mut status {
+        status.pending = pool.queue.len();
+        status.queue = pool.queue;
+    }
+    Ok(status)
+}
+
+fn status_for_lease(lease_id: &str) -> Result<Option<LeaseStatusSnapshot>, SpecOpsError> {
+    let status = holder_for_lease(&open_coordinator()?, lease_id)
+        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
+    let status = status.or_else(|| {
+        IndexCoordinator::open_default()
+            .and_then(|coordinator| holder_for_lease(&coordinator, lease_id))
+            .ok()
+            .flatten()
+            .filter(|status| status.holder_kind == Some(HeavyHolderKind::Verification))
+    });
+    Ok(status.map(LeaseStatusSnapshot::from))
 }
 
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
-    IndexCoordinator::open_default_verification()
+    let settings = gwt_config::Settings::load()
+        .map_err(|err| unexpected(format!("verification configuration invalid: {err}")))?;
+    let capacity = settings.verification.slots.map_or_else(
+        || {
+            let mut host = sysinfo::System::new();
+            host.refresh_memory();
+            automatic_slot_capacity(
+                std::thread::available_parallelism().map_or(1, usize::from),
+                host.total_memory(),
+            )
+        },
+        |slots| usize::from(slots.get()),
+    );
+    IndexCoordinator::open_verification(verification_coordinator_root(), capacity)
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
+}
+
+fn automatic_slot_capacity(logical_cores: usize, memory_bytes: u64) -> usize {
+    (logical_cores / 8)
+        .min((memory_bytes / (16 * 1024 * 1024 * 1024)) as usize)
+        .clamp(1, 4) // Largest all-PASS canonical capacity measured for #5082.
+}
+
+pub(super) fn cargo_subcommand(args: &[String]) -> Option<&str> {
+    let mut globals = args.iter().skip(1).take_while(|arg| arg.as_str() != "--");
+    loop {
+        let argument = globals.next()?;
+        if argument.starts_with('+')
+            || matches!(
+                argument.as_str(),
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if matches!(argument.as_str(), "--config" | "-Z") {
+            globals.next();
+            continue;
+        }
+        if argument.starts_with("--config=") {
+            continue;
+        }
+        return Some(argument.as_str());
+    }
+}
+
+pub(super) fn effective_cargo_target(
+    worktree: &Path,
+    command: &str,
+    isolated_baseline: bool,
+) -> Result<Option<PathBuf>, String> {
+    let (assignments, args) = crate::cli::verification_record::take_env_assignments(
+        crate::cli::verification_record::split_command_line(command)?,
+    )?;
+    if Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) != Some("cargo") {
+        // Wrappers may build Cargo without invoking it directly. Only an inline
+        // declaration opts in: ambient variables do not establish a wrapper's
+        // artifact contract, and isolated baselines remove this assignment.
+        if isolated_baseline {
+            return Ok(None);
+        }
+        return Ok(assignments
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| worktree.join(value)));
+    }
+    let cargo_args: Vec<_> = args[1..]
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .collect();
+    // Cargo plugins can choose their own build roots. Keep those commands
+    // exclusive unless their artifact directory can be established.
+    let Some(subcommand) = cargo_subcommand(&args) else {
+        return Ok(None);
+    };
+    if !matches!(
+        subcommand,
+        "build"
+            | "check"
+            | "clippy"
+            | "test"
+            | "t"
+            | "nextest"
+            | "rustc"
+            | "doc"
+            | "bench"
+            | "clean"
+    ) {
+        return Ok(None);
+    }
+    let mut metadata = gwt_core::process::hidden_command(&args[0]);
+    if let Some(toolchain) = args.get(1).filter(|arg| arg.starts_with('+')) {
+        metadata.arg(toolchain);
+    }
+    metadata
+        .args([
+            "metadata",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(worktree);
+    gwt_core::process::scrub_git_env(&mut metadata);
+    for (key, value) in assignments {
+        metadata.env(key, value);
+    }
+    if isolated_baseline {
+        metadata.env_remove("CARGO_TARGET_DIR");
+    }
+    let mut index = 0;
+    while index < cargo_args.len() {
+        let argument = cargo_args[index];
+        let (flag, inline) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(flag, value)| {
+                (flag, Some(value))
+            });
+        if matches!(flag, "--target-dir" | "--manifest-path" | "--config") {
+            let value = match inline {
+                Some(value) => value,
+                None => {
+                    index += 1;
+                    cargo_args
+                        .get(index)
+                        .ok_or_else(|| format!("{flag} requires a value"))?
+                        .as_str()
+                }
+            };
+            if flag == "--target-dir" {
+                metadata.env("CARGO_TARGET_DIR", value);
+            } else {
+                metadata.args([flag, value]);
+            }
+        }
+        index += 1;
+    }
+    let output = metadata
+        .output()
+        .map_err(|error| format!("Cargo target resolution failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cargo target resolution failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!("Cargo target resolution failed: invalid metadata JSON: {error}")
+    })?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| {
+            "Cargo target resolution failed: metadata target_directory must be a non-empty string"
+                .to_string()
+        })?;
+    Ok(Some(PathBuf::from(target)))
+}
+
+pub(super) fn command_temporary_base(worktree: &Path, command: &str) -> Result<PathBuf, String> {
+    let (assignments, _) = crate::cli::verification_record::take_env_assignments(
+        crate::cli::verification_record::split_command_line(command)?,
+    )?;
+    let keys = if cfg!(windows) {
+        ["TEMP", "TMP", "TMPDIR"]
+    } else {
+        ["TMPDIR", "TMP", "TEMP"]
+    };
+    let base = keys
+        .iter()
+        .find_map(|key| {
+            assignments
+                .iter()
+                .rev()
+                .find(|(name, value)| name == key && !value.is_empty())
+                .map(|(_, value)| PathBuf::from(value))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    Ok(if base.is_absolute() {
+        base
+    } else {
+        worktree.join(base)
+    })
+}
+
+// #5082: sampled target growth 4,650,508,061 + temporary growth 269,853,053
+// bytes across the changed-surface matrix, with 20% headroom (rounded up).
+const DEFAULT_VERIFICATION_DISK_BUDGET_BYTES: u64 = 5_904_433_337;
+
+pub(super) fn command_disk_budgets(
+    paths: &[PathBuf],
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
+    let settings = gwt_config::Settings::load().map_err(|error| error.to_string())?;
+    command_disk_budgets_with_inventory(paths, &settings, sysinfo::Disks::new_with_refreshed_list)
+}
+
+fn command_disk_budgets_with_inventory(
+    paths: &[PathBuf],
+    settings: &gwt_config::Settings,
+    _disk_inventory: impl FnOnce() -> sysinfo::Disks,
+) -> Result<Vec<gwt_core::index_coordinator::VerificationDiskBudget>, String> {
+    let bytes = settings
+        .verification
+        .disk_budget_bytes
+        .unwrap_or(DEFAULT_VERIFICATION_DISK_BUDGET_BYTES);
+    #[cfg(not(unix))]
+    let disks = _disk_inventory();
+    let mut budgets: Vec<gwt_core::index_coordinator::VerificationDiskBudget> = Vec::new();
+    for path in paths {
+        let mut probe = path.clone();
+        while !probe.exists() {
+            if !probe.pop() {
+                return Err(format!("cannot locate disk for {}", path.display()));
+            }
+        }
+        let probe = dunce::canonicalize(probe).map_err(|error| error.to_string())?;
+        #[cfg(not(unix))]
+        let mount = disks
+            .iter()
+            .filter(|disk| probe.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().components().count())
+            .ok_or_else(|| {
+                format!(
+                    "cannot identify verification volume for {}",
+                    probe.display()
+                )
+            })?;
+        #[cfg(windows)]
+        let volume = mount.mount_point().to_string_lossy().to_lowercase();
+        #[cfg(unix)]
+        let volume = {
+            // Bind mounts may have different mount paths on the same device.
+            use std::os::unix::fs::MetadataExt;
+            format!(
+                "device:{}",
+                fs::metadata(&probe)
+                    .map_err(|error| error.to_string())?
+                    .dev()
+            )
+        };
+        #[cfg(not(any(windows, unix)))]
+        let volume = mount.mount_point().to_string_lossy().into_owned();
+        if budgets.iter().any(|budget| budget.volume == volume) {
+            continue;
+        }
+        let total = fs2::total_space(&probe).map_err(|error| error.to_string())?;
+        let floor = settings
+            .build_artifact_gc
+            .below_bytes
+            .max(total.saturating_mul(settings.build_artifact_gc.below_percent) / 100);
+        budgets.push(gwt_core::index_coordinator::VerificationDiskBudget {
+            volume,
+            path: probe,
+            bytes,
+            floor_bytes: floor,
+        });
+    }
+    Ok(budgets)
+}
+
+/// Own the target boundary and its process-local acquisition diagnostic.
+/// Recovery borrows this guard; it never opens a second FD for the same lock.
+#[derive(Debug)]
+pub(crate) struct BuildArtifactGuard {
+    file: fs::File,
+    lock_path: PathBuf,
+    locked: bool,
+}
+
+fn artifact_claims() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, String>> {
+    static CLAIMS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+    > = std::sync::OnceLock::new();
+    CLAIMS.get_or_init(Default::default)
+}
+
+impl BuildArtifactGuard {
+    #[track_caller]
+    fn claim(target: &Path) -> std::io::Result<Self> {
+        let lock_path = build_artifact_lock_path(target)?;
+        let mut claims = artifact_claims()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holder) = claims.get(&lock_path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "artifact lock already claimed by this process: {holder}; lock {}; requested at {}; borrow the held BuildArtifactGuard for recovery",
+                    lock_path.display(),
+                    std::panic::Location::caller()
+                ),
+            ));
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        claims.insert(
+            lock_path.clone(),
+            format!(
+                "pid {} {file:?}; acquired at {}",
+                std::process::id(),
+                std::panic::Location::caller()
+            ),
+        );
+        // Never hold this registry mutex while waiting on a kernel lock:
+        // unrelated targets must remain independent (Issue #5106 AC-4).
+        Ok(Self {
+            file,
+            lock_path,
+            locked: false,
+        })
+    }
+
+    pub(super) fn protects(&self, target: &Path) -> std::io::Result<bool> {
+        Ok(self.locked && self.lock_path == build_artifact_lock_path(target)?)
+    }
+}
+
+impl Drop for BuildArtifactGuard {
+    fn drop(&mut self) {
+        let mut claims = artifact_claims()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.locked {
+            let _ = fs2::FileExt::unlock(&self.file);
+        }
+        claims.remove(&self.lock_path);
+    }
+}
+
+/// The shared target-directory boundary for canonical verification and GC.
+/// The lock lives outside the target, so deletion never removes its identity.
+#[track_caller]
+pub(crate) fn try_lock_build_artifacts(
+    target: &Path,
+) -> std::io::Result<Option<BuildArtifactGuard>> {
+    let mut guard = match BuildArtifactGuard::claim(target) {
+        Ok(guard) => guard,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match fs2::FileExt::try_lock_exclusive(&guard.file) {
+        Ok(()) => {
+            guard.locked = true;
+            Ok(Some(guard))
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[track_caller]
+pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifactGuard> {
+    let mut guard = BuildArtifactGuard::claim(target)?;
+    fs2::FileExt::lock_exclusive(&guard.file)?;
+    guard.locked = true;
+    Ok(guard)
+}
+
+pub(super) fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let mut existing = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(target)
+    };
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        missing.push(
+            existing
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid Cargo target path",
+                    )
+                })?
+                .to_os_string(),
+        );
+        existing.pop();
+    }
+    let mut normalized = dunce::canonicalize(existing)?;
+    for component in missing.into_iter().rev() {
+        normalized.push(component);
+    }
+    let identity = normalized.to_string_lossy();
+    let identity = if cfg!(windows) {
+        identity.to_lowercase()
+    } else {
+        identity.into_owned()
+    };
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let locks = verification_coordinator_root().join("build-artifacts");
+    fs::create_dir_all(&locks)?;
+    Ok(dunce::canonicalize(locks)?.join(format!("{digest}.lock")))
 }
 
 pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
@@ -694,18 +1649,144 @@ pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, Spec
     ))
 }
 
-fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseStatusSnapshot) {
+fn render(
+    out: &mut String,
+    held_label: &str,
+    free_label: &str,
+    status: &LeaseStatusSnapshot,
+    current_project: &str,
+) {
     let label = if status.held { held_label } else { free_label };
     out.push_str(&format!("verification lease: {label}\n"));
-    push_status_fields(out, status);
+    push_status_fields(out, status, current_project);
 }
 
-fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
+const QUEUE_BYPASS_RECOVERY: &str =
+    "FIFO position retained; rerun verify.run with the identical full matrix to reclaim priority";
+
+/// Explain root exclusion without confusing a current unknown-resource command
+/// with a pre-pool binary. Older tickets are attributed from live process data.
+fn push_slot_admission_fields(
+    out: &mut String,
+    label: &str,
+    holder: &HeavyLeaseStatus,
+    executable: Option<&Path>,
+    cwd: Option<&Path>,
+) {
+    let exclusive = label == "legacy";
+    let mode = if exclusive { "exclusive" } else { "shared" };
+    out.push_str(&format!("slots[{label}].mode: {mode}\n"));
+    if exclusive {
+        let reason = holder.holder_context.as_ref().map_or(
+            "legacy or unclassified runner holds the root lock",
+            |context| context.qos.as_str(),
+        );
+        out.push_str(&format!("slots[{label}].exclusive_reason: {reason}\n"));
+    }
+    let command = holder
+        .holder_context
+        .as_ref()
+        .map_or("unknown", |context| context.action.as_str());
+    out.push_str(&format!("slots[{label}].command: {command}\n"));
+    let worktree = holder
+        .holder_context
+        .as_ref()
+        .map(|context| context.project_root.as_path())
+        .or(cwd);
+    for (field, path) in [("executable", executable), ("worktree", worktree)] {
+        out.push_str(&format!(
+            "slots[{label}].{field}: {}\n",
+            path.map_or_else(|| "unknown".to_string(), |path| path.display().to_string())
+        ));
+    }
+}
+
+fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_project: &str) {
+    if let Some(capacity) = status.capacity {
+        out.push_str(&format!(
+            "capacity: {capacity}\nrunning: {}\navailable: {}\n",
+            status.running, status.available
+        ));
+        out.push_str("exclusive_commands: commands without a resolved build directory (Cargo metadata or inline CARGO_TARGET_DIR); legacy root locks also exclude all slots\n");
+        let exclusive_held = status
+            .slots
+            .iter()
+            .any(|slot| slot.slot.is_none() && (slot.status.held || slot.status.holder_stale));
+        let (count, oldest, total) = status
+            .queue
+            .iter()
+            .filter(|entry| exclusive_held && entry.bypass_reason.is_none())
+            .fold((0usize, 0u64, 0u64), |(count, oldest, total), entry| {
+                (
+                    count + 1,
+                    oldest.max(entry.waiting_ms),
+                    total.saturating_add(entry.waiting_ms),
+                )
+            });
+        out.push_str(&format!("exclusive_blocked_count: {count}\nexclusive_blocked_oldest_wait_ms: {oldest}\nexclusive_blocked_total_wait_ms: {total}\n"));
+        for slot in &status.slots {
+            let label = slot
+                .slot
+                .map_or_else(|| "legacy".to_string(), |slot| slot.to_string());
+            let holder = &slot.status;
+            out.push_str(&format!(
+                "slots[{label}]: held={} lease_id={} target={} owner_pid={} remaining_ms={} estimated_remaining_ms={} estimated_remaining_ms_uncertain=true holder_alive={} holder_stale={} holder_project_relation={}\n",
+                holder.held,
+                holder.lease_id.as_deref().unwrap_or("none"),
+                holder.target.as_deref().unwrap_or("none"),
+                holder.owner.as_ref().map_or_else(|| "unknown".to_string(), |owner| owner.pid.to_string()),
+                holder.remaining_ms.map_or_else(|| "unknown".to_string(), |remaining| remaining.to_string()),
+                holder.estimated_remaining_ms.map_or_else(|| "unknown".to_string(), |remaining| remaining.to_string()),
+                holder.holder_alive.map_or_else(|| "unknown".to_string(), |alive| alive.to_string()),
+                holder.holder_stale,
+                holder_project_relation(holder.target.as_deref(), current_project).as_str(),
+            ));
+            if holder.held || holder.holder_stale {
+                let identity = HolderDiagnostics::read(holder, status.caller_target.as_deref());
+                push_slot_admission_fields(
+                    out,
+                    &label,
+                    holder,
+                    identity.exe.as_deref(),
+                    identity.cwd.as_deref(),
+                );
+                identity.push_fields(out, &format!("slots[{label}]."));
+                if holder.lease_id == status.lease_id {
+                    identity.push_fields(out, "");
+                }
+            }
+        }
+    }
     if let Some(lease_id) = &status.lease_id {
         out.push_str(&format!("lease_id: {lease_id}\n"));
     }
     if let Some(target) = &status.target {
         out.push_str(&format!("target: {target}\n"));
+    }
+    if status.held {
+        let relation = holder_project_relation(status.target.as_deref(), current_project);
+        let candidate = relation == HolderProjectRelation::SameProject
+            && (status.legacy_release_available
+                || matches!(
+                    status.holder_state.as_deref(),
+                    Some("orphaned" | "reclaimable")
+                ));
+        out.push_str(&format!("holder_project_relation: {}\n", relation.as_str()));
+        out.push_str(&format!("holder_reclaim_candidate: {candidate}\n"));
+        if candidate {
+            out.push_str("holder_intervention: canonical_release_only\n");
+            if status.legacy_release_available {
+                out.push_str("holder_intervention_reason: only verify.lease.release may drain this project's legacy control channel; never use kill or pkill\n");
+            } else {
+                out.push_str("holder_intervention_reason: only verify.lease.release with a reason may re-check and reclaim this project's holder; never use kill or pkill\n");
+            }
+        } else {
+            out.push_str("holder_intervention: forbidden\n");
+            out.push_str(&format!(
+                "holder_intervention_reason: {}; you must not reclaim or stop this holder. Wait; do not bypass canonical release refusals with kill or pkill\n",
+                relation.reason()
+            ));
+        }
     }
     if let Some(pid) = status.owner_pid {
         out.push_str(&format!("owner_pid: {pid}\n"));
@@ -745,6 +1826,8 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if let Some(estimate) = status.estimated_remaining_ms {
         out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
+        out.push_str("estimated_remaining_ms_uncertain: true\n");
+        out.push_str("estimated_remaining_ms_basis: batch estimate or lease TTL, not a live progress counter; unchanged estimates are not evidence of a stalled holder\n");
     }
     if let Some(held) = status.holder_held_ms {
         out.push_str(&format!("holder_held_ms: {held}\n"));
@@ -754,6 +1837,9 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if let Some(state) = &status.holder_state {
         out.push_str(&format!("holder_state: {state}\n"));
+        if state == "unknown" {
+            out.push_str("holder_state_constraint: observation is inconclusive; repeated sampling does not authorize reclaiming or stopping the holder\n");
+        }
         if let Some(detail) = &status.holder_state_detail {
             out.push_str(&format!("holder_state_detail: {detail}\n"));
         }
@@ -763,17 +1849,39 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
         out.push_str(&format!("holder_state_advice: {HOLDER_STATE_ADVICE}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
+    if status.held || status.pending > 0 {
+        out.push_str("waiter_action: wait\n");
+        out.push_str("waiter_reason: waiting for canonical admission is expected; queue position does not authorize reclaiming or stopping the holder\n");
+    }
     // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
     // whether it is next or fifth. The queue names every claimant and how long
     // it has been waiting, in the order the lease will be handed over.
     for (position, entry) in status.queue.iter().enumerate() {
         out.push_str(&format!(
-            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={}\n",
+            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={} resident={} attempt_id={} job_status={}\n",
             entry.target.as_deref().unwrap_or("unknown"),
             entry.priority.as_str(),
             entry.queued_at_ms,
             entry.waiting_ms,
+            entry.resident,
+            entry.attempt_id.as_deref().unwrap_or("unknown"),
+            entry.job_status.map(|status| status.as_str()).unwrap_or("unknown"),
         ));
+        if let Some(reason) = &entry.bypass_reason {
+            out.push_str(&format!(
+                "queue[{position}].bypass: {reason}; {QUEUE_BYPASS_RECOVERY}\n"
+            ));
+        }
+        if status.capacity.is_some() {
+            let mode = match entry.mode {
+                gwt_core::index_coordinator::HeavyQueueMode::Shared => "shared",
+                gwt_core::index_coordinator::HeavyQueueMode::Exclusive => "exclusive",
+            };
+            out.push_str(&format!("queue[{position}].mode: {mode}\n"));
+            if let Some(reason) = &entry.scheduling_reason {
+                out.push_str(&format!("queue[{position}].scheduling: {reason}\n"));
+            }
+        }
     }
 }
 
@@ -790,16 +1898,18 @@ fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
     unexpected(format!(
         "verification lease {lease_id} is held without a legacy control channel. \
          Canonical leases are owned by `verify.run` and release when the runner finishes; \
-         they cannot be released or extended through the manual API — only a holder whose \
-         parent exited with nothing left to run can be reclaimed.{holder} \
-         Check `verify.lease.status` for the current holder."
+         they cannot be released or extended through the manual API unless the holder is \
+         orphaned or an old in-tree driver is stalled with no workload left to run.{holder} \
+         Check `verify.lease.status` for the current holder. For a same-project reclaim \
+         candidate, use `verify.lease.release` with `params.lease_id` and `params.reason`. \
+         To stop your own running attempt, get its ID from `verify.status` and call \
+         `verify.cancel` with `params.attempt_id` and `params.reason` from the same \
+         project, worktree, session and execution authority. Other attempts stay protected."
     ))
 }
 
 fn missing_lease(lease_id: &str) -> SpecOpsError {
-    let held = status()
-        .ok()
-        .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
+    let held = status_for_lease(lease_id).ok().flatten();
     match held {
         Some(_) => canonical_refusal(lease_id, None),
         None => unexpected(format!(
@@ -815,8 +1925,384 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn self_hold_matches_session_or_worktree_but_not_foreign_or_stale_holders() {
+        use gwt_core::index_coordinator::{HeavyHolderContext, HeavyHolderKind, HeavyLeaseStatus};
+        let mut holder = HeavyLeaseStatus {
+            held: true,
+            holder_alive: Some(true),
+            holder_kind: Some(HeavyHolderKind::Verification),
+            target: Some("repo--verification--first".into()),
+            holder_context: Some(
+                serde_json::from_value::<HeavyHolderContext>(serde_json::json!({
+                    "project_root": "/work/first", "action": "cargo build", "qos": "exclusive"
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            holder.holder_context.as_ref().unwrap().session_id.is_none(),
+            "legacy context must remain readable"
+        );
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            None
+        ));
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        holder.holder_context.as_mut().unwrap().session_id = Some("caller".into());
+        assert!(super::holder_is_self(
+            &holder,
+            Some("repo--verification--second"),
+            Some("caller")
+        ));
+        assert!(!super::holder_is_self(&holder, None, Some("other")));
+        holder.holder_stale = true;
+        assert!(!super::holder_is_self(
+            &holder,
+            Some("repo--verification--first"),
+            Some("caller")
+        ));
+    }
+
+    #[test]
+    fn canonical_refusal_names_the_authorized_recovery_operations() {
+        let error = super::canonical_refusal("held", None).to_string();
+        for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
+            assert!(error.contains(operation), "{error}");
+        }
+        assert!(error.contains("params.attempt_id"), "{error}");
+        assert!(error.contains("params.reason"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_disk_budgets_do_not_require_a_listed_mount() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join("temporary");
+        std::fs::create_dir(&temporary).unwrap();
+        let settings = toml::from_str::<gwt_config::Settings>(
+            "[verification]\ndisk_budget_bytes=1234\n[build_artifact_gc]\nbelow_bytes=21474836480\nbelow_percent=5\n",
+        )
+        .unwrap();
+        let inventory_called = std::cell::Cell::new(false);
+        let budgets = super::command_disk_budgets_with_inventory(
+            &[directory.path().join("missing/target"), temporary],
+            &settings,
+            || {
+                inventory_called.set(true);
+                sysinfo::Disks::new()
+            },
+        )
+        .expect("Unix device identity must work without a listed ancestor mount");
+
+        assert!(!inventory_called.get(), "Unix must not enumerate mounts");
+        assert_eq!(budgets.len(), 1, "same-device paths share one reservation");
+        let probe = dunce::canonicalize(directory.path()).unwrap();
+        assert_eq!(budgets[0].path, probe);
+        assert_eq!(
+            budgets[0].volume,
+            format!("device:{}", std::fs::metadata(&probe).unwrap().dev())
+        );
+        assert_eq!(budgets[0].bytes, 1234);
+        assert_eq!(
+            budgets[0].floor_bytes,
+            21_474_836_480.max(fs2::total_space(&probe).unwrap().saturating_mul(5) / 100)
+        );
+    }
+
+    #[test]
+    fn status_lists_both_slot_holders_and_remaining_capacity() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let coordinator = gwt_core::index_coordinator::IndexCoordinator::open_verification(
+            gwt_core::index_coordinator::verification_coordinator_root(),
+            2,
+        )
+        .unwrap();
+        let mut holders = Vec::new();
+        for worktree in ["first", "second"] {
+            let key = gwt_core::index_coordinator::TargetKey::verification("fixture", worktree);
+            let gwt_core::index_coordinator::JobAdmission::Owner(guard) = coordinator
+                .request_job(
+                    &key,
+                    gwt_core::index_coordinator::JobPriority::ManualRebuild,
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap()
+            else {
+                panic!("unique worktree")
+            };
+            let lease = guard
+                .acquire_heavy_with_ttl(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(60),
+                )
+                .unwrap();
+            holders.push((guard, lease));
+        }
+        let mut out = String::new();
+        let snapshot = super::status().unwrap();
+        super::push_status_fields(&mut out, &snapshot, "fixture");
+        assert!(out.contains("running: 2\n"), "{out}");
+        assert!(
+            out.contains(&format!("capacity: {}\n", snapshot.capacity.unwrap())),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "available: {}\n",
+                snapshot.capacity.unwrap().saturating_sub(2)
+            )),
+            "{out}"
+        );
+        assert!(out.contains("slots[0]:"), "{out}");
+        assert!(out.contains("slots[1]:"), "{out}");
+        for field in [
+            "holder_exe:",
+            "self_hold: false",
+            "slots[0].holder_exe:",
+            "slots[1].holder_exe:",
+        ] {
+            assert!(out.contains(field), "missing {field}: {out}");
+        }
+        struct NoWork;
+        impl super::OrphanReclaimer for NoWork {
+            fn observe(
+                &mut self,
+                _: u32,
+                _: &gwt_core::index_coordinator::HeavyLeaseStatus,
+                _: std::time::Duration,
+            ) -> Option<super::holder_activity::HolderActivity> {
+                None
+            }
+            fn terminate(&mut self, _: u32, _: bool) -> Result<(), String> {
+                panic!("a live slot holder must not be terminated")
+            }
+        }
+        for (_, lease) in &holders {
+            assert!(out.contains(lease.id()), "{out}");
+            assert_eq!(
+                super::holder_for_lease(&coordinator, lease.id())
+                    .unwrap()
+                    .unwrap()
+                    .lease_id
+                    .as_deref(),
+                Some(lease.id())
+            );
+            let error = super::release(
+                "fixture",
+                lease.id(),
+                Some("inspect live slot"),
+                &mut NoWork,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("Canonical leases are owned by `verify.run`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_capacity_is_bounded_by_cpu_and_memory() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(super::automatic_slot_capacity(64, 256 * gib), 4);
+        assert_eq!(super::automatic_slot_capacity(32, 128 * gib), 4);
+        assert_eq!(super::automatic_slot_capacity(32, 32 * gib), 2);
+        assert_eq!(super::automatic_slot_capacity(2, 8 * gib), 1);
+    }
+
+    #[test]
+    fn cargo_target_resolution_respects_configuration_and_command_overrides() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".cargo")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='target-fixture'\nversion='0.0.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            dir.path().join(".cargo/config.toml"),
+            "[build]\ntarget-dir='configured-target'\n",
+        )
+        .unwrap();
+        let _target = gwt_core::test_support::ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        assert_eq!(
+            super::effective_cargo_target(&root, "cargo test --workspace", false).unwrap(),
+            Some(root.join("configured-target"))
+        );
+        assert_eq!(super::effective_cargo_target(&root, "CARGO_TARGET_DIR=assigned-target cargo test --workspace --target-dir selected-target", false).unwrap(), Some(root.join("selected-target")));
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "python runner.py", false).unwrap(),
+            None
+        );
+        std::fs::write(dir.path().join("Cargo.toml"), "invalid manifest").unwrap();
+        let error = super::effective_cargo_target(&root, "cargo test --workspace", false)
+            .expect_err("metadata failure must remain distinct from a command without artifacts");
+        assert!(error.contains("Cargo target resolution failed"), "{error}");
+        assert!(error.contains("Cargo.toml"), "{error}");
+    }
+
+    #[test]
+    fn wrappers_declare_build_directories_without_cargo_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        for command in [
+            "CARGO_TARGET_DIR=build make -j1 quality-checks",
+            "CARGO_TARGET_DIR=old CARGO_TARGET_DIR=build python quality.py",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                Some(dir.path().join("build")),
+                "{command}"
+            );
+        }
+        for command in [
+            "make -j1 quality-checks",
+            "CARGO_TARGET_DIR= make quality-checks",
+            "CARGO_TARGET_DIR=build cargo llvm-cov",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                None,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "CARGO_TARGET_DIR=build make check", true)
+                .unwrap(),
+            None,
+            "isolated baselines remove the declared environment variable"
+        );
+    }
+
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn known_short_non_cargo_gates_are_light_and_unknown_commands_stay_heavy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        for command in [
+            "rustc --version",
+            "git diff --check",
+            "git diff --check --cached",
+            "git.exe diff --cached --check -- README.md",
+            "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90",
+            "node ./scripts/check-coverage-threshold.mjs summary.json 80 --scope-exclude 'crates/gwt/'",
+            "actionlint .github/workflows/test.yml",
+            "shellcheck scripts/check.sh",
+            "yamllint .github/workflows",
+            "taplo check Cargo.toml",
+            "taplo fmt --check Cargo.toml",
+            "typos README.md",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Light, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), Some(Duration::from_secs(60)), "{command}");
+        }
+        for command in [
+            "rustc --version input.rs",
+            "git diff",
+            "git status",
+            "git diff --line-prefix --check --ext-diff -- README.md",
+            "taplo fmt --config --check Cargo.toml",
+            "actionlint.sh .github/workflows/test.yml",
+            "actionlint -shellcheck ./wrapper.sh .github/workflows/test.yml",
+            "actionlint --shellcheck=./wrapper.sh .github/workflows/test.yml",
+            "actionlint -pyflakes ./wrapper.sh .github/workflows/test.yml",
+            "actionlint --pyflakes=./wrapper.sh .github/workflows/test.yml",
+            "shellcheck.py scripts/check.sh",
+            "git.sh diff --check",
+            "node.sh scripts/check-coverage-threshold.mjs summary.json 90",
+            "node scripts/coverage-summary.mjs -- --workspace --all-features",
+            "node arbitrary-script.mjs",
+            "node other/check-coverage-threshold.mjs summary.json 90",
+            "python3 runner.py",
+            "bash scripts/run-frontend-tests.sh",
+            "npx playwright test --headed",
+            "taplo lsp stdio",
+            "cargo build -p gwt",
+            "cargo test --workspace --all-features",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+        assert_eq!(short_non_cargo_timeout("markdownlint README.md"), None);
+    }
+
+    #[test]
+    fn known_node_test_is_slot_admitted_and_bounded() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        for command in [
+            "node --test \"scripts/coverage-summary.test.mjs\"",
+            "node.exe --test ./scripts/coverage-summary.test.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(
+                short_non_cargo_timeout(command),
+                Some(Duration::from_secs(300)),
+                "{command}"
+            );
+        }
+        for command in [
+            "node --test arbitrary.test.mjs",
+            "node --test ../scripts/coverage-summary.test.mjs",
+            "node --test scripts/coverage-summary.test.mjs --import=./wrapper.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn node_reader_options_cannot_preload_arbitrary_workloads() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options =
+            gwt_core::test_support::ScopedEnvVar::set("NODE_OPTIONS", "--require=./wrapper.cjs");
+        for command in [
+            "node scripts/check-coverage-threshold.mjs summary.json 90",
+            "node --test scripts/coverage-summary.test.mjs",
+            "NODE_OPTIONS= NODE_OPTIONS=--import=./wrapper.mjs node scripts/check-coverage-threshold.mjs summary.json 90",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+        let command = "NODE_OPTIONS=--require=./wrapper.cjs NODE_OPTIONS= node scripts/check-coverage-threshold.mjs summary.json 90";
+        assert_eq!(classify_command(command), CommandWeight::Light);
+        assert_eq!(
+            short_non_cargo_timeout(command),
+            Some(Duration::from_secs(60))
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            classify_command(
+                "node_options= node scripts/check-coverage-threshold.mjs summary.json 90"
+            ),
+            CommandWeight::Light,
+        );
     }
 
     /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the
@@ -825,6 +2311,61 @@ mod tests {
     /// heavy and a single named test target is light.
     #[test]
     fn classify_command_reads_the_scope_of_a_cargo_run() {
+        // Issue #4823: features do not widen target selection, and documentation
+        // checks share the host. A library run must also select a test filter.
+        for command in [
+            "cargo test -p gwt --all-features --test verification_lease",
+            "cargo test -p gwt --all-features --lib verification_lease::tests",
+            "cargo test -p gwt --all-features --lib -- verification_lease::tests --exact",
+            "cargo nextest run -p gwt --all-features --lib -E 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset 'test(=module::case_1)'",
+            "cargo nextest run -p gwt --lib --filterset='test(=module::case_1)'",
+            r#"cargo test -p gwt --lib verification_lease -- --skip """#,
+            "markdownlint README.md",
+            "markdownlint-cli2 README.md",
+            "bunx markdownlint-cli2 README.md",
+            "npx markdownlint-cli2 README.md",
+            "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks",
+            "npx --yes markdownlint-cli README.md",
+            r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#,
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Light, "{command}");
+        }
+        for command in [
+            "cargo test -p gwt --all-features",
+            "cargo test -p gwt --all-features --lib",
+            "cargo test -p gwt --lib --features extra",
+            "cargo test -p gwt --lib -- --skip ignored_case",
+            "cargo test -p gwt --lib -- --test-threads 1",
+            "cargo nextest run -p gwt --lib -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'test(case)'",
+            "cargo nextest run -p gwt --lib -E 'not test(=case)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case) or all()'",
+            "cargo nextest run -p gwt --lib -E 'test(=)'",
+            "cargo nextest run -p gwt --lib -E 'test(=case'",
+            "cargo nextest run -p gwt --lib -E",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' --filterset 'test(=two)'",
+            "cargo nextest run -p gwt --lib -E 'test(=one)' -E 'all()'",
+            "cargo nextest run -p gwt --lib -E 'all()' -E 'test(=one)'",
+            "cargo nextest run --lib -E 'test(=case)'",
+            "cargo nextest run --workspace -p gwt --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt -p gwt-core --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --all-targets --lib -E 'test(=case)'",
+            "cargo nextest run -p gwt --lib --test admission -E 'test(=case)'",
+            "cargo test -p gwt --lib -E 'test(=case)'",
+            r#"cargo test -p gwt --all-features --lib verification_lease -- """#,
+            r#"cargo test -p gwt --lib -- verification_lease """#,
+            r#"cargo test -p gwt --lib -- "" verification_lease"#,
+            r#"cargo test -p gwt --lib "" -- verification_lease"#,
+            r#"cargo test -p gwt --lib -- """#,
+            "cargo test -p gwt --doc",
+            "cargo doc --workspace",
+            "bunx arbitrary-script README.md",
+            "bunx --bun arbitrary-script README.md",
+            "bunx --arbitrary markdownlint-cli README.md",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
         // AC-3: the two cases the Issue fixes by name.
         assert_eq!(
             classify_command("cargo test --workspace --all-features"),
@@ -862,7 +2403,7 @@ mod tests {
             assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
         }
         assert_eq!(
-            classify_command("cargo test -pgwt --lib"),
+            classify_command("cargo test -pgwt --lib verification_lease"),
             CommandWeight::Light
         );
 
@@ -884,17 +2425,17 @@ mod tests {
         assert_eq!(classify_command("cargo test --lib"), CommandWeight::Heavy);
         assert_eq!(
             classify_command("cargo test -p gwt --lib"),
-            CommandWeight::Light
+            CommandWeight::Heavy
         );
 
-        // Cargo's own arguments end at `--`; the rest is the test binary's
-        // filter and says nothing about what cargo builds.
+        // Unknown libtest options cannot establish a bounded selection,
+        // even when Cargo supplied a non-empty filter before `--`.
         assert_eq!(
-            classify_command("cargo test -p gwt --lib -- --all-features"),
-            CommandWeight::Light
+            classify_command("cargo test -p gwt --lib verification_lease -- --all-features"),
+            CommandWeight::Heavy
         );
         assert_eq!(
-            classify_command("cargo +nightly test -p gwt --lib"),
+            classify_command("cargo +nightly test -p gwt --lib verification_lease"),
             CommandWeight::Light
         );
 
@@ -929,7 +2470,10 @@ mod tests {
         assert_eq!(first_heavy_command(&light), None);
         assert_eq!(first_heavy_command(&[]), None);
 
-        let mixed = command_strings(&["cargo test -p gwt --lib", "cargo test --workspace"]);
+        let mixed = command_strings(&[
+            "cargo test -p gwt --lib admission",
+            "cargo test --workspace",
+        ]);
         assert_eq!(
             first_heavy_command(&mixed).map(String::as_str),
             Some("cargo test --workspace")
@@ -937,13 +2481,176 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reclaimer_terminates_the_confirmed_holder() {
+        use std::process::Stdio;
+
+        let worktree = tempfile::tempdir().unwrap();
+        let mut child = gwt_core::process::hidden_command("cmd")
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_none(), "holder must be alive");
+        let result = SystemReclaimer::new(worktree.path()).terminate(child.id(), false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let exited = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if result.is_ok() && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => break false,
+            }
+        };
+        // Clean up even when the native termination under test failed.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            exited,
+            "the confirmed holder must exit before the lease TTL"
+        );
+    }
     use gwt_core::index_coordinator::JobPriority;
 
     #[test]
     fn free_status_renders_without_holder_fields() {
         let mut out = String::new();
-        render(&mut out, "held", "free", &LeaseStatusSnapshot::default());
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot::default(),
+            "repo",
+        );
         assert_eq!(out, "verification lease: free\npending: 0\n");
+    }
+
+    #[test]
+    fn status_attributes_exclusive_commands_and_legacy_runners() {
+        let mut out = String::new();
+        let holder = HeavyLeaseStatus {
+            holder_context: Some(gwt_core::index_coordinator::HeavyHolderContext {
+                project_root: PathBuf::from("/work/owner"),
+                action: "node scripts/coverage-summary.mjs".into(),
+                qos: "coverage requires exclusive host resources".into(),
+                session_id: None,
+                artifact_lock: None,
+            }),
+            ..HeavyLeaseStatus::default()
+        };
+        push_slot_admission_fields(&mut out, "legacy", &holder, None, None);
+        assert!(out.contains("mode: exclusive"), "{out}");
+        assert!(
+            out.contains("coverage requires exclusive host resources"),
+            "{out}"
+        );
+        assert!(
+            out.contains("command: node scripts/coverage-summary.mjs"),
+            "{out}"
+        );
+        assert!(out.contains("worktree: /work/owner"), "{out}");
+        out.clear();
+        push_slot_admission_fields(
+            &mut out,
+            "legacy",
+            &HeavyLeaseStatus::default(),
+            Some(Path::new("/old/target/debug/gwtd")),
+            Some(Path::new("/old")),
+        );
+        assert!(
+            out.contains("legacy or unclassified runner holds the root lock"),
+            "{out}"
+        );
+        assert!(out.contains("executable: /old/target/debug/gwtd"), "{out}");
+        assert!(out.contains("worktree: /old"), "{out}");
+        out.clear();
+        push_slot_admission_fields(&mut out, "legacy", &HeavyLeaseStatus::default(), None, None);
+        assert!(out.contains("executable: unknown"), "{out}");
+        assert!(out.contains("worktree: unknown"), "{out}");
+        assert!(out.contains("command: unknown"), "{out}");
+    }
+
+    #[test]
+    fn status_counts_waiters_blocked_by_an_exclusive_holder() {
+        let entries = [
+            (true, None, 90_000),
+            (false, None, 80_000),
+            (false, Some("reservation expired"), 120_000),
+        ]
+        .into_iter()
+        .map(|(resident, bypass_reason, waiting_ms)| {
+            serde_json::from_value(serde_json::json!({
+                "priority": "manual-rebuild", "queued_at_ms": 1,
+                "waiting_ms": waiting_ms, "resident": resident,
+                "bypass_reason": bypass_reason
+            }))
+            .unwrap()
+        })
+        .collect();
+        let mut status = LeaseStatusSnapshot {
+            capacity: Some(2),
+            slots: vec![HeavySlotStatus {
+                slot: None,
+                status: HeavyLeaseStatus {
+                    held: true,
+                    ..Default::default()
+                },
+            }],
+            queue: entries,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        assert!(
+            out.contains("exclusive_blocked_oldest_wait_ms: 90000\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exclusive_blocked_total_wait_ms: 170000\n"),
+            "{out}"
+        );
+        status.slots[0].status.held = false;
+        status.slots[0].status.holder_stale = true;
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        status.slots[0].slot = Some(0);
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 0\n"), "{out}");
+    }
+
+    #[test]
+    fn status_explains_bypassed_reservation_recovery() {
+        let entry: HeavyQueueEntry = serde_json::from_value(serde_json::json!({
+            "priority": "manual-rebuild", "queued_at_ms": 1, "waiting_ms": 180000,
+            "resident": false, "bypass_reason": "non-resident reservation grace elapsed"
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                queue: vec![entry],
+                ..LeaseStatusSnapshot::default()
+            },
+            "repo",
+        );
+        assert!(
+            out.contains("non-resident reservation grace elapsed"),
+            "{out}"
+        );
+        assert!(out.contains("FIFO position retained"), "{out}");
+        assert!(out.contains("identical full matrix"), "{out}");
     }
 
     #[test]
@@ -955,6 +2662,7 @@ mod tests {
             "free",
             &LeaseStatusSnapshot {
                 held: true,
+                legacy_release_available: false,
                 lease_id: Some("lease-1".to_string()),
                 target: Some("repo--verification--wt".to_string()),
                 owner_pid: Some(4242),
@@ -967,14 +2675,26 @@ mod tests {
                     HeavyQueueEntry {
                         target: Some("repo--verification--early".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 500,
                         waiting_ms: 90_000,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
+                        bypass_reason: None,
                     },
                     HeavyQueueEntry {
                         target: Some("repo--verification--late".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 900,
                         waiting_ms: 89_600,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
+                        bypass_reason: None,
                     },
                 ],
                 holder_kind: Some("verification".to_string()),
@@ -989,7 +2709,9 @@ mod tests {
                 holder_alive: Some(true),
                 holder_job_status: Some("running".to_string()),
                 holder_stale: false,
+                ..LeaseStatusSnapshot::default()
             },
+            "repo",
         );
         // Issue #4169 AC-2: the waiters are named in service order, each with
         // the moment it joined and how long it has been waiting. Issue #4409
@@ -1000,6 +2722,10 @@ mod tests {
             "verification lease: held\n\
              lease_id: lease-1\n\
              target: repo--verification--wt\n\
+             holder_project_relation: same_project\n\
+             holder_reclaim_candidate: false\n\
+             holder_intervention: forbidden\n\
+             holder_intervention_reason: held by this project; you must not reclaim or stop this holder. Wait; do not bypass canonical release refusals with kill or pkill\n\
              owner_pid: 4242\n\
              acquired_at_ms: 1000\n\
              expires_at_ms: 61000\n\
@@ -1011,11 +2737,15 @@ mod tests {
              holder_alive: true\n\
              holder_job_status: running\n\
              estimated_remaining_ms: 60000\n\
+             estimated_remaining_ms_uncertain: true\n\
+             estimated_remaining_ms_basis: batch estimate or lease TTL, not a live progress counter; unchanged estimates are not evidence of a stalled holder\n\
              pending: 2\n\
+             waiter_action: wait\n\
+             waiter_reason: waiting for canonical admission is expected; queue position does not authorize reclaiming or stopping the holder\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \
-             queued_at_ms=500 waiting_ms=90000\n\
+             queued_at_ms=500 waiting_ms=90000 resident=true attempt_id=unknown job_status=unknown\n\
              queue[1]: target=repo--verification--late priority=manual-rebuild \
-             queued_at_ms=900 waiting_ms=89600\n"
+             queued_at_ms=900 waiting_ms=89600 resident=true attempt_id=unknown job_status=unknown\n"
         );
     }
 
@@ -1040,6 +2770,7 @@ mod tests {
                 holder_state_detail: Some("holder state unknown: held 8m19s".to_string()),
                 ..LeaseStatusSnapshot::default()
             },
+            "repo",
         );
 
         assert!(out.contains("holder_state: unknown\n"), "{out}");
@@ -1050,6 +2781,80 @@ mod tests {
         assert!(out.contains("holder_state_advice: "), "{out}");
         assert!(out.contains("not a verdict"), "{out}");
         assert!(out.contains("ps -eo pid,ppid,time,command"), "{out}");
+        assert!(out.contains("holder_intervention: forbidden\n"), "{out}");
+        assert!(out.contains("holder_reclaim_candidate: false\n"), "{out}");
+        assert!(
+            out.contains("repeated sampling does not authorize"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn estimates_and_queue_positions_do_not_authorize_intervention() {
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                held: true,
+                estimated_remaining_ms: Some(60_000),
+                pending: 1,
+                ..LeaseStatusSnapshot::default()
+            },
+            "repo",
+        );
+        assert!(
+            out.contains("estimated_remaining_ms: 60000\nestimated_remaining_ms_uncertain: true\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("unchanged estimates are not evidence of a stalled holder"),
+            "{out}"
+        );
+        assert!(out.contains("waiter_action: wait\n"), "{out}");
+        assert!(out.contains("queue position does not authorize"), "{out}");
+    }
+
+    #[test]
+    fn only_a_known_same_project_orphan_is_a_reclaim_candidate() {
+        let mut snapshot = LeaseStatusSnapshot {
+            held: true,
+            target: Some("repo--verification--wt".to_string()),
+            holder_state: Some("orphaned".to_string()),
+            ..LeaseStatusSnapshot::default()
+        };
+        let mut own = String::new();
+        render(&mut own, "held", "free", &snapshot, "repo");
+        assert!(own.contains("holder_reclaim_candidate: true\n"), "{own}");
+        assert!(
+            own.contains("holder_intervention: canonical_release_only\n"),
+            "{own}"
+        );
+
+        let mut other = String::new();
+        render(&mut other, "held", "free", &snapshot, "another-repo");
+        assert!(
+            other.contains("holder_project_relation: other_project\n"),
+            "{other}"
+        );
+        assert!(
+            other.contains("holder_reclaim_candidate: false\n"),
+            "{other}"
+        );
+        assert!(!other.contains("canonical_release_only"), "{other}");
+
+        snapshot.target = None;
+        let mut unknown = String::new();
+        render(&mut unknown, "held", "free", &snapshot, "repo");
+        assert!(
+            unknown.contains("holder_project_relation: unknown\n"),
+            "{unknown}"
+        );
+        assert!(
+            unknown.contains("holder_reclaim_candidate: false\n"),
+            "{unknown}"
+        );
     }
 
     /// Issue #4352 AC-2: the retired manual acquire never reserves a lease
@@ -1186,6 +2991,13 @@ mod tests {
             reading(true, 0)
         }
 
+        fn stalled_driver() -> HolderActivity {
+            HolderActivity {
+                delegated: false,
+                ..reading(false, 0)
+            }
+        }
+
         /// Scripted readings; "ending" the holder drops the lease, the way
         /// the kernel releases it when the holder process exits.
         struct ScriptedReclaimer<'a> {
@@ -1240,6 +3052,73 @@ mod tests {
                 == Some(lease_id)
         }
 
+        #[test]
+        fn another_projects_holder_is_protected_in_status_and_release() {
+            let held = hold_lease();
+            let worktree = tempfile::tempdir().unwrap();
+            let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+            let mut out = String::new();
+            run(&mut env, VerificationLeaseCommand::Status, &mut out).unwrap();
+            assert!(
+                out.contains("holder_project_relation: other_project\n"),
+                "{out}"
+            );
+            assert!(out.contains("holder_reclaim_candidate: false\n"), "{out}");
+            assert!(out.contains("holder_intervention: forbidden\n"), "{out}");
+            assert!(!out.contains("re-checks that and reclaims"), "{out}");
+
+            let err = run(
+                &mut env,
+                VerificationLeaseCommand::Release {
+                    lease_id: held.lease_id.clone(),
+                    reason: Some("another project is waiting".to_string()),
+                },
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("held by another project"), "{err}");
+            assert!(err.contains("must not reclaim or stop"), "{err}");
+            assert!(still_held(&held.lease_id));
+        }
+
+        #[test]
+        fn a_current_holder_cannot_hide_another_projects_legacy_holder_from_the_guard() {
+            let current = hold_lease();
+            let coordinator = IndexCoordinator::open_default().unwrap();
+            let key = TargetKey::verification("another-project", "legacy");
+            let JobAdmission::Owner(guard) = coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("private legacy lane must be free");
+            };
+            let lease = guard.acquire_heavy(Duration::from_secs(1)).unwrap();
+            let control = coordinator_root().join(CONTROL_DIR).join("foreign-legacy");
+            fs::create_dir_all(&control).unwrap();
+            fs::write(
+                control.join(OUTCOME_FILE),
+                serde_json::json!({"granted": true, "held": true, "lease_id": lease.id()})
+                    .to_string(),
+            )
+            .unwrap();
+            let worktree = tempfile::tempdir().unwrap();
+            let mut reclaimer = NeverTerminates(SystemReclaimer::new(worktree.path()));
+            let err = release(
+                "99a8660247f5bc49",
+                lease.id(),
+                Some("drain old holder"),
+                &mut reclaimer,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("held by another project"), "{err}");
+            assert!(!control.join(RELEASE_FILE).exists());
+            assert!(coordinator.heavy_lease_status().unwrap().held);
+            assert!(still_held(&current.lease_id));
+        }
+
         /// Issue #4633 AC-3 / AC-6 (a): a live `verify.run` holder — this
         /// process, whose parent is alive — keeps its lease, and the refusal
         /// is the one it has always been.
@@ -1251,6 +3130,7 @@ mod tests {
             let mut out = String::new();
 
             let err = release(
+                "99a8660247f5bc49",
                 &held.lease_id,
                 Some("try to take a live lease"),
                 &mut reclaimer,
@@ -1282,6 +3162,7 @@ mod tests {
             let mut out = String::new();
 
             release(
+                "99a8660247f5bc49",
                 &lease_id,
                 Some("window closed after the provider limit"),
                 &mut reclaimer,
@@ -1306,6 +3187,164 @@ mod tests {
             assert!(reason.contains("window closed"), "{reason}");
         }
 
+        #[test]
+        fn a_renewing_holder_is_protected_even_when_process_samples_look_orphaned() {
+            struct RenewingReclaimer<'a>(ScriptedReclaimer<'a>);
+            impl OrphanReclaimer for RenewingReclaimer<'_> {
+                fn observe(
+                    &mut self,
+                    pid: u32,
+                    status: &HeavyLeaseStatus,
+                    pause: Duration,
+                ) -> Option<HolderActivity> {
+                    self.0
+                        .held
+                        .lease
+                        .as_mut()
+                        .unwrap()
+                        .extend(Duration::from_secs(2_700))
+                        .unwrap();
+                    // The diagnostic ledger is best-effort. Its absence must
+                    // not erase a renewal already published in the ticket.
+                    fs::remove_file(open_coordinator().unwrap().lease_event_log_path()).unwrap();
+                    self.0.observe(pid, status, pause)
+                }
+
+                fn terminate(&mut self, pid: u32, force: bool) -> Result<(), String> {
+                    self.0.terminate(pid, force)
+                }
+            }
+
+            // Cover a renewal already published and one that arrives while
+            // the reclaimer samples processes, without any real waiting.
+            for already_renewed in [true, false] {
+                let mut held = hold_lease();
+                if already_renewed {
+                    held.lease
+                        .as_mut()
+                        .unwrap()
+                        .extend(Duration::from_secs(2_700))
+                        .unwrap();
+                    fs::remove_file(open_coordinator().unwrap().lease_event_log_path()).unwrap();
+                }
+                let lease_id = held.lease_id.clone();
+                let mut reclaimer = RenewingReclaimer(ScriptedReclaimer {
+                    readings: vec![Some(orphan()), Some(orphan())],
+                    held: &mut held,
+                    terminated: Vec::new(),
+                });
+                let error = release(
+                    "99a8660247f5bc49",
+                    &lease_id,
+                    Some("suspected orphan"),
+                    &mut reclaimer,
+                    &mut String::new(),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains("renewed"), "{error}");
+                assert!(reclaimer.0.terminated.is_empty());
+                assert!(still_held(&lease_id));
+            }
+        }
+
+        #[test]
+        fn a_confirmed_expired_stalled_driver_unblocks_twelve_waiters() {
+            let mut held = hold_lease();
+            // Reproduce Issue #4425 without waiting on a wall clock: an
+            // expired holder, no CPU progress, and twelve queued verifiers.
+            held.lease.as_mut().unwrap().extend_until(0).unwrap();
+            let coordinator = open_coordinator().unwrap();
+            let waiting: Vec<_> = (0..12)
+                .map(|index| {
+                    TargetKey::verification("99a8660247f5bc49", format!("waiting-{index:02}"))
+                })
+                .collect();
+            for key in &waiting {
+                coordinator
+                    .reserve_heavy(
+                        key,
+                        JobPriority::ManualRebuild,
+                        Duration::from_secs(600),
+                        Some("waiting for the stalled holder"),
+                    )
+                    .unwrap();
+            }
+            let before = coordinator.heavy_lease_status().unwrap();
+            assert!(before.expired);
+            assert_eq!(before.queue.len(), 12);
+            let next = waiting
+                .iter()
+                .find(|key| Some(key.file_stem()) == before.queue[0].target)
+                .unwrap();
+            let lease_id = held.lease_id.clone();
+            let mut reclaimer = ScriptedReclaimer {
+                readings: vec![Some(stalled_driver()), Some(stalled_driver())],
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+            let mut out = String::new();
+
+            release(
+                "99a8660247f5bc49",
+                &lease_id,
+                Some("all commands exited"),
+                &mut reclaimer,
+                &mut out,
+            )
+            .unwrap();
+
+            assert_eq!(reclaimer.terminated, vec![(std::process::id(), false)]);
+            assert!(!still_held(&lease_id));
+            assert_eq!(coordinator.heavy_lease_status().unwrap().queue.len(), 12);
+            let events = open_coordinator().unwrap().lease_events().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.kind, LeaseEventKind::Reclaimed);
+            assert!(event
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("all commands exited"));
+            let JobAdmission::Owner(next) = coordinator
+                .request_job(next, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("the first waiting verifier must be able to progress");
+            };
+            let _lease = next.acquire_heavy(Duration::from_secs(1)).unwrap();
+        }
+
+        #[test]
+        fn a_stalled_driver_that_resumes_before_confirmation_keeps_its_lease() {
+            let mut held = hold_lease();
+            let lease_id = held.lease_id.clone();
+            let mut reclaimer = ScriptedReclaimer {
+                readings: vec![
+                    Some(stalled_driver()),
+                    Some(HolderActivity {
+                        workload_processes: 1,
+                        ..stalled_driver()
+                    }),
+                ],
+                held: &mut held,
+                terminated: Vec::new(),
+            };
+
+            let err = release(
+                "99a8660247f5bc49",
+                &lease_id,
+                Some("looked idle"),
+                &mut reclaimer,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("did not confirm"), "{err}");
+            assert!(reclaimer.terminated.is_empty());
+            assert!(still_held(&lease_id));
+        }
+
         /// Ending a process is recorded, so it cannot be done anonymously.
         #[test]
         fn reclaiming_an_orphan_needs_a_reason() {
@@ -1317,9 +3356,15 @@ mod tests {
                 terminated: Vec::new(),
             };
 
-            let err = release(&lease_id, Some("  "), &mut reclaimer, &mut String::new())
-                .unwrap_err()
-                .to_string();
+            let err = release(
+                "99a8660247f5bc49",
+                &lease_id,
+                Some("  "),
+                &mut reclaimer,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
 
             assert!(err.contains("needs a reason"), "{err}");
             assert!(reclaimer.terminated.is_empty(), "{err}");
@@ -1339,6 +3384,7 @@ mod tests {
             };
 
             let err = release(
+                "99a8660247f5bc49",
                 &lease_id,
                 Some("looked idle"),
                 &mut reclaimer,
@@ -1362,9 +3408,15 @@ mod tests {
             let worktree = tempfile::tempdir().unwrap();
             let mut reclaimer = NeverTerminates(SystemReclaimer::new(worktree.path()));
 
-            let err = release(&lease_id, Some("gone"), &mut reclaimer, &mut String::new())
-                .unwrap_err()
-                .to_string();
+            let err = release(
+                "99a8660247f5bc49",
+                &lease_id,
+                Some("gone"),
+                &mut reclaimer,
+                &mut String::new(),
+            )
+            .unwrap_err()
+            .to_string();
 
             assert!(err.contains("no live verification lease"), "{err}");
         }

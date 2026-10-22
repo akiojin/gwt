@@ -41,9 +41,23 @@ use notify::{Config, Error, Event, EventHandler, EventKind, RecursiveMode, Resul
 
 type SharedHandler = Arc<Mutex<Box<dyn EventHandler>>>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StartupStep {
+    Excluded(Vec<PathBuf>),
+    Started,
+}
+
 pub(super) struct WorktreeWatcher {
     handler: SharedHandler,
     stream: Option<StreamThread>,
+}
+
+#[cfg(test)]
+impl WorktreeWatcher {
+    pub(super) fn startup_trace(&self) -> Vec<StartupStep> {
+        self.stream.as_ref().unwrap().trace.lock().unwrap().clone()
+    }
 }
 
 impl notify::Watcher for WorktreeWatcher {
@@ -76,16 +90,30 @@ impl notify::Watcher for WorktreeWatcher {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let handler = self.handler.clone();
+        #[cfg(test)]
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(test)]
+        let worker_trace = trace.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("gwt index FSEvents".into())
             .spawn(move || {
-                run_stream(root_string, excluded_string, handler, worker_stop, ready_tx)
+                run_stream(
+                    root_string,
+                    excluded_string,
+                    handler,
+                    worker_stop,
+                    ready_tx,
+                    #[cfg(test)]
+                    worker_trace,
+                )
             })?;
         let stream = StreamThread {
             root,
             stop,
             worker: Some(worker),
+            #[cfg(test)]
+            trace,
         };
         // On either failure, dropping the local stream stops and joins its worker.
         ready_rx
@@ -116,6 +144,8 @@ struct StreamThread {
     root: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    trace: Arc<Mutex<Vec<StartupStep>>>,
 }
 
 impl Drop for StreamThread {
@@ -160,6 +190,7 @@ fn run_stream(
     handler: SharedHandler,
     stop: Arc<AtomicBool>,
     ready: mpsc::SyncSender<Result<()>>,
+    #[cfg(test)] trace: Arc<Mutex<Vec<StartupStep>>>,
 ) {
     // This stable allocation outlives NativeStream, including its Release.
     let mut context = Box::new(CallbackContext { handler });
@@ -203,6 +234,13 @@ fn run_stream(
         let _ = ready.send(Err(Error::generic("FSEvents target exclusion failed")));
         return;
     }
+    #[cfg(test)]
+    trace.lock().unwrap().push(StartupStep::Excluded(
+        exclusions
+            .iter()
+            .map(|path| PathBuf::from(path.to_string()))
+            .collect(),
+    ));
     let run_loop = CFRunLoop::get_current();
     // SAFETY: this is the worker's run loop and the system default mode constant.
     let mode = unsafe { kCFRunLoopDefaultMode };
@@ -220,6 +258,8 @@ fn run_stream(
         return;
     }
     stream.started = true;
+    #[cfg(test)]
+    trace.lock().unwrap().push(StartupStep::Started);
     if ready.send(Ok(())).is_err() {
         return;
     }

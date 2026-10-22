@@ -63,6 +63,19 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
+static GIT_COMMAND_OBSERVER: std::sync::OnceLock<fn(&str, u64)> = std::sync::OnceLock::new();
+
+/// Observe logged Git completions on any thread: command label and wall time in ms.
+/// The first observer remains installed for the lifetime of the process.
+pub fn set_git_command_observer(observer: fn(&str, u64)) {
+    let _ = GIT_COMMAND_OBSERVER.set(observer);
+}
+
+pub(crate) fn notify_git_command_finished(label: &str, duration_ms: u64) {
+    if let Some(observer) = GIT_COMMAND_OBSERVER.get() {
+        observer(label, duration_ms);
+    }
+}
 
 fn next_git_spawn_id() -> u64 {
     note_thread_git_spawn();
@@ -71,6 +84,12 @@ fn next_git_spawn_id() -> u64 {
 
 thread_local! {
     static THREAD_GIT_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static THREAD_GIT_DURATION_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Cumulative wall time of synchronous logged Git commands on this thread.
+pub fn thread_git_duration_ms() -> u64 {
+    THREAD_GIT_DURATION_MS.with(std::cell::Cell::get)
 }
 
 /// Record one git subprocess spawned by the current thread.
@@ -99,6 +118,24 @@ pub fn thread_git_spawn_count() -> u64 {
 pub fn run_git_logged(
     args: &[&str],
     current_dir: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Output> {
+    run_git_logged_inner(args, current_dir, false)
+}
+
+/// Logged Git discovery whose repository is determined only by `current_dir`.
+/// Preserves the environment isolation of callers previously using
+/// [`scrub_git_env`] on a raw command.
+pub fn run_git_logged_scrubbed(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Output> {
+    run_git_logged_inner(args, current_dir, true)
+}
+
+fn run_git_logged_inner(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+    scrub: bool,
 ) -> std::io::Result<std::process::Output> {
     let spawn_id = next_git_spawn_id();
     let label = format!("git {}", args.join(" "));
@@ -129,6 +166,9 @@ pub fn run_git_logged(
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
+    if scrub {
+        scrub_git_env(&mut command);
+    }
     let result = command.output();
 
     let (exit_code, success, stdout_lines, stderr_lines) = match &result {
@@ -147,9 +187,11 @@ pub fn run_git_logged(
     };
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    THREAD_GIT_DURATION_MS.with(|total| total.set(total.get().saturating_add(duration_ms)));
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
+        &label,
         exit_code,
         duration_ms,
     );
@@ -233,9 +275,11 @@ pub fn run_git_logged_with_stdin(
     };
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    THREAD_GIT_DURATION_MS.with(|total| total.set(total.get().saturating_add(duration_ms)));
     push_command_summary_to_hub(
         crate::process_console::ProcessKind::Git,
         spawn_id,
+        &label,
         exit_code,
         duration_ms,
     );
@@ -285,9 +329,13 @@ pub fn push_command_banner_to_hub(
 pub fn push_command_summary_to_hub(
     kind: crate::process_console::ProcessKind,
     spawn_id: u64,
+    label: &str,
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
+    if kind == crate::process_console::ProcessKind::Git {
+        notify_git_command_finished(label, duration_ms);
+    }
     let hub = crate::process_console::global();
     let exit = match exit_code {
         Some(code) => code.to_string(),
@@ -353,13 +401,37 @@ pub fn command_exists(cmd: &str) -> bool {
 
 /// Create a non-interactive command that does not create an extra console
 /// window when spawned from the Windows GUI front door.
+/// Inherited Git selection is removed before callers add explicit child env.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     // The one sanctioned raw constructor; every other call site must go
     // through this helper (enforced via clippy.toml disallowed-methods).
     #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
+    scrub_git_env(&mut command);
+    // Test subprocesses can fetch through production code as well as through
+    // fixture helpers. Set their defaults at the common boundary (Issue #4426).
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     command
+}
+
+/// Authentication must fail instead of opening a terminal or credential GUI.
+/// Keep inherited settings and append an empty helper to the highest-priority
+/// inherited configuration, including Git -c settings propagated into hooks.
+pub fn noninteractive_git_environment() -> [(String, String); 4] {
+    let mut parameters = std::env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
+    if !parameters.is_empty() {
+        parameters.push(' ');
+    }
+    parameters.push_str("'credential.helper='");
+    [
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        // Empty also blocks fallback to core.askpass and SSH_ASKPASS.
+        ("GIT_ASKPASS".into(), String::new()),
+        ("GCM_INTERACTIVE".into(), "never".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), parameters),
+    ]
 }
 
 /// Resolve a process request with the current platform rules and build a
@@ -383,6 +455,11 @@ pub fn resolved_tokio_command(
     #[allow(clippy::disallowed_methods)]
     let mut command = tokio::process::Command::new(&plan.program);
     configure_hidden_tokio_command(&mut command);
+    for key in GIT_ENV_SCRUB_KEYS {
+        command.env_remove(key);
+    }
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     apply_resolved_tokio_plan(&mut command, &plan);
     Ok(command)
 }
@@ -542,6 +619,136 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_commands_disable_git_credentials_and_preserve_inherited_config() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let _key = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_KEY_0", "test.retained");
+        let _value = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_VALUE_0", "yes");
+        // Publish the count after its entries; drop it before those entries.
+        let _count = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_COUNT", "1");
+        let _parameters = crate::test_support::ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            "'test.alsoRetained=kept'",
+        );
+        let _askpass =
+            crate::test_support::ScopedEnvVar::set("GIT_ASKPASS", "inherited-askpass-must-not-run");
+        let mut command = hidden_command("git");
+        let environment: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            environment.get(OsStr::new("GIT_TERMINAL_PROMPT")),
+            Some(&Some(OsStr::new("0")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GCM_INTERACTIVE")),
+            Some(&Some(OsStr::new("never")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_ASKPASS")),
+            Some(&Some(OsStr::new("")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_COUNT")),
+            None,
+            "the inherited config count must remain untouched"
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_PARAMETERS")),
+            Some(&Some(OsStr::new(
+                "'test.alsoRetained=kept' 'credential.helper='"
+            )))
+        );
+        let output = command
+            .args(["config", "--get", "test.retained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "yes");
+
+        let output = hidden_command("git")
+            .args(["config", "--get", "test.alsoRetained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "kept");
+
+        let asynchronous = resolved_tokio_command(ProcessPlanRequest::new("git")).unwrap();
+        let async_environment: std::collections::HashMap<_, _> =
+            asynchronous.as_std().get_envs().collect();
+        for (key, value) in noninteractive_git_environment() {
+            assert_eq!(
+                async_environment.get(OsStr::new(&key)),
+                Some(&Some(OsStr::new(&value))),
+                "async test subprocess default: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_git_init_cannot_reinitialize_an_inherited_bare_repository() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let bare = temp.path().join("shared.git");
+        let fixture = temp.path().join("fixture");
+        let inherited_worktree = temp.path().join("inherited-worktree");
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::create_dir_all(&inherited_worktree).unwrap();
+        let mut seed = hidden_command("git");
+        scrub_git_env(&mut seed);
+        assert!(seed
+            .args(["init", "--bare", "--quiet"])
+            .arg(&bare)
+            .status()
+            .unwrap()
+            .success());
+        let config = std::fs::read(bare.join("config")).unwrap();
+        let _git_dir = crate::test_support::ScopedEnvVar::set("GIT_DIR", &bare);
+        let _worktree =
+            crate::test_support::ScopedEnvVar::set("GIT_WORK_TREE", &inherited_worktree);
+        let _index =
+            crate::test_support::ScopedEnvVar::set("GIT_INDEX_FILE", bare.join("fixture-index"));
+
+        let output = hidden_command("git")
+            .args(["init", "--quiet"])
+            .current_dir(&fixture)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            fixture.join(".git/config").is_file(),
+            "git init escaped the fixture"
+        );
+        assert_eq!(std::fs::read(bare.join("config")).unwrap(), config);
+    }
+
+    #[test]
+    fn process_constructors_scrub_git_overrides_and_preserve_explicit_environment() {
+        let program = std::env::current_exe().unwrap();
+        let hidden = hidden_command(&program);
+        let resolved = resolved_command(ProcessPlanRequest::new(&program)).unwrap();
+        let tokio = resolved_tokio_command(ProcessPlanRequest::new(&program)).unwrap();
+        for command in [&hidden, &resolved, tokio.as_std()] {
+            let environment = command
+                .get_envs()
+                .collect::<std::collections::HashMap<_, _>>();
+            for key in GIT_ENV_SCRUB_KEYS {
+                assert_eq!(environment.get(OsStr::new(key)), Some(&None), "{key}");
+            }
+        }
+        let explicit = resolved_command(
+            ProcessPlanRequest::new(&program).env("GIT_DIR", "explicit-repository"),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_DIR")
+                .unwrap()
+                .1,
+            Some(OsStr::new("explicit-repository")),
+        );
+    }
 
     fn echo_command(text: &str) -> (String, Vec<String>) {
         if cfg!(windows) {

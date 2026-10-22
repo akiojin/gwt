@@ -185,7 +185,6 @@ pub fn provider_key(agent_id: &AgentId, custom_agent: Option<&CustomCodingAgent>
         AgentId::Codex => "codex".to_string(),
         AgentId::GrokBuild => "grok".to_string(),
         AgentId::Antigravity => "antigravity".to_string(),
-        AgentId::Gemini => "gemini".to_string(),
         AgentId::OpenCode => "opencode".to_string(),
         AgentId::OpenClaw => "openclaw".to_string(),
         AgentId::Hermes => "hermes".to_string(),
@@ -216,7 +215,7 @@ pub fn provider_skip_mapping(
         AgentId::ClaudeCode | AgentId::Antigravity => {
             ProviderSkipMapping::flags(provider, &["--dangerously-skip-permissions"])
         }
-        AgentId::Codex | AgentId::Gemini | AgentId::Hermes | AgentId::Copilot => {
+        AgentId::Codex | AgentId::Hermes | AgentId::Copilot => {
             ProviderSkipMapping::flags(provider, &["--yolo"])
         }
         AgentId::GrokBuild => ProviderSkipMapping::flags(provider, &["--always-approve"]),
@@ -578,7 +577,6 @@ mod tests {
         let supported = [
             (AgentId::Codex, vec!["--yolo"]),
             (AgentId::ClaudeCode, vec!["--dangerously-skip-permissions"]),
-            (AgentId::Gemini, vec!["--yolo"]),
             (AgentId::Copilot, vec!["--yolo"]),
             (AgentId::Antigravity, vec!["--dangerously-skip-permissions"]),
             (AgentId::GrokBuild, vec!["--always-approve"]),
@@ -654,7 +652,6 @@ mod tests {
             AgentId::Codex,
             AgentId::GrokBuild,
             AgentId::Antigravity,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,

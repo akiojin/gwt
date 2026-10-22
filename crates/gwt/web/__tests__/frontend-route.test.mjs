@@ -64,14 +64,12 @@ test("not-found view is path-free and links to the Hub", () => {
   }
 });
 
-test("index.html boots only the route bootstrap and the Project links the Hub in a new tab", () => {
+test("index.html boots only the route bootstrap without a header Hub link", () => {
   const scripts = [...indexHtml.matchAll(/<script type="module" src="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(scripts, ["/frontend-bootstrap.js"]);
   const { document } = parseHTML(indexHtml);
-  const home = document.getElementById("project-home-link");
-  assert.equal(home.getAttribute("href"), "/");
-  assert.equal(home.getAttribute("target"), "_blank");
-  assert.equal(home.getAttribute("rel"), "noopener");
+  assert.equal(Boolean(document.getElementById("project-home-link")), false);
+  assert.equal(Boolean(document.querySelector('header a[aria-label="Open the gwt Hub in a new tab"]')), false);
 });
 
 function bootIn(pathname) {

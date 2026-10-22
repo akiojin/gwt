@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::SystemTime,
 };
@@ -145,6 +145,9 @@ pub struct Pane {
     /// so a client that resets to the snapshot continues the sequence with
     /// the next chunk exactly like the pane's own parser does.
     incomplete_escape_tail: Vec<u8>,
+    /// Reconnects frequently request the same idle screen. Serialize it once
+    /// until output or a successful resize changes the parser state.
+    snapshot_cache: OnceLock<Vec<u8>>,
 }
 
 /// A pane whose trusted gate helper is running but whose target is still
@@ -177,6 +180,7 @@ impl PendingPane {
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            snapshot_cache: OnceLock::new(),
         })
     }
 
@@ -261,6 +265,7 @@ impl Pane {
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            snapshot_cache: OnceLock::new(),
         })
     }
 
@@ -311,8 +316,29 @@ impl Pane {
     /// (Issue #4234: a raw line store that no reader consumed used to grow
     /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
+        self.snapshot_cache.take();
         // Update vt100 screen state
         self.parser.process(data);
+        // Issue #4909: publish the child's bracketed-paste mode on the shared
+        // PTY handle, where prompt injection reads it without the pane lock.
+        self.pty
+            .set_bracketed_paste(self.parser.screen().bracketed_paste());
+        // Codex renders this header on the first visible row, including when
+        // --no-alt-screen is used. Read parsed cells so split/ANSI output and
+        // old scrollback cannot masquerade as the active input surface.
+        let screen = self.parser.screen();
+        let cols = screen.size().1;
+        const TRANSCRIPT_HEADER: &str = "/ T R A N S C R I P T";
+        // The minimum agent pane width is 20: Codex clips the final letter
+        // there. Trim padding because vt100 rows omit trailing blank cells.
+        let header = TRANSCRIPT_HEADER[..usize::from(cols).min(TRANSCRIPT_HEADER.len())].trim_end();
+        self.pty.set_transcript_overlay(
+            cols >= 20
+                && screen.rows(0, cols).next().is_some_and(|row| {
+                    row.strip_prefix(header)
+                        .is_some_and(|tail| tail.chars().all(|c| c == ' ' || c == '/'))
+                }),
+        );
         self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
         self.incomplete_escape_tail = if self.incomplete_escape_tail.is_empty() {
             incomplete_escape_suffix(data).to_vec()
@@ -331,6 +357,15 @@ impl Pane {
     /// Get the current vt100 screen.
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    /// Issue #4909: whether the child has bracketed-paste mode on, as the
+    /// last processed output left it (`CSI ? 2004 h` sets, `CSI ? 2004 l`
+    /// clears). Claude Code and Codex both turn it on at startup; a body
+    /// injected while it is on must be wrapped as a paste so the composer
+    /// reads `@`, a leading `/`, and newlines as text rather than as keys.
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.parser.screen().bracketed_paste()
     }
 
     /// Stream position of the parsed screen: the position of the last PTY
@@ -356,12 +391,16 @@ impl Pane {
     /// cursor/attributes are best effort. Representable saved states remain
     /// exact.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        let mut snapshot = self
-            .parser
-            .screen()
-            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-        snapshot.extend_from_slice(&self.incomplete_escape_tail);
-        snapshot
+        self.snapshot_cache
+            .get_or_init(|| {
+                let mut snapshot = self
+                    .parser
+                    .screen()
+                    .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+                snapshot.extend_from_slice(&self.incomplete_escape_tail);
+                snapshot
+            })
+            .clone()
     }
 
     /// Get the current pane status.
@@ -371,18 +410,18 @@ impl Pane {
 
     /// Check and update the pane's process status.
     ///
-    /// The `Running` guard makes the exited transition happen exactly once per
-    /// pane no matter how many watchers poll concurrently, which is why the
+    /// The receipt guard makes the exited transition happen exactly once per
+    /// pane no matter how many watchers observe it, which is why the
     /// exit receipt is captured and logged here rather than at a call site
     /// (Issue #3341): every teardown path above this layer drops the pane, and
     /// a clean `exit 0` leaves no other durable evidence at all.
     pub fn check_status(&mut self) -> Result<&PaneStatus, TerminalError> {
-        if self.status == PaneStatus::Running {
+        if self.last_exit.is_none() {
             if let Some(exit_status) = self.pty.try_wait()? {
-                if exit_status.success() {
-                    self.status = PaneStatus::Completed(0);
-                } else {
-                    self.status = PaneStatus::Completed(1);
+                // A display-only error does not prove exit, and must not
+                // suppress its eventual receipt or descriptor cleanup.
+                if self.status == PaneStatus::Running {
+                    self.status = PaneStatus::Completed(i32::from(!exit_status.success()));
                 }
                 let exit = PaneExit {
                     exit_code: exit_status.exit_code(),
@@ -490,6 +529,7 @@ impl Pane {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let started = std::time::Instant::now();
         self.pty.resize(cols, rows)?;
+        self.snapshot_cache.take();
         let pty_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let parser_started = std::time::Instant::now();
         resize_parser_preserving_state(&mut self.parser, rows, cols);
@@ -607,6 +647,9 @@ mod tests {
     /// Drive `check_status` until the child is reaped, then return the exit
     /// receipt Issue #3341 requires the pane to keep.
     fn wait_for_exit(pane: &mut Pane) -> PaneExit {
+        // ConPTY blocks the child on its startup cursor-position query until
+        // the terminal answers it, so the child never exits unanswered.
+        answer_cursor_position_query(pane.pty());
         drain_pty_output(pane);
         for _ in 0..100 {
             if pane
@@ -716,6 +759,89 @@ mod tests {
         assert_eq!(pane.status(), &PaneStatus::Running);
     }
 
+    /// Issue #4909: the bracketed-paste mode is tracked off the pane's output
+    /// and published on the shared PTY handle for the injection path.
+    #[test]
+    fn bracketed_paste_mode_is_tracked_from_output_and_published_on_the_pty() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-bracketed-paste", sleep_command("60"));
+        let pty = pane.shared_pty();
+        assert!(!pane.bracketed_paste_enabled());
+        assert!(!pty.bracketed_paste_enabled());
+
+        pane.process_bytes(b"\x1b[?1h\x1b[?2004h\x1b[?25l$ ");
+        assert!(
+            pane.bracketed_paste_enabled(),
+            "CSI ? 2004 h turns the mode on"
+        );
+        assert!(pty.bracketed_paste_enabled());
+
+        // A sequence split across two PTY chunks is still one sequence.
+        pane.process_bytes(b"\x1b[?20");
+        pane.process_bytes(b"04l");
+        assert!(!pane.bracketed_paste_enabled(), "CSI ? 2004 l turns it off");
+        assert!(!pty.bracketed_paste_enabled());
+
+        pane.process_bytes(b"\x1b[?2004h");
+        assert!(pty.bracketed_paste_enabled());
+        let _ = pane.kill();
+    }
+
+    /// Issue #5839: prompt transactions must not feed Codex's Transcript/Find
+    /// surface, including a transaction reserved before the overlay appeared.
+    #[test]
+    fn transcript_overlay_refuses_prompt_input_and_allows_raw_key_recovery() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane("test-transcript-input", sleep_command("60"));
+        let pty = pane.shared_pty();
+        pane.process_bytes(b"\x1b[2J\x1b[Hquoted / T R A N S C R I P T\r\nFind: in documentation");
+        let reservation = pty.reserve_input_transaction().expect("ordinary output");
+
+        // Codex --no-alt-screen also renders this header; DECSET 1049 is not
+        // required. The parser must join a header split across output chunks.
+        pane.process_bytes(b"\x1b[2J\x1b[H/ T R A N S C");
+        pane.process_bytes(b" R I P T / / / /\x1b[21;1HFind: ");
+        let error = reservation
+            .write_input(b"notification")
+            .expect_err("overlay blocks reserved input");
+        assert!(error.to_string().contains("Transcript"), "{error}");
+        let authorize_called = std::cell::Cell::new(false);
+        assert!(reservation
+            .write_input_authorized(b"notification", |_| {
+                authorize_called.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(
+            !authorize_called.get(),
+            "refusal must precede the physical commit"
+        );
+        drop(reservation);
+        assert!(
+            pty.reserve_input_transaction().is_err(),
+            "overlay blocks new delivery"
+        );
+
+        // Agent panes can shrink to twenty columns, clipping the final T.
+        pane.resize(20, 24).expect("narrow pane");
+        pane.process_bytes(b"\x1b[2J\x1b[H/ T R A N S C R I P \x1b[21;1HFind: ");
+        assert!(
+            pty.reserve_input_transaction().is_err(),
+            "clipped overlay still blocks delivery"
+        );
+
+        // Raw user keys can close the overlay. The next rendered composer
+        // clears the guard and allows notification delivery again.
+        pty.write_input(b"\x1b").expect("raw Esc remains available");
+        pane.process_bytes(b"\x1b[2J\x1b[Hcodex\r\n> ");
+        let reservation = pty.reserve_input_transaction().expect("composer recovered");
+        reservation
+            .write_input(b"notification")
+            .expect("normal input");
+        drop(reservation);
+        let _ = pane.kill();
+    }
+
     #[test]
     fn process_exit_probe_does_not_treat_display_error_as_child_exit() {
         let _pty_guard = lock_pty_test();
@@ -727,6 +853,15 @@ mod tests {
         pane.kill().expect("kill child");
         for _ in 0..100 {
             if pane.process_has_exited().expect("probe killed child") {
+                pane.check_status().expect("capture killed child exit");
+                assert_eq!(
+                    pane.status(),
+                    &PaneStatus::Error("display-only failure".into())
+                );
+                assert!(
+                    pane.last_exit().is_some(),
+                    "a display error must not prevent recording the real child exit"
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1296,6 +1431,39 @@ mod tests {
         assert_eq!(
             replay.screen().cursor_position(),
             source.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn unchanged_snapshot_only_allocates_the_returned_bytes() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("idle-snapshot", 6, sleep_command("60"));
+        for line in 0..600 {
+            pane.process_bytes(format!("\x1b[36mhistory-{line:04}\x1b[0m\r\n").as_bytes());
+        }
+        let expected = pane.snapshot_bytes();
+        let before = crate::test_util::thread_allocations();
+        let repeated = pane.snapshot_bytes();
+        let allocations = crate::test_util::thread_allocations().wrapping_sub(before);
+        assert_eq!(repeated, expected);
+        assert!(
+            allocations <= 2,
+            "unchanged snapshot allocated {allocations} times"
+        );
+
+        // Output (including an unfinished escape) and resize must both replace
+        // the serialized state even when the PTY emits nothing after resize.
+        pane.process_bytes(b"changed\x1b[");
+        let changed = pane.snapshot_bytes();
+        assert_ne!(changed, expected);
+        assert!(changed.ends_with(b"\x1b["));
+        pane.process_bytes(b"31mred");
+        let _ = pane.snapshot_bytes();
+        pane.resize(40, 8).unwrap();
+        assert_eq!(
+            pane.snapshot_bytes(),
+            pane.screen()
+                .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
         );
     }
 

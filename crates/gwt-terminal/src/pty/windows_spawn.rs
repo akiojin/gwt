@@ -11,6 +11,63 @@ use gwt_core::process::{
 
 use super::{NormalizedWindowsHostShellCommand, SpawnConfig};
 
+/// Check the serialized CreateProcessW command line before creating a PTY or
+/// its gate helper. The gate uses std::process; direct PTYs use portable-pty.
+pub(super) fn check_command_line_length(
+    config: &SpawnConfig,
+    gated: bool,
+) -> Result<(), crate::TerminalError> {
+    let program_len = if gated {
+        // std::process always surrounds argv[0] with quotes.
+        config.command.encode_utf16().count() + 2
+    } else {
+        argument_utf16_len(&config.command, false)
+    };
+    let length = program_len
+        + config
+            .args
+            .iter()
+            .map(|arg| 1 + argument_utf16_len(arg, gated))
+            .sum::<usize>()
+        + 1; // terminating NUL
+    if length > 32_767 {
+        return Err(crate::TerminalError::PtyCreationFailed {
+            reason: format!(
+                "Windows command line is {length} UTF-16 code units including the terminator; \
+                 the CreateProcessW limit is 32767. Shorten the arguments or pass large content via a file."
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn argument_utf16_len(arg: &str, gated: bool) -> usize {
+    // Match portable-pty 0.9's append_quoted and std::process's append_arg.
+    // Both escape internal quotes, but std only adds outer quotes for spaces,
+    // tabs or empty args; portable-pty also quotes newlines, VT and quotes.
+    let quoted = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| matches!(c, ' ' | '\t') || (!gated && matches!(c, '\n' | '\u{b}' | '"')));
+    let mut length = usize::from(quoted) * 2;
+    let mut backslashes = 0;
+    for unit in arg.encode_utf16() {
+        length += 1;
+        if unit == u16::from(b'\\') {
+            backslashes += 1;
+        } else {
+            if unit == u16::from(b'"') {
+                length += backslashes + 1;
+            }
+            backslashes = 0;
+        }
+    }
+    if quoted {
+        length += backslashes;
+    }
+    length
+}
+
 pub(super) fn normalize_spawn_config(
     mut config: SpawnConfig,
 ) -> Result<SpawnConfig, ProcessResolveFailure> {
@@ -182,6 +239,38 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use crate::pty::PtyHandle;
+
+    #[test]
+    fn command_line_limit_counts_program_separator_and_terminator() {
+        let mut config = SpawnConfig {
+            command: "app.exe".to_string(),
+            args: vec!["a".repeat(32_767 - 7 - 1 - 1)],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+        assert!(check_command_line_length(&config, false).is_ok());
+        let error = check_command_line_length(&config, true).unwrap_err();
+        assert!(error.to_string().contains("32769 UTF-16"));
+        config.args[0].push('a');
+        let error = check_command_line_length(&config, false).unwrap_err();
+        assert!(error.to_string().contains("32768 UTF-16"));
+        config.args[0].truncate(32_767 - 9 - 1 - 1);
+        assert!(check_command_line_length(&config, true).is_ok());
+    }
+
+    #[test]
+    fn command_line_argument_lengths_include_unicode_and_windows_escaping() {
+        assert_eq!(argument_utf16_len("😀", false), 2);
+        assert_eq!(argument_utf16_len("", false), 2);
+        assert_eq!(argument_utf16_len("a b\\", false), 7);
+        assert_eq!(argument_utf16_len("\\\"", false), 6);
+        assert_eq!(argument_utf16_len("\\\"", true), 4);
+        assert_eq!(argument_utf16_len("line\n", false), 7);
+        assert_eq!(argument_utf16_len("line\n", true), 5);
+    }
 
     fn normalized_config(
         command: &str,
@@ -555,6 +644,36 @@ mod tests {
             message.contains("native-binary placeholder without a safe wrapper"),
             "{message}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oversized_command_line_is_rejected_before_direct_or_gated_spawn() {
+        let config = || SpawnConfig {
+            command: std::env::current_exe().unwrap().display().to_string(),
+            args: vec!["😀".repeat(20_000)],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+        let direct_error = PtyHandle::spawn(config())
+            .err()
+            .expect("reject oversized command");
+        assert!(
+            direct_error.to_string().contains("UTF-16"),
+            "{direct_error}"
+        );
+        let gated_error = PtyHandle::spawn_pending(
+            config(),
+            PathBuf::from("nonexistent-gwt-gate.exe"),
+            Vec::new(),
+            "length-preflight",
+        )
+        .err()
+        .expect("reject target before starting the gate");
+        assert!(gated_error.to_string().contains("UTF-16"), "{gated_error}");
     }
 
     #[cfg(windows)]

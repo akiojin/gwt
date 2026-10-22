@@ -25,10 +25,21 @@ pub const DEFAULT_PROJECT_OPEN_BUDGET_MS: f64 = 2_000.0;
 /// Covers worktree resolution, Docker runtime probing and the PTY spawn.
 pub const DEFAULT_PANE_CREATE_BUDGET_MS: f64 = 5_000.0;
 
-/// Individual ceiling for one index search attempt, in milliseconds.
+/// Individual ceiling for one cold index search attempt, in milliseconds.
 ///
-/// Covers the embedding model query and the batched scope search.
-pub const DEFAULT_SEARCH_BUDGET_MS: f64 = 2_000.0;
+/// Issue #4698: the controlled one-shot runner (SPEC-1939 FR-384) imports and
+/// constructs the embedding model on every search, so every search is cold.
+/// Measured end to end at 11.2-15.3 s, with the runner alone at 18.3-19.8 s on
+/// a loaded Windows host, the ceiling sits below the 30 s attempt deadline so
+/// a slow search is a violation before it is a timeout.
+pub const DEFAULT_SEARCH_BUDGET_MS: f64 = 25_000.0;
+
+/// Individual ceiling for the warm part of one index search, in milliseconds:
+/// the search total minus the model load the runner reported (Issue #4698).
+///
+/// Covers interpreter start, the Chroma import, scope health checks, the query
+/// encode and the batched scope search, measured at 5.0-5.8 s on a loaded host.
+pub const DEFAULT_SEARCH_WARM_BUDGET_MS: f64 = 8_000.0;
 
 /// Individual ceiling for one Work events ingest trigger, in milliseconds.
 ///
@@ -65,8 +76,10 @@ pub enum PerfRoute {
     PaneClose,
     /// Prompt submission reaching the PTY.
     PromptSend,
-    /// One index search attempt.
+    /// One index search attempt, cold: the model load included.
     Search,
+    /// The same search attempt without the model load it paid.
+    SearchWarm,
     /// One Work events ingest trigger, off the GUI event loop.
     WorkEventsIngest,
     /// Hook health aggregation across every Active Work row of one build.
@@ -75,7 +88,7 @@ pub enum PerfRoute {
 
 impl PerfRoute {
     /// Every instrumented route, in the order `perf.summary` reports them.
-    pub const ALL: [PerfRoute; 9] = [
+    pub const ALL: [PerfRoute; 10] = [
         PerfRoute::Startup,
         PerfRoute::ProjectOpen,
         PerfRoute::ProjectSwitch,
@@ -83,6 +96,7 @@ impl PerfRoute {
         PerfRoute::PaneClose,
         PerfRoute::PromptSend,
         PerfRoute::Search,
+        PerfRoute::SearchWarm,
         PerfRoute::WorkEventsIngest,
         PerfRoute::WorkHookHealth,
     ];
@@ -97,6 +111,7 @@ impl PerfRoute {
             PerfRoute::PaneClose => "pane.close",
             PerfRoute::PromptSend => "prompt.send",
             PerfRoute::Search => "search",
+            PerfRoute::SearchWarm => "search.warm",
             PerfRoute::WorkEventsIngest => "work_events.ingest",
             PerfRoute::WorkHookHealth => "work.hook_health",
         }
@@ -143,6 +158,7 @@ impl PerfRoute {
             PerfRoute::ProjectOpen => DEFAULT_PROJECT_OPEN_BUDGET_MS,
             PerfRoute::PaneCreate => DEFAULT_PANE_CREATE_BUDGET_MS,
             PerfRoute::Search => DEFAULT_SEARCH_BUDGET_MS,
+            PerfRoute::SearchWarm => DEFAULT_SEARCH_WARM_BUDGET_MS,
             PerfRoute::WorkEventsIngest => DEFAULT_WORK_EVENTS_INGEST_BUDGET_MS,
             PerfRoute::WorkHookHealth => DEFAULT_WORK_HOOK_HEALTH_BUDGET_MS,
         }

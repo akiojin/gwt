@@ -2,17 +2,13 @@
 //!
 //! Replaces the wry/tao native WebView GUI route with a tray-resident
 //! process that owns the embedded server and exposes an `Open` menu entry
-//! to launch the default browser. This module is the runtime entry point
-//! when `gwt` is invoked with no CLI verb (FrontDoorRoute::Tray).
-//!
-//! Phase 1 ships only the type and module skeletons; the actual event loop
-//! and EmbeddedServer integration land in Phase 4. Until then, `run()`
-//! returns `Err(TrayError::NotYetImplemented)` so we never silently take
-//! over the GUI route.
+//! to launch the default browser. This module supplies argument parsing and
+//! runtime support for the tray process bootstrapped by `main.rs`.
 
 use std::net::{IpAddr, Ipv4Addr};
 
 pub mod autostart;
+pub mod lifetime;
 pub mod lock;
 pub mod menu;
 pub mod port;
@@ -45,11 +41,10 @@ pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
 
 /// CLI flags accepted by the tray-resident front door.
 ///
-/// SPEC #2920 FR-013: `--no-tray` skips tray-icon creation (for CI /
-/// Playwright). `--no-open` is preserved as a no-op for backward
-/// compatibility — the tray menu `Open` action is what actually opens the
-/// browser now, so the auto-open default is `false` regardless of this
-/// flag.
+/// SPEC #2920 FR-013: `--no-tray` skips tray registration and ties the
+/// transient server to its parent/browser lifetime. `--no-open` explicitly
+/// suppresses automatic browser launch; startup never auto-opens, with or
+/// without this compatibility flag (FR-012).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayArgs {
     pub bind: IpAddr,
@@ -67,13 +62,6 @@ impl Default for TrayArgs {
             no_open: false,
         }
     }
-}
-
-/// Errors surfaced by the tray-resident entry point.
-#[derive(Debug, thiserror::Error)]
-pub enum TrayError {
-    #[error("tray-resident process is not yet implemented (SPEC #2920 Phase 4)")]
-    NotYetImplemented,
 }
 
 /// SPEC #2920 Phase 4 partial — argv parse errors for the tray-resident
@@ -114,19 +102,16 @@ impl std::fmt::Display for TrayArgParseError {
 
 impl std::error::Error for TrayArgParseError {}
 
-/// SPEC #2920 Phase 4 partial — parse the GUI route's argv into a
-/// [`TrayArgs`]. The full Tray route (FrontDoorRoute::Tray) lands later;
-/// for now this powers the existing GUI route so VPN-reachable hosts can
-/// run `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
-/// port forwarding.
+/// Parse the tray process's argv into [`TrayArgs`]. Hosts can run
+/// `gwt --bind 0.0.0.0 --port <n>` without SSH local port forwarding.
 ///
 /// Accepted flags:
 /// - `--bind <ip>`: parsed via `IpAddr::from_str`. Defaults to
 ///   `127.0.0.1` (matches the documented trust boundary).
 /// - `--port <n>`: parsed via `u16::from_str`. Omission remains `None` so
 ///   stable-port policy can distinguish it from explicit `--port 0`.
-/// - `--no-tray` / `--no-open`: recognised so the README hint does not
-///   fail today, but their behaviour stays out of scope for this slice.
+/// - `--no-tray`: transient server without a tray icon.
+/// - `--no-open`: explicit startup browser suppression (also the default).
 ///
 /// Unknown long flags are rejected. One legacy positional (e.g. `gwt .`)
 /// is tolerated and ignored — the GUI route already uses `current_dir()`
@@ -174,13 +159,6 @@ pub fn parse_tray_argv(argv: &[String]) -> Result<TrayArgs, TrayArgParseError> {
     Ok(args)
 }
 
-/// Entry point invoked by `main.rs` after `FrontDoorRoute::Tray` is
-/// resolved. Phase 4 will replace the placeholder with the real event
-/// loop + EmbeddedServer bootstrap.
-pub fn run(_args: TrayArgs) -> Result<i32, TrayError> {
-    Err(TrayError::NotYetImplemented)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,17 +172,7 @@ mod tests {
         assert!(!args.no_open);
     }
 
-    #[test]
-    fn tray_run_is_not_yet_implemented_in_phase_1() {
-        // SPEC #2920 Phase 1 only ships skeletons; real bootstrap lands
-        // in Phase 4 alongside the WebView removal.
-        let err = run(TrayArgs::default()).expect_err("placeholder must error");
-        assert!(matches!(err, TrayError::NotYetImplemented));
-    }
-
-    // SPEC #2920 Phase 4 partial — `--bind`/`--port` restore on the GUI
-    // (tray-resident) route. These cover the argv parser; full Tray route
-    // takeover and `--no-tray`/`--no-open` behaviour stay TODO.
+    // Parser coverage; native registration/lifetime is tested separately.
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
@@ -278,12 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tray_argv_accepts_no_tray_and_no_open_as_noop_flags() {
-        // SPEC #2920 Phase 4 partial: the flags are recognised so the
-        // README hint `gwt --no-tray --no-open` does not error today.
-        // Their behaviour (skipping tray icon / suppressing auto-open) is
-        // out of scope for this slice and lands in the full Tray route
-        // takeover.
+    fn parse_tray_argv_accepts_no_tray_and_no_open() {
         let args = parse_tray_argv(&argv(&["gwt", "--no-tray", "--no-open"])).expect("flags parse");
         assert!(args.no_tray);
         assert!(args.no_open);

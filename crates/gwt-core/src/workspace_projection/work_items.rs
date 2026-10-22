@@ -31,6 +31,8 @@ fn bool_is_false(value: &bool) -> bool {
 /// The retained window must stay wide enough for the readers of inline history:
 /// event-id dedup on re-ingest, [`WorkItem::latest_next_action`], the derived
 /// progress summary, and terminal-close detection all look at the recent tail.
+/// A successor also retains its explicit Start/predecessor anchor within this
+/// cap, so routine heartbeats cannot erase its current-lifetime authority.
 pub const MAX_INLINE_WORK_EVENTS: usize = 50;
 
 /// Issue #4508: most recent Board entry ids retained per Work item.
@@ -211,6 +213,77 @@ impl DuplicateWorkEventProvenance {
 }
 
 impl WorkEvent {
+    /// An authenticated repair may retire an invalid deterministic successor
+    /// without reopening it. Its reserved, content-bound event identity separates
+    /// this structural lineage audit from ordinary machine-local closes.
+    pub fn is_successor_supersession(&self) -> bool {
+        self.kind == WorkEventKind::Discard
+            && self.owner.is_none()
+            && self.status_category.is_none()
+            && (self.id == format!("superseded-{}", self.work_item_id)
+                || self
+                    .successor_supersession_content_id()
+                    .is_ok_and(|id| self.id == id))
+            && self.agent_session_id.is_none()
+            && self.execution_container.is_some()
+            && self
+                .related_work_item_id
+                .as_deref()
+                .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
+    }
+
+    /// Bind the shard identity to the whole payload. Two hosts may retire the
+    /// same invalid successor at different instants and from different paths;
+    /// those are distinct immutable events, while exact retries are idempotent.
+    /// Legacy identities remain readable and can be copied by reconciliation.
+    pub fn bind_successor_supersession_identity(&mut self) -> crate::error::Result<()> {
+        if !self.is_successor_supersession() {
+            return Err(crate::error::GwtError::Other(
+                "content identity requires a valid successor supersession event".to_string(),
+            ));
+        }
+        self.id = self.successor_supersession_content_id()?;
+        Ok(())
+    }
+
+    fn successor_supersession_content_id(&self) -> crate::error::Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut payload = self.clone();
+        payload.id = format!("superseded-{}", self.work_item_id);
+        let bytes = serde_json::to_vec(&payload).map_err(|error| {
+            crate::error::GwtError::Other(format!("successor supersession identity: {error}"))
+        })?;
+        Ok(format!("{}-{:x}", payload.id, Sha256::digest(bytes)))
+    }
+
+    pub fn is_successor_lineage_anchor(&self) -> bool {
+        (self.kind == WorkEventKind::Start || self.is_successor_supersession())
+            && self
+                .related_work_item_id
+                .as_deref()
+                .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
+    }
+
+    /// A fresh authenticated activation may start a new owner's lifetime
+    /// after foreign terminal history occupied the branch's canonical ID.
+    /// Ordinary Start events never grant this owner-boundary authority.
+    pub fn is_owner_successor(&self) -> bool {
+        self.kind == WorkEventKind::Start
+            && self.id == format!("owner-successor-{}", self.work_item_id)
+            && self.agent_session_id.is_some()
+            && self.is_successor_lineage_anchor()
+            && self
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+                .and_then(work_owner_for_branch)
+                .zip(self.owner.as_deref())
+                .is_some_and(|(branch_owner, owner)| {
+                    branch_owner == owner
+                        || can_upgrade_work_owner(Some(&branch_owner), Some(owner))
+                })
+    }
+
     pub fn new(
         kind: WorkEventKind,
         work_item_id: impl Into<String>,
@@ -784,7 +857,28 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         .max()
         .unwrap_or(item.updated_at);
 
+    let lineage_start = if item.events[dropped_events..]
+        .iter()
+        .any(WorkEvent::is_successor_supersession)
+    {
+        None
+    } else {
+        item.events[..dropped_events]
+            .iter()
+            .find(|event| event.is_successor_supersession())
+            .or_else(|| {
+                item.events[..dropped_events]
+                    .iter()
+                    .find(|event| event.is_successor_lineage_anchor())
+            })
+            .cloned()
+    };
     item.events.drain(..dropped_events);
+    if let Some(start) = lineage_start {
+        // Keep one provenance anchor and the newest remaining events; the
+        // history bound and folded-state watermark stay unchanged.
+        item.events[0] = start;
+    }
     let retained_ids = item
         .events
         .iter()
@@ -1253,7 +1347,7 @@ mod tests {
     #[test]
     fn workspace_work_events_build_hot_projection_with_lifecycle_refs() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let work_items_path = temp.path().join("workspace/work_items.json");
+        let work_items_path = temp.path().join("project-state/works.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 0, 0).unwrap();
         let done_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 30, 0).unwrap();

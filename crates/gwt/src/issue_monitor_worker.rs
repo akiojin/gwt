@@ -1,16 +1,89 @@
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    IssueMonitorCandidateSource, IssueMonitorExecutionSettlement, IssueMonitorInboxItem,
-    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary,
-    IssueMonitorState, IssueReadinessFailure, MonitorInboxState,
+    IssueMonitorCandidateSource, IssueMonitorExecutionSettlement, IssueMonitorIssue,
+    IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
+    IssueReadinessFailure, MonitorInboxState,
 };
+use gwt_github::client::{IssueClient, LabelAssignment, OwnerMutationResult};
+use gwt_github::issue_auto_claim::{renew_claim_mutation, ClaimRenewOutcome};
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
 pub(crate) const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+
+/// Only an exact current, live Active holder can extend an existing claim.
+pub fn live_claim_renewal_generations(
+    project_root: &Path,
+    monitor: &IssueMonitorState,
+    now: &str,
+) -> BTreeMap<u64, String> {
+    monitor
+        .claim_renewal_candidates(now)
+        .into_iter()
+        .filter_map(|identity| {
+            crate::cli::execution_state::live_active_owner_generation(
+                project_root,
+                identity.issue_number,
+            )
+            .map(|generation| (identity.issue_number, generation))
+        })
+        .collect()
+}
+
+pub fn execute_claim_renewal<C: IssueClient + ?Sized>(
+    project_root: &Path,
+    payload: &crate::IssueMonitorEffectPayload,
+    client: &C,
+    now: &str,
+) -> OwnerMutationResult<ClaimRenewOutcome> {
+    let crate::IssueMonitorEffectPayload::RenewClaim {
+        issue_number,
+        claim_id,
+        owner,
+        generation_id,
+        ttl_secs,
+    } = payload
+    else {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "effect is not a claim renewal".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    };
+    if crate::cli::execution_state::live_active_owner_generation(project_root, *issue_number)
+        .as_deref()
+        != Some(generation_id.as_str())
+    {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "the exact Active execution holder is no longer live".to_string(),
+            conflicting_claims: Vec::new(),
+        });
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()
+        .and_then(|now| {
+            now.checked_add_signed(chrono::Duration::seconds(
+                (*ttl_secs).min(i64::MAX as u64) as i64
+            ))
+        })
+        .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| now.to_string());
+    renew_claim_mutation(
+        client,
+        IssueNumber(*issue_number),
+        claim_id,
+        owner,
+        now,
+        &expires_at,
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -21,6 +94,11 @@ pub struct IssueMonitorDaemonPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedIssueMonitorCandidates {
     pub issues: Vec<IssueMonitorIssue>,
+    /// Issue #4157: read once before the scan transaction; replaying this input
+    /// at commit time must neither do network I/O nor refresh its acquisition time.
+    pub open_pr_observations: BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
+    pub open_pr_observed_at: Option<String>,
+    pub urgent_assignments: BTreeMap<u64, LabelAssignment>,
     pub source: IssueMonitorCandidateSource,
     /// The live-list failure that forced a cache fallback. Kept alongside the
     /// read model so failures never render as healthy.
@@ -57,9 +135,12 @@ pub enum IssueMonitorScanStage {
     PrDiffReadback,
     StatusCheckReadback,
     MergeCommitReadback,
+    /// Issue #4726: PR state + `mergeable` / `mergeStateStatus`.
+    MergeabilityReadback,
     ClaimCompletionReadback,
     /// Issue #3917: PR body / Issue comment readback for delegation evidence.
     MergedIssueSettlementReadback,
+    BranchPrune,
     ProposalReturn,
 }
 
@@ -76,8 +157,10 @@ impl IssueMonitorScanStage {
             Self::PrDiffReadback => "pr-diff-readback",
             Self::StatusCheckReadback => "status-check-readback",
             Self::MergeCommitReadback => "merge-commit-readback",
+            Self::MergeabilityReadback => "mergeability-readback",
             Self::ClaimCompletionReadback => "claim-completion-readback",
             Self::MergedIssueSettlementReadback => "merged-issue-settlement-readback",
+            Self::BranchPrune => "branch-prune",
             Self::ProposalReturn => "proposal-return",
         }
     }
@@ -252,9 +335,10 @@ pub fn issue_monitor_readback_budget() -> std::time::Duration {
 /// Whether the scan still has budget to start another per-candidate readback
 /// and leave the launch stage something to run on. An absent ambient deadline
 /// (direct callers, tests) imposes no limit of its own.
-fn readback_fan_out_has_budget() -> bool {
+pub(crate) fn readback_fan_out_has_budget() -> bool {
     gwt_core::operation_deadline::current().is_none_or(|deadline| {
-        deadline.saturating_duration_since(std::time::Instant::now()) > ISSUE_MONITOR_LAUNCH_RESERVE
+        deadline.saturating_duration_since(gwt_core::operation_deadline::now())
+            > ISSUE_MONITOR_LAUNCH_RESERVE
     })
 }
 
@@ -270,9 +354,9 @@ pub fn ensure_scan_deadline(stage: IssueMonitorScanStage) -> Result<(), IssueMon
 /// deadline, so in a serial fan-out the first slow branch can spend the entire
 /// window and every later branch inherits an already-expired one. Entering a
 /// per-call budget caps each branch instead. The budget still nests inside the
-/// scan deadline, and the loop refuses to start a candidate without
-/// [`ISSUE_MONITOR_LAUNCH_RESERVE`] left, so a call that does start always has a
-/// real budget and can never overrun the scan.
+/// scan deadline minus [`ISSUE_MONITOR_LAUNCH_RESERVE`]. Enforce that boundary
+/// on every call: one candidate can issue several readbacks after the loop's
+/// admission check, so that check alone cannot preserve the launch reserve.
 pub(crate) fn run_budgeted_readback_stage<T, E>(
     stage: IssueMonitorScanStage,
     operation: impl FnOnce() -> Result<T, E>,
@@ -280,10 +364,20 @@ pub(crate) fn run_budgeted_readback_stage<T, E>(
 where
     E: fmt::Display,
 {
-    let _budget = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + issue_monitor_readback_budget(),
-    );
-    operation().map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))
+    let now = gwt_core::operation_deadline::now();
+    let mut deadline = now + issue_monitor_readback_budget();
+    if let Some(scan_deadline) = gwt_core::operation_deadline::current() {
+        let available = scan_deadline.saturating_duration_since(now);
+        if available <= ISSUE_MONITOR_LAUNCH_RESERVE {
+            return Err(IssueMonitorScanFailure::new(
+                stage,
+                "scan budget reserved for the launch stage",
+            ));
+        }
+        deadline = deadline.min(scan_deadline - ISSUE_MONITOR_LAUNCH_RESERVE);
+    }
+    let _budget = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+    run_scan_stage(stage, operation)
 }
 
 pub(crate) fn run_scan_stage<T, E>(
@@ -293,11 +387,78 @@ pub(crate) fn run_scan_stage<T, E>(
 where
     E: fmt::Display,
 {
-    ensure_scan_deadline(stage)?;
-    let value =
-        operation().map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))?;
-    ensure_scan_deadline(stage)?;
-    Ok(value)
+    let started = std::time::Instant::now();
+    let result = (|| {
+        ensure_scan_deadline(stage)?;
+        let value =
+            operation().map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))?;
+        ensure_scan_deadline(stage)?;
+        Ok(value)
+    })();
+    tracing::info!(
+        target: "gwt.issue_monitor.scan",
+        stage = stage.as_str(),
+        duration_ms = started.elapsed().as_secs_f64() * 1_000.0,
+        success = result.is_ok(),
+        "Issue Monitor readback stage"
+    );
+    result
+}
+
+/// Attribute the whole scan, including local I/O between remote readbacks.
+/// Drop records the current phase and total on every early return as well.
+pub(crate) struct IssueMonitorScanTiming {
+    started: std::time::Instant,
+    phase_started: std::time::Instant,
+    phase: &'static str,
+}
+
+impl IssueMonitorScanTiming {
+    pub(crate) fn start(phase: &'static str) -> Self {
+        let started = std::time::Instant::now();
+        let timing = Self {
+            started,
+            phase_started: started,
+            phase,
+        };
+        timing.record_started();
+        timing
+    }
+
+    pub(crate) fn next(&mut self, phase: &'static str) {
+        self.record(self.phase, self.phase_started.elapsed());
+        self.phase = phase;
+        self.phase_started = std::time::Instant::now();
+        self.record_started();
+    }
+
+    fn record_started(&self) {
+        tracing::info!(
+            target: "gwt.issue_monitor.scan",
+            stage = self.phase,
+            state = "started",
+            "Issue Monitor scan stage"
+        );
+    }
+
+    fn record(&self, stage: &str, elapsed: std::time::Duration) {
+        tracing::info!(
+            target: "gwt.issue_monitor.scan",
+            stage,
+            state = "finished",
+            duration_ms = elapsed.as_secs_f64() * 1_000.0,
+            remaining_budget_ms = ?gwt_core::operation_deadline::current().map(|deadline|
+                deadline.saturating_duration_since(gwt_core::operation_deadline::now()).as_millis()),
+            "Issue Monitor scan stage"
+        );
+    }
+}
+
+impl Drop for IssueMonitorScanTiming {
+    fn drop(&mut self) {
+        self.record(self.phase, self.phase_started.elapsed());
+        self.record("total", self.started.elapsed());
+    }
 }
 
 /// Issue #4084: read the execution record state of every launched Issue so the
@@ -310,16 +471,130 @@ where
 /// Issue #4131: `Blocked` is reported as `Interrupted` when the Host's Active
 /// reaper wrote it, because that status means the holder died rather than
 /// decided.
-pub fn read_execution_settlements(
+pub fn read_execution_observations(
     project_root: &Path,
     issue_numbers: &[u64],
-) -> BTreeMap<u64, IssueMonitorExecutionSettlement> {
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let _timing = IssueMonitorScanTiming::start("execution-observation");
+    let deadline = gwt_core::operation_deadline::current();
+    let span = tracing::Span::current();
+    #[cfg(test)]
+    let home = gwt_core::test_support::gwt_home_override();
+    let observe = || {
+        #[cfg(test)]
+        let _home = home
+            .as_ref()
+            .map(gwt_core::test_support::ScopedGwtHome::set);
+        let _span = span.enter();
+        let _deadline = deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
+        read_execution_observations_from_inventory(project_root, issue_numbers, &inventory)
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Deadline-aware Git uses a synchronous runtime. Keep that work off
+        // the async driver's thread while retaining its absolute deadline.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(observe)
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    } else {
+        observe()
+    }
+}
+
+/// Read only exact dead holder host incarnations; never infer another host's absence.
+fn dead_holder_hosts(
+    sessions_dir: &Path,
+    diagnosis: &crate::cli::execution_state::OwnerExecutionDiagnosis,
+) -> std::collections::BTreeSet<(u32, u64)> {
+    let mut dead = std::collections::BTreeSet::new();
+    let Some(session_id) = diagnosis.holder_session_id.as_deref() else {
+        return dead;
+    };
+    let Ok(session) = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+    else {
+        return dead;
+    };
+    let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(&session) else {
+        return dead;
+    };
+    if identity.session_id != session_id
+        || identity.linked_issue_number != Some(diagnosis.owner_number)
+        || identity.execution_binding.owner_number != diagnosis.owner_number
+        || identity.execution_binding.owner_kind != diagnosis.owner_kind.as_str()
+        || Some(identity.execution_binding.identity.generation_id.as_str())
+            != diagnosis.generation_id.as_deref()
+    {
+        return dead;
+    }
+    let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
+        return dead;
+    };
+    for namespace in namespaces.flatten() {
+        if gwt_core::operation_deadline::ensure_remaining("dead holder host observations").is_err()
+        {
+            return std::collections::BTreeSet::new();
+        }
+        let Some(pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+        else {
+            continue;
+        };
+        let path = gwt_agent::runtime_state_path_for_pid(sessions_dir, pid, session_id);
+        let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&path) else {
+            continue;
+        };
+        if runtime.execution_identity.as_ref() != Some(&identity) {
+            continue;
+        }
+        let Some(started_at) = runtime.host_started_at.filter(|started_at| *started_at > 0) else {
+            continue;
+        };
+        if !crate::process::is_host_process_alive(pid)
+            || crate::process::host_process_start_time(pid)
+                .is_some_and(|current| current != started_at)
+        {
+            dead.insert((pid, started_at));
+        }
+    }
+    dead
+}
+
+pub(crate) fn read_execution_observations_from_inventory(
+    project_root: &Path,
+    issue_numbers: &[u64],
+    inventory: &crate::session_inventory::SessionInventory,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
     use crate::cli::execution_state::{
         diagnose_owner, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
     };
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let worktrees = gwt_git::worktree::WorktreeManager::new(project_root)
+        .list()
+        .unwrap_or_default();
+    let normalized = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     issue_numbers
         .iter()
         .map(|issue_number| {
+            if gwt_core::operation_deadline::ensure_remaining("execution observations").is_err() {
+                return (
+                    *issue_number,
+                    crate::issue_monitor::IssueMonitorExecutionObservation {
+                        settlement: IssueMonitorExecutionSettlement::Unknown,
+                        process_held: true,
+                        holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
+                        held_holder_session_id: None,
+                        exited_holder_session_id: None,
+                    },
+                );
+            }
             let diagnosis = diagnose_owner(
                 project_root,
                 ExecutionOwnerKey {
@@ -327,42 +602,310 @@ pub fn read_execution_settlements(
                     number: *issue_number,
                 },
             );
+            // The holder is not necessarily the only agent in this worktree:
+            // an unbound/manual Session can already have a live exact PTY.
+            let worktree = diagnosis
+                .holder_worktree
+                .as_deref()
+                .map(Path::new)
+                .or_else(|| {
+                    worktrees
+                        .iter()
+                        .find(|worktree| {
+                            worktree.branch.as_deref()
+                                == Some(&format!("work/issue-{issue_number}"))
+                        })
+                        .map(|worktree| worktree.path.as_path())
+                });
+            let belongs_here = |path: &Path, owner: Option<u64>| {
+                worktree.map_or(owner == Some(*issue_number), |target| {
+                    normalized(target) == normalized(path)
+                })
+            };
+            let process_held = inventory
+                .sessions
+                .iter()
+                .any(|session| belongs_here(&session.worktree_path, session.issue_number))
+                || inventory.uncertainties.iter().any(|uncertainty| {
+                    uncertainty
+                        .session_id
+                        .as_deref()
+                        .and_then(|id| {
+                            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        })
+                        .is_none_or(|session| {
+                            belongs_here(&session.worktree_path, session.linked_issue_number)
+                        })
+                });
+            let process_held = process_held
+                || diagnosis.holder_runtime.as_deref() == Some("live")
+                || (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                    && !diagnosis.reclaimable);
             let settlement = match diagnosis.ecr_status {
                 Some(ExecutionControlStatus::Active) if diagnosis.reclaimable => {
                     IssueMonitorExecutionSettlement::Active
                 }
-                // A missing pane is not exit proof: a headless or detached
-                // exact process can still own this generation.
                 Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Unknown,
                 Some(ExecutionControlStatus::Completed) => {
                     IssueMonitorExecutionSettlement::Completed
                 }
-                // Issue #4131: the generation reaper runs earlier in this same
-                // scan, so a holder that an auto-update restart killed reaches
-                // this read already `Blocked` — written for it, not by it.
-                // Reporting that as a settlement made the idle release treat
-                // interrupted work as finished and park the Issue.
                 Some(ExecutionControlStatus::Blocked) if diagnosis.ecr_settled_by_host_reaper => {
                     IssueMonitorExecutionSettlement::Interrupted
                 }
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
             };
-            (*issue_number, settlement)
+            // Reaper interruption is normally retryable, but retrying a window
+            // with no gate-admitted recovery only repeats the same loop.
+            // Preserve real settlements and process liveness; this diagnosis
+            // does not write the ECR or claim that unfinished work was delivered.
+            // A live or uncertain process already vetoes recovery. Work identity
+            // validation can invoke Git, so defer that recovery-only diagnosis
+            // until no process holds this Issue's worktree.
+            let recovery_exhausted = !process_held
+                && (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                    || diagnosis.ecr_settled_by_host_reaper)
+                && worktree
+                    .zip(diagnosis.holder_session_id.as_deref())
+                    .is_some_and(|(worktree, session_id)| {
+                        crate::cli::hook::workflow_policy::identity_gate_closed_for_session(
+                            worktree, session_id,
+                        ) && crate::cli::execution_state::diagnose(worktree, Some(session_id))
+                            .recovery_hint
+                            .as_deref()
+                            == Some(crate::cli::execution_state::RECOVERY_HINT_RECOVERY_EXHAUSTED)
+                    });
+            let settlement = if recovery_exhausted {
+                IssueMonitorExecutionSettlement::RecoveryExhausted
+            } else {
+                settlement
+            };
+            let dead_holder_hosts = if !process_held
+                && diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                && matches!(
+                    settlement,
+                    IssueMonitorExecutionSettlement::Completed
+                        | IssueMonitorExecutionSettlement::Blocked
+                ) {
+                dead_holder_hosts(&sessions_dir, &diagnosis)
+            } else {
+                Default::default()
+            };
+            (
+                *issue_number,
+                crate::issue_monitor::IssueMonitorExecutionObservation {
+                    settlement,
+                    process_held,
+                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    exited_holder_session_id: diagnosis.holder_session_id.clone().filter(|_| {
+                        matches!(
+                            diagnosis.holder_runtime.as_deref(),
+                            Some("child_exited" | "terminal")
+                        )
+                    }),
+                    dead_holder_hosts,
+                    held_holder_session_id: diagnosis.holder_session_id.clone().filter(|holder| {
+                        matches!(
+                            diagnosis.holder_runtime.as_deref(),
+                            Some("live" | "unknown" | "not_evaluated")
+                        ) || inventory
+                            .sessions
+                            .iter()
+                            .any(|session| &session.session_id == holder)
+                            || inventory.uncertainties.iter().any(|uncertainty| {
+                                uncertainty
+                                    .session_id
+                                    .as_ref()
+                                    .is_none_or(|id| id == holder)
+                            })
+                    }),
+                },
+            )
         })
         .collect()
 }
 
-/// Issue #4084 AC-2/AC-3: classify the launched windows against the last
-/// canvas snapshot and release the ones no human has to judge.
-pub fn reconcile_issue_monitor_idle_windows(
+/// Refresh transient Session liveness for every unbound recovery path.
+pub fn refresh_issue_monitor_execution_observations(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
+    let settlements =
+        read_execution_observations(project_root, &monitor.execution_settlement_issue_numbers());
+    monitor.set_process_held_issues(
+        settlements
+            .iter()
+            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+            .collect(),
+    );
+    settlements
+}
+
+/// Issue #4783 AC-R5: prove the producing Session, owner and canonical worktree
+/// before a canvas id can restore launch accounting. Unknown evidence grants nothing.
+pub fn verified_live_launch_owners(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+    now: &str,
+) -> BTreeMap<String, u64> {
+    use crate::cli::execution_state::{
+        execution_binding_authorizes_current_generation, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    let mut owners = BTreeMap::new();
+    let mut ambiguous = std::collections::BTreeSet::new();
+    let Some(repo_hash) =
+        crate::index_worker::detect_repo_hash(project_root).map(|hash| hash.to_string())
+    else {
+        return owners;
+    };
+    let fresh = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at)
+        .ok()
+        .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+        .is_some_and(|(observed, now)| {
+            now >= observed
+                && now.signed_duration_since(observed).num_seconds()
+                    <= crate::issue_monitor::IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS
+        });
+    if !fresh {
+        return owners;
+    }
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    for window in &snapshot.windows {
+        if window.review_dispatch || !crate::issue_monitor::idle_window_is_alive(window.status) {
+            continue;
+        }
+        let Some((session_id, issue_number)) =
+            window.session_id.as_deref().zip(window.issue_number)
+        else {
+            continue;
+        };
+        if gwt_agent::validate_session_id_path_component(session_id).is_err() {
+            continue;
+        }
+        let Ok(session) =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+        else {
+            continue;
+        };
+        if session.id != session_id
+            || session.linked_issue_number != Some(issue_number)
+            || session.repo_hash.as_deref() != Some(repo_hash.as_str())
+            || session.review_dispatch
+        {
+            continue;
+        }
+        let Ok(worktree) = dunce::canonicalize(&session.worktree_path) else {
+            continue;
+        };
+        let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(&session) else {
+            continue;
+        };
+        let kind = match identity.execution_binding.owner_kind.as_str() {
+            "issue" => ExecutionOwnerKind::Issue,
+            "spec" => ExecutionOwnerKind::Spec,
+            _ => continue,
+        };
+        if !execution_binding_authorizes_current_generation(
+            &worktree,
+            ExecutionOwnerKey {
+                kind,
+                number: issue_number,
+            },
+            session_id,
+            &identity.execution_binding.identity,
+        )
+        .unwrap_or(false)
+        {
+            continue;
+        }
+        if ambiguous.contains(&window.window_id) {
+            continue;
+        }
+        if owners
+            .insert(window.window_id.clone(), issue_number)
+            .is_some()
+        {
+            owners.remove(&window.window_id);
+            ambiguous.insert(window.window_id.clone());
+        }
+    }
+    owners
+}
+
+/// Reapply live-owner proof after a cross-process prefs rebase, preserving the
+/// canvas sample's ordering fence against a newer launch ACK.
+pub fn reconcile_verified_live_launch_bindings(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> Vec<u64> {
+    let (live_launch_owners, observed_at) =
+        read_verified_live_launch_owners(monitor, project_root, now);
+    monitor.reconcile_observed_launch_bindings(&live_launch_owners, &observed_at, now)
+}
+
+/// Read producing-owner proof once, retaining the exact canvas ordering fence.
+pub fn read_verified_live_launch_owners(
+    monitor: &IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> (BTreeMap<String, u64>, String) {
+    monitor.fresh_window_snapshot(now).map_or_else(
+        || (BTreeMap::new(), now.to_string()),
+        |snapshot| {
+            (
+                verified_live_launch_owners(project_root, snapshot, now),
+                snapshot.observed_at.clone(),
+            )
+        },
+    )
+}
+
+/// Recover stuck launches and classify windows using the same live Session observations.
+pub fn reconcile_issue_monitor_windows(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
-    let settlements =
-        read_execution_settlements(project_root, &monitor.execution_settlement_issue_numbers());
-    let outcome = monitor.reconcile_idle_windows(&settlements, now);
+    let settlements = refresh_issue_monitor_execution_observations(monitor, project_root);
+    // Dead terminal predecessors must retire before verified duplicate repair
+    // can interpret their displaced binding as unfinished work.
+    let terminal = monitor.reconcile_dead_terminal_launches(&settlements, now);
+    let (live_launch_owners, observed_at) =
+        read_verified_live_launch_owners(monitor, project_root, now);
+    reconcile_issue_monitor_windows_with_observations(
+        monitor,
+        &settlements,
+        &live_launch_owners,
+        &observed_at,
+        now,
+        terminal,
+    )
+}
+
+/// Finish a caller-owned reconciliation without repeating runtime I/O.
+/// `terminal` is the dead-holder pass run before candidate or binding repair.
+pub fn reconcile_issue_monitor_windows_with_observations(
+    monitor: &mut IssueMonitorState,
+    settlements: &BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation>,
+    live_launch_owners: &BTreeMap<String, u64>,
+    observed_at: &str,
+    now: &str,
+    terminal: crate::IssueMonitorIdleReconciliation,
+) -> crate::IssueMonitorIdleReconciliation {
+    monitor.set_process_held_issues(
+        settlements
+            .iter()
+            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+            .collect(),
+    );
+    monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
+    monitor.reconcile_cancelled_claim_phases(settlements, now);
+    monitor.recover_stuck_autonomous(now);
+    let mut outcome = monitor.reconcile_idle_windows(settlements, now);
+    outcome.released.extend(terminal.released);
+    outcome.requeued.extend(terminal.requeued);
+    outcome.idle_windows.extend(terminal.idle_windows);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
             released = ?outcome.released,
@@ -431,11 +974,7 @@ pub fn issue_monitor_daemon_payloads(
         for notice in monitor.take_autonomous_notices() {
             payloads.push(IssueMonitorDaemonPayload {
                 event: "toast".to_string(),
-                payload: serde_json::json!({
-                    "level": notice.level,
-                    "message": notice.message,
-                    "issue_number": notice.issue_number,
-                }),
+                payload: serde_json::to_value(notice).expect("operator notice serializes"),
             });
         }
     }
@@ -450,30 +989,39 @@ pub fn issue_monitor_daemon_payloads(
 pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now_instant = chrono::Utc::now();
+    let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.status_view_at(&now);
+    status.github_budget = Some(gwt_core::github_budget::status_by_resource(
+        &gwt_core::github_budget::BudgetLedger::global().snapshot(now_instant),
+        &gwt_core::github_budget::ThrottlePolicy::current(),
+        now_instant,
+    ));
+    if let Some(drain) = status.update_drain.as_mut() {
+        drain.blocking = monitor
+            .pending_effects()
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                    Some(crate::update_drain::UpdateBlocker::PendingAcquireClaim {
+                        issue_number: *issue_number,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    }
     vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(monitor.status_view_at(&now))
-                .expect("issue monitor status serializes"),
+            payload: serde_json::to_value(status).expect("issue monitor status serializes"),
         },
         IssueMonitorDaemonPayload {
             event: "inbox".to_string(),
-            payload: serde_json::to_value(monitor.inbox.clone())
+            payload: serde_json::to_value(monitor.inbox_view_at(&now))
                 .expect("issue monitor inbox serializes"),
         },
     ]
-}
-
-pub fn load_open_issue_monitor_candidates(
-    owner: &str,
-    repo: &str,
-) -> Result<Vec<IssueMonitorIssue>, String> {
-    let issues = gwt_git::issue::fetch_issues(owner, repo).map_err(|error| error.to_string())?;
-    Ok(issues
-        .into_iter()
-        .map(|issue| issue_monitor_candidate(issue, IssueMonitorReadiness::NotApplicable))
-        .collect())
 }
 
 fn issue_monitor_candidate(
@@ -481,6 +1029,7 @@ fn issue_monitor_candidate(
     readiness: IssueMonitorReadiness,
 ) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: issue.author_login,
         number: issue.number,
         title: issue.title,
         labels: issue.labels,
@@ -502,13 +1051,13 @@ fn issue_monitor_candidate(
 /// `## 受け入れ基準` block; the assembled section is appended so the Monitor
 /// sees the same block regardless of where it is stored. A body-resident
 /// section is already inside `body`, so nothing is duplicated.
-fn acceptance_source_text(body: &str, entry: &CacheEntry) -> String {
+pub(crate) fn acceptance_source_text(body: &str, spec_body: &gwt_github::SpecBody) -> String {
     let spec = SectionName("spec".to_string());
     let comment_resident = matches!(
-        entry.spec_body.sections_index.0.get(&spec),
+        spec_body.sections_index.0.get(&spec),
         Some(gwt_github::SectionLocation::Comments(_))
     );
-    match entry.spec_body.sections.get(&spec) {
+    match spec_body.sections.get(&spec) {
         Some(content) if comment_resident && !content.trim().is_empty() => {
             format!("{body}\n\n{content}")
         }
@@ -645,7 +1194,9 @@ where
             None
         } else {
             refresh_count += 1;
-            match refresh(number) {
+            match run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+                refresh(number)
+            }) {
                 Ok(()) => {
                     let refreshed = cache.load_entry(number);
                     match refreshed {
@@ -712,7 +1263,7 @@ where
             // the `spec` section lives; a comment-resident block must reach
             // the acceptance classifier too.
             let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
-            issue.body = Some(acceptance_source_text(body, entry));
+            issue.body = Some(acceptance_source_text(body, &entry.spec_body));
         }
         candidates.push(issue_monitor_candidate(issue, readiness));
     }
@@ -720,24 +1271,256 @@ where
     (candidates, errors)
 }
 
-pub fn load_open_issue_monitor_candidates_for_repo_path(
+/// Reuse revision-bound provenance and enrich newly observed urgent labels.
+fn load_urgent_assignments_with<E: fmt::Display>(
+    issues: &[IssueMonitorIssue],
+    prefs: &crate::IssueMonitorPrefs,
+    mut fetch: impl FnMut(u64) -> Result<Option<LabelAssignment>, E>,
+) -> BTreeMap<u64, LabelAssignment> {
+    let mut assignments = BTreeMap::new();
+    for issue in issues.iter().filter(|issue| {
+        issue.state == IssueMonitorIssueState::Open
+            && issue
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("urgent"))
+    }) {
+        if let Some(grant) = prefs
+            .urgent_queue
+            .grants
+            .get(&issue.number)
+            .filter(|grant| {
+                grant.label_present
+                    && issue.updated_at.is_some()
+                    && grant.issue_updated_at == issue.updated_at
+                    && grant.assignment_revision == issue.updated_at
+                    && grant.assigned_at.is_some()
+            })
+        {
+            assignments.insert(
+                issue.number,
+                LabelAssignment {
+                    actor: grant.assigned_by.clone(),
+                    created_at: grant.assigned_at.clone().expect("known assignment time"),
+                },
+            );
+            continue;
+        }
+        match fetch(issue.number) {
+            Ok(Some(assignment)) => {
+                assignments.insert(issue.number, assignment);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(issue = issue.number, %error,
+                "urgent label assignment unavailable; continuing candidate scan"),
+        }
+    }
+    assignments
+}
+
+/// Issue #4157: discover related PRs once, then read only PRs belonging to
+/// candidates this terminal could admit. Existing in-flight ownership is not
+/// changed by these normal-launch observations.
+fn load_open_pr_launch_observations(
     repo_path: &Path,
     owner: &str,
     repo: &str,
-) -> Result<Vec<IssueMonitorIssue>, String> {
-    load_open_issue_monitor_candidates_for_repo_path_with_provenance(repo_path, owner, repo)
-        .map(|loaded| loaded.issues)
+    issues: &[IssueMonitorIssue],
+    prefs: &crate::IssueMonitorPrefs,
+) -> (
+    BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
+    Option<String>,
+) {
+    let local = prefs
+        .terminal_queues
+        .get(&crate::process::current_hostname());
+    let candidates: Vec<_> = issues
+        .iter()
+        .filter(|issue| {
+            issue.state == IssueMonitorIssueState::Open
+                && (issue
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+                    || local.is_some_and(|queue| {
+                        queue
+                            .entries
+                            .iter()
+                            .any(|entry| entry.number == issue.number)
+                    }))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return (BTreeMap::new(), None);
+    }
+    let observed_at = chrono::Utc::now().to_rfc3339();
+    // Existing holds must be refreshable even when expensive association
+    // discovery fails. Read them first, and reuse each PR's result this scan.
+    let mut readbacks = BTreeMap::new();
+    let fetch = |number| {
+        run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+            gwt_git::pr_status::try_fetch_pr_lifecycle_for_monitor(repo_path, number)
+        })
+        .map_err(|error| error.to_string())
+    };
+    for issue in &candidates {
+        if let Some(hold) = prefs
+            .open_pr_observations
+            .get(&issue.number)
+            .and_then(|previous| previous.hold.as_ref())
+        {
+            readbacks
+                .entry(hold.pr_number)
+                .or_insert_with(|| fetch(hold.pr_number));
+        }
+    }
+    let branches = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
+    });
+    let numbers: Vec<_> = candidates.iter().map(|issue| issue.number).collect();
+    let mut linked = BTreeMap::new();
+    let linked_result = run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
+        crate::cli::issue::fetch_linked_prs_bulk_via_gh_observing(
+            owner,
+            repo,
+            &numbers,
+            |issue, prs| {
+                linked.insert(issue, prs.to_vec());
+            },
+        )
+    });
+    if let Err(error) = &branches {
+        tracing::warn!(%error, "open PR branch discovery failed; preserving prior launch holds");
+    }
+    if let Err(error) = &linked_result {
+        tracing::warn!(%error, completed_issues = linked.len(), "linked PR discovery incomplete; preserving unobserved launch holds");
+    }
+    let related = candidates
+        .iter()
+        .filter_map(|issue| {
+            let prs = linked.get(&issue.number);
+            let mut complete = branches.is_ok() && prs.is_some();
+            let mut numbers: Vec<_> = prs
+                .into_iter()
+                .flatten()
+                .filter(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("OPEN"))
+                .map(|pr| pr.number)
+                .collect();
+            let branch = crate::issue_monitor::issue_monitor_launch_plan(issue).branch_name;
+            numbers.extend(
+                branches
+                    .as_ref()
+                    .ok()
+                    .and_then(|branches| branches.get(&branch))
+                    .copied(),
+            );
+            if let Some(hold) = prefs
+                .open_pr_observations
+                .get(&issue.number)
+                .and_then(|previous| previous.hold.as_ref())
+            {
+                let prior = readbacks.get(&hold.pr_number);
+                // A terminal read releases this known hold independently of
+                // discovery. Other known PRs still undergo lifecycle checks.
+                complete |= matches!(prior, Some(Ok((state, _))) if *state != gwt_git::pr_status::PrState::Open);
+                if prior.is_some_and(Result::is_ok) || !complete {
+                    numbers.push(hold.pr_number);
+                }
+            }
+            numbers.sort_unstable();
+            numbers.dedup();
+            // Keep an independently observed branch PR even if the timeline failed.
+            (complete || !numbers.is_empty()).then_some((issue.number, (numbers, complete)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut observations = collect_open_pr_launch_observations(&related, |number| {
+        readbacks
+            .entry(number)
+            .or_insert_with(|| fetch(number))
+            .clone()
+    });
+    // Discovery proved an open PR exists. A first, failed lifecycle read must
+    // not admit a duplicate launch; subsequent failures retain the prior fact.
+    for (issue, (prs, _)) in &related {
+        if let Some(number) = prs.first().filter(|_| {
+            prefs
+                .open_pr_observations
+                .get(issue)
+                .is_none_or(|previous| previous.hold.is_none())
+        }) {
+            observations.entry(*issue).or_insert_with(|| {
+                Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: *number,
+                    lifecycle: "UNDETERMINED".into(),
+                })
+            });
+        }
+    }
+    (observations, Some(observed_at))
 }
 
-/// Load live candidates when available, retaining typed provenance for capped
-/// (therefore incomplete) live lists and cache fallbacks. The existing
-/// Vec-returning API above remains a compatibility wrapper.
+fn collect_open_pr_launch_observations(
+    // The bool permits release: complete association evidence or a directly
+    // confirmed terminal prior hold. Other known failed reads remain unknown.
+    related: &BTreeMap<u64, (Vec<u64>, bool)>,
+    mut fetch: impl FnMut(
+        u64,
+    ) -> Result<
+        (
+            gwt_git::pr_status::PrState,
+            gwt_git::pr_status::PrInventoryItem,
+        ),
+        String,
+    >,
+) -> BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>> {
+    use gwt_git::pr_status::PrState;
+    let mut readbacks = BTreeMap::new();
+    let mut observations = BTreeMap::new();
+    for (issue, (prs, complete)) in related {
+        let mut hold = None;
+        let mut repair = false;
+        let mut unknown = !*complete;
+        for number in prs {
+            let result = readbacks.entry(*number).or_insert_with(|| fetch(*number));
+            match result {
+                Ok((PrState::Open, pr))
+                    if matches!(pr.lifecycle.as_str(), "CI-RED" | "CONFLICTED") =>
+                {
+                    repair = true
+                }
+                Ok((PrState::Open, pr)) => {
+                    hold = Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                        pr_number: *number,
+                        lifecycle: pr.lifecycle.clone(),
+                    })
+                }
+                Ok(_) => {} // Closed or merged: release this PR's hold.
+                result => {
+                    tracing::warn!(
+                        issue,
+                        pr = number,
+                        ?result,
+                        "PR lifecycle unobserved; preserving prior launch hold"
+                    );
+                    unknown = true;
+                }
+            }
+        }
+        if repair || hold.is_some() || !unknown {
+            observations.insert(*issue, if repair { None } else { hold });
+        }
+    }
+    observations
+}
+
+/// Load live candidates with the complete REST queue label collection, while
+/// retaining the general open list's capped provenance and cache fallbacks.
 pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     repo_path: &Path,
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
-    let live_error = match gwt_git::issue::fetch_issue_listing(owner, repo) {
+    let live_error = match gwt_git::issue::fetch_issue_monitor_listing(owner, repo) {
         Ok(listing) => {
             let source = live_candidate_source(listing.capped);
             let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
@@ -754,7 +1537,7 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     "issue cache full refresh failed; scanning with the live list"
                 );
             }
-            let (issues, readiness_failures) =
+            let (mut issues, readiness_failures) =
                 issue_monitor_candidates_with_readiness(listing.issues, &cache_root, |number| {
                     crate::issue_cache::refresh_issue_cache_entry_from_remote(
                         repo_path,
@@ -762,14 +1545,54 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                         number,
                     )
                 });
+            if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
+                backfill_missing_issue_authors((owner, repo), &mut issues, |issue| {
+                    try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue)
+                });
+            }
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo_path),
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "urgent assignment cache unavailable");
+                crate::IssueMonitorPrefs::default()
+            });
+            // Construct/authenticate only when a live urgent revision actually
+            // needs enrichment. Retain a construction error for this scan so a
+            // broken credential probe is not repeated for every urgent row.
+            let mut client = None;
+            let urgent_assignments = load_urgent_assignments_with(&issues, &prefs, |number| {
+                if !readback_fan_out_has_budget() {
+                    return Err("urgent assignment deferred to preserve launch budget".to_string());
+                }
+                run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+                    let client = client
+                        .get_or_insert_with(|| {
+                            gwt_github::client::http::HttpIssueClient::from_runtime_environment(
+                                owner, repo,
+                            )
+                        })
+                        .as_ref()
+                        .map_err(ToString::to_string)?;
+                    client
+                        .fetch_label_assignment(IssueNumber(number), "urgent")
+                        .map_err(|error| error.to_string())
+                })
+                .map_err(|error| error.to_string())
+            });
+            let (open_pr_observations, open_pr_observed_at) =
+                load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
+                open_pr_observations,
+                open_pr_observed_at,
                 source,
                 // Issue #4436 AC-1: the live list succeeded and every other
                 // Issue's readiness was refreshed, so this pass is not a failed
                 // refresh. The per-Issue reasons ride their own rows instead.
                 live_error: None,
                 readiness_failures,
+                urgent_assignments,
             });
         }
         Err(error) => error.to_string(),
@@ -790,7 +1613,64 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         }
         result
     });
-    resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)
+    let mut loaded = resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)?;
+    if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
+        backfill_missing_issue_authors((owner, repo), &mut loaded.issues, |issue| {
+            try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue)
+        });
+    }
+    Ok(loaded)
+}
+
+/// Legacy candidates need an authoritative author before admission, including
+/// rows that the admission policy will exclude from the claim frontier.
+fn backfill_missing_issue_authors<F>(
+    source: (&str, &str),
+    issues: &mut [IssueMonitorIssue],
+    mut refresh: F,
+) where
+    F: FnMut(&IssueMonitorIssue) -> Result<IssueMonitorIssue, IssueMonitorScanFailure>,
+{
+    static CURSORS: OnceLock<Mutex<BTreeMap<(String, String), u64>>> = OnceLock::new();
+    let cursors = CURSORS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let source = (source.0.to_ascii_lowercase(), source.1.to_ascii_lowercase());
+    let mut remaining = issues
+        .iter()
+        .enumerate()
+        .filter(|(_, issue)| {
+            issue.state == IssueMonitorIssueState::Open && issue.author_login.is_none()
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    remaining.sort_unstable_by_key(|index| issues[*index].number);
+    for _ in 0..ISSUE_MONITOR_TARGETED_REFRESH_LIMIT.min(remaining.len()) {
+        if !readback_fan_out_has_budget() {
+            break;
+        }
+        let index = {
+            let mut cursors = cursors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = cursors.entry(source.clone()).or_default();
+            let next = remaining
+                .iter()
+                .position(|index| issues[*index].number > *previous)
+                .unwrap_or(0);
+            let index = remaining.remove(next);
+            // Advance only the attempted row, even on failure or unknown author.
+            *previous = issues[index].number;
+            index
+        };
+        let issue = &mut issues[index];
+        match refresh(issue) {
+            Ok(refreshed) => *issue = refreshed,
+            Err(error) => tracing::warn!(
+                issue = issue.number,
+                %error,
+                "original Issue author unavailable; preserving unknown provenance"
+            ),
+        }
+    }
 }
 
 /// Issue #4087 AC-4: run the Issue cache full refresh when its TTL has
@@ -811,7 +1691,10 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     {
         return Ok(false);
     }
-    crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)?;
+    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+        crate::issue_cache::sync_issue_cache_from_remote_for_monitor(repo_path, cache_root)
+    })
+    .map_err(|error| error.to_string())?;
     Ok(true)
 }
 
@@ -826,20 +1709,26 @@ where
         Ok((issues, capped)) => {
             let source = live_candidate_source(capped);
             Ok(LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
                 issues,
                 source,
                 live_error: None,
                 readiness_failures: Vec::new(),
+                urgent_assignments: BTreeMap::new(),
             })
         }
         Err(live_error) => {
             for issues in cache_results.into_iter().flatten() {
                 if !issues.is_empty() {
                     return Ok(LoadedIssueMonitorCandidates {
+                        open_pr_observations: BTreeMap::new(),
+                        open_pr_observed_at: None,
                         issues,
                         source: IssueMonitorCandidateSource::Cache,
                         live_error: Some(live_error),
                         readiness_failures: Vec::new(),
+                        urgent_assignments: BTreeMap::new(),
                     });
                 }
             }
@@ -878,6 +1767,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    if let Some(observed_at) = &loaded.open_pr_observed_at {
+        monitor.reconcile_open_pr_holds(&loaded.open_pr_observations, observed_at);
+    }
     // Reconcile local credentials before this scan plans claims. No network
     // request is made here; Claude credential access remains opt-in.
     let usage_config = gwt_config::Settings::load().unwrap_or_default().usage;
@@ -913,6 +1805,14 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             expected_project_tab_id,
             now,
         );
+    for (number, assignment) in &loaded.urgent_assignments {
+        let revision = loaded
+            .issues
+            .iter()
+            .find(|issue| issue.number == *number)
+            .and_then(|issue| issue.updated_at.as_deref());
+        monitor.record_urgent_assignment(*number, revision, assignment);
+    }
     // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
     // ledger whether a generation-conflict hold still protects anything. The
     // reaper released 29 of the 45 stranded production generations and their
@@ -976,33 +1876,39 @@ pub fn try_refresh_issue_monitor_candidate(
             ),
         )
     })?;
+    // The previous-result fallback scans this candidate again before claiming
+    // it. A fresh revision must carry fresh launch prerequisites as well:
+    // retaining old labels/readiness can bypass a newly added hold or missing
+    // plan/tasks, while an old body feeds stale acceptance to the gate.
+    let is_spec = entry
+        .snapshot
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    let readiness = if is_spec && !spec_cache_entry_has_no_sections(&entry) {
+        spec_cache_entry_readiness(&entry)
+    } else {
+        IssueMonitorReadiness::NotApplicable
+    };
+    let body = if is_spec {
+        acceptance_source_text(&entry.snapshot.body, &entry.spec_body)
+    } else {
+        entry.snapshot.body
+    };
     Ok(IssueMonitorIssue {
+        author_login: entry.snapshot.author_login,
+        number: entry.snapshot.number.0,
+        title: entry.snapshot.title,
+        labels: entry.snapshot.labels,
         state: match entry.snapshot.state {
             IssueState::Open => IssueMonitorIssueState::Open,
             IssueState::Closed => IssueMonitorIssueState::Closed,
         },
+        body: (!body.is_empty()).then_some(body),
+        url: issue.url.clone(),
+        readiness,
         updated_at: Some(entry.snapshot.updated_at.0),
-        ..issue.clone()
     })
-}
-
-/// Issue #3225 / #3832: GitHub-derived completion probe for the claim loop.
-/// Ordinary Issues are terminal only when GitHub reports `Closed`; linked PR
-/// evidence remains delivery evidence and cannot suppress an Open Issue.
-/// SPECs retain their structured-task plus merged-PR gate. Fails open (false)
-/// on remote errors so a transient gh failure never blocks real work.
-pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue: &IssueMonitorIssue) -> bool {
-    match try_issue_completed_by_merged_pr(owner, repo, issue) {
-        Ok(completed) => completed,
-        Err(error) => {
-            tracing::debug!(
-                issue = issue.number,
-                error = %error,
-                "issue monitor completion probe failed (fail-open)"
-            );
-            false
-        }
-    }
 }
 
 /// Checked completion probe used by scan proposal transactions.
@@ -1247,7 +2153,7 @@ pub fn reconcile_issue_monitor_merges(
     {
         return Ok(IssueMonitorMergeReconciliation::default());
     }
-    let merged_prs = gwt_git::pr_status::fetch_merged_pr_deliveries(repo_path)?;
+    let merged_prs = gwt_git::pr_status::fetch_merged_pr_deliveries_for_monitor(repo_path)?;
     let merged_branches = merged_prs.branches;
     let deliveries = merged_prs
         .deliveries
@@ -1332,10 +2238,28 @@ pub fn prune_delivered_work_branches(
     base_branch: &str,
     reconciliation: &IssueMonitorMergeReconciliation,
 ) -> gwt_git::merged_branch_prune::PruneReport {
-    let mut report = gwt_git::merged_branch_prune::PruneReport::default();
     if reconciliation.merged.is_empty() {
-        return report;
+        return gwt_git::merged_branch_prune::PruneReport::default();
     }
+    run_budgeted_readback_stage(IssueMonitorScanStage::BranchPrune, || {
+        Ok::<_, String>(prune_delivered_work_branches_observed(
+            repo_path,
+            base_branch,
+            reconciliation,
+        ))
+    })
+    .unwrap_or_else(|error| gwt_git::merged_branch_prune::PruneReport {
+        skipped_reason: Some(error.to_string()),
+        ..Default::default()
+    })
+}
+
+fn prune_delivered_work_branches_observed(
+    repo_path: &Path,
+    base_branch: &str,
+    reconciliation: &IssueMonitorMergeReconciliation,
+) -> gwt_git::merged_branch_prune::PruneReport {
+    let mut report = gwt_git::merged_branch_prune::PruneReport::default();
     // Mirrors the gh command root: a workspace home resolves to its child bare
     // repo, anything else runs where the caller pointed us.
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
@@ -1379,15 +2303,10 @@ pub fn prune_delivered_work_branches_with<E: gwt_git::merged_branch_prune::Prune
 
 /// Issue #3917: propose settling every delivered Issue whose work branch
 /// merged. Side-effect free like the rest of the scan: it only prepares
-/// `SettleMergedIssue` effects for the durable executor. Delegation
-/// evidence (PR body, Issue comments) is read only when unchecked criteria
-/// remain; a failed readback defers that Issue to the next scan instead of
-/// escalating it. Returns the Issue numbers proposed this scan.
+/// `SettleMergedIssue` effects for the durable executor. Unchecked criteria
+/// always keep the Issue open. Returns the Issue numbers proposed this scan.
 pub fn propose_merged_issue_settlements(
     monitor: &mut IssueMonitorState,
-    repo_path: &Path,
-    owner: &str,
-    repo: &str,
     deliveries: &BTreeMap<String, crate::MergedIssueDelivery>,
 ) -> Vec<u64> {
     if !monitor.config.enabled || deliveries.is_empty() {
@@ -1397,23 +2316,7 @@ pub fn propose_merged_issue_settlements(
     let mut proposed = Vec::new();
     for (issue, delivery) in monitor.merged_issue_settlement_candidates(deliveries) {
         let issue_number = issue.number;
-        let pr_number = delivery.pr_number;
-        let evidence = |_unmet: &[String]| -> Option<bool> {
-            match fetch_delegation_evidence(repo_path, owner, repo, issue_number, pr_number) {
-                Ok(texts) => Some(crate::delegation_recorded(texts.iter().map(String::as_str))),
-                Err(error) => {
-                    tracing::warn!(
-                        issue = issue_number,
-                        pr = pr_number,
-                        error = %error,
-                        "merged issue settlement evidence readback failed; deferring to the next scan"
-                    );
-                    None
-                }
-            }
-        };
-        let Some(action) = crate::decide_merged_issue_settlement(&issue, auto_close, evidence)
-        else {
+        let Some(action) = crate::decide_merged_issue_settlement(&issue, auto_close) else {
             continue;
         };
         if monitor.propose_merged_issue_settlement(issue_number, &delivery, action) {
@@ -1421,30 +2324,6 @@ pub fn propose_merged_issue_settlements(
         }
     }
     proposed
-}
-
-/// PR body plus Issue comment bodies, the two places a delegation record may
-/// live (Issue #3917 AC-2).
-fn fetch_delegation_evidence(
-    repo_path: &Path,
-    owner: &str,
-    repo: &str,
-    issue_number: u64,
-    pr_number: u64,
-) -> Result<Vec<String>, IssueMonitorScanFailure> {
-    let mut texts = Vec::new();
-    if let Some(body) =
-        run_scan_stage(IssueMonitorScanStage::MergedIssueSettlementReadback, || {
-            gwt_git::pr_status::try_fetch_pr_body(repo_path, pr_number)
-        })?
-    {
-        texts.push(body);
-    }
-    texts.extend(run_scan_stage(
-        IssueMonitorScanStage::MergedIssueSettlementReadback,
-        || gwt_git::issue::fetch_issue_comment_bodies(owner, repo, issue_number),
-    )?);
-    Ok(texts)
 }
 
 /// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.
@@ -1586,12 +2465,13 @@ fn autonomous_eligibility_candidates<'a>(
     issues
         .iter()
         .filter(|issue| monitor.is_autonomous_two_stage_candidate(issue))
+        .filter(|issue| !monitor.open_pr_launch_held(issue.number))
         .filter(|issue| {
             monitor
                 .inbox_item(issue.number)
                 .is_some_and(|item| item.state == MonitorInboxState::Queued)
         })
-        .filter(|issue| monitor.retry_ready(issue.number, now))
+        .filter(|issue| monitor.retry_ready_for_saved_profile(issue.number, now))
         .collect()
 }
 
@@ -1606,7 +2486,9 @@ fn autonomous_eligibility_candidates<'a>(
 ///   token); `Remediate` re-queues (bounded); `Escalate` → NeedsHuman; `WaitForCi`
 ///   waits.
 /// - **Delivering** → watch for the merge; on merge verify `merged_sha ==
-///   reviewed_sha` (TOCTOU layer-4) before completing, else escalate.
+///   reviewed_sha` (TOCTOU layer-4) before completing, else escalate. An
+///   unmerged PR that was closed, went conflicting / behind, or outlived
+///   `merge_watch_timeout_secs` leaves Delivering (Issue #4726).
 ///
 /// No-op unless autonomous mode is on. Review-dispatch requests are queued on the
 /// monitor ([`IssueMonitorState::take_pending_review_dispatches`]) for the GUI to
@@ -1745,7 +2627,7 @@ fn read_open_pr_inventory(
         return None;
     }
     match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch(repo_path)
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
     }) {
         Ok(index) => Some(index),
         Err(failure) => {
@@ -1763,6 +2645,62 @@ fn read_open_pr_inventory(
             None
         }
     }
+}
+
+// Returns true when the gate must wait for the one allowed CI retry.
+fn prepare_failed_ci_reruns(
+    monitor: &mut IssueMonitorState,
+    issue_number: u64,
+    targets: &[crate::issue_monitor_ci::CiRerunTarget],
+    now: &str,
+    mut retry_state: impl FnMut(
+        &crate::issue_monitor_ci::CiRerunTarget,
+        bool,
+    ) -> Result<crate::issue_monitor_ci::CiRetryState, String>,
+) -> bool {
+    use crate::issue_monitor_ci::CiRetryState;
+    let mut waiting = false;
+    for target in targets {
+        let id = target.effect_id();
+        if monitor
+            .pending_effects()
+            .iter()
+            .any(|effect| effect.effect_id == id)
+        {
+            waiting = true;
+            continue;
+        }
+        let consumed = monitor.ci_rerun_consumed(&id);
+        match retry_state(target, consumed) {
+            Ok(CiRetryState::Ready) if !consumed => {
+                waiting |= monitor.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                    id,
+                    monitor.effect_authority_epoch(),
+                    crate::IssueMonitorEffectPayload::RerunFailedCi {
+                        issue_number,
+                        target: target.clone(),
+                    },
+                ));
+            }
+            Ok(CiRetryState::Failed) => {}
+            Ok(CiRetryState::Pending) => waiting = true,
+            Ok(CiRetryState::Ready) | Err(_) if consumed => {
+                waiting = true;
+                monitor.request_autonomous_steering(issue_number,
+                    format!("CI run {} retry submission is consumed; awaiting GitHub readback, no duplicate will be sent", target.run_id), now);
+            }
+            Err(reason) => {
+                waiting = true;
+                monitor.request_autonomous_steering(
+                    issue_number,
+                    format!("CI retry readback unavailable: {reason}"),
+                    now,
+                );
+            }
+            Ok(CiRetryState::Ready) => unreachable!("unconsumed ready runs are handled above"),
+        }
+    }
+    waiting
 }
 
 /// Advance one in-flight autonomous issue by a single step. Every remote
@@ -1801,7 +2739,20 @@ fn advance_one_autonomous_issue(
                 // whose review window is already live, or a full `max_active`,
                 // keeps the record Implementing so the next scan retries; the
                 // reason lands on the record for `issue.monitor.status`.
-                if let Some(hold) = monitor.review_dispatch_hold(issue_number, pr, now) {
+                // Issue #4815 AC-2: a review ladder is keyed by the reviewed
+                // SHA, and a new head resets it, so the head is read before
+                // the hold is asked whenever failures are recorded. Otherwise
+                // the readback stays after admission, as before.
+                let retry_head = if monitor.review_attempts_recorded(issue_number) {
+                    run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                        gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                    })?
+                } else {
+                    None
+                };
+                if let Some(hold) =
+                    monitor.review_dispatch_hold(issue_number, pr, retry_head.as_deref(), now)
+                {
                     tracing::info!(
                         issue = issue_number,
                         pr,
@@ -1811,11 +2762,15 @@ fn advance_one_autonomous_issue(
                     monitor.hold_review_dispatch(issue_number, hold);
                     return Ok(());
                 }
-                if let Some(sha) =
-                    run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
-                        gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
-                    })?
-                {
+                let sha = match retry_head {
+                    Some(sha) => Some(sha),
+                    None => {
+                        run_budgeted_readback_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                            gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                        })?
+                    }
+                };
+                if let Some(sha) = sha {
                     let criteria = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
@@ -1884,14 +2839,26 @@ fn advance_one_autonomous_issue(
                 gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
             })?
             .unwrap_or_default();
+            // Issue #4726 AC-1: an auto-merge armed on a conflicting / behind
+            // PR never merges, so the gate reads mergeability too.
+            let mergeability =
+                run_budgeted_readback_stage(IssueMonitorScanStage::MergeabilityReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_merge_readback(repo_path, pr)
+                })?
+                .mergeability;
             let body = issues
                 .iter()
                 .find(|issue| issue.number == issue_number)
                 .and_then(|issue| issue.body.clone())
                 .unwrap_or_default();
-            let Some(inputs) =
-                monitor.autonomous_gate_inputs(issue_number, protection, &rollup, &head, &body)
-            else {
+            let Some(inputs) = monitor.autonomous_gate_inputs(
+                issue_number,
+                protection,
+                &rollup,
+                &head,
+                &body,
+                mergeability,
+            ) else {
                 return Ok(()); // verdict not back yet → wait
             };
             // Issue #4544 AC-3: a launch that stopped at a provider permission
@@ -1903,6 +2870,49 @@ fn advance_one_autonomous_issue(
             // environment fact about the launch, and Issue #3944 AC-1 reserves
             // the retry counter for the agent's own failures.
             let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            // Issue #5876 T-4a: a transient required CI failure gets one
+            // persisted failed-jobs retry before it can create a fix generation.
+            // Review/acceptance/head/mergeability failures retain their routing.
+            if matches!(routed, crate::issue_monitor_gate::GateAction::Remediate(_))
+                && matches!(inputs.ci, crate::issue_monitor_gate::CiOutcome::Failed)
+                && inputs.review == crate::issue_monitor_review::ReviewGateOutcome::Pass
+                && inputs.acceptance_unchanged
+                && !inputs.reviewed_sha.is_empty()
+                && inputs.reviewed_sha == inputs.head_sha
+                && crate::issue_monitor_gate::unmergeable_reason(inputs.mergeability).is_none()
+            {
+                if let gwt_git::branch_protection::BranchProtectionStatus::Verified {
+                    required_checks,
+                } = &inputs.branch_protection
+                {
+                    let targets = crate::issue_monitor_ci::failed_required_targets(
+                        &rollup,
+                        required_checks,
+                        repo_slug,
+                        pr,
+                        &head,
+                    );
+                    if prepare_failed_ci_reruns(
+                        monitor,
+                        issue_number,
+                        &targets,
+                        now,
+                        |target, consumed| {
+                            run_budgeted_readback_stage(
+                                IssueMonitorScanStage::StatusCheckReadback,
+                                || {
+                                    crate::issue_monitor_ci::retry_state(
+                                        repo_path, target, consumed,
+                                    )
+                                },
+                            )
+                            .map_err(|error| error.to_string())
+                        },
+                    ) {
+                        routed = crate::issue_monitor_gate::GateAction::WaitForCi;
+                    }
+                }
+            }
             if matches!(routed, crate::issue_monitor_gate::GateAction::Deliver) {
                 if let Some(reason) = crate::cli::permission_readiness::owner_settlement_refusal(
                     repo_path,
@@ -1953,7 +2963,7 @@ fn advance_one_autonomous_issue(
                 }
                 crate::issue_monitor_gate::GateAction::WaitForCi => {}
                 crate::issue_monitor_gate::GateAction::Remediate(reason) => {
-                    monitor.record_autonomous_failure(issue_number, reason, now);
+                    monitor.remediate_autonomous_gate(issue_number, reason, &body, now);
                 }
                 // Issue #3944 AC-1: an environment hold is not a human
                 // decision — keep the PR in flight, ask the PM to steer,
@@ -2005,6 +3015,28 @@ fn advance_one_autonomous_issue(
                         ),
                     );
                 }
+            } else {
+                // Issue #4726 AC-2/AC-3: GitHub will not merge a closed,
+                // conflicting or behind PR, and nothing else would ever end
+                // this watch — leave Delivering and release the slot. A failed
+                // readback still reports its degradation, but only after the
+                // timeout has had its say: a readback that keeps failing must
+                // not hold the slot past the merge-watch.
+                let readback = run_budgeted_readback_stage(
+                    IssueMonitorScanStage::MergeabilityReadback,
+                    || gwt_git::pr_status::try_fetch_pr_merge_readback(repo_path, pr),
+                );
+                let expired = monitor.merge_watch_expired(issue_number, now);
+                if let Some(exit) = crate::DeliveringExit::decide(readback.as_ref().ok(), expired) {
+                    tracing::warn!(
+                        issue = issue_number,
+                        pr,
+                        exit = ?exit,
+                        "issue monitor: delivery left the merge-watch unmerged"
+                    );
+                    monitor.exit_delivering(issue_number, pr, exit, now);
+                }
+                readback?;
             }
         }
         _ => {}
@@ -2023,44 +3055,59 @@ pub fn load_cached_issue_monitor_candidates(
         .list_entries()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .map(|entry| {
-            let is_spec = entry
-                .snapshot
-                .labels
-                .iter()
-                .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
-            let (readiness, body) = if is_spec {
-                (
-                    spec_cache_entry_readiness(&entry),
-                    acceptance_source_text(&entry.snapshot.body, &entry),
-                )
-            } else {
-                (
-                    IssueMonitorReadiness::NotApplicable,
-                    entry.snapshot.body.clone(),
-                )
-            };
-            IssueMonitorIssue {
-                readiness,
-                number: entry.snapshot.number.0,
-                title: entry.snapshot.title,
-                labels: entry.snapshot.labels,
-                state: match entry.snapshot.state {
-                    IssueState::Open => IssueMonitorIssueState::Open,
-                    IssueState::Closed => IssueMonitorIssueState::Closed,
-                },
-                body: (!body.is_empty()).then_some(body),
-                url: None,
-                updated_at: Some(entry.snapshot.updated_at.0),
-            }
-        })
+        .map(cached_issue_monitor_candidate)
         .collect::<Vec<_>>();
     issues.sort_by_key(|issue| issue.number);
     Ok(issues)
 }
 
+/// Restore one launch's source evidence without scanning unrelated cache rows
+/// or performing a remote readback. Missing/legacy evidence remains unknown.
+pub fn load_cached_issue_monitor_candidate(
+    cache_root: &Path,
+    issue_number: u64,
+) -> Option<IssueMonitorIssue> {
+    Cache::new(cache_root.to_path_buf())
+        .load_entry(IssueNumber(issue_number))
+        .map(cached_issue_monitor_candidate)
+}
+
+fn cached_issue_monitor_candidate(entry: CacheEntry) -> IssueMonitorIssue {
+    let is_spec = entry
+        .snapshot
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
+    let (readiness, body) = if is_spec {
+        (
+            spec_cache_entry_readiness(&entry),
+            acceptance_source_text(&entry.snapshot.body, &entry.spec_body),
+        )
+    } else {
+        (
+            IssueMonitorReadiness::NotApplicable,
+            entry.snapshot.body.clone(),
+        )
+    };
+    IssueMonitorIssue {
+        author_login: entry.snapshot.author_login,
+        readiness,
+        number: entry.snapshot.number.0,
+        title: entry.snapshot.title,
+        labels: entry.snapshot.labels,
+        state: match entry.snapshot.state {
+            IssueState::Open => IssueMonitorIssueState::Open,
+            IssueState::Closed => IssueMonitorIssueState::Closed,
+        },
+        body: (!body.is_empty()).then_some(body),
+        url: None,
+        updated_at: Some(entry.snapshot.updated_at.0),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubRemoteResolutionError {
+    MetadataNeedsAttention(String),
     CommandSpawnFailed(String),
     GitCommandFailed {
         status_code: Option<i32>,
@@ -2074,6 +3121,7 @@ pub enum GitHubRemoteResolutionError {
 impl fmt::Display for GitHubRemoteResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MetadataNeedsAttention(diagnosis) => f.write_str(diagnosis),
             Self::CommandSpawnFailed(error) => {
                 write!(f, "git remote get-url origin could not be started: {error}")
             }
@@ -2104,6 +3152,17 @@ impl fmt::Display for GitHubRemoteResolutionError {
 
 impl std::error::Error for GitHubRemoteResolutionError {}
 
+/// Bind admission to the project's actual source repository. A failed lookup
+/// keeps restored launch work held until a later scan resolves its provenance.
+pub fn bind_issue_monitor_source_repository(monitor: &mut IssueMonitorState, project_root: &Path) {
+    let repository = github_remote_owner_and_repo(project_root).ok();
+    monitor.set_source_repository(
+        repository
+            .as_ref()
+            .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+    );
+}
+
 pub fn github_remote_owner_and_repo(
     repo_path: &Path,
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
@@ -2114,6 +3173,11 @@ fn github_remote_owner_and_repo_with_program(
     repo_path: &Path,
     program: impl Into<std::ffi::OsString>,
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
+    if let Some(diagnosis) = gwt_git::repository::git_health::cached_metadata_failure(repo_path) {
+        return Err(GitHubRemoteResolutionError::MetadataNeedsAttention(
+            diagnosis,
+        ));
+    }
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
     let output = gwt_core::process_console::spawn_logged_blocking(
@@ -2126,6 +3190,17 @@ fn github_remote_owner_and_repo_with_program(
             .forward_output(false),
     )
     .map_err(|error| GitHubRemoteResolutionError::CommandSpawnFailed(error.to_string()))?;
+    if !output.success() {
+        if let Some(diagnosis) = gwt_git::repository::git_health::record_metadata_failure(
+            repo_path,
+            "git remote get-url origin",
+            &output.stderr,
+        ) {
+            return Err(GitHubRemoteResolutionError::MetadataNeedsAttention(
+                diagnosis,
+            ));
+        }
+    }
     github_remote_owner_and_repo_from_get_url_output(
         output.success(),
         output.exit_code,
@@ -2203,15 +3278,13 @@ fn has_supported_github_remote_prefix(remote_url: &str) -> bool {
     .any(|prefix| remote_url.starts_with(prefix))
 }
 
-#[allow(dead_code)]
-fn _assert_inbox_item_is_send_sync(_: IssueMonitorInboxItem) {}
-
 #[cfg(test)]
 mod linked_pr_batch_tests {
     use super::*;
 
     fn spec_issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("SPEC {number}"),
             labels: vec!["gwt-spec".to_string()],
@@ -2276,8 +3349,70 @@ mod linked_pr_batch_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    fn test_monitor(config: crate::IssueMonitorConfig) -> crate::IssueMonitorState {
+        let mut monitor = crate::IssueMonitorState::new(config);
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor
+    }
+
+    fn test_monitor_with_prefs(
+        config: crate::IssueMonitorConfig,
+        prefs: crate::IssueMonitorPrefs,
+    ) -> crate::IssueMonitorState {
+        let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor
+    }
+
+    #[test]
+    fn issue_5783_daemon_reconciles_ten_closed_bindings_before_id_reuse() {
+        let repo = tempfile::tempdir().unwrap();
+        let now = "2026-10-20T00:00:00Z";
+        let mut bindings = (0..10)
+            .map(|index| (format!("tab-1::agent-{index}"), 100 + index))
+            .collect::<BTreeMap<_, _>>();
+        bindings.insert("foreign-tab::agent-0".into(), 500);
+        bindings.insert("legacy-agent".into(), 501);
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launch_bindings: bindings,
+                ..Default::default()
+            },
+        );
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.into(),
+            windows: Vec::new(),
+        });
+        let stale = monitor.prefs();
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 2);
+        // The daemon's commit imports disk state before repeating reconciliation.
+        monitor.rebase_daemon_driver_prefs(&stale);
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.prefs().launch_bindings.len(), 2);
+        monitor.record_candidate(issue(5783));
+        monitor.complete_active_launch_at(5783, "tab-1::agent-0", now);
+        // The captured empty canvas predates this ACK and cannot revoke it.
+        reconcile_verified_live_launch_bindings(&mut monitor, repo.path(), now);
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-0"), Some(5783));
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("tab-1::agent-0"),
+            Some(&5783)
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("foreign-tab::agent-0"),
+            Some(&500)
+        );
+        assert_eq!(
+            monitor.prefs().launch_bindings.get("legacy-agent"),
+            Some(&501)
+        );
+    }
     use crate::{IssueMonitorConfig, MonitorInboxState};
     use gwt_github::{
         Cache, CommentId, CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState,
@@ -2285,8 +3420,216 @@ mod tests {
     };
     use std::path::PathBuf;
 
+    #[test]
+    fn issue_4783_verified_readoption_preserves_takeover_and_rejects_foreign_worktree() {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 4783,
+        };
+        execution_state::materialize_at_launch(
+            repo.path(),
+            owner.kind,
+            owner.number,
+            "Elvor-old",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            repo.path(),
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(repo.path(), "work/issue-4783", gwt_agent::AgentId::Codex);
+        session.id = "Elvor-old".into();
+        session.linked_issue_number = Some(4783);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: 4783,
+            identity: execution_state::current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        });
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: "2026-10-15T00:00:00Z".into(),
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::agent-87".into(),
+                issue_number: Some(4783),
+                status: crate::WindowState::Running,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: Some(session.id.clone()),
+            }],
+        };
+        let expected = BTreeMap::from([("tab-1::agent-87".to_string(), 4783)]);
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected
+        );
+        let mut future = snapshot.clone();
+        future.observed_at = "2026-10-15T00:10:00Z".into();
+        assert!(
+            verified_live_launch_owners(repo.path(), &future, &snapshot.observed_at).is_empty()
+        );
+
+        let other = repo.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        session.worktree_path = other;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        assert!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at).is_empty()
+        );
+        session.worktree_path = repo.path().into();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+
+        let takeover = execution_state::GenerationTakeoverRequest {
+            operation_id: "readopt-takeover".into(),
+            principal_id: "gwt-host-continuation".into(),
+            work_id: None,
+            source: None,
+            from_session_id: session.id.clone(),
+            to_session_id: "Elvor".into(),
+            reason: "verified dead predecessor".into(),
+            requested_at: chrono::Utc::now(),
+        };
+        execution_state::prepare_generation_takeover(repo.path(), owner, &takeover).unwrap();
+        let binding =
+            execution_state::activate_generation_takeover(repo.path(), owner, &takeover).unwrap();
+        assert!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at).is_empty()
+        );
+        session.id = "Elvor".into();
+        let session_binding = session.execution_binding.as_mut().unwrap();
+        session_binding.session_id = session.id.clone();
+        session_binding.identity = binding;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        snapshot.windows[0].session_id = Some(session.id.clone());
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected
+        );
+        let settled = execution_state::settle(
+            repo.path(),
+            &session.id,
+            execution_state::ExecutionSettlement::Blocked {
+                reason: "operator decision".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(settled, execution_state::SettleResult::Settled(_)));
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected,
+            "an authentic same-Session lifecycle prefix remains valid"
+        );
+    }
+
+    #[test]
+    fn issue_4783_readoption_requires_a_readable_session() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        for unreadable in [false, true] {
+            if unreadable {
+                std::fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+                std::fs::write(
+                    gwt_core::paths::gwt_sessions_dir().join("missing.toml"),
+                    "broken[",
+                )
+                .unwrap();
+            }
+            let mut monitor = test_monitor_with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    launch_bindings: BTreeMap::from([("tab-1::agent-87".into(), 5023)]),
+                    ..Default::default()
+                },
+            );
+            monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab-1".into(),
+                observed_at: "2026-10-15T00:00:00Z".into(),
+                windows: vec![crate::IssueMonitorWindowObservation {
+                    monitor_owned: true,
+                    window_id: "tab-1::agent-87".into(),
+                    issue_number: Some(5023),
+                    status: crate::WindowState::Running,
+                    review_dispatch: false,
+                    hold_reason: None,
+                    last_output_at: None,
+                    session_id: Some("missing".into()),
+                }],
+            });
+
+            reconcile_issue_monitor_windows(&mut monitor, repo.path(), "2026-10-15T00:00:00Z");
+
+            assert_eq!(
+                monitor.launched_window_id(5023),
+                None,
+                "unreadable={unreadable}"
+            );
+            assert_eq!(
+                monitor.prefs().launch_bindings.get("tab-1::agent-87"),
+                Some(&5023)
+            );
+
+            let mut bound = test_monitor(crate::IssueMonitorConfig::default());
+            bound.record_candidate(issue(5023));
+            bound.complete_active_launch_at(5023, "tab-1::old", "2026-10-14T00:00:00Z");
+            let mut snapshot = monitor
+                .fresh_window_snapshot("2026-10-15T00:00:00Z")
+                .unwrap()
+                .clone();
+            snapshot.windows.push(crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::old".into(),
+                issue_number: Some(5023),
+                status: crate::WindowState::Stopped,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            });
+            bound.record_window_snapshot(snapshot);
+            let outcome =
+                reconcile_issue_monitor_windows(&mut bound, repo.path(), "2026-10-15T00:00:00Z");
+            assert!(
+                outcome.rebound.is_empty(),
+                "an unreadable Session cannot become the replacement binding: {outcome:?}"
+            );
+            assert_ne!(
+                bound.launched_window_id(5023).as_deref(),
+                Some("tab-1::agent-87")
+            );
+        }
+    }
+
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: vec!["auto-improve".to_string()],
@@ -2298,8 +3641,257 @@ mod tests {
         }
     }
 
+    #[test]
+    fn urgent_assignment_loader_reuses_revision_and_fetches_changed_urgent_only() {
+        let mut cached = issue(1);
+        cached.labels.push("urgent".into());
+        cached.updated_at = Some("2026-10-03T00:00:00Z".into());
+        let mut changed = cached.clone();
+        changed.number = 2;
+        changed.updated_at = Some("2026-10-03T01:00:00Z".into());
+        let mut monitor = test_monitor(Default::default());
+        let prior = LabelAssignment {
+            actor: Some("first".into()),
+            created_at: "2026-10-02T00:00:00Z".into(),
+        };
+        for number in [1, 2] {
+            let mut old = cached.clone();
+            old.number = number;
+            monitor.observe_urgent_issue(&old, "2026-10-03T00:00:00Z");
+            monitor.record_urgent_assignment(number, old.updated_at.as_deref(), &prior);
+        }
+        let fresh = LabelAssignment {
+            actor: Some("second".into()),
+            created_at: "2026-10-03T01:00:00Z".into(),
+        };
+        let mut calls = Vec::new();
+        let assignments = load_urgent_assignments_with(
+            &[cached, changed, issue(3)],
+            &monitor.prefs(),
+            |number| {
+                calls.push(number);
+                Ok::<_, String>(Some(fresh.clone()))
+            },
+        );
+        assert_eq!(calls, vec![2]);
+        assert_eq!(assignments.get(&1), Some(&prior));
+        assert_eq!(assignments.get(&2), Some(&fresh));
+    }
+
+    #[test]
+    fn urgent_assignment_failed_refresh_preserves_fifo_and_retries() {
+        let mut first = issue(1);
+        first.labels.push("urgent".into());
+        first.updated_at = Some("2026-10-03T03:00:00Z".into());
+        let mut second = first.clone();
+        second.number = 2;
+        let mut monitor = test_monitor(Default::default());
+        monitor.terminal_queue_push(&[1, 2], "test", "2026-10-03T03:00:00Z");
+        for (issue, assigned_at) in [
+            (&first, "2026-10-03T01:00:00Z"),
+            (&second, "2026-10-03T02:00:00Z"),
+        ] {
+            monitor.observe_urgent_issue(issue, "2026-10-03T03:00:00Z");
+            monitor.record_urgent_assignment(
+                issue.number,
+                issue.updated_at.as_deref(),
+                &LabelAssignment {
+                    actor: Some("actor".into()),
+                    created_at: assigned_at.into(),
+                },
+            );
+        }
+        first.updated_at = Some("2026-10-03T04:00:00Z".into());
+        monitor.observe_urgent_issue(&first, "2026-10-03T04:00:00Z");
+        let failed =
+            load_urgent_assignments_with(std::slice::from_ref(&first), &monitor.prefs(), |_| {
+                Err::<Option<LabelAssignment>, _>("events unavailable")
+            });
+        assert!(failed.is_empty());
+        let projection = monitor.urgent_queue_projection(&crate::process::current_hostname());
+        assert_eq!(
+            projection
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            projection.entries[0].assigned_at.as_deref(),
+            Some("2026-10-03T01:00:00Z")
+        );
+
+        // A failed refresh preserves ordering, but must not mark the new
+        // revision's event history as successfully fetched.
+        let mut retried = false;
+        let refreshed =
+            load_urgent_assignments_with(std::slice::from_ref(&first), &monitor.prefs(), |_| {
+                retried = true;
+                Ok::<_, String>(Some(LabelAssignment {
+                    actor: Some("other".into()),
+                    created_at: "2026-10-03T04:00:00Z".into(),
+                }))
+            });
+        assert!(retried);
+        monitor.record_urgent_assignment(1, first.updated_at.as_deref(), &refreshed[&1]);
+        let projection = monitor.urgent_queue_projection(&crate::process::current_hostname());
+        assert_eq!(
+            projection
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn issue_4157_related_pr_readbacks_preserve_unknown_and_release_terminal_or_repair() {
+        use gwt_git::pr_status::{parse_pr_inventory_json, PrState};
+        let related = BTreeMap::from([
+            (42, (vec![7, 8], false)),
+            (43, (vec![7], true)),
+            (44, (vec![8], true)),
+            (45, (vec![], true)),
+            (46, (vec![], false)),
+        ]);
+        let now = "2026-10-21T00:00:00Z".parse().unwrap();
+        let item = parse_pr_inventory_json(
+            r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"other-branch","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
+            now,
+        ).unwrap().remove(0);
+        let mut calls = Vec::new();
+        let observations = collect_open_pr_launch_observations(&related, |number| {
+            calls.push(number);
+            if number == 8 {
+                return Err("read failed".into());
+            }
+            Ok((PrState::Open, item.clone()))
+        });
+        assert_eq!(calls, vec![7, 8], "a PR linked to two Issues is read once");
+        assert_eq!(observations[&42].as_ref().unwrap().lifecycle, "IN-PROGRESS");
+        assert_eq!(observations[&42], observations[&43]);
+        assert!(
+            !observations.contains_key(&44),
+            "a failed read cannot clear a hold"
+        );
+        assert_eq!(observations[&45], None, "successful absence clears a hold");
+        assert!(
+            !observations.contains_key(&46),
+            "partial discovery cannot clear a hold"
+        );
+        for state in [PrState::Open, PrState::Closed, PrState::Merged] {
+            let observations = collect_open_pr_launch_observations(&related, |_| {
+                let mut item = item.clone();
+                item.lifecycle = "CI-RED".into();
+                Ok((state, item))
+            });
+            assert!(observations.values().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn issue_4157_loaded_pr_observation_blocks_claim_and_new_autonomous_attempt() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut candidate = issue(42);
+        candidate.labels.push("auto-merge".into());
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: delivery\n".into());
+        let mut loaded = LoadedIssueMonitorCandidates {
+            issues: vec![candidate],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+            readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
+            open_pr_observations: BTreeMap::from([(
+                42,
+                Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "IN-PROGRESS".into(),
+                }),
+            )]),
+            open_pr_observed_at: Some("2026-10-21T00:00:00Z".into()),
+        };
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.terminal_queue_push(&[42], "test", "2026-10-21T00:00:00Z");
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            home.path(),
+            "2026-10-21T00:01:00Z",
+        );
+        assert!(monitor.claim_probe_plan(1).1.is_empty());
+        assert!(autonomous_eligibility_candidates(
+            &monitor,
+            &loaded.issues,
+            "2026-10-21T00:01:00Z"
+        )
+        .is_empty());
+        loaded.open_pr_observations.insert(42, None);
+        loaded.open_pr_observed_at = Some("2026-10-21T00:02:00Z".into());
+        scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            home.path(),
+            "2026-10-21T00:02:00Z",
+        );
+        assert_eq!(monitor.claim_probe_plan(1).1, vec![42]);
+        assert_eq!(
+            autonomous_eligibility_candidates(&monitor, &loaded.issues, "2026-10-21T00:02:00Z")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn urgent_assignment_loaded_metadata_reaches_status_projection() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut urgent = issue(7);
+        urgent.labels.push("urgent".into());
+        let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
+            issues: vec![urgent],
+            source: IssueMonitorCandidateSource::Live,
+            live_error: None,
+            readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::from([(
+                7,
+                LabelAssignment {
+                    actor: Some("octocat".into()),
+                    created_at: "2026-10-02T00:00:00Z".into(),
+                },
+            )]),
+        };
+        let mut monitor = test_monitor(Default::default());
+        scan_loaded_issue_monitor_candidates(&mut monitor, &loaded, &repo, "2026-10-03T00:00:00Z");
+        let status = monitor.status_view();
+        let entry = status
+            .terminal_queue
+            .iter()
+            .find(|entry| entry.number == 7)
+            .unwrap();
+        assert_eq!(entry.assigned_by.as_deref(), Some("octocat"));
+        assert_eq!(entry.assigned_at.as_deref(), Some("2026-10-02T00:00:00Z"));
+    }
+
     fn github_issue(number: u64) -> IssueSnapshot {
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("Issue {number}"),
             body: String::new(),
@@ -2312,6 +3904,7 @@ mod tests {
 
     fn live_issue(number: u64, labels: &[&str], updated_at: Option<&str>) -> gwt_git::issue::Issue {
         gwt_git::issue::Issue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             state: "OPEN".to_string(),
@@ -2323,8 +3916,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_5603_readiness_refresh_preserves_the_launch_reserve() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let scan_deadline = now + std::time::Duration::from_secs(60);
+        let _scan = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("t1"))],
+            temp.path(),
+            |_| {
+                let deadline = gwt_core::operation_deadline::current().unwrap();
+                assert!(deadline <= scan_deadline - ISSUE_MONITOR_LAUNCH_RESERVE);
+                assert!(deadline <= now + issue_monitor_readback_budget());
+                Err("readback timed out".to_string())
+            },
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(errors.len(), 1);
+        ensure_scan_deadline(IssueMonitorScanStage::CandidateLoad).unwrap();
+    }
+
     fn structured_spec(number: u64, updated_at: &str, plan: &str, tasks: &str) -> IssueSnapshot {
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("SPEC {number}"),
             body: format!(
@@ -2777,6 +4393,7 @@ mod tests {
             |_| {
                 cache
                     .write_snapshot(&IssueSnapshot {
+                        author_login: None,
                         number: IssueNumber(48),
                         title: "Comment-resident plan".to_string(),
                         body: "<!-- gwt-spec id=48 version=1 -->\n\
@@ -2810,13 +4427,46 @@ mod tests {
     }
 
     #[test]
+    fn github_budget_pause_is_visible_in_the_gui_status_payload() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
+        let now = chrono::Utc::now();
+        let deadline = now + chrono::Duration::minutes(30);
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "core".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: deadline,
+            },
+            now,
+        );
+        let monitor = test_monitor(IssueMonitorConfig::default());
+        let payloads = issue_monitor_read_only_daemon_payloads(&monitor);
+        let status = &payloads
+            .iter()
+            .find(|payload| payload.event == "status")
+            .expect("status payload")
+            .payload;
+        let core = &status["github_budget"]["core"];
+        assert_eq!(core["throttled"], true, "{status}");
+        assert!(
+            core["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("github_rate_limited")),
+            "{status}"
+        );
+        assert_eq!(core["backoff_until"], serde_json::json!(deadline));
+    }
+
+    #[test]
     fn needs_human_is_visible_in_read_only_projection_without_gui() {
         // SPEC-3431 T-040 (FR-011): the PM agent consumes NeedsHuman through
         // the always-emitted status/inbox projection and must never depend on
         // toasts, which are drained only while a GUI is connected. Escalation
         // therefore has to be visible with gui_connected=false, and no toast
         // may be the only carrier.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -2904,7 +4554,7 @@ mod tests {
         // operator notices; the worker drains them into `toast` payloads so the
         // GUI's issue_monitor_toast pipe (surface toast + persistent autonomous
         // notification stack) receives them.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -2931,16 +4581,36 @@ mod tests {
                     && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
             })
             .expect("autonomous notice surfaces as a toast payload");
+        assert!(
+            toast
+                .payload
+                .get("notification_transition_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()),
+            "typed transitions must carry a replay-stable source identity"
+        );
         assert_eq!(
             toast.payload.get("level").and_then(|v| v.as_str()),
             Some("error")
+        );
+        assert_eq!(
+            toast
+                .payload
+                .get("notification_transition")
+                .and_then(|v| v.as_str()),
+            Some("needs_human")
         );
         assert!(toast
             .payload
             .get("message")
             .and_then(|v| v.as_str())
             .is_some_and(|message| message.contains("review rejected")));
-        // Drained: a second pass emits no duplicate.
+        // Re-observing the same parked state is not a new transition.
+        monitor.escalate_to_needs_human(
+            42,
+            crate::NeedsHumanKind::UserChoiceRequired,
+            "review rejected",
+        );
         let again = issue_monitor_daemon_payloads(&mut monitor, true);
         assert!(!again.iter().any(|payload| {
             payload.event == "toast"
@@ -2952,7 +4622,7 @@ mod tests {
     fn payloads_retain_autonomous_notices_while_no_gui_is_connected() {
         // Fully-unattended window: with no GUI connected the notices stay queued
         // (bounded) instead of being dropped, and surface on the next connect.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -2982,7 +4652,7 @@ mod tests {
 
     #[test]
     fn payloads_surface_stalled_scan_through_status_error() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             poll_interval_secs: 10,
             ..IssueMonitorConfig::default()
@@ -3009,17 +4679,45 @@ mod tests {
     /// says why in a form an operator can act on.
     #[test]
     fn permission_readiness_blocks_an_unsupported_provider_before_anything_is_created() {
-        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         // OpenClaw exposes neither a skip flag nor a permission overlay.
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
+
+        // Immediate admission and full scans use the durable planner, not the
+        // synchronous claim API below. Both must reject before any effect.
+        let mut durable = monitor.clone();
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
+            0,
+            "an unsupported provider must produce no durable claim effect"
+        );
+        assert!(durable.pending_effects().is_empty());
+        assert!(durable.take_pending_launch_requests().is_empty());
+        assert_eq!(durable.active_count(), 0);
+        let blocked = durable.inbox_item(42).expect("excluded durable candidate");
+        assert_eq!(blocked.state, MonitorInboxState::NotReady);
+        let reason = blocked.exclusion_reason.as_deref().expect("gate reason");
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:20Z", 1, |_| false),
+            1,
+            "a corrected profile is re-evaluated on the next scan"
+        );
 
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
@@ -3072,16 +4770,28 @@ mod tests {
     /// refuse a specific fault, not the mechanism.
     #[test]
     fn permission_readiness_leaves_a_supported_provider_launching() {
-        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
+
+        assert_eq!(
+            monitor.clone().prepare_claim_effects_with_probe(
+                "host:1",
+                "2026-07-02T00:00:10Z",
+                1,
+                |_| false,
+            ),
+            1,
+            "a supported provider still prepares a durable claim"
+        );
 
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
@@ -3095,6 +4805,79 @@ mod tests {
             launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
             vec![42]
         );
+    }
+
+    #[test]
+    fn permission_readiness_rechecks_the_profile_when_a_claim_succeeds() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        // Autonomous eligibility marks a candidate Implementing before claims.
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_attempt(42);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        let crate::IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected claim acquisition");
+        };
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+        // config_set.launch_agent can change the selected provider while the
+        // GitHub request is in flight, without changing effect authority.
+        monitor.switch_launch_profile_agent("openclaw").unwrap();
+        assert!(monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::AutonomousPhase::Idle
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        let item = monitor.inbox_item(42).unwrap();
+        assert_eq!(item.state, MonitorInboxState::NotReady);
+        let reason = item.exclusion_reason.as_deref().unwrap();
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(&monitor.pending_effects()[0].payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
+                if released == claim_id && released_owner == owner));
+
+        // The next scan may prepare eligibility again while the unsupported
+        // profile remains selected; every permission rejection must be idle.
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            0
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+
+        monitor.switch_launch_profile_agent("codex").unwrap();
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        assert!(monitor.apply_confirmed_claim(42, "new-claim", owner, "new-effect", now));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
     }
 
     /// A launch profile naming `agent_id`, with every other field at the value
@@ -3121,11 +4904,12 @@ mod tests {
         // Issue #3225 negative control, replaced by Issue #3832: GitHub Closed
         // is terminal, while an ordinary Open issue remains launchable even
         // when the linked-PR probe reports closing merged evidence.
-        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42, 43], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         let closed = IssueMonitorIssue {
             state: IssueMonitorIssueState::Closed,
@@ -3163,7 +4947,7 @@ mod tests {
 
     #[test]
     fn payloads_keep_queue_when_no_gui_is_connected() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -3182,10 +4966,11 @@ mod tests {
 
     #[test]
     fn read_only_payloads_do_not_drain_recovery_blocked_deliveries() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -3217,10 +5002,11 @@ mod tests {
     fn payloads_emit_launch_request_when_gui_is_connected() {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         monitor.record_candidate(issue(42));
         monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:00:00Z");
@@ -3302,15 +5088,19 @@ mod tests {
             crate::cli::execution_state::EXECUTION_GENERATION_CONFLICT_PREFIX
         );
         let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         scan_loaded_issue_monitor_candidates(
             &mut monitor,
             &loaded,
@@ -3399,7 +5189,9 @@ mod tests {
     /// ordinary settlement is what made the release treat interrupted work as
     /// finished and leave the Issue `Launched` with no pane and no way back.
     #[test]
-    fn a_generation_the_reaper_blocked_reads_as_interrupted_not_settled() {
+    fn issue_5535_stopped_holder_requeues_and_activates_a_fresh_launch() {
+        use crate::cli::execution_state::{self, ExecutionControlStatus};
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3436,6 +5228,7 @@ mod tests {
             crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
                 .unwrap()
                 .unwrap();
+        let old_generation_id = binding.generation_id.clone();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let mut session =
             gwt_agent::Session::new(worktree.path(), "work/issue-42", gwt_agent::AgentId::Codex);
@@ -3467,24 +5260,124 @@ mod tests {
         )
         .save(&runtime_path)
         .unwrap();
+        let git_spawns_before = gwt_core::process::thread_git_spawn_count();
+        let live_observations = read_execution_observations(worktree.path(), &[owner.number]);
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            gwt_core::process::thread_git_spawn_count() - git_spawns_before,
+            1,
+            "an exact live process must skip recovery-gate Git validation; only worktree listing is needed"
+        );
+        assert_eq!(
+            live_observations
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Unknown),
             "an exact live process must not permit recovery even without a pane"
         );
-        std::fs::remove_file(runtime_path).unwrap();
-
-        // What an auto-update restart leaves behind: the holder is gone and
-        // settled nothing.
-        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        assert!(live_observations[&owner.number].process_held);
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", "2026-09-07T04:00:00Z");
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        monitor.record_candidate(issue(42));
+        monitor.complete_active_launch_at(42, "tab-1::live", "2026-09-07T04:00:00Z");
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-07T04:10:00Z".to_string(),
+            windows: Vec::new(),
+        });
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
+        assert!(
+            outcome.released.is_empty(),
+            "the exact agent process is alive"
+        );
+        assert!(outcome.requeued.is_empty());
+        assert_eq!(monitor.active_issue_numbers(), vec![42]);
+        assert_eq!(
+            outcome.idle_windows[0].idle_kind.as_str(),
+            "binding_pending"
+        );
+        assert!(monitor
+            .vanished_launched_windows(
+                "tab-1",
+                &Default::default(),
+                "2026-09-07T04:10:00Z",
+                &read_execution_observations(worktree.path(), &[42]),
+            )
+            .is_empty());
+        // The stop leaves an exact dead child in the surviving GUI Host's
+        // namespace, but its sidecar cannot supply a successor-fencing proof.
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &identity,
+            41,
+            started_at,
+            i32::MAX as u32,
+            1,
+        );
+        runtime.runtime_incarnation = None;
+        runtime.save(&runtime_path).unwrap();
+        session.update_status(gwt_agent::AgentStatus::Stopped);
         session.save(&sessions_dir).unwrap();
 
+        // A different, unbound agent in the same worktree also vetoes recovery.
+        let mut unbound = session.clone();
+        unbound.id = "unbound-live-agent".to_string();
+        unbound.execution_binding = None;
+        unbound.linked_issue_number = None;
+        unbound.update_status(gwt_agent::AgentStatus::Running);
+        unbound.save(&sessions_dir).unwrap();
+        let unbound_path = gwt_agent::runtime_state_path(&sessions_dir, &unbound.id);
+        let mut unbound_runtime =
+            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        unbound_runtime.host_started_at = Some(started_at);
+        unbound_runtime.child_pid = Some(std::process::id());
+        unbound_runtime.child_started_at = Some(started_at);
+        unbound_runtime.save(&unbound_path).unwrap();
+        let observations = read_execution_observations(worktree.path(), &[42]);
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            observations[&42].settlement,
+            IssueMonitorExecutionSettlement::Active
+        );
+        assert!(
+            observations[&42].process_held,
+            "inventory retains an unrelated live agent in the target worktree"
+        );
+        assert!(monitor
+            .reconcile_idle_windows(&observations, "2026-09-07T04:10:00Z")
+            .released
+            .is_empty());
+        std::fs::remove_file(unbound_path).unwrap();
+
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pause,
+            "work-stopped-requeue",
+            chrono::Utc::now(),
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let shard_path = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.path().join(".gwt/work/events"),
+            &event.id,
+        );
+        std::fs::create_dir_all(shard_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &shard_path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            execution_state::classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            execution_state::ExactSessionRuntimeDisposition::ChildExited
+        );
+
+        assert_eq!(
+            read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Active),
             "the record is still Active before the reaper runs"
         );
@@ -3510,24 +5403,776 @@ mod tests {
             .unwrap(),
             crate::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped
         );
+        assert!(
+            !shard_path.exists(),
+            "recovery archives the untracked Work event"
+        );
 
         assert_eq!(
-            read_execution_settlements(worktree.path(), &[owner.number])
+            read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
-                .copied(),
+                .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Interrupted),
             "the reaper blocked it on the holder's behalf; the work is unfinished"
         );
+        for phase in ["first qualified absence", "replayed canvas"] {
+            let outcome = reconcile_issue_monitor_windows(
+                &mut monitor,
+                worktree.path(),
+                "2026-09-07T04:10:00Z",
+            );
+            assert!(outcome.released.is_empty(), "{phase}");
+            assert!(outcome.requeued.is_empty(), "{phase}");
+            assert_eq!(monitor.active_issue_numbers(), vec![42], "{phase}");
+        }
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-07T04:10:01Z".to_string(),
+            windows: Vec::new(),
+        });
+        let outcome =
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:01Z");
+        assert_eq!(outcome.released, vec![42]);
+        assert_eq!(outcome.requeued, vec![42]);
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .last_failure_message
+            .as_deref()
+            .unwrap()
+            .contains("agent process absent"));
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        assert_eq!(
+            monitor
+                .claim_next_launch_requests(&client, "host-a/session-a", "2026-09-07T04:11:00Z")
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+        let fresh_request = execution_state::SuccessorRequest {
+            operation_id: "stopped-holder-fresh-launch".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "binding-fresh-launch".to_string(),
+            initial_session_id: "fresh-launch-holder".to_string(),
+            entrypoint: "gwt-execute".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        execution_state::prepare_fresh_linked_owner_launch_successor(
+            worktree.path(),
+            owner,
+            &fresh_request,
+        )
+        .unwrap();
+        let activated =
+            execution_state::activate_successor(worktree.path(), owner, &fresh_request).unwrap();
+        assert_ne!(activated.generation_id, old_generation_id);
+        assert_eq!(
+            execution_state::load_generation_ledger(worktree.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+    }
+
+    pub(crate) fn completed_child_exit_fixture(
+        worktree: &Path,
+    ) -> (crate::cli::execution_state::ExecutionOwnerKey, String, u64) {
+        use crate::cli::execution_state::{self, ExecutionControlRecord, LegacyActiveDisposition};
+        let session_id = "completed-child-exited";
+        let record: ExecutionControlRecord = serde_json::from_value(serde_json::json!({
+            "owner_kind": "issue", "owner_number": 42,
+            "primary_session_id": session_id, "entrypoint": "gwt-execute",
+            "status": "completed", "launched_at": "2026-09-07T03:00:00Z",
+            "settled_at": "2026-09-07T04:00:00Z"
+        }))
+        .unwrap();
+        execution_state::save(worktree, &record).unwrap();
+        let owner = execution_state::ExecutionOwnerKey {
+            kind: execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            LegacyActiveDisposition::Unknown,
+        )
+        .unwrap();
+        let binding = execution_state::current_execution_binding(worktree, owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session =
+            gwt_agent::Session::new(worktree, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.into();
+        session.linked_issue_number = Some(42);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: 42,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let host_started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            host_started,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+        (owner, session_id.to_string(), host_started)
+    }
+
+    #[test]
+    fn issue_5876_completed_child_exit_requeues_on_the_next_scan() {
+        use crate::cli::execution_state;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let (owner, session_id, host_started) = completed_child_exit_fixture(worktree.path());
+        assert_eq!(
+            execution_state::diagnose_owner(worktree.path(), owner)
+                .holder_runtime
+                .as_deref(),
+            Some("child_exited")
+        );
+        let mut observed = read_execution_observations(worktree.path(), &[42]);
+        assert!(!observed[&42].process_held);
+        assert!(!observed[&42].holder_host_dead);
+
+        let now = "2026-09-07T04:00:01Z";
+        let mut candidate = issue(42);
+        candidate.labels.push("gwt-spec".into());
+        candidate.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut base = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        base.set_gui_connected(true);
+        base.set_autonomous_mode(true);
+        base.terminal_queue_push(&[42], "test", now);
+        base.record_candidate(candidate.clone());
+        base.complete_active_launch_at(42, "tab-1::finished", "2026-09-07T03:59:59Z");
+        let pane = crate::IssueMonitorWindowObservation {
+            monitor_owned: true,
+            window_id: "tab-1::finished".into(),
+            issue_number: Some(42),
+            status: crate::WindowState::Stopped,
+            review_dispatch: false,
+            hold_reason: None,
+            last_output_at: None,
+            session_id: Some(session_id.clone()),
+        };
+        let snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.into(),
+            windows: vec![pane],
+        };
+        base.record_window_snapshot_from_host(
+            snapshot.clone(),
+            std::process::id(),
+            host_started,
+            Default::default(),
+        );
+        base.record_monitor_runtime_windows(
+            std::process::id(),
+            host_started,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("tab-1::finished".into(), 42)]),
+            now,
+        );
+        for mode in ["bound", "settled", "cold"] {
+            if mode == "cold" {
+                let runtime_path = gwt_agent::runtime_state_path(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &session_id,
+                );
+                let mut runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+                runtime.status = gwt_agent::AgentStatus::Stopped;
+                runtime.save(&runtime_path).unwrap();
+                assert_eq!(
+                    execution_state::diagnose_owner(worktree.path(), owner)
+                        .holder_runtime
+                        .as_deref(),
+                    Some("terminal")
+                );
+                observed = read_execution_observations(worktree.path(), &[42]);
+            }
+            let mut monitor = if mode == "cold" {
+                let old = base.prefs();
+                let mut cold = test_monitor_with_prefs(
+                    IssueMonitorConfig {
+                        enabled: true,
+                        max_active: 1,
+                        ..IssueMonitorConfig::default()
+                    },
+                    crate::IssueMonitorPrefs {
+                        enabled: true,
+                        autonomous_mode: true,
+                        max_active_agents: 1,
+                        terminal_queues: old.terminal_queues,
+                        monitor_runtime_counts: old.monitor_runtime_counts,
+                        ..crate::IssueMonitorPrefs::default()
+                    },
+                );
+                cold.set_gui_connected(true);
+                cold.record_window_snapshot_from_host(
+                    snapshot.clone(),
+                    std::process::id(),
+                    host_started,
+                    Default::default(),
+                );
+                cold.record_candidate(candidate.clone());
+                cold
+            } else {
+                base.clone()
+            };
+            if mode == "settled" {
+                let id = monitor.launch_identity(42);
+                monitor
+                    .settle_exact_terminal_delivery(&crate::IssueMonitorStopTarget {
+                        issue_number: 42,
+                        claim_id: id.claim_id,
+                        delivery_id: id.delivery_id,
+                        window_id: id.window_id,
+                    })
+                    .unwrap();
+            }
+            let stale = monitor.prefs();
+            let attempts = monitor.attempt_count(42);
+            let result = monitor.reconcile_dead_terminal_launches(&observed, now);
+            assert_eq!(
+                monitor.active_count(),
+                0,
+                "mode={mode}: exited pane cannot hold capacity"
+            );
+            assert_eq!(result.requeued, vec![42], "mode={mode}");
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), attempts);
+            assert!(result.pane_closes.is_empty());
+            monitor.record_window_snapshot_from_host(
+                snapshot.clone(),
+                std::process::id(),
+                host_started,
+                Default::default(),
+            );
+            assert_eq!(
+                monitor.active_count(),
+                0,
+                "a new GUI snapshot must not restore the completed pane"
+            );
+            monitor.rebase_daemon_driver_prefs(&stale);
+            assert_eq!(monitor.active_count(), 0, "stale accounting cannot return");
+            assert!(monitor
+                .reconcile_dead_terminal_launches(&observed, now)
+                .requeued
+                .is_empty());
+            let persisted =
+                serde_json::from_slice(&serde_json::to_vec(&monitor.prefs()).unwrap()).unwrap();
+            let mut restored = test_monitor_with_prefs(
+                IssueMonitorConfig {
+                    enabled: true,
+                    max_active: 1,
+                    ..IssueMonitorConfig::default()
+                },
+                persisted,
+            );
+            restored.record_window_snapshot_from_host(
+                snapshot.clone(),
+                std::process::id(),
+                host_started,
+                Default::default(),
+            );
+            assert_eq!(
+                restored.active_count(),
+                0,
+                "cold restore must retain exact Session retirement"
+            );
+            restored.set_gui_connected(true);
+            restored.record_candidate(candidate.clone());
+            let next = restored
+                .next_launch_request(now)
+                .expect("fresh successor without TTL wait");
+            assert_eq!(
+                next.launch_session_strategy,
+                crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+            assert!(restored.next_launch_request(now).is_none());
+        }
+    }
+
+    #[test]
+    fn issue_4446_blocked_execution_with_dead_host_releases_capacity_without_requeue() {
+        use crate::cli::execution_state::{
+            self, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
+            ExecutionSettlement, LegacyActiveDisposition, SettleResult,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 4446,
+        };
+        let session_id = "blocked-dead-host-holder";
+        execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = execution_state::current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-4446",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = session_id.to_string();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        assert!(matches!(
+            execution_state::settle(
+                worktree.path(),
+                session_id,
+                ExecutionSettlement::Blocked {
+                    reason: "the holder deliberately stopped this execution".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let dead_host_pid = i32::MAX as u32;
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            1,
+            dead_host_pid,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            dead_host_pid,
+            session_id,
+        ))
+        .unwrap();
+        let diagnosis = execution_state::diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("host_dead"));
+        assert!(!diagnosis.ecr_settled_by_host_reaper);
+        let observations = read_execution_observations(worktree.path(), &[owner.number]);
+        assert_eq!(
+            observations[&owner.number].settlement,
+            IssueMonitorExecutionSettlement::Blocked
+        );
+        assert!(!observations[&owner.number].process_held);
+        assert_eq!(
+            observations[&owner.number].dead_holder_hosts,
+            std::collections::BTreeSet::from([(dead_host_pid, 1)])
+        );
+
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[owner.number], "test", "2026-10-13T00:00:00Z");
+        monitor.record_candidate(issue(owner.number));
+        monitor.complete_active_launch_at(owner.number, "tab-1::dead", "2026-10-13T00:00:00Z");
+        assert_eq!(monitor.effective_max_active_agents(), 1);
+        assert_eq!(monitor.active_count(), 1);
+        let now = "2026-10-13T09:00:00Z";
+        monitor.record_monitor_runtime_windows(
+            dead_host_pid,
+            1,
+            BTreeMap::from([(owner.number, 1)]),
+            BTreeMap::from([("tab-1::dead".to_string(), owner.number)]),
+            "2026-10-13T00:00:00Z",
+        );
+        monitor.record_autonomous_heartbeat(owner.number, "2026-10-13T00:00:00Z");
+        let base = monitor.clone();
+        let running_snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: now.to_string(),
+            // The last canvas still calls the exact dead holder Running.
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::dead".to_string(),
+                issue_number: Some(owner.number),
+                status: crate::WindowState::Running,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        };
+        monitor.record_window_snapshot_from_host(
+            running_snapshot.clone(),
+            dead_host_pid,
+            1,
+            Default::default(),
+        );
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let prefs_before_status = std::fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                project_root: Some(worktree.path().to_path_buf()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let status: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        let execution = &status["execution_generations"]["4446"];
+        assert_eq!(execution["ecr_status"], "blocked");
+        assert_eq!(execution["holder_runtime"], "host_dead");
+        assert_eq!(
+            execution["generation_id"],
+            serde_json::json!(diagnosis.generation_id)
+        );
+        assert_eq!(
+            execution["settlement"],
+            serde_json::json!(diagnosis.settlement)
+        );
+        assert_eq!(
+            execution["settlement_severity"],
+            serde_json::json!(diagnosis.settlement_severity)
+        );
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), prefs_before_status);
+
+        // A live or uncertain successor still owns capacity despite the dead holder.
+        let mut held = observations.clone();
+        held.get_mut(&owner.number).unwrap().process_held = true;
+        for state in [crate::WindowState::Running, crate::WindowState::Idle] {
+            let mut snapshot = running_snapshot.clone();
+            snapshot.windows[0].status = state;
+            let mut successor = snapshot.windows[0].clone();
+            successor.window_id = "tab-1::successor".to_string();
+            successor.status = crate::WindowState::Idle;
+            snapshot.windows.push(successor);
+            monitor.record_window_snapshot(snapshot);
+            let active_before = monitor.active_count();
+            let occupied_before = monitor.agent_status_at(now).occupied_slot_count;
+            let protected = monitor.reconcile_idle_windows(&held, now);
+            assert!(protected.released.is_empty(), "{state:?}");
+            assert!(protected.pane_closes.is_empty(), "{state:?}");
+            assert_eq!(monitor.active_count(), active_before);
+            assert_eq!(
+                monitor.agent_status_at(now).occupied_slot_count,
+                occupied_before
+            );
+        }
+
+        // The same PID with a different start token is another host incarnation.
+        let mut other_host = base.clone();
+        assert!(other_host.record_monitor_runtime_counts(
+            dead_host_pid,
+            2,
+            BTreeMap::from([(owner.number, 1)]),
+            now,
+        ));
+        let outcome = reconcile_issue_monitor_windows(&mut other_host, worktree.path(), now);
+        assert_eq!(outcome.released, vec![owner.number]);
+        assert_eq!(other_host.active_count(), 1);
+        assert_eq!(
+            other_host.prefs().monitor_runtime_counts[&format!("{dead_host_pid}:2")]
+                .counts
+                .get(&owner.number),
+            Some(&1)
+        );
+
+        for (case, snapshot) in [
+            ("no canvas", None),
+            ("count-only census", None),
+            (
+                "stale Running canvas",
+                Some(crate::IssueMonitorWindowSnapshot {
+                    observed_at: "2026-10-13T00:00:00Z".to_string(),
+                    ..running_snapshot.clone()
+                }),
+            ),
+            ("fresh Running canvas", Some(running_snapshot.clone())),
+        ] {
+            let mut candidate = base.clone();
+            if case == "count-only census" {
+                assert!(candidate.record_monitor_runtime_counts(
+                    dead_host_pid,
+                    1,
+                    BTreeMap::from([(owner.number, 1)]),
+                    now,
+                ));
+            }
+            if let Some(snapshot) = snapshot {
+                candidate.record_window_snapshot_from_host(
+                    snapshot,
+                    dead_host_pid,
+                    1,
+                    Default::default(),
+                );
+            }
+            let outcome = reconcile_issue_monitor_windows(&mut candidate, worktree.path(), now);
+            assert_eq!(outcome.released, vec![owner.number], "{case}");
+            assert!(outcome.requeued.is_empty(), "{case}");
+            assert_eq!(candidate.active_count(), 0, "{case}");
+            assert_eq!(
+                candidate.agent_status_at(now).occupied_slot_count,
+                Some(0),
+                "{case}"
+            );
+            assert!(candidate.queued_issue_numbers().is_empty(), "{case}");
+            let mut stale_observer = base.clone();
+            stale_observer.rebase_gui_observer_prefs(&candidate.prefs());
+            assert!(
+                stale_observer
+                    .prefs()
+                    .monitor_runtime_counts
+                    .values()
+                    .all(|census| !census.counts.contains_key(&owner.number)),
+                "{case}"
+            );
+            assert_eq!(
+                candidate.inbox_item(owner.number).unwrap().state,
+                MonitorInboxState::Launched,
+                "{case}"
+            );
+            let loaded = LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
+                issues: vec![issue(owner.number)],
+                source: IssueMonitorCandidateSource::Cache,
+                live_error: None,
+                readiness_failures: Vec::new(),
+                urgent_assignments: BTreeMap::new(),
+            };
+            let mut committed = candidate.clone();
+            committed.rebase_daemon_driver_prefs(&base.prefs());
+            reconcile_issue_monitor_windows(&mut committed, worktree.path(), now);
+            scan_loaded_issue_monitor_candidates_for_project_tab(
+                &mut committed,
+                &loaded,
+                worktree.path(),
+                Some("tab-1"),
+                now,
+            );
+            assert!(committed.queued_issue_numbers().is_empty(), "{case}");
+            assert_eq!(committed.active_count(), 0, "{case}");
+            let mut restored =
+                test_monitor_with_prefs(IssueMonitorConfig::default(), committed.prefs());
+            restored.set_terminal_queue_auto_refill(true, 1);
+            scan_loaded_issue_monitor_candidates_for_project_tab(
+                &mut restored,
+                &loaded,
+                worktree.path(),
+                Some("tab-1"),
+                now,
+            );
+            assert!(restored.queued_issue_numbers().is_empty(), "{case}");
+            assert_eq!(restored.active_count(), 0, "{case}");
+            if case == "fresh Running canvas" {
+                // Local queue retirement removes the inbox row, while the
+                // same terminal generation must still remain diagnosable.
+                let cache_root =
+                    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(worktree.path());
+                Cache::new(cache_root)
+                    .write_snapshot(&github_issue(owner.number))
+                    .unwrap();
+                crate::save_issue_monitor_prefs(&prefs_path, &candidate.prefs()).unwrap();
+                let prefs_before_status = std::fs::read(&prefs_path).unwrap();
+                let (code, output) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                        project_root: Some(worktree.path().to_path_buf()),
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{output}");
+                let status: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+                assert_eq!(status["source"], "degraded_cache");
+                assert!(status["inbox"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["issue_number"] != owner.number));
+                let execution = &status["execution_generations"]["4446"];
+                assert_eq!(execution["ecr_status"], "blocked");
+                assert_eq!(execution["holder_runtime"], "host_dead");
+                assert_eq!(
+                    execution["generation_id"],
+                    serde_json::json!(diagnosis.generation_id)
+                );
+                assert_eq!(std::fs::read(&prefs_path).unwrap(), prefs_before_status);
+            }
+        }
+
+        // A reused window id belongs to its new owner, including legacy bare aliases.
+        let new_owner = 4447;
+        for (old_window, new_window, tab) in [
+            ("tab-1::dead", "tab-1::dead", "tab-1"),
+            ("dead", "tab-new::dead", "tab-new"),
+        ] {
+            let mut prefs = base.prefs();
+            prefs.monitor_runtime_counts.clear();
+            prefs.launched_issues[0].window_id = old_window.to_string();
+            prefs.launch_bindings.clear();
+            prefs
+                .launch_bindings
+                .insert(old_window.to_string(), owner.number);
+            prefs
+                .launch_confirmations
+                .get_mut(&owner.number)
+                .unwrap()
+                .window_id = old_window.to_string();
+            let mut reused = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            reused.record_candidate(issue(owner.number));
+            reused.record_candidate(issue(new_owner));
+            // Legacy prefs can contain two owners for a reused ID. Current
+            // ACKs correctly reject that conflict, so restore it explicitly.
+            let mut prefs = reused.prefs();
+            let mut new_launch = prefs.launched_issues[0].clone();
+            new_launch.issue_number = new_owner;
+            new_launch.window_id = new_window.to_string();
+            prefs.launched_issues.push(new_launch);
+            prefs
+                .launch_bindings
+                .insert(new_window.to_string(), new_owner);
+            reused = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            reused.record_candidate(issue(owner.number));
+            reused.record_candidate(issue(new_owner));
+            let mut snapshot = running_snapshot.clone();
+            snapshot.project_tab_id = tab.to_string();
+            snapshot.windows[0].window_id = new_window.to_string();
+            snapshot.windows[0].issue_number = Some(new_owner);
+            reused.record_window_snapshot(snapshot);
+
+            let loaded = LoadedIssueMonitorCandidates {
+                open_pr_observations: BTreeMap::new(),
+                open_pr_observed_at: None,
+                issues: vec![issue(owner.number), issue(new_owner)],
+                source: IssueMonitorCandidateSource::Cache,
+                live_error: None,
+                readiness_failures: Vec::new(),
+                urgent_assignments: BTreeMap::new(),
+            };
+            let mut scanned = reused.clone();
+            reconcile_issue_monitor_windows(&mut scanned, worktree.path(), now);
+            scan_loaded_issue_monitor_candidates_for_project_tab(
+                &mut scanned,
+                &loaded,
+                worktree.path(),
+                Some(tab),
+                now,
+            );
+            assert!(scanned
+                .queued_issue_numbers()
+                .iter()
+                .all(|number| *number != owner.number));
+            assert_eq!(scanned.active_issue_numbers(), vec![new_owner]);
+            let outcome = reconcile_issue_monitor_windows(&mut reused, worktree.path(), now);
+            assert_eq!(outcome.released, vec![owner.number], "{old_window}");
+            assert!(outcome.pane_closes.is_empty(), "{old_window}");
+            assert!(
+                reused.take_pending_idle_pane_closes().is_empty(),
+                "{old_window}"
+            );
+            assert_eq!(
+                reused.active_issue_numbers(),
+                vec![new_owner],
+                "{old_window}"
+            );
+            assert_eq!(
+                reused.prefs().launch_bindings.get(new_window),
+                Some(&new_owner),
+                "{old_window}"
+            );
+            let status = reused.agent_status_at(now);
+            assert_eq!(status.occupied_slot_count, Some(1), "{old_window}");
+            assert_eq!(
+                status
+                    .inbox
+                    .iter()
+                    .find(|row| row.issue_number == new_owner)
+                    .unwrap()
+                    .pane_state,
+                Some(crate::WindowState::Running),
+                "{old_window}"
+            );
+        }
     }
 
     #[test]
     fn synchronous_claim_path_honors_autonomous_retry_backoff() {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         monitor.set_autonomous_mode(true);
         monitor.record_candidate(issue(42));
@@ -3558,10 +6203,11 @@ mod tests {
 
     #[test]
     fn durable_launch_delivery_survives_fanout_zero_and_replays_one_stable_identity() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -3593,10 +6239,11 @@ mod tests {
     fn payloads_emit_launch_request_before_launching_snapshot_when_gui_is_connected() {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         monitor.record_candidate(issue(42));
         monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-06-23T10:00:00Z");
@@ -3623,11 +6270,12 @@ mod tests {
         client.seed(github_issue(42));
         client.seed(github_issue(43));
         client.seed(github_issue(44));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 3,
             ..IssueMonitorConfig::default()
         });
+        monitor.terminal_queue_push(&[42, 43, 44], "test", "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         monitor.record_candidate(issue(42));
         monitor.record_candidate(issue(43));
@@ -3668,6 +6316,7 @@ mod tests {
             )
         };
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("SPEC {number}"),
             body: format!(
@@ -3784,6 +6433,7 @@ mod tests {
             .map(|index| format!("- [ ] AC-{index}: 受け入れ条件 {index}\n"))
             .collect::<String>();
         let snapshot = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(3864),
             title: "SPEC 3864".to_string(),
             body: format!(
@@ -3865,15 +6515,24 @@ mod tests {
         #[cfg(windows)]
         {
             let fake_gh = dir.join("gh.cmd");
+            // Keep the paginated fixture inside the production readback budget
+            // without spawning cmd/findstr pipelines for each response.
             std::fs::write(
                 &fake_gh,
                 "@echo off\r\n\
+                 if /I \"%~1 %~2\"==\"issue view\" (\r\n\
+                   type \"%~dp0gh-view-%~3.json\"\r\n\
+                   exit /b 0\r\n\
+                 )\r\n\
                  set \"page=1\"\r\n\
                  set \"suffix=json\"\r\n\
-                 echo %* | findstr /C:\"page=2\" >nul\r\n\
-                 if not errorlevel 1 set \"page=2\"\r\n\
-                 echo %* | findstr /C:\"--include\" >nul\r\n\
-                 if not errorlevel 1 set \"suffix=http\"\r\n\
+                 :scan_args\r\n\
+                 if \"%~1\"==\"\" goto output_page\r\n\
+                 if \"%~1\"==\"https://api.github.com/repositories/1/issues?per_page=2&page=2\" set \"page=2\"\r\n\
+                 if \"%~1\"==\"--include\" set \"suffix=http\"\r\n\
+                 shift /1\r\n\
+                 goto scan_args\r\n\
+                 :output_page\r\n\
                  type \"%~dp0gh-page-%page%.%suffix%\"\r\n\
                  exit /b 0\r\n",
             )
@@ -3887,6 +6546,10 @@ mod tests {
             std::fs::write(
                 &fake_gh,
                 "#!/bin/sh\n\
+                 if [ \"$1 $2\" = \"issue view\" ]; then\n\
+                   cat \"$(dirname \"$0\")/gh-view-$3.json\"\n\
+                   exit $?\n\
+                 fi\n\
                  page=1\n\
                  suffix=json\n\
                  case \"$*\" in *page=2*) page=2 ;; esac\n\
@@ -3907,7 +6570,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_candidate(issue(7));
         monitor.record_candidate(issue(8));
         crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
@@ -3927,6 +6590,218 @@ mod tests {
             }),
             "missing population diagnostic: {rows:?}"
         );
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_explicit_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let mut closed = issue(8);
+        closed.state = IssueMonitorIssueState::Closed;
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7), closed],
+            IssueMonitorCandidateSource::Live,
+            temp.path(),
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(monitor.inbox_item(8).is_none());
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn targeted_refresh_rechecks_launch_prerequisites_before_fallback_scan() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[]);
+        let previous = IssueMonitorIssue {
+            labels: vec!["gwt-spec".into(), "gwt-queued".into()],
+            body: Some("old acceptance criteria".into()),
+            readiness: IssueMonitorReadiness::ReadyWithOpenTasks,
+            ..issue(42)
+        };
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42], "operator", "2026-10-16T00:00:00Z");
+        monitor.record_candidate(previous.clone());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+
+        let mut snapshot = structured_spec(42, "2026-10-16T00:00:01Z", "", "- [ ] T-1");
+        snapshot.author_login = Some("OriginalCreator".into());
+        snapshot.labels.extend(["gwt-queued".into(), "hold".into()]);
+        let write_remote = |snapshot: &IssueSnapshot| {
+            std::fs::write(
+                temp.path().join("gh-view-42.json"),
+                serde_json::json!({
+                    "number": 42, "title": snapshot.title, "body": snapshot.body,
+                    "author": {"login": snapshot.author_login},
+                    "labels": snapshot.labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+                    "state": "OPEN", "updatedAt": snapshot.updated_at.0,
+                    "comments": snapshot.comments.iter().map(|comment| serde_json::json!({"databaseId": comment.id.0, "body": comment.body})).collect::<Vec<_>>()
+                }).to_string(),
+            ).unwrap();
+        };
+        write_remote(&snapshot);
+        let held = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &previous).unwrap();
+        // This is the same refresh -> scan boundary as the daemon's previous-result fallback.
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&held),
+            "2026-10-16T00:00:02Z",
+        );
+        let row = monitor.inbox_item(42).unwrap();
+        assert_eq!(row.state, MonitorInboxState::HoldExcluded);
+        assert!(row.exclusion_reason.as_deref().unwrap().contains("hold"));
+        assert_eq!(held.title, snapshot.title);
+        assert_eq!(held.author_login, snapshot.author_login);
+        assert_eq!(held.body.as_deref(), Some(snapshot.body.as_str()));
+        assert_eq!(held.readiness, IssueMonitorReadiness::NotReady);
+        assert_eq!(
+            held.updated_at.as_deref(),
+            Some(snapshot.updated_at.0.as_str())
+        );
+
+        snapshot.labels.retain(|label| label != "hold");
+        write_remote(&snapshot);
+        let unready = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &held).unwrap();
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&unready),
+            "2026-10-16T00:00:03Z",
+        );
+        let row = monitor.inbox_item(42).unwrap();
+        assert_eq!(row.state, MonitorInboxState::NotReady);
+        assert!(row
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("plan/tasks"));
+        assert!(monitor.queued_issue_numbers().is_empty());
+
+        // Removing the SPEC label must match the ordinary plain-Issue loader,
+        // even when the old section index still refers to a SPEC comment.
+        snapshot = spec_with_storage(42, "## Acceptance Criteria\n- [ ] AC-1: work", true);
+        snapshot.labels = vec!["gwt-queued".into()];
+        snapshot.updated_at = UpdatedAt::new("2026-10-16T00:00:04Z");
+        write_remote(&snapshot);
+        let plain = try_refresh_issue_monitor_candidate(&repo, "owner", "repo", &unready).unwrap();
+        assert_eq!(plain.readiness, IssueMonitorReadiness::NotApplicable);
+        assert_eq!(plain.body.as_deref(), Some(snapshot.body.as_str()));
+    }
+
+    fn shrink_probe_repo(dir: &Path, states: &[(u64, &str)]) -> PathBuf {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+        }
+        for (number, state) in states {
+            std::fs::write(
+                dir.join(format!("gh-view-{number}.json")),
+                serde_json::json!({
+                    "number": number, "title": format!("Issue {number}"),
+                    "body": "Body", "labels": [{"name": "auto-improve"}],
+                    "state": state, "updatedAt": "2026-09-10T00:00:00Z", "comments": []
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn inbox_population_shrink_from_confirmed_closed_issue_is_not_a_fault() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED")]);
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(7));
+        monitor.record_candidate(issue(8));
+        let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &[issue(7)],
+            IssueMonitorCandidateSource::Live,
+            &repo,
+            "2026-09-10T00:00:00Z",
+        );
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inbox_population_shrink_with_open_issue_is_a_single_fault_across_replays() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 8, 9]);
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let repo = shrink_probe_repo(temp.path(), &[(8, "CLOSED"), (9, "OPEN")]);
+        let mut before = test_monitor(IssueMonitorConfig::default());
+        for number in [7, 8, 9] {
+            before.record_candidate(issue(number));
+        }
+        let mut newcomer = issue(10);
+        newcomer.labels.push("gwt-queued".into());
+        for now in ["2026-09-10T00:00:00Z", "2026-09-10T00:00:10Z"] {
+            let mut monitor = before.clone();
+            let summary = crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[issue(7), newcomer.clone()],
+                IssueMonitorCandidateSource::Live,
+                &repo,
+                now,
+            );
+            assert_eq!(monitor.inbox.len(), 2);
+            assert_eq!(summary.errors.len(), 1);
+        }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1, "same reduction was recorded twice: {rows:?}");
+        assert_eq!(rows[0].kind, gwt_core::error_ledger::ErrorKind::DaemonFault);
+        assert!(rows[0].message.contains("removed issues: [9]"), "{rows:?}");
     }
 
     /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
@@ -3981,7 +6856,8 @@ mod tests {
             3,
             "full refresh follows the short page's Link"
         );
-        let mut monitor = crate::IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[4080, 7, 8], "test", "2026-07-02T00:00:00Z");
         crate::issue_monitor::scan_issue_monitor_candidates(
             &mut monitor,
             &candidates,
@@ -4055,6 +6931,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = Cache::new(dir.path().to_path_buf());
         let mut spec = github_issue(3165);
+        spec.author_login = Some("OriginalCreator".into());
         spec.title = "SPEC: Missing plan and tasks".to_string();
         spec.labels = vec!["gwt-spec".to_string()];
         let ready_spec = structured_spec(3166, "t1", "Plan body", "- [ ] T-001");
@@ -4065,12 +6942,13 @@ mod tests {
         cache.write_snapshot(&ready_spec).expect("write ready spec");
         cache.write_snapshot(&closed).expect("write closed issue");
 
-        let candidates = load_cached_issue_monitor_candidates(dir.path()).expect("load cache");
+        let mut candidates = load_cached_issue_monitor_candidates(dir.path()).expect("load cache");
 
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0].number, 3000);
         assert_eq!(candidates[0].state, IssueMonitorIssueState::Closed);
         assert_eq!(candidates[1].number, 3165);
+        assert_eq!(candidates[1].author_login, spec.author_login);
         assert_eq!(candidates[1].title, "SPEC: Missing plan and tasks");
         assert_eq!(candidates[1].labels, vec!["gwt-spec"]);
         assert_eq!(candidates[1].state, IssueMonitorIssueState::Open);
@@ -4083,6 +6961,55 @@ mod tests {
             candidates[2].readiness,
             crate::IssueMonitorReadiness::ReadyWithOpenTasks,
             "unchecked tasks are launch-ready but not completion-ready"
+        );
+        let mut refreshed_numbers = Vec::new();
+        backfill_missing_issue_authors(("test", "cache-authors"), &mut candidates, |issue| {
+            refreshed_numbers.push(issue.number);
+            Err(IssueMonitorScanFailure::new(
+                IssueMonitorScanStage::CandidateLoad,
+                "readback unavailable",
+            ))
+        });
+        assert_eq!(refreshed_numbers, vec![3166]);
+        assert!(candidates[2].author_login.is_none());
+        backfill_missing_issue_authors(("test", "cache-authors"), &mut candidates, |issue| {
+            let mut refreshed = issue.clone();
+            refreshed.author_login = Some("akiojin".into());
+            Ok(refreshed)
+        });
+        assert_eq!(candidates[2].author_login.as_deref(), Some("akiojin"));
+    }
+
+    #[test]
+    fn missing_author_backfill_reaches_past_permanently_unresolved_rows() {
+        let mut candidates = (1..=ISSUE_MONITOR_TARGETED_REFRESH_LIMIT as u64 + 1)
+            .map(issue)
+            .collect::<Vec<_>>();
+        let mut attempted = Vec::new();
+        for _ in 0..2 {
+            backfill_missing_issue_authors(("test", "author-fairness"), &mut candidates, |issue| {
+                attempted.push(issue.number);
+                if issue.number == 1 {
+                    return Err(IssueMonitorScanFailure::new(
+                        IssueMonitorScanStage::CandidateLoad,
+                        "permanently unreadable",
+                    ));
+                }
+                let mut refreshed = issue.clone();
+                if issue.number > ISSUE_MONITOR_TARGETED_REFRESH_LIMIT as u64 {
+                    refreshed.author_login = Some("akiojin".into());
+                }
+                Ok(refreshed)
+            });
+        }
+        assert_eq!(
+            attempted[ISSUE_MONITOR_TARGETED_REFRESH_LIMIT],
+            ISSUE_MONITOR_TARGETED_REFRESH_LIMIT as u64 + 1,
+            "the next pass must start after the rows already attempted"
+        );
+        assert_eq!(
+            candidates.last().unwrap().author_login.as_deref(),
+            Some("akiojin")
         );
     }
 
@@ -4102,10 +7029,13 @@ mod tests {
         assert_eq!(live.issues, vec![live_issue]);
 
         let live_with_failed_spec_enrichment = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![cached_issue.clone()],
             source: IssueMonitorCandidateSource::Live,
             live_error: Some("issue #43 targeted refresh failed".to_string()),
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
         assert!(
             live_with_failed_spec_enrichment.authorizes_remote_effects(),
@@ -4153,12 +7083,15 @@ mod tests {
     #[test]
     fn cached_candidates_preserve_live_scan_error_after_read_model_refresh() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         let loaded = LoadedIssueMonitorCandidates {
+            open_pr_observations: BTreeMap::new(),
+            open_pr_observed_at: None,
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Cache,
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),
             readiness_failures: Vec::new(),
+            urgent_assignments: BTreeMap::new(),
         };
 
         let summary = scan_loaded_issue_monitor_candidates(
@@ -4268,6 +7201,55 @@ mod tests {
     }
 
     #[test]
+    fn issue_5557_readbacks_preserve_the_launch_reserve_across_one_candidate() {
+        use gwt_core::operation_deadline::{now, ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
+        let started = Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let outer = started + Duration::from_secs(11);
+        let _scan = ScopedOperationDeadline::enter(outer);
+        let stage = IssueMonitorScanStage::StatusCheckReadback;
+        let first = run_budgeted_readback_stage(stage, || {
+            Ok::<_, String>(gwt_core::operation_deadline::current().unwrap())
+        })
+        .unwrap();
+        // The old helper gives this call all 11 remaining seconds, although
+        // only one belongs to maintenance. A candidate's next call then eats
+        // the same launch reserve unless every call enforces this boundary.
+        assert_eq!(first, outer - ISSUE_MONITOR_LAUNCH_RESERVE);
+
+        let _spent = ScopedOperationClock::set(first);
+        let mut called = false;
+        let refused = run_budgeted_readback_stage(stage, || {
+            called = true;
+            Ok::<_, String>(())
+        });
+        assert!(refused.is_err());
+        assert!(!called, "maintenance must not spend the launch reserve");
+        assert_eq!(outer.duration_since(now()), ISSUE_MONITOR_LAUNCH_RESERVE);
+        ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn).unwrap();
+        println!("{{\"scenario\":\"readback-reserve\",\"before_readback_budget_seconds\":11,\"after_readback_budget_seconds\":1,\"launch_reserve_seconds\":10,\"proposal_return_valid\":true}}");
+    }
+
+    #[test]
+    fn issue_5557_failed_stages_record_timing_without_losing_the_error() {
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::io::stdout)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut timing = IssueMonitorScanTiming::start("maintenance");
+            let stage = IssueMonitorScanStage::OpenPrReadback;
+            let result = run_scan_stage(stage, || Err::<(), _>("fixture readback failed"));
+            assert_eq!(result.unwrap_err().stage, stage);
+            timing.next("proposal-return");
+            ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn).unwrap();
+        });
+    }
+
+    #[test]
     fn github_remote_output_resolves_valid_origin() {
         assert_eq!(
             github_remote_owner_and_repo_from_get_url_output(
@@ -4309,6 +7291,84 @@ mod tests {
         assert_eq!(
             github_remote_owner_and_repo(tmp.path()).expect("workspace home origin"),
             ("owner".to_string(), "repo".to_string())
+        );
+        // Git fetches the first URL; metadata routing can select a later one.
+        // Admission must follow the actual upstream even with another URL.
+        std::fs::write(
+            bare_repo_path.join("origin.inc"),
+            "[remote \"origin\"]\n url = https://github.com/akiojin/gwt.git\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bare_repo_path.join("config"),
+            "[core]\n bare = true\n[include]\n path = origin.inc\n[remote \"origin\"]\n url = https://github.com/example/other.git\n",
+        )
+        .unwrap();
+        assert_eq!(
+            github_remote_owner_and_repo(tmp.path()).unwrap(),
+            ("akiojin".into(), "gwt".into())
+        );
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        bind_issue_monitor_source_repository(&mut monitor, tmp.path());
+        let mut external = issue(42);
+        external.author_login = Some("external-reporter".into());
+        assert!(monitor
+            .source_exclusion(&external)
+            .expect("the actual upstream requires curation")
+            .1
+            .contains("untrusted external Issue"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_remote_fatal_metadata_failure_waits_for_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let marker = repo.join(".git");
+        std::fs::write(&marker, "gitdir: /mnt/e/gwt/worktrees/develop\n").unwrap();
+        let fake_git = temp.path().join("git");
+        gwt_core::test_support::write_executable_script(
+            &fake_git,
+            r#"#!/bin/sh
+printf 'attempt\n' >> attempts
+if [ -e repaired ]; then
+  printf '%s\n' 'https://github.com/owner/repo.git'
+  exit 0
+fi
+printf '%s\n' "fatal: Invalid path '/mnt': No such file or directory" >&2
+exit 128
+"#,
+        )
+        .unwrap();
+        let first = github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str())
+            .unwrap_err()
+            .to_string();
+        let second = github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("attempts")).unwrap(),
+            "attempt\n"
+        );
+        assert_eq!(first, second);
+        assert!(first.contains("Git needs attention"), "{first}");
+        assert!(first.contains("git remote get-url origin"), "{first}");
+        assert!(first.contains("Invalid path '/mnt'"), "{first}");
+        assert!(
+            first.contains(&format!("{}:1", marker.display())),
+            "{first}"
+        );
+        assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
+        std::fs::write(&marker, "gitdir: .git-admin\n").unwrap();
+        std::fs::write(repo.join("repaired"), "").unwrap();
+        assert_eq!(
+            github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str()).unwrap(),
+            ("owner".to_string(), "repo".to_string()),
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("attempts")).unwrap(),
+            "attempt\nattempt\n"
         );
     }
 
@@ -4419,11 +7479,10 @@ exit 1
         // created and (crucially) no branch-protection network call is made. The
         // early return runs before any gh invocation, so this test exercises the
         // gate without touching the network.
-        use crate::{
-            IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorState,
-        };
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        use crate::{IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState};
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let issues = vec![IssueMonitorIssue {
+            author_login: None,
             number: 50,
             title: "t".to_string(),
             labels: vec!["auto-merge".to_string()],
@@ -4448,16 +7507,18 @@ exit 1
 
     #[test]
     fn autonomous_eligibility_candidate_filter_skips_non_terminal_exclusions() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        monitor.terminal_queue_push(&[50, 51], "test", "2026-07-02T00:00:00Z");
         let mut not_ready = issue(50);
         not_ready.labels = vec!["gwt-spec".to_string(), "auto-merge".to_string()];
         not_ready.readiness = IssueMonitorReadiness::NotReady;
@@ -4471,7 +7532,7 @@ exit 1
 
         assert!(autonomous_eligibility_candidates(
             &monitor,
-            &[not_ready, held],
+            &[not_ready.clone(), held.clone()],
             "2026-08-05T10:00:01Z",
         )
         .is_empty());
@@ -4485,6 +7546,72 @@ exit 1
             monitor.inbox_item(51).map(|item| item.state),
             Some(MonitorInboxState::HoldExcluded)
         );
+
+        // Eligibility precedes claim acquisition. A fresh exclusion must also
+        // retire that provisional phase, without spending a retry attempt.
+        let now = "2026-08-05T10:00:02Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        monitor.terminal_queue_push(&[50, 51], "test", now);
+        for mut ready in [not_ready.clone(), held.clone()] {
+            ready.labels.retain(|label| label != "hold");
+            ready.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+            ready.body = Some("## Acceptance Criteria\n- [ ] AC-1: execute\n".to_string());
+            monitor.record_candidate(ready.clone());
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(&ready, &protection, now),
+                crate::EligibilityDecision::Eligible
+            );
+            monitor.record_attempt(ready.number);
+        }
+        let mut running = monitor.clone();
+        assert!(running.apply_confirmed_claim(50, "claim", "host:1", "effect", now));
+        running.complete_active_launch(50, "tab-1::agent-50");
+        let mut resuming_review = monitor.clone();
+        resuming_review.begin_review(50, 500, "reviewed-head");
+        assert_eq!(
+            resuming_review.resume_inflight_reviews_after_restart(now),
+            vec![50]
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 2, |_| false),
+            2
+        );
+        crate::scan_issue_monitor_candidates(&mut monitor, &[not_ready.clone(), held], now);
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        for number in [50, 51] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                crate::AutonomousPhase::Idle
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+            assert!(monitor
+                .inbox_item(number)
+                .unwrap()
+                .exclusion_reason
+                .is_some());
+        }
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+
+        crate::scan_issue_monitor_candidates(&mut resuming_review, &[not_ready.clone()], now);
+        assert_eq!(
+            resuming_review.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "restart recovery must retain its pending review"
+        );
+        crate::scan_issue_monitor_candidates(&mut running, &[not_ready], now);
+        assert_eq!(
+            running.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "fresh readiness does not revoke a running implementation"
+        );
+        assert_eq!(running.active_count(), 1);
     }
 
     #[test]
@@ -4492,11 +7619,11 @@ exit 1
         // Default OFF ⇒ no phase advancement, no network call, no merge.
         use crate::{
             AutonomousPhase, IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState,
-            IssueMonitorState,
         };
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_autonomous_phase(50, AutonomousPhase::Reviewing); // would otherwise act
         let issues = vec![IssueMonitorIssue {
+            author_login: None,
             number: 50,
             title: "t".to_string(),
             labels: vec!["auto-merge".to_string()],
@@ -4524,8 +7651,8 @@ exit 1
 
     #[test]
     fn advance_autonomous_in_flight_is_noop_when_global_monitor_is_disabled() {
-        use crate::{AutonomousPhase, IssueMonitorConfig, IssueMonitorState};
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        use crate::{AutonomousPhase, IssueMonitorConfig};
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_autonomous_mode(true);
         monitor.set_autonomous_phase(50, AutonomousPhase::Reviewing);
 
@@ -4760,6 +7887,7 @@ exit 0
         let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
 
         let issues = vec![IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Issue 42".to_string(),
             labels: vec!["auto-merge".to_string()],
@@ -4773,7 +7901,7 @@ exit 0
         // switch gates every autonomous remote call
         // (`advance_autonomous_in_flight_is_noop_when_global_monitor_is_disabled`),
         // and this test is about the gh command root, not the kill switch.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -4781,6 +7909,7 @@ exit 0
                 ..crate::IssueMonitorPrefs::default()
             },
         );
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
         crate::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-07-28T00:00:00Z");
         // Delivering is the narrowest phase that proves the loop reaches gh: it
         // watches the merge (`--json mergeCommit`) and then re-reads the merged
@@ -4810,5 +7939,350 @@ exit 0
         );
         assert_eq!(monitor.active_count(), 0);
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+    }
+
+    /// Issue #4815 AC-1: the scan step itself honours the review ladder. A
+    /// review window that fails after the first dispatch is counted once for
+    /// its SHA; the two scans inside the backoff re-detect the open PR and
+    /// produce no dispatch; the scan after the backoff dispatches once more.
+    #[test]
+    fn issue_4815_two_scans_inside_the_review_backoff_dispatch_nothing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let container_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&container_root).expect("create container root");
+        let bare_repo = container_root.join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+        let call_log = tmp.path().join("gh-calls.log");
+        let fake_gh = write_bare_repo_bound_fake_gh(&tmp.path().join("bin"), &call_log);
+        let mut path_entries = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(path_entries).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+
+        let issues = vec![IssueMonitorIssue {
+            author_login: None,
+            number: 42,
+            title: "Issue 42".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: Some("## Acceptance Criteria\n- [ ] AC-1: returns 200\n".to_string()),
+            url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-08-15T00:00:00Z".to_string()),
+        }];
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                max_active_agents: 3,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[42], "test", "2026-07-02T00:00:00Z");
+        crate::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-07-28T00:00:00Z");
+        monitor.complete_active_launch_at(42, "tab-1::impl-42", "2026-07-28T00:00:00Z");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        let branch = monitor
+            .inbox_item(42)
+            .and_then(|item| item.launch_plan.as_ref())
+            .map(|plan| plan.branch_name.clone())
+            .expect("launch plan branch");
+        let open_prs = std::collections::HashMap::from([(branch, 7_u64)]);
+        let scan = |monitor: &mut IssueMonitorState, now: &str| {
+            advance_one_autonomous_issue(
+                monitor,
+                &issues,
+                "owner/repo",
+                &container_root,
+                "develop",
+                Some(&open_prs),
+                b"secret",
+                42,
+                now,
+            )
+            .expect("scan step");
+            monitor.take_pending_review_dispatches().len()
+        };
+
+        assert_eq!(
+            scan(&mut monitor, "2026-07-28T00:10:00Z"),
+            1,
+            "first scan dispatches"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(crate::AutonomousPhase::Reviewing)
+        );
+        // The review window fails to start.
+        monitor.record_launch_failed_at(42, "spawn failed: os error 206", "2026-07-28T00:10:05Z");
+        let attempts = monitor
+            .autonomous_record(42)
+            .and_then(|record| record.review_attempts.clone())
+            .expect("review attempt recorded");
+        assert_eq!(
+            (attempts.reviewed_sha.as_str(), attempts.count),
+            ("abc123", 1)
+        );
+        assert_eq!(attempts.not_before.as_deref(), Some("2026-07-28T00:11:05Z"));
+
+        // Two scans inside the backoff: the PR is re-detected, nothing is
+        // dispatched, and the hold names the backoff on the record.
+        assert_eq!(scan(&mut monitor, "2026-07-28T00:10:30Z"), 0);
+        assert_eq!(scan(&mut monitor, "2026-07-28T00:10:50Z"), 0);
+        assert!(monitor
+            .autonomous_record(42)
+            .and_then(|record| record.review_dispatch_hold.clone())
+            .is_some_and(|hold| hold
+                .reason
+                .contains("backing off until 2026-07-28T00:11:05Z")));
+        assert_eq!(
+            monitor.active_issue_numbers(),
+            vec![42],
+            "the implementation keeps its slot"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launched)
+        );
+
+        // After the backoff the same head is dispatched exactly once more.
+        assert_eq!(scan(&mut monitor, "2026-07-28T00:12:00Z"), 1);
+        assert_eq!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(crate::AutonomousPhase::Reviewing)
+        );
+    }
+    #[test]
+    fn ci_rerun_gate_waits_without_new_generation_and_proposes_once() {
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 7,
+            head_sha: "abc123".into(),
+            run_id: 90,
+        };
+        for _ in 0..2 {
+            assert!(prepare_failed_ci_reruns(
+                &mut monitor,
+                42,
+                std::slice::from_ref(&target),
+                "2026-10-21T09:00:00Z",
+                |_, consumed| {
+                    assert!(!consumed);
+                    Ok(crate::issue_monitor_ci::CiRetryState::Ready)
+                }
+            ));
+        }
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert_eq!(monitor.pending_effects()[0].effect_id, target.effect_id());
+        assert!(
+            monitor.autonomous_record(42).is_none(),
+            "waiting creates no retry generation"
+        );
+    }
+
+    #[test]
+    fn ci_rerun_gate_waits_for_running_workflow_and_preserves_terminal_failure() {
+        use crate::issue_monitor_ci::{CiRerunTarget, CiRetryState};
+        let target = CiRerunTarget {
+            pr_number: 7,
+            head_sha: "abc123".into(),
+            run_id: 90,
+        };
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
+        assert!(prepare_failed_ci_reruns(
+            &mut monitor,
+            42,
+            std::slice::from_ref(&target),
+            "2026-10-21T09:00:00Z",
+            |_, _| Ok(CiRetryState::Pending)
+        ));
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "do not consume a still-running workflow"
+        );
+        assert!(!prepare_failed_ci_reruns(
+            &mut monitor,
+            42,
+            &[target],
+            "2026-10-21T09:00:00Z",
+            |_, _| Ok(CiRetryState::Failed)
+        ));
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "a failed retry returns to normal remediation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_rerun_reviewing_route_waits_for_retry_then_resumes_remediation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        for args in [
+            vec!["init", "--bare"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("initialize repository");
+            assert!(output.status.success(), "git fixture: {output:?}");
+        }
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).expect("create bin");
+        let fake_gh = bin.join("gh");
+        std::fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+case "$*" in
+  *repos/owner/repo/branches/develop/protection)
+    printf '%s\n' '{"required_status_checks":{"contexts":["Rust"]},"allow_force_pushes":{"enabled":false}}' ;;
+  'pr view 7 --json statusCheckRollup')
+    printf '%s\n' '{"statusCheckRollup":[{"name":"Rust","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/90/job/10"}]}' ;;
+  'pr view 7 --json headRefOid')
+    printf '%s\n' '{"headRefOid":"abc123"}' ;;
+  'pr view 7 --json state,mergeable,mergeStateStatus')
+    printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
+  'api /repos/owner/repo/actions/runs/90')
+    cat "$GWT_TEST_CI_RERUN_FIXTURES/run.json" ;;
+  *) printf '%s\n' "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .expect("write fake gh");
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gh");
+        let mut paths = vec![bin];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(paths).expect("join PATH"),
+        );
+        let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let _fixtures =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_CI_RERUN_FIXTURES", temp.path());
+        let workflow = |attempt, status| {
+            std::fs::write(
+                temp.path().join("run.json"),
+                serde_json::json!({
+                    "id": 90, "repository": {"full_name": "owner/repo"},
+                    "head_sha": "abc123", "event": "pull_request",
+                    "run_attempt": attempt, "status": status, "conclusion": "failure"
+                })
+                .to_string(),
+            )
+            .expect("write workflow readback");
+        };
+        let body = "## Acceptance Criteria\n- [ ] AC-1: returns 200\n";
+        let issues = [IssueMonitorIssue {
+            labels: vec!["auto-merge".into()],
+            body: Some(body.into()),
+            ..issue(42)
+        }];
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(body).snapshot(),
+        );
+        monitor.begin_review(42, 7, "abc123");
+        monitor.record_review_verdict(42, true);
+        monitor.set_active_launch_id(42, Some("generation-1".into()));
+        let reviewing = monitor.autonomous_record(42).cloned();
+        let scan = |monitor: &mut IssueMonitorState| {
+            advance_one_autonomous_issue(
+                monitor,
+                &issues,
+                "owner/repo",
+                temp.path(),
+                "develop",
+                None,
+                b"secret",
+                42,
+                "2026-10-21T09:00:00Z",
+            )
+            .expect("reviewing scan");
+        };
+
+        workflow(1, "completed");
+        scan(&mut monitor);
+        assert_eq!(monitor.autonomous_record(42), reviewing.as_ref());
+        assert_eq!(monitor.pending_effects().len(), 1);
+        let effect = monitor.pending_effects()[0].clone();
+        assert_eq!(effect.effect_id, "ci-rerun:7:abc123:90");
+        assert!(matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::RerunFailedCi {
+                issue_number: 42,
+                ..
+            }
+        ));
+        let key = effect.attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        assert!(monitor.complete_pending_effect(&key).is_some());
+
+        workflow(2, "in_progress");
+        scan(&mut monitor);
+        assert_eq!(
+            monitor.autonomous_record(42),
+            reviewing.as_ref(),
+            "a pending retry retains the reviewed generation and attempt count"
+        );
+        assert!(monitor.pending_effects().is_empty());
+
+        workflow(2, "completed");
+        scan(&mut monitor);
+        let remediating = monitor.autonomous_record(42).expect("remediation record");
+        assert_eq!(remediating.phase, crate::AutonomousPhase::Idle);
+        assert_eq!(remediating.attempts, 1);
+        assert!(remediating.retry_not_before.is_some());
+        assert_eq!(
+            remediating.last_failure_message.as_deref(),
+            Some("CI failed or independent review rejected — remediate")
+        );
+        assert!(monitor.pending_effects().is_empty());
     }
 }

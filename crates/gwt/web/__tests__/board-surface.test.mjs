@@ -15,6 +15,7 @@ import {
   mentionsForBoardSubmit,
   visibleBoardEntries,
 } from "../board-surface.js";
+import * as boardSurface from "../board-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
@@ -38,7 +39,7 @@ test("Board surface requests older history with cursor-based paging", () => {
   assert.match(appSource, /case\s+"board_history_page"/);
   assert.match(appSource, /function\s+mergeBoardEntries/);
   assert.match(appSource, /hasMoreBefore/);
-  assert.match(appSource, /state\.focusEntryId[\s\S]+requestOlderBoardEntries\(event\.id\)/);
+  assert.match(appSource, /state\.focusEntryId[\s\S]+requestOlderBoardEntries\(snapshot\.windowId\)/);
 });
 
 test("Board surface scrolls to bottom after the user's own post succeeds", () => {
@@ -86,19 +87,15 @@ test("Board surface wires all active Work ids into currentWorkspaceIds (SPEC-235
 });
 
 test("Board message body renders sanitized server Markdown with a plaintext fallback (SPEC-2963)", () => {
-  // The card body reuses the Knowledge markdown renderer, which sets innerHTML
-  // from the server-sanitized `body_html` and falls back to plaintext.
+  // Both cards use the typed content renderer. Its DOM behavior is covered by
+  // ui-content.test.mjs; this contract preserves the shared wiring and styles.
   assert.match(
     appSource,
-    /createKnowledgeMarkdownBody\(entry,\s*"board-message-body"\)/,
+    /renderUiContent\(document, entry\.content,\s*"board-message-body"\)/,
   );
   assert.match(
     appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,400}body_html[\s\S]{0,200}innerHTML/,
-  );
-  assert.match(
-    appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,400}is-plaintext[\s\S]{0,120}textContent/,
+    /content: \{ type: "markdown", body: entry\.body/,
   );
   // Only the plaintext fallback forces pre-wrap; rendered HTML lays itself out.
   assert.match(
@@ -300,4 +297,18 @@ test("Board origin helpers label live focus versus exact resume actions", () => 
   assert.equal(boardEntryOriginActionLabel(entry, liveAgents), "Focus Agent");
   assert.equal(boardEntryOriginActionLabel(entry, []), "Resume Agent");
   assert.equal(boardEntryOriginActionLabel({ author_kind: "user" }, liveAgents), "");
+});
+
+
+test("Board author names survive closed windows and lead provider context", () => {
+  assert.equal(typeof boardSurface.boardEntryAuthorLabel, "function");
+  const { boardEntryAuthorLabel } = boardSurface;
+  const named = { author_kind: "agent", author: "Codex", origin_agent_name: "ミオ",
+    origin_agent_id: "codex", origin_session_id: "closed-session", origin_branch: "work/task" };
+  assert.equal(boardEntryAuthorLabel(named), "ミオ (Codex)");
+  assert.equal(boardEntryOriginLabel(named), "From ミオ (Codex) · work/task · closed-s");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "agent", author: "Codex" }), "Codex");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "user", author: "You" }), "You");
+  assert.match(appSource, /Reply to \$\{boardEntryAuthorLabel\(parent\)\}/);
+  assert.match(appSource, /Replying to \$\{boardEntryAuthorLabel\(parent\)\}/);
 });

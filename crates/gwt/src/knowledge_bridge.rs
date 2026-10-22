@@ -1,14 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use gwt_core::paths::gwt_cache_dir;
-use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
-use pulldown_cmark::{html, Options, Parser};
+use gwt_github::{Cache, CacheEntry, IssueState, IssueSummary, SectionName};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile},
     has_gwt_spec_label,
     issue_cache::{
         issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
@@ -166,7 +167,6 @@ fn spec_reference_at(rest: &str) -> Option<u64> {
 pub enum KnowledgeKind {
     Issue,
     Spec,
-    Pr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +208,8 @@ pub struct KnowledgeListItem {
     /// One-based position in the Issue Monitor queue, when queued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_position: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_by: Option<String>,
     /// Human-readable reason for a non-terminal monitor exclusion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
@@ -291,7 +293,8 @@ pub struct KnowledgeBridgeView {
     pub selected_number: Option<u64>,
     pub empty_message: Option<String>,
     pub refresh_enabled: bool,
-    pub detail: KnowledgeDetailView,
+    /// Issue/SPEC lists defer detail generation until an explicit selection.
+    pub detail: Option<KnowledgeDetailView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -448,25 +451,29 @@ fn canonical_semantic_search_with_runner<R: CanonicalProjectIndexSearchRunner + 
     query: &str,
     limit: usize,
 ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
-    let scope = match kind {
-        KnowledgeKind::Issue => crate::protocol::IndexSearchScope::Issues,
-        KnowledgeKind::Spec => crate::protocol::IndexSearchScope::Specs,
-        KnowledgeKind::Pr => return Ok(Vec::new()),
+    use crate::protocol::{IndexSearchScope, IndexSearchTarget};
+    let scopes: &[_] = match kind {
+        KnowledgeKind::Issue => &[IndexSearchScope::Issues, IndexSearchScope::Specs],
+        KnowledgeKind::Spec => &[IndexSearchScope::Specs],
     };
     let outcome = runner
         .search(
             repo_path,
             query,
-            &[scope],
+            scopes,
             crate::protocol::IndexSearchMatchMode::Semantic,
             false,
         )
         .map_err(semantic_failure_from_index_error)?;
     let mut hits = Vec::new();
     for result in outcome.results {
-        let number = match (kind, result.target) {
-            (KnowledgeKind::Issue, crate::protocol::IndexSearchTarget::Issue { number }) => number,
-            (KnowledgeKind::Spec, crate::protocol::IndexSearchTarget::Spec { spec_id }) => spec_id,
+        let number = match (result.scope, result.target) {
+            (IndexSearchScope::Issues, IndexSearchTarget::Issue { number })
+                if kind == KnowledgeKind::Issue =>
+            {
+                number
+            }
+            (IndexSearchScope::Specs, IndexSearchTarget::Spec { spec_id }) => spec_id,
             _ => continue,
         };
         hits.push(SemanticSearchHit {
@@ -533,10 +540,6 @@ pub fn load_knowledge_bridge(
         ));
     }
 
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Ok(disabled_pr_view());
-    }
-
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(non_repo_view(kind));
     }
@@ -544,23 +547,15 @@ pub fn load_knowledge_bridge(
     if refresh {
         refresh_knowledge_bridge_cache(repo_path, true)?;
     }
-    let entries = load_local_cache_entries_for_repo(repo_path)?;
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let entries = load_cache_summaries(&cache)?;
     let linked_branches = load_linked_branches(repo_path);
-    Ok(match kind {
-        KnowledgeKind::Issue => build_work_item_view(
-            KnowledgeKind::Issue,
-            entries,
-            linked_branches,
-            selected_number,
-        ),
-        KnowledgeKind::Spec => build_work_item_view(
-            KnowledgeKind::Spec,
-            entries,
-            linked_branches,
-            selected_number,
-        ),
-        KnowledgeKind::Pr => disabled_pr_view(),
-    })
+    Ok(build_work_item_view(
+        kind,
+        &entries,
+        linked_branches,
+        selected_number,
+    ))
 }
 
 /// Cache-backed single-entry detail (SPEC #3170 FR-102, T-947): reads
@@ -568,7 +563,7 @@ pub fn load_knowledge_bridge(
 /// remotes, never rebuilds the list, never scans Sessions/Work.
 pub fn load_knowledge_bridge_detail(
     repo_path: &Path,
-    kind: KnowledgeKind,
+    _kind: KnowledgeKind,
     number: u64,
 ) -> Result<KnowledgeDetailView, String> {
     if !repo_path.is_dir() {
@@ -576,9 +571,6 @@ pub fn load_knowledge_bridge_detail(
             "project root is not available: {}",
             repo_path.display()
         ));
-    }
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Err("PR knowledge selection is unavailable".to_string());
     }
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Err("Knowledge Bridge is available only for Git projects.".to_string());
@@ -588,39 +580,100 @@ pub fn load_knowledge_bridge_detail(
         .load_entry(gwt_github::IssueNumber(number))
         .ok_or_else(|| format!("Issue #{number} not in local cache"))?;
     let linked_branches = load_linked_branches(repo_path);
-    Ok(detail_for_kind(kind, &entry, &linked_branches))
+    Ok(work_item_detail_view(&entry, &linked_branches))
+}
+
+// Cache roots identify the shared project even when requests come from different worktrees.
+// Weak entries retain a result only while that refresh still has callers.
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlights {
+    active: Mutex<HashMap<PathBuf, Weak<KnowledgeCacheRefreshFlight>>>,
+}
+
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlight {
+    result: OnceLock<Result<bool, String>>,
+}
+
+impl KnowledgeCacheRefreshFlights {
+    fn run(
+        &self,
+        cache_root: &Path,
+        force: bool,
+        mut refresh: impl FnMut() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        loop {
+            let flight = self.join(cache_root);
+            let result = flight.run(&mut refresh);
+            // A forced request may have joined a non-forced TTL skip. Its next
+            // flight must actually sync, while an active sync (or failure) is shared.
+            if !force || result != Ok(false) {
+                return result;
+            }
+        }
+    }
+
+    fn join(&self, cache_root: &Path) -> Arc<KnowledgeCacheRefreshFlight> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.retain(|_, flight| flight.strong_count() > 0);
+        if let Some(flight) = active
+            .get(cache_root)
+            .and_then(Weak::upgrade)
+            .filter(|flight| flight.result.get() != Some(&Ok(false)))
+        {
+            return flight;
+        }
+        let flight = Arc::new(KnowledgeCacheRefreshFlight::default());
+        active.insert(cache_root.to_path_buf(), Arc::downgrade(&flight));
+        flight
+    }
+}
+
+impl KnowledgeCacheRefreshFlight {
+    fn run(&self, refresh: impl FnOnce() -> Result<bool, String>) -> Result<bool, String> {
+        self.result.get_or_init(refresh).clone()
+    }
 }
 
 pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<bool, String> {
+    static FLIGHTS: OnceLock<KnowledgeCacheRefreshFlights> = OnceLock::new();
+
     if !repo_path.is_dir() || issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(false);
     }
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let outcome = if force {
-        sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
-    } else {
-        sync_issue_cache_from_remote_if_stale_with_fingerprint(
-            repo_path,
-            &cache_root,
-            ISSUE_CACHE_TTL,
-        )?
-    };
-    if outcome.source_changed
-        && crate::index_worker::detect_repo_hash(repo_path).is_some()
-        && crate::index_worker::default_rebuild_runner(
-            repo_path,
-            crate::index_worker::IndexRebuildScope::Issues,
-            None,
-        )
-        .is_err()
-    {
-        tracing::debug!(
-            target: "gwt::knowledge_bridge",
-            error_code = "INDEX_REPAIR_FAILED",
-            "issue cache refresh succeeded but issue index rebuild failed"
-        );
-    }
-    Ok(outcome.refreshed)
+    FLIGHTS
+        .get_or_init(KnowledgeCacheRefreshFlights::default)
+        .run(&cache_root, force, || {
+            let outcome = if force {
+                sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
+            } else {
+                sync_issue_cache_from_remote_if_stale_with_fingerprint(
+                    repo_path,
+                    &cache_root,
+                    ISSUE_CACHE_TTL,
+                )?
+            };
+            if outcome.source_changed
+                && crate::index_worker::detect_repo_hash(repo_path).is_some()
+                && crate::index_worker::default_rebuild_runner(
+                    repo_path,
+                    crate::index_worker::IndexRebuildScope::Issues,
+                    None,
+                )
+                .is_err()
+            {
+                tracing::debug!(
+                    target: "gwt::knowledge_bridge",
+                    error_code = "INDEX_REPAIR_FAILED",
+                    "issue cache refresh succeeded but issue index rebuild failed"
+                );
+            }
+            Ok(outcome.refreshed)
+        })
 }
 
 pub fn search_knowledge_bridge(
@@ -758,7 +811,11 @@ where
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
     let linked_branches: HashMap<u64, Vec<String>> = HashMap::new();
-    Ok(work_item_list_item(&refreshed, &linked_branches, None))
+    Ok(work_item_list_item(
+        &IssueSummary::from(&refreshed.snapshot),
+        &linked_branches,
+        None,
+    ))
 }
 
 #[cfg(test)]
@@ -818,12 +875,6 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
             repo_path.display()
         ));
     }
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Ok(KnowledgeSearchOutcome {
-            view: disabled_pr_view(),
-            semantic_retry: None,
-        });
-    }
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(KnowledgeSearchOutcome {
             view: non_repo_view(kind),
@@ -831,11 +882,10 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         });
     }
 
-    let mut entries = load_local_cache_entries_for_repo(repo_path)?
-        .into_iter()
-        .filter(|entry| candidate_matches_kind(entry, kind))
-        .collect::<Vec<_>>();
-    entries.sort_by(issue_entry_sort);
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let summaries = load_cache_summaries(&cache)?;
+    let mut entries = summaries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
     let linked_branches = load_linked_branches(repo_path);
     // FR-098/FR-100: a semantic failure never aborts the completion — the
     // cache-backed/local exact rows below stay usable. Typed transient
@@ -876,14 +926,14 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .iter()
         .filter(|entry| is_exact_search_match(entry, query))
     {
-        if seen.insert(entry.snapshot.number.0) {
-            list_items.push(list_item_for_kind(kind, entry, &linked_branches, Some(100)));
+        if seen.insert(entry.number) {
+            list_items.push(work_item_list_item(entry, &linked_branches, Some(100)));
         }
     }
 
     let entries_by_number = entries
         .iter()
-        .map(|entry| (entry.snapshot.number.0, entry))
+        .map(|entry| (entry.number, entry))
         .collect::<HashMap<_, _>>();
     for hit in hits {
         if !seen.insert(hit.number) {
@@ -892,8 +942,7 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         let Some(entry) = entries_by_number.get(&hit.number) else {
             continue;
         };
-        list_items.push(list_item_for_kind(
-            kind,
+        list_items.push(work_item_list_item(
             entry,
             &linked_branches,
             hit.distance.map(distance_to_match_score),
@@ -906,11 +955,6 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
     let selected_number = selected_number
         .filter(|selected| list_items.iter().any(|entry| entry.number == *selected))
         .or_else(|| list_items.first().map(|entry| entry.number));
-    let detail = selected_number
-        .and_then(|selected| entries_by_number.get(&selected).copied())
-        .map(|entry| detail_for_kind(kind, entry, &linked_branches))
-        .unwrap_or_else(|| empty_detail(search_empty_title(kind), "No semantic matches found."));
-
     Ok(KnowledgeSearchOutcome {
         view: KnowledgeBridgeView {
             kind,
@@ -922,23 +966,17 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
                 None
             },
             refresh_enabled: true,
-            detail,
+            detail: None,
         },
         semantic_retry,
     })
 }
 
-fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
-    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let cache = Cache::new(cache_root);
-    load_cache_entries(&cache)
-}
-
-fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
-    match cache.list_entries() {
+fn load_cache_summaries(cache: &Cache) -> Result<std::sync::Arc<Vec<IssueSummary>>, String> {
+    match cache.list_summaries() {
         Ok(entries) => Ok(entries),
         Err(gwt_github::CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Vec::new())
+            Ok(std::sync::Arc::new(Vec::new()))
         }
         Err(error) => Err(format!("failed to read issue cache: {error}")),
     }
@@ -946,23 +984,20 @@ fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
 
 fn build_work_item_view(
     kind: KnowledgeKind,
-    mut entries: Vec<CacheEntry>,
+    summaries: &[IssueSummary],
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
 ) -> KnowledgeBridgeView {
-    entries.sort_by(issue_entry_sort);
+    let mut entries = summaries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
 
     let list_items = entries
         .iter()
         .map(|entry| work_item_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
-    let selected_number = resolve_selected_number(&entries, selected_number);
-    let detail = entries
-        .iter()
-        .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(|entry| work_item_detail_view(entry, &linked_branches))
-        .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached work items available."));
-
+    let selected_number = selected_number
+        .filter(|selected| entries.iter().any(|entry| entry.number == *selected))
+        .or_else(|| entries.first().map(|entry| entry.number));
     KnowledgeBridgeView {
         kind,
         entries: list_items,
@@ -973,64 +1008,18 @@ fn build_work_item_view(
             None
         },
         refresh_enabled: true,
-        detail,
-    }
-}
-
-fn disabled_pr_view() -> KnowledgeBridgeView {
-    KnowledgeBridgeView {
-        kind: KnowledgeKind::Pr,
-        entries: Vec::new(),
-        selected_number: None,
-        empty_message: Some(
-            "PR Bridge is waiting for cache-backed PR list support before it can render data."
-                .to_string(),
-        ),
-        refresh_enabled: false,
-        detail: KnowledgeDetailView {
-            number: None,
-            title: "PR Bridge".to_string(),
-            subtitle: "Unavailable".to_string(),
-            state: "unavailable".to_string(),
-            labels: Vec::new(),
-            sections: vec![knowledge_detail_section(
-                "Status",
-                "PR Bridge is waiting for cache-backed PR list support before it can render data.",
-            )],
-            launch_issue_number: None,
-            related_works: Vec::new(),
-        },
+        detail: None,
     }
 }
 
 fn non_repo_view(kind: KnowledgeKind) -> KnowledgeBridgeView {
-    let title = match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => "Issue Bridge",
-        KnowledgeKind::Pr => "PR Bridge",
-    };
     KnowledgeBridgeView {
         kind,
         entries: Vec::new(),
         selected_number: None,
         empty_message: Some("Knowledge Bridge is available only for Git projects.".to_string()),
         refresh_enabled: false,
-        detail: empty_detail(
-            title,
-            "Knowledge Bridge is available only for Git projects.",
-        ),
-    }
-}
-
-fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
-    KnowledgeDetailView {
-        number: None,
-        title: title.to_string(),
-        subtitle: String::new(),
-        state: "idle".to_string(),
-        labels: Vec::new(),
-        sections: vec![knowledge_detail_section("Status", body)],
-        launch_issue_number: None,
-        related_works: Vec::new(),
+        detail: None,
     }
 }
 
@@ -1041,62 +1030,17 @@ fn knowledge_detail_section(
     let body = body.into();
     KnowledgeDetailSection {
         title: title.into(),
-        body_html: Some(render_markdown_body_html(&body)),
+        body_html: Some(render_markdown_html(&body, MarkdownHtmlProfile::Knowledge)),
         body,
     }
 }
 
-fn render_markdown_body_html(markdown: &str) -> String {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-
-    let parser = Parser::new_ext(markdown, options);
-    let mut raw_html = String::new();
-    html::push_html(&mut raw_html, parser);
-
-    sanitize_markdown_html(&raw_html)
-}
-
-fn sanitize_markdown_html(raw_html: &str) -> String {
-    ammonia::Builder::default()
-        .add_tags(&["input", "table", "thead", "tbody", "tr", "th", "td"])
-        .add_tag_attributes("input", &["checked", "disabled", "type"])
-        .clean(raw_html)
-        .to_string()
-}
-
-fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => {
-            let _ = entry;
-            true
-        }
-        KnowledgeKind::Pr => false,
-    }
-}
-
-fn list_item_for_kind(
-    kind: KnowledgeKind,
-    entry: &CacheEntry,
-    linked_branches: &HashMap<u64, Vec<String>>,
-    match_score: Option<u8>,
-) -> KnowledgeListItem {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => {
-            work_item_list_item(entry, linked_branches, match_score)
-        }
-        KnowledgeKind::Pr => unreachable!("PR bridge has no list items"),
-    }
-}
-
 fn work_item_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    if is_spec_entry(entry) {
+    if has_gwt_spec_label(&entry.labels) {
         spec_list_item(entry, linked_branches, match_score)
     } else {
         issue_list_item(entry, linked_branches, match_score)
@@ -1104,19 +1048,19 @@ fn work_item_list_item(
 }
 
 fn issue_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(&entry.labels);
     KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: format!("Updated {}", short_updated_at(&entry.snapshot.updated_at.0)),
-        labels: entry.snapshot.labels.clone(),
+        number: entry.number,
+        title: entry.title.clone(),
+        state: issue_state_label(entry.state),
+        meta: format!("Updated {}", short_updated_at(&entry.updated_at)),
+        labels: entry.labels.clone(),
         linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
+            .get(&entry.number)
             .map(Vec::len)
             .unwrap_or_default(),
         related_work_count: 0,
@@ -1125,53 +1069,24 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
+        parent_spec: parent_spec_from_body(&entry.body),
         monitor_state: None,
         queue_position: None,
+        queued_by: None,
         exclusion_reason: None,
         related_work_refs: Vec::new(),
     }
 }
 
 fn spec_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
-    KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: spec_list_meta(entry),
-        labels: entry.snapshot.labels.clone(),
-        linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
-            .map(Vec::len)
-            .unwrap_or_default(),
-        related_work_count: 0,
-        related_session_count: 0,
-        match_score,
-        phase: phase_info.phase,
-        has_unknown_phase: phase_info.has_unknown_phase,
-        is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
-        monitor_state: None,
-        queue_position: None,
-        exclusion_reason: None,
-        related_work_refs: Vec::new(),
-    }
-}
-
-fn detail_for_kind(
-    kind: KnowledgeKind,
-    entry: &CacheEntry,
-    linked_branches: &HashMap<u64, Vec<String>>,
-) -> KnowledgeDetailView {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => work_item_detail_view(entry, linked_branches),
-        KnowledgeKind::Pr => disabled_pr_view().detail,
-    }
+    let mut item = issue_list_item(entry, linked_branches, match_score);
+    let phase = effective_spec_lifecycle_label(entry.state, &entry.labels);
+    item.meta = format!("{phase} · Updated {}", short_updated_at(&entry.updated_at));
+    item
 }
 
 fn work_item_detail_view(
@@ -1185,21 +1100,20 @@ fn work_item_detail_view(
     }
 }
 
-fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
+fn is_exact_search_match(entry: &IssueSummary, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
     }
     let query_lower = query.to_lowercase();
-    let number = entry.snapshot.number.0.to_string();
+    let number = entry.number.to_string();
     if query_lower.strip_prefix('#') == Some(number.as_str()) || query_lower == number {
         return true;
     }
-    if entry.snapshot.title.to_lowercase() == query_lower {
+    if entry.title.to_lowercase() == query_lower {
         return true;
     }
     entry
-        .snapshot
         .labels
         .iter()
         .any(|label| label.to_lowercase() == query_lower)
@@ -1207,13 +1121,6 @@ fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
 
 fn distance_to_match_score(distance: f64) -> u8 {
     ((1.0 - distance) * 100.0).round().clamp(0.0, 100.0) as u8
-}
-
-fn search_empty_title(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => "Work Item Search",
-        KnowledgeKind::Pr => "PR Bridge",
-    }
 }
 
 fn issue_detail_view(
@@ -1295,7 +1202,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         ));
     }
 
-    let phase = effective_spec_lifecycle_label(entry);
+    let phase = effective_spec_lifecycle_label(entry.snapshot.state, &entry.snapshot.labels);
     KnowledgeDetailView {
         number: Some(entry.snapshot.number.0),
         title: entry.snapshot.title.clone(),
@@ -1313,19 +1220,11 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
     }
 }
 
-fn spec_list_meta(entry: &CacheEntry) -> String {
-    let phase = effective_spec_lifecycle_label(entry);
-    format!(
-        "{phase} · Updated {}",
-        short_updated_at(&entry.snapshot.updated_at.0)
-    )
-}
-
-fn effective_spec_lifecycle_label(entry: &CacheEntry) -> &'static str {
-    if entry.snapshot.state == IssueState::Closed {
+fn effective_spec_lifecycle_label(state: IssueState, labels: &[String]) -> &'static str {
+    if state == IssueState::Closed {
         return "Done";
     }
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(labels);
     phase_display_label(phase_info.phase.as_deref())
 }
 
@@ -1340,31 +1239,17 @@ fn phase_display_label(phase: Option<&str>) -> &'static str {
     }
 }
 
-fn resolve_selected_number(entries: &[CacheEntry], selected_number: Option<u64>) -> Option<u64> {
-    selected_number
-        .filter(|selected| {
-            entries
-                .iter()
-                .any(|entry| entry.snapshot.number.0 == *selected)
-        })
-        .or_else(|| entries.first().map(|entry| entry.snapshot.number.0))
-}
-
-fn issue_entry_sort(left: &CacheEntry, right: &CacheEntry) -> std::cmp::Ordering {
-    let left_state = if left.snapshot.state == IssueState::Open {
-        0
-    } else {
-        1
-    };
-    let right_state = if right.snapshot.state == IssueState::Open {
+fn issue_entry_sort(left: &IssueSummary, right: &IssueSummary) -> std::cmp::Ordering {
+    let left_state = if left.state == IssueState::Open { 0 } else { 1 };
+    let right_state = if right.state == IssueState::Open {
         0
     } else {
         1
     };
     left_state
         .cmp(&right_state)
-        .then_with(|| right.snapshot.updated_at.0.cmp(&left.snapshot.updated_at.0))
-        .then_with(|| left.snapshot.number.0.cmp(&right.snapshot.number.0))
+        .then_with(|| right.updated_at.cmp(&left.updated_at))
+        .then_with(|| left.number.cmp(&right.number))
 }
 
 fn issue_state_label(state: IssueState) -> String {
@@ -1422,6 +1307,126 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_runs_sync_and_rebuild_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let joined = Barrier::new(8);
+        let syncs = AtomicUsize::new(0);
+        let rebuilds = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let _flight = flights.join(Path::new("project-cache"));
+                        // All requests join the active generation before it completes.
+                        joined.wait();
+                        flights.run(Path::new("project-cache"), true, || {
+                            syncs.fetch_add(1, Ordering::SeqCst);
+                            rebuilds.fetch_add(1, Ordering::SeqCst);
+                            Ok(true)
+                        })
+                    })
+                })
+                .collect();
+            for request in requests {
+                assert_eq!(request.join().expect("refresh thread"), Ok(true));
+            }
+        });
+        assert_eq!(
+            syncs.load(Ordering::SeqCst),
+            1,
+            "one remote sync for eight requests"
+        );
+        assert_eq!(
+            rebuilds.load(Ordering::SeqCst),
+            1,
+            "one index rebuild for eight requests"
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_shares_failure_and_allows_retry() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let leader = flights.join(cache);
+        let follower = flights.join(cache);
+        assert_eq!(
+            flights.run(cache, false, || Err("sync failed".into())),
+            Err("sync failed".into())
+        );
+        assert_eq!(
+            flights.run(cache, true, || panic!("must share the failed sync")),
+            Err("sync failed".into())
+        );
+        drop(leader);
+        drop(follower);
+        assert_eq!(flights.run(cache, true, || Ok(true)), Ok(true));
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_keeps_projects_independent() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        // Running another project from inside the first cannot deadlock on a global lock.
+        assert_eq!(
+            flights.run(Path::new("project-a"), false, || {
+                flights.run(Path::new("project-b"), false, || Ok(false))
+            }),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                mpsc, Barrier,
+            },
+            time::{Duration, Instant},
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let flight = flights.join(cache);
+        let release = Barrier::new(2);
+        let (entered, started) = mpsc::channel();
+        let syncs = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let ordinary = scope.spawn(|| {
+                flights.run(cache, false, || {
+                    entered.send(()).expect("signal TTL check");
+                    release.wait();
+                    Ok(false)
+                })
+            });
+            started
+                .recv_timeout(Duration::from_secs(30))
+                .expect("TTL check started");
+            let forced = scope.spawn(|| {
+                flights.run(cache, true, || {
+                    syncs.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                })
+            });
+            // Observe that the forced request joined before allowing the TTL skip to finish.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Arc::strong_count(&flight) < 3 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let joined = Arc::strong_count(&flight) >= 3;
+            release.wait();
+            assert_eq!(ordinary.join().expect("ordinary refresh"), Ok(false));
+            assert_eq!(forced.join().expect("forced refresh"), Ok(true));
+            assert!(joined, "forced request must wait for the active flight");
+        });
+        assert_eq!(syncs.load(Ordering::SeqCst), 1);
+    }
 
     use gwt_core::test_support::ScopedEnvVar;
 
@@ -1560,6 +1565,7 @@ exit 1\n",
         state: IssueState,
     ) -> IssueSnapshot {
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: title.to_string(),
             body: body.to_string(),
@@ -1623,7 +1629,12 @@ Extra context.
     }
 
     #[test]
-    fn load_knowledge_bridge_returns_non_repo_and_disabled_pr_views() {
+    fn knowledge_kind_rejects_removed_pr_wire_value() {
+        assert!(serde_json::from_str::<KnowledgeKind>(r#""pr""#).is_err());
+    }
+
+    #[test]
+    fn load_knowledge_bridge_returns_non_repo_view() {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let issue_view = load_knowledge_bridge(dir.path(), KnowledgeKind::Issue, None, false)
@@ -1634,14 +1645,7 @@ Extra context.
             issue_view.empty_message.as_deref(),
             Some("Knowledge Bridge is available only for Git projects.")
         );
-        assert_eq!(issue_view.detail.title, "Issue Bridge");
-
-        let pr_view =
-            load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
-        assert_eq!(pr_view.kind, KnowledgeKind::Pr);
-        assert!(!pr_view.refresh_enabled);
-        assert_eq!(pr_view.detail.title, "PR Bridge");
-        assert_eq!(pr_view.detail.state, "unavailable");
+        assert!(issue_view.detail.is_none());
     }
 
     #[test]
@@ -1702,19 +1706,19 @@ Extra context.
         assert_eq!(issue_entry.queue_position, None);
         assert_eq!(issue_entry.exclusion_reason, None);
         assert_eq!(issue_view.selected_number, Some(11));
-        assert_eq!(issue_view.detail.launch_issue_number, Some(11));
-        assert!(issue_view
-            .detail
+        assert!(issue_view.detail.is_none());
+        let issue_detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 11).expect("issue detail");
+        assert_eq!(issue_detail.launch_issue_number, Some(11));
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Description" && section.body == "Need more tests."));
-        assert!(issue_view
-            .detail
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Comment 1" && section.body == "Follow-up detail"));
-        assert!(issue_view
-            .detail
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Linked branches"
@@ -1733,27 +1737,26 @@ Extra context.
         assert_eq!(spec_entry.exclusion_reason, None);
         assert!(spec_entry.meta.contains("Backlog"));
         assert!(!spec_entry.meta.contains("phase/in-progress"));
-        assert_eq!(spec_view.detail.launch_issue_number, Some(22));
-        assert!(spec_view.detail.subtitle.contains("Backlog"));
-        assert!(!spec_view.detail.subtitle.contains("phase/in-progress"));
-        assert!(spec_view
-            .detail
+        assert!(spec_view.detail.is_none());
+        let spec_detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Spec, 22).expect("spec detail");
+        assert_eq!(spec_detail.launch_issue_number, Some(22));
+        assert!(spec_detail.subtitle.contains("Backlog"));
+        assert!(!spec_detail.subtitle.contains("phase/in-progress"));
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "spec"
                 && section.body.contains("Raise project coverage")));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "plan"));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "tasks"));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "notes"));
@@ -1761,9 +1764,11 @@ Extra context.
         let unified_selected = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(22), false)
             .expect("unified work item bridge");
         assert_eq!(unified_selected.selected_number, Some(22));
-        assert_eq!(unified_selected.detail.launch_issue_number, Some(22));
-        assert!(unified_selected
-            .detail
+        assert!(unified_selected.detail.is_none());
+        let unified_detail = load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 22)
+            .expect("unified work item detail");
+        assert_eq!(unified_detail.launch_issue_number, Some(22));
+        assert!(unified_detail
             .sections
             .iter()
             .any(|section| section.title == "spec"));
@@ -1836,7 +1841,7 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(23))
             .expect("load stale closed spec");
 
-        let list_item = spec_list_item(&entry, &HashMap::new(), None);
+        let list_item = spec_list_item(&IssueSummary::from(&entry.snapshot), &HashMap::new(), None);
         assert_eq!(list_item.phase.as_deref(), Some("implementation"));
         assert!(list_item.meta.contains("Done"));
         assert!(!list_item.meta.contains("phase/implementation"));
@@ -1901,7 +1906,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4101))
             .expect("load child issue");
         assert_eq!(
-            issue_list_item(&child_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&child_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
 
@@ -1917,7 +1927,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4102))
             .expect("load orphan issue");
         assert_eq!(
-            issue_list_item(&orphan_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&orphan_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             None
         );
 
@@ -1934,7 +1949,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4103))
             .expect("load nested spec");
         assert_eq!(
-            spec_list_item(&nested_entry, &HashMap::new(), None).parent_spec,
+            spec_list_item(
+                &IssueSummary::from(&nested_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
     }
@@ -1976,10 +1996,9 @@ Extra context.
             ))
             .expect("write markdown issue snapshot");
 
-        let view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(31), false)
-            .expect("issue bridge");
-        let description = view
-            .detail
+        let detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 31).expect("issue detail");
+        let description = detail
             .sections
             .iter()
             .find(|section| section.title == "Description")
@@ -1993,6 +2012,8 @@ Extra context.
         assert!(html.contains("<h1>Markdown title</h1>"), "{html}");
         assert!(html.contains("<table>"), "{html}");
         assert!(html.contains("type=\"checkbox\""), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("checked"), "{html}");
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("onclick"), "{html}");
         assert!(!html.contains("javascript:"), "{html}");
@@ -2145,6 +2166,11 @@ Extra context.
                         crate::protocol::IndexSearchTarget::Issue { number: 42 },
                         0.02,
                     ),
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Specs,
+                        crate::protocol::IndexSearchTarget::Spec { spec_id: 1939 },
+                        0.03,
+                    ),
                 ],
                 ..Default::default()
             },
@@ -2159,17 +2185,26 @@ Extra context.
         .expect("issue search");
         assert_eq!(
             issue_hits,
-            vec![SemanticSearchHit {
-                number: 42,
-                distance: Some(0.02)
-            }]
+            vec![
+                SemanticSearchHit {
+                    number: 42,
+                    distance: Some(0.02)
+                },
+                SemanticSearchHit {
+                    number: 1939,
+                    distance: Some(0.03)
+                }
+            ]
         );
         assert_eq!(
             issue_runner.calls.borrow().as_slice(),
             &[CanonicalSearchCall {
                 repo_path: repo.to_path_buf(),
                 query: "issue query".to_string(),
-                scopes: vec![crate::protocol::IndexSearchScope::Issues],
+                scopes: vec![
+                    crate::protocol::IndexSearchScope::Issues,
+                    crate::protocol::IndexSearchScope::Specs,
+                ],
                 match_mode: crate::protocol::IndexSearchMatchMode::Semantic,
                 auto_build: false,
             }]
@@ -2238,6 +2273,7 @@ Extra context.
                     crate::index_search::IndexSearchUnavailable {
                         reason: "spawn".to_string(),
                         retry_after_ms: 5_000,
+                        holder: None,
                     },
                 ),
                 Some("SEARCH_UNAVAILABLE"),
@@ -2870,6 +2906,10 @@ exit 1\n",
         assert_eq!(view.entries[2].state, "open");
         assert_eq!(view.entries[2].match_score, Some(80));
         assert_eq!(view.selected_number, Some(22));
+        assert!(
+            view.detail.is_none(),
+            "search must not generate preview detail"
+        );
     }
 
     #[test]
@@ -3101,6 +3141,10 @@ exit 1\n",
         assert!(!view.entries[1].is_spec);
         assert_eq!(view.entries[1].match_score, Some(99));
         assert_eq!(view.selected_number, Some(22));
+        assert!(
+            view.detail.is_none(),
+            "search must not generate preview detail"
+        );
     }
 
     #[test]
@@ -3370,6 +3414,7 @@ exit 1\n",
                 crate::index_search::IndexSearchUnavailable {
                     reason: "run project index search: spawn failed".to_string(),
                     retry_after_ms: 5_000,
+                    holder: None,
                 },
             ),
         );

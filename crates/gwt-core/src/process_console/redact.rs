@@ -9,7 +9,8 @@
 //! - `Authorization: <anything>` headers (case-insensitive)
 //! - URL userinfo (`scheme://user:password@host`)
 //! - `token=<value>` URL parameters
-//! - GitHub Personal Access Token prefixes (`gh_` / `ghp_` / `ghs_` / `ghu_`) followed by 16+ alphanumerics
+//! - GitHub classic token prefixes (`ghp_` / `gho_` / `ghs_` / `ghu_`) followed by 16+ alphanumerics
+//! - GitHub fine-grained tokens (`github_pat_`) and OpenAI project keys (`sk-proj-`)
 //!
 //! Replacement is `***redacted***`. The function returns the raw line
 //! unchanged when it does not match any pattern, so callers can compare
@@ -34,7 +35,7 @@ pub fn redact_line(line: &str) -> String {
         .replace_all(&out, format!("${{1}}{REDACTED}@"))
         .into_owned();
     out = url_token_re().replace_all(&out, REDACTED).into_owned();
-    out = github_token_re().replace_all(&out, REDACTED).into_owned();
+    out = api_token_re().replace_all(&out, REDACTED).into_owned();
     out
 }
 
@@ -55,9 +56,14 @@ fn url_token_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\btoken=[^\s&\r\n]+").expect("url token regex"))
 }
 
-fn github_token_re() -> &'static Regex {
+fn api_token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"gh[pous]_[A-Za-z0-9]{16,}").expect("github token regex"))
+    RE.get_or_init(|| {
+        Regex::new(
+            r"gh[pous]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-proj-[A-Za-z0-9_-]{16,}",
+        )
+        .expect("API token regex")
+    })
 }
 
 #[cfg(test)]
@@ -107,8 +113,8 @@ mod tests {
     }
 
     #[test]
-    fn redacts_other_github_token_prefixes() {
-        for prefix in ["gho_", "ghs_", "ghu_"] {
+    fn redacts_other_api_token_prefixes() {
+        for prefix in ["gho_", "ghs_", "ghu_", "github_pat_", "sk-proj-"] {
             let token = format!("{prefix}{}", "X".repeat(20));
             let line = format!("token is {token} here");
             let out = redact_line(&line);
@@ -127,9 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn does_not_redact_short_gh_words() {
-        // `gh_` followed by <16 chars should not match.
-        let line = "ghi_short and gh_abc are not tokens";
+    fn does_not_redact_short_token_prefixes() {
+        // Short prefix examples are ordinary text, not credential-shaped values.
+        let line = "ghi_short gh_abc github_pat_example sk-proj-example are not tokens";
         let out = redact_line(line);
         assert_eq!(out, line);
     }

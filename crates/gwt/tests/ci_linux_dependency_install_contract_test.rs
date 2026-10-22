@@ -415,6 +415,11 @@ mod wrapper {
             // the script would try to write /etc/apt/apt.conf.d, which on a
             // Linux host means escalating through sudo from a test.
             command.env("GWT_APT_CONF_DIR", self.path("apt.conf.d"));
+            // Recovery must never invoke the host's package manager.
+            command.env(
+                "GWT_APT_DPKG",
+                self.write_executable("fake-dpkg", "#!/usr/bin/env bash\nexit 0\n"),
+            );
             for (key, value) in extra_env {
                 command.env(key, value);
             }
@@ -459,6 +464,195 @@ exit 0
 
     fn no_lock_probe() -> &'static str {
         "#!/usr/bin/env bash\nexit 1\n"
+    }
+
+    /// #4883: kill an install with an unfinished dpkg journal, then require
+    /// recovery before the next apt invocation can succeed.
+    #[test]
+    fn an_interrupted_install_is_repaired_before_retry() {
+        check_interrupted_install_recovery(false);
+    }
+
+    #[test]
+    fn a_half_installed_dependency_is_reinstalled_without_removals() {
+        check_interrupted_install_recovery(true);
+    }
+
+    fn check_interrupted_install_recovery(configure_fails: bool) {
+        let harness = Harness::new(if configure_fails {
+            "half-installed"
+        } else {
+            "interrupted"
+        });
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt = harness.write_executable(
+            "apt",
+            r#"#!/usr/bin/env bash
+set -eu
+mkdir -p "$GWT_APT_STATE_DIR"
+if [[ "$*" == *--reinstall* ]]; then
+  [[ "$*" == *--no-remove* && "$*" == *fixture:arm64=1.0* && "$*" != *healthy* ]]
+  echo reinstall >> "$GWT_APT_STATE_DIR/order"
+  rm "$GWT_APT_STATE_DIR/journal"
+  exit 0
+fi
+echo apt >> "$GWT_APT_STATE_DIR/order"
+if [[ ! -f "$GWT_APT_STATE_DIR/killed" ]]; then
+  touch "$GWT_APT_STATE_DIR/journal"
+  rmdir "$GWT_APT_CACHE_DIR/partial"
+  mkfifo "$GWT_APT_STATE_DIR/wait"
+  touch "$GWT_APT_STATE_DIR/ready"
+  read -r line <> "$GWT_APT_STATE_DIR/wait"
+fi
+[[ ! -f "$GWT_APT_STATE_DIR/journal" ]] || { echo 'E: dpkg was interrupted' >&2; exit 100; }
+[[ -d "$GWT_APT_CACHE_DIR/partial" ]]
+echo 'Get:1 fixture package [1 kB]'
+echo 'Fetched 1 kB in 1s (1 kB/s)'
+"#,
+        );
+        let dpkg = harness.write_executable(
+            "recover-dpkg",
+            r#"#!/usr/bin/env bash
+set -eu
+[[ "$*" == '--configure -a' ]]
+echo dpkg >> "$GWT_APT_STATE_DIR/order"
+if [[ "$TEST_CONFIGURE_FAILS" == 1 ]]; then
+  echo 'dpkg: dependency is half-installed' >&2
+  exit 1
+fi
+rm "$GWT_APT_STATE_DIR/journal"
+"#,
+        );
+        let query = harness.write_executable(
+            "query-dpkg",
+            "#!/usr/bin/env bash\nprintf 'ii \\thealthy\\t2.0\\niHR\\tfixture:arm64\\t1.0\\n'\n",
+        );
+        harness.write_executable(
+            "bin/timeout",
+            r#"#!/usr/bin/env bash
+set -eu
+shift 3
+if [[ "$1" == "$GWT_APT_GET" && ! -f "$GWT_APT_STATE_DIR/killed" ]]; then
+  "$@" & child=$!
+  for _ in {1..10}; do
+    [[ -f "$GWT_APT_STATE_DIR/ready" ]] && break
+    sleep 1
+  done
+  kill -TERM "$child"
+  wait "$child" || true
+  touch "$GWT_APT_STATE_DIR/killed"
+  exit 124
+fi
+exec "$@"
+"#,
+        );
+        let path = format!(
+            "{}:{}",
+            harness.path("bin").display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = harness.run(
+            &["install", "-y", "fixture"],
+            &[
+                ("PATH", &path),
+                ("GWT_APT_GET", apt.to_str().unwrap()),
+                ("GWT_APT_DPKG", dpkg.to_str().unwrap()),
+                ("GWT_APT_DPKG_QUERY", query.to_str().unwrap()),
+                (
+                    "TEST_CONFIGURE_FAILS",
+                    if configure_fails { "1" } else { "0" },
+                ),
+                (CACHE_ENV, harness.path("archives").to_str().unwrap()),
+                ("GWT_APT_RETRY_DELAY", "0"),
+            ],
+        );
+        let log = combined(&output);
+        assert!(
+            output.status.success(),
+            "timeout recovery must succeed:\n{log}"
+        );
+        assert_eq!(
+            fs::read_to_string(harness.path("state/order")).unwrap(),
+            if configure_fails {
+                "apt\ndpkg\nreinstall\napt\n"
+            } else {
+                "apt\ndpkg\napt\n"
+            }
+        );
+        assert!(
+            log.contains("timed out after") && log.contains("acquired=1"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn an_apt_state_refusal_does_not_consume_an_attempt() {
+        let harness = Harness::new("state-refusal");
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt = harness.write_executable(
+            "apt",
+            "#!/usr/bin/env bash\necho 'E: dpkg was interrupted, run dpkg --configure -a' >&2\nexit 100\n",
+        );
+        let output = harness.run(
+            &["install"],
+            &[
+                ("GWT_APT_GET", apt.to_str().unwrap()),
+                ("GWT_APT_RETRY_DELAY", "0"),
+            ],
+        );
+        let log = combined(&output);
+        assert!(!output.status.success(), "{log}");
+        assert!(
+            log.contains("attempts=0/3") && log.contains("E: dpkg was interrupted"),
+            "{log}"
+        );
+        assert!(!log.contains("attempt=2/3"), "{log}");
+    }
+
+    #[test]
+    fn an_apt_spawn_failure_does_not_consume_an_attempt() {
+        let harness = Harness::new("spawn-refusal");
+        harness.write_executable("no-lock", no_lock_probe());
+        let output = harness.run(
+            &["install"],
+            &[
+                ("GWT_APT_GET", harness.path("missing-apt").to_str().unwrap()),
+                ("GWT_APT_RETRY_DELAY", "0"),
+            ],
+        );
+        let log = combined(&output);
+        assert!(!output.status.success(), "{log}");
+        assert!(
+            log.contains("attempts=0/3") && !log.contains("attempt=2/3"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_fatal_recovery_error_stops_before_another_install() {
+        let harness = Harness::new("recovery-fatal");
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt = harness.write_executable("apt", "#!/usr/bin/env bash\nmkdir -p \"$GWT_APT_STATE_DIR\"\necho apt >> \"$GWT_APT_STATE_DIR/order\"\nexit 124\n");
+        let dpkg = harness.write_executable("fatal-dpkg", "#!/usr/bin/env bash\necho dpkg >> \"$GWT_APT_STATE_DIR/order\"\necho 'dpkg: database is unreadable' >&2\nexit 2\n");
+        let output = harness.run(
+            &["install"],
+            &[
+                ("GWT_APT_GET", apt.to_str().unwrap()),
+                ("GWT_APT_DPKG", dpkg.to_str().unwrap()),
+                ("GWT_APT_RETRY_DELAY", "0"),
+            ],
+        );
+        let log = combined(&output);
+        assert!(!output.status.success(), "{log}");
+        assert_eq!(
+            fs::read_to_string(harness.path("state/order")).unwrap(),
+            "apt\ndpkg\n"
+        );
+        assert!(
+            log.contains("interrupted dpkg recovery failed")
+                && log.contains("dpkg: database is unreadable"),
+            "{log}"
+        );
     }
 
     /// AC-4: a dependency install that fails for a network reason is retried
@@ -568,6 +762,10 @@ exit 0
         );
         let log = combined(&output);
         assert!(output.status.success(), "ci-apt must succeed:\n{log}");
+        assert!(
+            log.contains("step=update apt_exit=0") && log.contains("step=install apt_exit=0"),
+            "{log}"
+        );
 
         let argv = fs::read_to_string(harness.path("state/argv")).expect("read argv");
         let expected = format!("Dir::Cache::archives={}", cache.display());

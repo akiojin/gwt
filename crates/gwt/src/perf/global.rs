@@ -14,7 +14,10 @@
 
 use std::{
     io,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,7 @@ use super::{
 };
 
 static GLOBAL: OnceLock<Mutex<PerfRuntime>> = OnceLock::new();
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Kill switch, budgets, smoothing and self-budget wired to one sink.
 pub struct PerfRuntime {
@@ -191,7 +195,12 @@ pub fn install(config: &PerfConfig) -> bool {
     let Ok(runtime) = PerfRuntime::from_config(config) else {
         return false;
     };
-    GLOBAL.set(Mutex::new(runtime)).is_ok()
+    let enabled = runtime.is_enabled();
+    let installed = GLOBAL.set(Mutex::new(runtime)).is_ok();
+    if installed {
+        ENABLED.store(enabled, Ordering::Relaxed);
+    }
+    installed
 }
 
 /// Install the collector from `~/.gwt/config.toml`, falling back to defaults.
@@ -210,12 +219,22 @@ pub fn install_appending_to_established_log_from_settings() -> bool {
     let Ok(runtime) = PerfRuntime::appending_to_established_log(&settings.perf) else {
         return false;
     };
-    GLOBAL.set(Mutex::new(runtime)).is_ok()
+    let enabled = runtime.is_enabled();
+    let installed = GLOBAL.set(Mutex::new(runtime)).is_ok();
+    if installed {
+        ENABLED.store(enabled, Ordering::Relaxed);
+    }
+    installed
 }
 
 /// Whether a collector has been installed in this process.
 pub fn is_installed() -> bool {
     GLOBAL.get().is_some()
+}
+
+/// The install-time kill switch, read without a foreground I/O mutex.
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
 }
 
 /// Run `action` against the installed collector, if there is one.
@@ -390,6 +409,30 @@ mod tests {
         assert_eq!(records[0].role.as_deref(), Some("read"));
         assert_eq!(records[1].target, "gwtd:pr.create");
         assert_eq!(records[1].role.as_deref(), Some("mutation"));
+    }
+
+    /// Issue #4698 AC-3 / AC-4: the cold search (model load included) and its
+    /// warm remainder are held to separate budgets. A warm remainder slowed past
+    /// its budget is a violation even while the cold total stays within its own.
+    #[test]
+    fn a_slow_warm_search_violates_its_own_budget_while_the_cold_total_stays_within() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime =
+            PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
+
+        for _ in 0..3 {
+            runtime.record_route(PerfRoute::Search, Duration::from_millis(20_000));
+            runtime.record_route(PerfRoute::SearchWarm, Duration::from_millis(9_000));
+        }
+
+        let violations: Vec<_> = read_all()
+            .into_iter()
+            .filter(|record| record.is_violation())
+            .collect();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].target, "route:search.warm");
+        assert_eq!(violations[0].budget, Some(8_000.0));
     }
 
     #[test]

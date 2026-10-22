@@ -273,14 +273,14 @@ pub enum SessionPathState {
     Error(io::Error),
 }
 
-/// Path-independent package runner used for one versioned tool launch.
+/// Legacy package runner identity retained for persisted Session compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRuntimeRunnerKind {
     Npx,
 }
 
-/// Why gwt resolved an exact package version for one tool launch.
+/// Legacy resolution reason retained for persisted Session compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRuntimeResolutionReason {
@@ -289,7 +289,7 @@ pub enum ToolRuntimeResolutionReason {
     LegacyMigration,
 }
 
-/// Durable, non-secret provenance for a versioned tool launch.
+/// Legacy package provenance retained for persisted Session compatibility.
 ///
 /// Absolute executable paths are intentionally excluded so a Session can be
 /// resumed after the npm installation or machine-local PATH changes.
@@ -305,41 +305,6 @@ pub struct ToolRuntimeProvenance {
 
 impl ToolRuntimeProvenance {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-}
-
-/// Select the machine-independent command identity stored in a [`Session`].
-///
-/// Targeted Windows Host package launches execute the absolute `npx.cmd` path
-/// selected by the launch environment, but that machine-local path must not
-/// become durable Session state. All other launch configurations retain their
-/// existing command unchanged.
-#[must_use]
-pub fn durable_session_launch_command(config: &LaunchConfig) -> String {
-    if !cfg!(windows)
-        || config.runtime_target != LaunchRuntimeTarget::Host
-        || !matches!(config.agent_id, AgentId::Codex | AgentId::ClaudeCode)
-    {
-        return config.command.clone();
-    }
-
-    let Some(provenance) = config.tool_runtime_provenance.as_ref() else {
-        return config.command.clone();
-    };
-    if config.agent_id.npm_package() != Some(provenance.official_package.as_str()) {
-        return config.command.clone();
-    }
-
-    let command_name = Path::new(&config.command)
-        .file_name()
-        .and_then(|name| name.to_str());
-    match provenance.runner_kind {
-        ToolRuntimeRunnerKind::Npx
-            if command_name.is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")) =>
-        {
-            "npx.cmd".to_string()
-        }
-        _ => config.command.clone(),
-    }
 }
 
 /// Inspect one Session path while preserving present-but-unreadable entries.
@@ -385,6 +350,9 @@ pub struct Session {
     pub repo_hash: Option<String>,
     pub branch: String,
     pub agent_id: AgentId,
+    /// Stable, gwt-assigned window name, distinct from the provider identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub agent_session_id: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
@@ -394,6 +362,10 @@ pub struct Session {
     pub session_history: Vec<AgentSessionHistoryEntry>,
     pub status: AgentStatus,
     pub tool_version: Option<String>,
+    /// Legacy selector retained for reading historical Sessions; new launches do not write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_version_selector: Option<String>,
+    /// Legacy package identity retained only for historical Session roundtrips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
     pub model: Option<String>,
@@ -423,6 +395,9 @@ pub struct Session {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
     pub linked_issue_number: Option<u64>,
+    /// Independent review dispatch, distinct from a producing agent session.
+    #[serde(default)]
+    pub review_dispatch: bool,
     /// Issue #4217 FR-002: who started this session. Stamped by the launcher,
     /// which is the only party that knows; every gate that used to sniff
     /// `GWT_AUTONOMOUS_EXECUTION` reads this instead. Absent in legacy records,
@@ -444,10 +419,16 @@ pub struct Session {
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
+    /// Non-secret effective Codex authentication root captured at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth_root: Option<crate::CodexAuthRoot>,
     /// GUI window lifecycle flag used by startup restore. Conversation
     /// history alone must not reopen a window after the user closed it.
     #[serde(default)]
     pub restore_window_on_startup: bool,
+    /// Consecutive mid-turn interruptions; two exhaust the automatic retry budget.
+    #[serde(default)]
+    pub consecutive_interruptions: u8,
     /// Active backend override id, if any (SPEC-1921 FR-102).
     /// `None` means the agent launched against its default upstream
     /// (no env override). Set only for built-in agents that support
@@ -545,7 +526,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -565,10 +546,12 @@ impl Session {
             repo_hash,
             branch: branch.into(),
             agent_id,
+            agent_name: None,
             agent_session_id: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
             tool_version: None,
+            tool_version_selector: None,
             tool_runtime_provenance: None,
             model: None,
             reasoning_level: None,
@@ -582,6 +565,7 @@ impl Session {
             execution_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            review_dispatch: false,
             launch_route: LaunchRoute::Manual,
             launch_origin: SessionLaunchOrigin::Launch,
             restore_source_session_id: None,
@@ -589,7 +573,9 @@ impl Session {
             workflow_bypass_armed_at: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
+            codex_auth_root: None,
             restore_window_on_startup: false,
+            consecutive_interruptions: 0,
             backend_id: None,
             windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
@@ -619,7 +605,6 @@ impl Session {
         let mut session = Self::new(worktree_path, branch, config.agent_id.clone());
         session.display_name = config.display_name.clone();
         session.tool_version = config.tool_version.clone();
-        session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
         session.model = config.model.clone();
         session.reasoning_level = config.reasoning_level.clone();
         session.session_mode = config.session_mode;
@@ -630,9 +615,14 @@ impl Session {
         session.docker_service = config.docker_service.clone();
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
+        session.review_dispatch = config
+            .env_vars
+            .get("GWT_REVIEW_DISPATCH")
+            .is_some_and(|value| value.trim() == "1");
         session.launch_route = config.launch_route;
-        session.launch_command = durable_session_launch_command(config);
+        session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
+        session.codex_auth_root = config.validated_codex_auth_root_for_cwd(&session.worktree_path);
         session.windows_shell = config.windows_shell;
         session.update_status(AgentStatus::Running);
         session
@@ -716,6 +706,15 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
+    /// Apply hook status without reviving an explicitly stopped or closed Session.
+    /// Explicit launch enables restore before the new child's hooks run.
+    pub fn record_hook_status(&mut self, status: AgentStatus) {
+        if self.status == AgentStatus::Stopped && !self.restore_window_on_startup {
+            return;
+        }
+        self.update_status(status);
+    }
+
     /// Persist that a managed runtime hook was observed for this session.
     pub fn record_hook_event(&mut self, event: &str) {
         let now = Utc::now();
@@ -723,12 +722,13 @@ impl Session {
         self.last_hook_event_at = Some(now);
         self.updated_at = now;
         if let Some(status) = hook_event_status(event) {
-            self.update_status(status);
+            self.record_hook_status(status);
         }
     }
 
     /// Persist that the latest Stop hook was allowed to complete.
     pub fn record_completed_stop(&mut self) {
+        self.consecutive_interruptions = 0;
         let now = Utc::now();
         self.last_completed_stop_at = Some(now);
         self.updated_at = now;
@@ -736,7 +736,35 @@ impl Session {
             self.last_hook_event = Some("Stop".to_string());
             self.last_hook_event_at = Some(now);
         }
-        self.update_status(AgentStatus::Idle);
+        self.record_hook_status(AgentStatus::Idle);
+    }
+
+    /// Record a process death without a completed Stop boundary.
+    /// Persist with the existing Session update transaction before retrying.
+    pub fn record_interruption(&mut self) {
+        self.consecutive_interruptions = self.consecutive_interruptions.saturating_add(1).min(2);
+        if self.consecutive_interruptions == 2 {
+            self.restore_window_on_startup = false;
+        }
+        self.update_status(AgentStatus::Interrupted);
+    }
+
+    /// Carry the retry budget into an exact automatic-resume successor before spawn.
+    pub fn inherit_interruption_count(&mut self, source: &Self) {
+        self.consecutive_interruptions = source.consecutive_interruptions.min(2);
+    }
+
+    /// Keep a stopped Session in history without granting startup restore authority.
+    pub fn record_terminal_stop(&mut self) {
+        self.restore_window_on_startup = false;
+        self.update_status(AgentStatus::Stopped);
+    }
+
+    /// Reset the retry budget only after a manual exact resume reaches Running.
+    pub fn record_manual_resume(&mut self) {
+        self.consecutive_interruptions = 0;
+        self.restore_window_on_startup = true;
+        self.update_status(AgentStatus::Running);
     }
 
     /// Whether the latest hook lifecycle indicates the session did not reach a
@@ -978,8 +1006,16 @@ impl Session {
     /// legacy migration applied should use [`Session::load_and_migrate`].
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut session: Self = toml::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut session: Self = toml::from_str(&content).map_err(|error| {
+            tracing::warn!(path = %path.display(), %error, "Cannot load session; leaving it unchanged");
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        session.normalize_fast_mode_fields();
+        Ok(session)
+    }
+
+    pub(crate) fn from_toml_value(value: toml::Value) -> Result<Self, toml::de::Error> {
+        let mut session: Self = value.try_into()?;
         session.normalize_fast_mode_fields();
         Ok(session)
     }
@@ -1017,7 +1053,9 @@ impl Session {
         }
 
         if self.schema_version < 3 {
-            if self.worktree_path.exists() {
+            if self.worktree_path.exists()
+                && !matches!(self.status, AgentStatus::Stopped | AgentStatus::Unknown)
+            {
                 self.status = AgentStatus::Interrupted;
             }
             self.schema_version = 3;
@@ -1030,6 +1068,13 @@ impl Session {
             // `Unknown feature flag: goals` (Issue #4127).
             scrub_legacy_codex_feature_enablement(&self.agent_id, &mut self.launch_args, "goals");
             self.schema_version = 4;
+        }
+
+        if self.schema_version < 5 {
+            // Schema 4 -> 5: older Sessions have no interruption streak.
+            // Keep the existing identity, lifecycle evidence, and restore policy.
+            self.consecutive_interruptions = 0;
+            self.schema_version = 5;
         }
     }
 
@@ -1336,6 +1381,120 @@ where
         )),
         SessionPathState::Error(error) => Err(error),
     })
+}
+
+/// Lease two distinct Sessions in lexical order under an already-held owner
+/// lease. A single thread guard covers the pair; ordinary nested Session
+/// leases remain forbidden. The callback receives Sessions in caller order.
+pub fn with_session_pair_lease<T>(
+    sessions_dir: &Path,
+    session_ids: [&str; 2],
+    operation: impl FnOnce([Session; 2]) -> io::Result<T>,
+) -> io::Result<T> {
+    let _thread_guard = SessionLeaseThreadGuard::enter()?;
+    if session_ids[0] == session_ids[1] {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session pair must be distinct",
+        ));
+    }
+    for id in session_ids {
+        validate_session_id_path_component(id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    }
+    fs::create_dir_all(sessions_dir)?;
+    let mut ordered = session_ids;
+    ordered.sort_unstable();
+    let deadline = Instant::now() + SESSION_LEASE_WAIT;
+    let mut locks = Vec::with_capacity(2);
+    for id in ordered {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(session_lock_path(sessions_dir, id))?;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "Session pair lease is held; retry after it settles",
+                        ));
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        locks.push(file);
+    }
+    let sessions = [
+        Session::load(&session_file_path(sessions_dir, session_ids[0]))?,
+        Session::load(&session_file_path(sessions_dir, session_ids[1]))?,
+    ];
+    let result = operation(sessions);
+    // File ownership is the RAII lock guard, including every early error.
+    drop(locks);
+    result
+}
+
+/// Finalize an exact observed runtime after its child exit was proved by the
+/// caller. Supports unbound duplicate Sessions as well as bound ones. Both
+/// durable snapshots must still match under the caller's Session lease.
+pub fn persist_observed_session_runtime_stopped_under_lease(
+    sessions_dir: &Path,
+    expected: &Session,
+    host_pid: u32,
+    expected_runtime: &SessionRuntimeState,
+) -> io::Result<bool> {
+    require_current_thread_session_lease()?;
+    validate_session_id_path_component(&expected.id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if host_pid == 0
+        || expected_runtime
+            .runtime_incarnation
+            .is_none_or(|value| value == 0)
+        || expected_runtime
+            .host_started_at
+            .is_none_or(|value| value == 0)
+        || expected_runtime.child_pid.is_none_or(|value| value == 0)
+        || expected_runtime
+            .child_started_at
+            .is_none_or(|value| value == 0)
+    {
+        return Ok(false);
+    }
+    let path = session_file_path(sessions_dir, &expected.id);
+    let mut current = Session::load(&path)?;
+    if serialize_session_toml(&current)? != serialize_session_toml(expected)? {
+        return Ok(false);
+    }
+    let runtime_path = runtime_state_path_for_pid(sessions_dir, host_pid, &expected.id);
+    let mut runtime = SessionRuntimeState::load(&runtime_path)?;
+    if runtime.execution_identity != expected_runtime.execution_identity
+        || runtime.runtime_incarnation != expected_runtime.runtime_incarnation
+        || runtime.host_started_at != expected_runtime.host_started_at
+        || runtime.child_pid != expected_runtime.child_pid
+        || runtime.child_started_at != expected_runtime.child_started_at
+    {
+        return Ok(false);
+    }
+    current.update_status(AgentStatus::Stopped);
+    current.restore_window_on_startup = false;
+    runtime.status = AgentStatus::Stopped;
+    runtime.updated_at = Utc::now();
+    write_session_toml_atomic(&path, &serialize_session_toml(&current)?)?;
+    runtime.save(&runtime_path)?;
+    Ok(true)
 }
 
 fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
@@ -1836,6 +1995,7 @@ impl SessionRuntimeState {
 
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let _publication = runtime_publication_lease(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1870,6 +2030,43 @@ impl SessionRuntimeState {
         serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
+}
+
+/// Retain this shared lease from reading a runtime sidecar through publishing
+/// its replacement. GC takes the exclusive counterpart only during unlink.
+/// Acquire after any Session lease; paths outside the PID runtime layout have
+/// no namespace to collect and return `None`. Contention is bounded by the
+/// existing Session persistence wait, rather than stalling a hook indefinitely.
+pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
+    let publication = path
+        .parent()
+        .and_then(Path::parent)
+        .filter(|root| root.file_name().is_some_and(|name| name == "runtime"))
+        .and_then(Path::parent)
+        .map(crate::runtime_gc::runtime_publication_lock)
+        .transpose()?;
+    if let Some(publication) = publication.as_ref() {
+        let deadline = Instant::now() + SESSION_LEASE_WAIT;
+        loop {
+            match FileExt::try_lock_shared(publication) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(publication)
 }
 
 /// Return the JSON sidecar path for a session runtime state record.
@@ -2634,9 +2831,10 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
 }
 
 /// Persist one hook event and an optional provider Session id under one
-/// bounded lease. A contended lease returns `WouldBlock` without changing the
-/// durable Session so the caller can fail open and keep action-critical hook
-/// output within its wall-clock budget.
+/// bounded lease. SessionStart with a supplied provider id uses the durable
+/// durable Session transaction: readiness cannot precede its identity commit.
+/// Other bookkeeping uses a bounded lease and returns `WouldBlock` unchanged
+/// so latency-critical hooks can fail open within their wall-clock budget.
 pub fn persist_session_hook_metadata_with_wait(
     sessions_dir: &Path,
     session_id: &str,
@@ -2648,25 +2846,29 @@ pub fn persist_session_hook_metadata_with_wait(
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    update_session_with_wait_and_durability(
-        sessions_dir,
-        session_id,
-        wait,
-        // Issue #3777: the hook only stamps liveness here and the next hook
-        // event rewrites it, so this write must not wait for the device inside
-        // the UserPromptSubmit budget.
-        SessionDurability::RenameOnly,
-        |session| {
-            if let Some(agent_session_id) = agent_session_id {
-                apply_agent_session_id(session, agent_session_id);
-            }
-            if session.project_state_root.is_none() {
-                session.project_state_root = project_state_root.map(Path::to_path_buf);
-            }
-            session.record_hook_event(event);
-            Ok(())
-        },
-    )
+    let update = |session: &mut Session| {
+        if let Some(agent_session_id) = agent_session_id {
+            apply_agent_session_id(session, agent_session_id);
+        }
+        if session.project_state_root.is_none() {
+            session.project_state_root = project_state_root.map(Path::to_path_buf);
+        }
+        session.record_hook_event(event);
+        Ok(())
+    };
+    if event == "SessionStart" && agent_session_id.is_some() {
+        update_session_with_wait(sessions_dir, session_id, wait, update)
+    } else {
+        // Issue #3777: liveness must not wait for the device inside the
+        // UserPromptSubmit budget.
+        update_session_with_wait_and_durability(
+            sessions_dir,
+            session_id,
+            wait,
+            SessionDurability::RenameOnly,
+            update,
+        )
+    }
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -2778,6 +2980,10 @@ mod tests {
         assert!(!session.skip_permissions);
         assert!(!session.fast_mode);
         assert!(!session.codex_fast_mode);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            false
+        );
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
         assert!(session.docker_service.is_none());
         assert!(session.docker_runtime_binding.is_none());
@@ -2792,26 +2998,45 @@ mod tests {
     }
 
     #[test]
+    fn assigned_agent_name_survives_session_persistence_and_legacy_absence() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let mut value = serde_json::to_value(&session).unwrap();
+        value["agent_name"] = serde_json::json!("ハヤテ");
+        let named: Session = serde_json::from_value(value).unwrap();
+        let persisted = toml::to_string(&named).unwrap();
+        let restored: Session = toml::from_str(&persisted).unwrap();
+        let mut value = serde_json::to_value(restored).unwrap();
+        assert_eq!(value["agent_name"], "ハヤテ");
+        value.as_object_mut().unwrap().remove("agent_name");
+        let legacy: Session = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
+    }
+
+    #[test]
     fn session_launch_origin_preserves_restore_provenance_and_defaults_legacy_to_unknown() {
         let session = Session::new("/tmp/wt", "main", AgentId::Codex);
         let mut value = serde_json::to_value(&session).expect("serialize Session");
         assert_eq!(value["launch_origin"], "launch");
         value["launch_origin"] = serde_json::json!("automatic_restore");
         value["restore_source_session_id"] = serde_json::json!("source-session");
+        value["review_dispatch"] = serde_json::json!(true);
         let restored: Session = serde_json::from_value(value.clone()).expect("restore metadata");
         let persisted = toml::to_string(&restored).expect("persist restore metadata");
         let roundtrip: Session = toml::from_str(&persisted).expect("read restore metadata");
         let roundtrip = serde_json::to_value(roundtrip).expect("inspect restore metadata");
         assert_eq!(roundtrip["launch_origin"], "automatic_restore");
         assert_eq!(roundtrip["restore_source_session_id"], "source-session");
+        assert_eq!(roundtrip["review_dispatch"], true);
 
         let legacy = value.as_object_mut().expect("Session object");
         legacy.remove("launch_origin");
         legacy.remove("restore_source_session_id");
+        legacy.remove("review_dispatch");
         let legacy: Session = serde_json::from_value(value).expect("read legacy Session");
         let legacy = serde_json::to_value(legacy).expect("inspect legacy Session");
         assert_eq!(legacy["launch_origin"], "unknown");
         assert!(legacy["restore_source_session_id"].is_null());
+        assert_eq!(legacy["review_dispatch"], false);
     }
 
     #[test]
@@ -3952,7 +4177,9 @@ display_name = "Codex"
                 std::time::Duration::from_secs(1),
                 |_| {
                     lease_acquired_tx.send(()).expect("signal Session lease");
-                    release_lease_rx.recv().expect("release Session lease");
+                    // Release obsolete blocking writers on RED; assertions
+                    // check their result rather than elapsed wall-clock time.
+                    let _ = release_lease_rx.recv_timeout(Duration::from_secs(10));
                     Ok(())
                 },
             )
@@ -3973,8 +4200,22 @@ display_name = "Codex"
         assert!(timeout.to_string().contains("retry"));
         assert!(!timeout.to_string().contains(&session_id));
 
-        release_lease_tx.send(()).expect("release Session lease");
+        let identity_commit = persist_session_hook_metadata_with_wait(
+            dir.path(),
+            &session_id,
+            "SessionStart",
+            Some("provider-bounded-start"),
+            None,
+            Duration::ZERO,
+        );
+        let _ = release_lease_tx.send(());
         lease_worker.join().expect("join Session lease holder");
+        assert_eq!(
+            identity_commit
+                .expect_err("SessionStart identity commit must respect its lease wait")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         with_session_lease_wait(
             dir.path(),
             &session_id,
@@ -4290,10 +4531,39 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn removed_gemini_session_is_rejected_without_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-gemini.toml");
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let encoded = toml::to_string(&session)
+            .unwrap()
+            .replace("type = \"Codex\"", "type = \"Gemini\"");
+        std::fs::write(&path, encoded).unwrap();
+        let log_file = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log_file.try_clone().unwrap())
+            .finish();
+        let error =
+            tracing::subscriber::with_default(subscriber, || Session::load(&path)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("unknown variant `Gemini`"));
+        use std::io::{Read, Seek};
+        let mut log_file = log_file;
+        log_file.rewind().unwrap();
+        let mut warning = String::new();
+        log_file.read_to_string(&mut warning).unwrap();
+        assert!(warning.contains("WARN"), "{warning}");
+        assert!(warning.contains("unknown variant `Gemini`"), "{warning}");
+        assert!(warning.contains("legacy-gemini.toml"), "{warning}");
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
-        session.model = Some("gemini-3-flash-preview".into());
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::OpenCode);
+        session.model = Some("test-model".into());
         session.tool_version = Some("0.1.0".into());
         session.agent_session_id = Some("agent-abc".into());
         session.reasoning_level = Some("high".into());
@@ -4319,8 +4589,8 @@ display_name = "Claude Code"
         let loaded = Session::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.branch, "feature/x");
-        assert_eq!(loaded.agent_id, AgentId::Gemini);
-        assert_eq!(loaded.model, Some("gemini-3-flash-preview".into()));
+        assert_eq!(loaded.agent_id, AgentId::OpenCode);
+        assert_eq!(loaded.model, Some("test-model".into()));
         assert_eq!(loaded.tool_version, Some("0.1.0".into()));
         assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
         assert_eq!(loaded.reasoning_level, Some("high".into()));
@@ -4343,7 +4613,7 @@ display_name = "Claude Code"
             ]
         );
         assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
-        assert_eq!(loaded.display_name, "Gemini CLI (legacy)");
+        assert_eq!(loaded.display_name, "OpenCode");
     }
 
     #[test]
@@ -4351,6 +4621,7 @@ display_name = "Claude Code"
         let dir = tempfile::tempdir().expect("tempdir");
         let mut session = Session::new("/tmp/wt", "feature/npx-plan", AgentId::Codex);
         session.tool_version = Some("latest".to_string());
+        session.tool_version_selector = Some("latest".to_string());
         session.tool_runtime_provenance = Some(ToolRuntimeProvenance {
             schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
             official_package: "@openai/codex".to_string(),
@@ -4365,6 +4636,8 @@ display_name = "Claude Code"
         let persisted = std::fs::read_to_string(&path).expect("read Session");
         let loaded = Session::load(&path).expect("load Session");
 
+        assert_eq!(loaded.tool_version, session.tool_version);
+        assert_eq!(loaded.tool_version_selector, session.tool_version_selector);
         assert_eq!(
             loaded.tool_runtime_provenance,
             session.tool_runtime_provenance
@@ -4423,7 +4696,7 @@ display_name = "Claude Code"
     fn load_legacy_toml_without_runtime_fields_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.toml");
-        let session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::OpenCode);
         let mut legacy = toml::map::Map::new();
         legacy.insert("id".into(), toml::Value::String(session.id.clone()));
         legacy.insert(
@@ -4444,7 +4717,7 @@ display_name = "Claude Code"
             toml::Value::try_from(session.status).unwrap(),
         );
         legacy.insert("tool_version".into(), toml::Value::String("1.2.3".into()));
-        legacy.insert("model".into(), toml::Value::String("gemini-pro".into()));
+        legacy.insert("model".into(), toml::Value::String("test-model".into()));
         legacy.insert("reasoning_level".into(), toml::Value::String("high".into()));
         legacy.insert("skip_permissions".into(), toml::Value::Boolean(true));
         legacy.insert("codex_fast_mode".into(), toml::Value::Boolean(false));
@@ -5159,6 +5432,68 @@ display_name = "Claude Code"
 
         assert_eq!(runtime.execution_identity.as_ref(), Some(&identity));
         assert_eq!(runtime.runtime_incarnation, Some(17));
+    }
+
+    #[test]
+    fn bridge_diagnostic_is_exact_launch_scoped_and_cleared_only_by_same_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let path = runtime_state_path(dir.path(), &session.id);
+        let runtime = SessionRuntimeState::for_execution_process(
+            AgentStatus::Running,
+            &identity,
+            17,
+            100,
+            123,
+            101,
+        );
+        runtime.save(&path).unwrap();
+        let request = crate::SessionBridgeObservation::capture(&path, &session.id)
+            .unwrap()
+            .unwrap();
+        request
+            .record(crate::HostBridgeKind::WorkspaceUpdate, true)
+            .unwrap();
+        assert!(crate::has_unresolved_host_bridge_fault(&path, &runtime).unwrap());
+        // Runtime inventory treats every *.json filename as a Session id.
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count(),
+            1
+        );
+
+        let request = crate::SessionBridgeObservation::capture(&path, &session.id)
+            .unwrap()
+            .unwrap();
+        request
+            .record(crate::HostBridgeKind::WorkTerminalization, false)
+            .unwrap();
+        assert!(crate::has_unresolved_host_bridge_fault(&path, &runtime).unwrap());
+        // Hook updates replace the runtime sidecar, not the adjacent receipt.
+        let mut hooked = runtime.clone();
+        hooked.source_event = Some("PostToolUse".into());
+        hooked.save(&path).unwrap();
+        assert!(crate::has_unresolved_host_bridge_fault(&path, &hooked).unwrap());
+        let success = crate::SessionBridgeObservation::capture(&path, &session.id)
+            .unwrap()
+            .unwrap();
+        success
+            .record(crate::HostBridgeKind::WorkspaceUpdate, false)
+            .unwrap();
+        assert!(!crate::has_unresolved_host_bridge_fault(&path, &runtime).unwrap());
+        let late = crate::SessionBridgeObservation::capture(&path, &session.id)
+            .unwrap()
+            .unwrap();
+        let mut successor = runtime.clone();
+        successor.runtime_incarnation = Some(18);
+        successor.save(&path).unwrap();
+        assert!(!late
+            .record(crate::HostBridgeKind::WorkspaceUpdate, true)
+            .unwrap());
+        assert!(!crate::has_unresolved_host_bridge_fault(&path, &successor).unwrap());
     }
 
     fn save_bound_session_for_fence_test(
@@ -5995,14 +6330,9 @@ display_name = "Claude Code"
         let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir("/tmp/worktree")
             .branch("feature/demo")
-            .version("0.122.0")
             .build();
-        config.command = "npx".to_string();
-        config.args = vec![
-            "--yes".to_string(),
-            "@openai/codex@0.122.0".to_string(),
-            "--no-alt-screen".to_string(),
-        ];
+        config.tool_version = Some("0.122.0".to_string());
+        config.args = vec!["--no-alt-screen".to_string()];
         config.model = Some("gpt-5.5".to_string());
         config.reasoning_level = Some("high".to_string());
         config.skip_permissions = true;
@@ -6013,20 +6343,19 @@ display_name = "Claude Code"
         config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
         config.linked_issue_number = Some(1921);
         config.session_mode = crate::SessionMode::Continue;
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
 
         let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
 
         assert_eq!(session.branch, "feature/demo");
         assert_eq!(session.agent_id, AgentId::Codex);
-        assert_eq!(session.launch_command, "npx");
-        assert_eq!(
-            session.launch_args,
-            vec![
-                "--yes".to_string(),
-                "@openai/codex@0.122.0".to_string(),
-                "--no-alt-screen".to_string(),
-            ]
-        );
+        assert_eq!(session.launch_command, "codex");
+        assert_eq!(session.launch_args, vec!["--no-alt-screen".to_string()]);
+        assert_eq!(session.tool_version.as_deref(), Some("0.122.0"));
+        assert!(session.tool_version_selector.is_none());
+        assert!(session.tool_runtime_provenance.is_none());
         assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(session.reasoning_level.as_deref(), Some("high"));
         assert!(session.skip_permissions);
@@ -6041,6 +6370,10 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            true
+        );
     }
 
     /// Issue #4217 AC-2: the launch route reaches the durable Session, which
@@ -6114,113 +6447,6 @@ display_name = "Claude Code"
         let decoded: Session = toml::from_str(&encoded).expect("deserialize Grok Build session");
         assert_eq!(decoded.agent_id, AgentId::GrokBuild);
         assert_eq!(decoded.launch_args, session.launch_args);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn session_from_launch_config_does_not_persist_absolute_targeted_npx_runner() {
-        for (agent_id, package) in [
-            (AgentId::Codex, "@openai/codex"),
-            (AgentId::ClaudeCode, "@anthropic-ai/claude-code"),
-        ] {
-            let mut config = crate::AgentLaunchBuilder::new(agent_id)
-                .working_dir(r"C:\worktree")
-                .branch("feature/npx-plan")
-                .version("latest")
-                .build();
-            config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
-            config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-                schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-                official_package: package.to_string(),
-                requested_selector: "latest".to_string(),
-                resolved_exact_version: "0.122.0".to_string(),
-                runner_kind: ToolRuntimeRunnerKind::Npx,
-                resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-            });
-
-            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", &config);
-            let sessions_dir = tempfile::tempdir().expect("sessions dir");
-            session.save(sessions_dir.path()).expect("persist Session");
-            let persisted =
-                std::fs::read_to_string(sessions_dir.path().join(format!("{}.toml", session.id)))
-                    .expect("read persisted Session");
-
-            assert_eq!(session.launch_command, "npx.cmd");
-            assert_eq!(config.command, r"C:\Program Files\nodejs\npx.cmd");
-            assert!(persisted.contains("launch_command = \"npx.cmd\""));
-            assert!(!persisted.contains("Program Files"));
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn session_from_launch_config_preserves_absolute_runner_outside_targeted_provenance() {
-        let absolute_npx = r"C:\Program Files\nodejs\npx.cmd";
-        let mut without_provenance = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        without_provenance.command = absolute_npx.to_string();
-
-        let mut unrelated = crate::AgentLaunchBuilder::new(AgentId::Gemini)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        unrelated.command = absolute_npx.to_string();
-        unrelated.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@google/gemini-cli".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.1.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        let mut container = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir(r"C:\worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        container.command = absolute_npx.to_string();
-        container.runtime_target = LaunchRuntimeTarget::Docker;
-        container.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@openai/codex".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.122.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        for config in [&without_provenance, &unrelated, &container] {
-            let session = Session::from_launch_config(r"C:\worktree", "feature/npx-plan", config);
-            assert_eq!(session.launch_command, absolute_npx);
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn session_from_launch_config_preserves_non_windows_runner_path() {
-        let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
-            .working_dir("/tmp/worktree")
-            .branch("feature/npx-plan")
-            .version("latest")
-            .build();
-        config.command = "/opt/node/bin/npx".to_string();
-        config.tool_runtime_provenance = Some(ToolRuntimeProvenance {
-            schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
-            official_package: "@openai/codex".to_string(),
-            requested_selector: "latest".to_string(),
-            resolved_exact_version: "0.122.0".to_string(),
-            runner_kind: ToolRuntimeRunnerKind::Npx,
-            resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
-        });
-
-        let session = Session::from_launch_config("/tmp/worktree", "feature/npx-plan", &config);
-
-        assert_eq!(session.launch_command, "/opt/node/bin/npx");
     }
 
     #[test]
@@ -6329,6 +6555,84 @@ display_name = "Claude Code"
             !session.exact_auto_resume_candidate(),
             "Codex hook placeholder ids are not valid `codex resume <id>` targets"
         );
+    }
+
+    #[test]
+    fn interruption_count_defaults_when_loading_schema_four() {
+        let mut session = Session::new("/tmp/wt", "work/recovery", AgentId::Codex);
+        session.schema_version = 4;
+        session.status = AgentStatus::Stopped;
+        session.agent_session_id = Some("exact-conversation".into());
+        let mut value = toml::Value::try_from(&session).unwrap();
+        value
+            .as_table_mut()
+            .unwrap()
+            .remove("consecutive_interruptions");
+        let mut loaded: Session = value.try_into().unwrap();
+        assert_eq!(loaded.consecutive_interruptions, 0);
+        loaded.migrate_legacy_launch_args();
+        assert_eq!(loaded.schema_version, 5);
+        assert_eq!(loaded.status, AgentStatus::Stopped);
+        assert_eq!(loaded.agent_session_id, session.agent_session_id);
+        assert_eq!(
+            loaded.restore_window_on_startup,
+            session.restore_window_on_startup
+        );
+        loaded.record_interruption();
+        loaded.migrate_legacy_launch_args();
+        assert_eq!(loaded.consecutive_interruptions, 1);
+    }
+
+    #[test]
+    fn interruption_count_saturates_and_survives_successor_roundtrip() {
+        let mut source = Session::new("/tmp/wt", "work/recovery", AgentId::Codex);
+        source.restore_window_on_startup = true;
+        source.record_interruption();
+        assert_eq!(source.consecutive_interruptions, 1);
+        assert_eq!(source.status, AgentStatus::Interrupted);
+        assert!(source.restore_window_on_startup);
+        let mut successor = Session::new("/tmp/wt", "work/recovery", AgentId::Codex);
+        successor.inherit_interruption_count(&source);
+        let mut successor: Session = toml::from_str(&toml::to_string(&successor).unwrap()).unwrap();
+        assert_eq!(successor.consecutive_interruptions, 1);
+        successor.restore_window_on_startup = true;
+        successor.record_interruption();
+        successor.record_interruption();
+        assert_eq!(successor.consecutive_interruptions, 2);
+        assert!(!successor.restore_window_on_startup);
+    }
+
+    #[test]
+    fn interruption_count_resets_only_on_completed_stop_or_manual_resume() {
+        let mut session = Session::new("/tmp/wt", "work/recovery", AgentId::Codex);
+        session.record_interruption();
+        session.record_hook_event("Stop");
+        assert_eq!(session.consecutive_interruptions, 1);
+        session.record_completed_stop();
+        assert_eq!(session.consecutive_interruptions, 0);
+        assert_eq!(session.status, AgentStatus::Idle);
+        session.record_interruption();
+        session.restore_window_on_startup = true;
+        session.record_terminal_stop();
+        assert_eq!(session.consecutive_interruptions, 1);
+        assert_eq!(session.status, AgentStatus::Stopped);
+        assert!(!session.restore_window_on_startup);
+        session.record_manual_resume();
+        assert_eq!(session.consecutive_interruptions, 0);
+        assert_eq!(session.status, AgentStatus::Running);
+        assert!(session.restore_window_on_startup);
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_preserves_terminal_and_unknown_status() {
+        let dir = tempfile::tempdir().unwrap();
+        for status in [AgentStatus::Stopped, AgentStatus::Unknown] {
+            let mut session = Session::new(dir.path(), "work/recovery", AgentId::Codex);
+            session.schema_version = 2;
+            session.status = status;
+            session.migrate_legacy_launch_args();
+            assert_eq!(session.status, status);
+        }
     }
 
     #[test]

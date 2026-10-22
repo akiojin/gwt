@@ -16,8 +16,8 @@ use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
-    persist_session_hook_metadata_with_wait, persist_session_status, AgentStatus,
-    PendingDiscussionResume, Session, SessionRuntimeState,
+    persist_session_hook_metadata_with_wait, AgentStatus, PendingDiscussionResume, Session,
+    SessionRuntimeState,
 };
 use serde::Serialize;
 
@@ -54,6 +54,7 @@ pub fn status_for_event(event: &str) -> Option<&'static str> {
         crate::persistence::WindowState::Waiting => Some("Waiting"),
         crate::persistence::WindowState::Stopped => Some("Stopped"),
         crate::persistence::WindowState::Error => Some("Error"),
+        crate::persistence::WindowState::Interrupted => Some("Interrupted"),
     }
 }
 
@@ -89,6 +90,7 @@ fn write_state_with_status(
     status: &str,
     pending_discussion: Option<PendingDiscussionResume>,
 ) -> Result<(), HookError> {
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let state = RuntimeState {
         status: status.to_string(),
@@ -156,6 +158,9 @@ pub(crate) fn record_hook_event_completed_from_env() {
         return;
     };
     let runtime_path = PathBuf::from(runtime_path);
+    let Ok(_publication) = gwt_agent::session::runtime_publication_lease(&runtime_path) else {
+        return;
+    };
     let Ok(raw) = std::fs::read_to_string(&runtime_path) else {
         return;
     };
@@ -340,7 +345,8 @@ pub(crate) fn handle_with_input_prepared(
             })
         });
         let agent_session_id_to_sync = agent_session_id.as_ref().filter(|agent_session_id| {
-            agent_session_id_needs_sync(session.as_ref(), agent_session_id)
+            event == "SessionStart"
+                || agent_session_id_needs_sync(session.as_ref(), agent_session_id)
         });
         let persisted = timed_substage(event, "runtime-state/session-metadata", || {
             persist_session_hook_metadata_with_wait(
@@ -356,6 +362,23 @@ pub(crate) fn handle_with_input_prepared(
             Ok(updated) => session = Some(updated),
             Err(error) => {
                 log_session_metadata_error("record hook metadata for", &gwt_session_id, &error);
+                if event == "SessionStart" && agent_session_id.is_some() {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+
+    if event == "SessionStart" {
+        if let Some(expected) = agent_session_id.as_ref() {
+            if session.as_ref().and_then(Session::exact_resume_session_id)
+                != Some(expected.as_str())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    session_start_persisted_id_missing_message(gwt_session_id.as_str()),
+                )
+                .into());
             }
         }
     }
@@ -395,13 +418,13 @@ pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<Stri
     };
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     match resolve_hook_agent_session_id(session.as_ref(), hook_event.as_ref()) {
-        HookAgentSessionId::Provided(_) => {
+        HookAgentSessionId::Provided(expected) => {
             let Some(session) = current_session_for_id(&sessions_dir, &gwt_session_id) else {
                 return Some(session_start_persisted_id_missing_message(
                     gwt_session_id.as_str(),
                 ));
             };
-            if session.exact_resume_session_id().is_some() {
+            if session.exact_resume_session_id() == Some(expected.as_str()) {
                 None
             } else {
                 Some(session_start_persisted_id_missing_message(
@@ -462,9 +485,14 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     if session.is_some() {
-        if let Err(error) =
-            persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)
-        {
+        if let Err(error) = gwt_agent::update_session_if_changed(
+            &sessions_dir,
+            gwt_session_id.as_str(),
+            |session| {
+                session.record_hook_status(AgentStatus::Running);
+                Ok(())
+            },
+        ) {
             log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
         }
     }
@@ -720,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_input_fails_open_when_corrupt_metadata_has_hook_session_id() {
+    fn session_start_rejects_corrupt_metadata_with_provider_identity() {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("sessions");
@@ -739,12 +767,62 @@ mod tests {
         );
 
         handle_with_input("SessionStart", r#"{"session_id":"agent-123"}"#)
-            .expect("corrupt metadata with a hook session_id must fail open");
+            .expect_err("SessionStart must not accept an uncommitted provider identity");
+        assert!(
+            !runtime_path.exists(),
+            "failed identity must not publish Idle"
+        );
+    }
 
-        let raw = std::fs::read_to_string(&runtime_path).unwrap();
-        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(state.status, "Idle");
-        assert_eq!(state.source_event, "SessionStart");
+    #[test]
+    fn session_start_rejects_failed_identity_commit_under_session_lease() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        env.unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        env.unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/issue-5102", AgentId::Codex);
+        session.agent_session_id = Some("source-provider-5102".to_string());
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+        // A held canonical lease rejects a nested writer deterministically;
+        // no wall-clock ordering is needed to exercise persistence failure.
+        gwt_agent::with_session_path_lease(&sessions_dir, &session.id, |_| {
+            crate::daemon_runtime::handle_runtime_state(
+                "SessionStart",
+                r#"{"session_id":"provider-5102"}"#,
+            )
+            .expect_err("a failed identity commit must not reach hook-live success");
+            Ok(())
+        })
+        .unwrap();
+
+        let loaded = Session::load(&sessions_dir.join(format!("{}.toml", session.id))).unwrap();
+        assert_eq!(loaded.agent_session_id, session.agent_session_id);
+        assert!(!runtime_path.exists());
+    }
+
+    #[test]
+    fn session_start_diagnostic_rejects_a_different_persisted_provider_id() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/issue-5102", AgentId::ClaudeCode);
+        session.agent_session_id = Some("source-provider-5102".to_string());
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+        assert!(
+            session_start_agent_session_diagnostic(r#"{"session_id":"provider-5102"}"#).is_some(),
+            "an old resume handle does not prove the supplied identity was committed"
+        );
     }
 
     #[test]
@@ -1118,6 +1196,47 @@ mod tests {
         assert!(loaded.should_mark_interrupted_from_lifecycle());
     }
 
+    /// Issue #4768: Grok Build sends every hook field under both its
+    /// camelCase key and the Claude-compatible snake_case key. Both spellings
+    /// in one payload must not fail the hook closed.
+    #[test]
+    fn runtime_state_records_grok_payload_carrying_both_key_spellings() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "work/issue-277", AgentId::GrokBuild);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input(
+            "SessionStart",
+            r#"{"hookEventName":"session_start","hook_event_name":"SessionStart","sessionId":"grok-conversation-4768","session_id":"grok-conversation-4768","cwd":"repo"}"#,
+        )
+        .expect("SessionStart with both session id spellings must succeed");
+        handle_with_input(
+            "PreToolUse",
+            r#"{"hookEventName":"pre_tool_use","hook_event_name":"PreToolUse","sessionId":"grok-conversation-4768","session_id":"grok-conversation-4768","toolName":"run_command","tool_name":"Bash","toolInput":{"command":"ls"},"tool_input":{"command":"ls"}}"#,
+        )
+        .expect("PreToolUse with both key spellings must succeed");
+
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.last_hook_event.as_deref(), Some("PreToolUse"));
+        assert_eq!(
+            loaded.exact_resume_session_id(),
+            Some("grok-conversation-4768")
+        );
+    }
+
     #[test]
     fn runtime_state_records_completed_stop_as_clean_boundary() {
         let _lock = env_lock();
@@ -1149,5 +1268,45 @@ mod tests {
         assert!(loaded.last_completed_stop_at.is_some());
         assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
         assert!(!loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn late_hooks_preserve_explicit_close_until_relaunch() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/closed", AgentId::ClaudeCode);
+        session.record_terminal_stop();
+        session.save(&sessions_dir).unwrap();
+        let path = sessions_dir.join(format!("{}.toml", session.id));
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        for event in ["PostToolUse", "Stop"] {
+            handle_with_input(event, "{}").unwrap();
+            let loaded = Session::load(&path).unwrap();
+            assert_eq!(loaded.status, AgentStatus::Stopped, "late {event}");
+            assert_eq!(loaded.last_hook_event.as_deref(), Some(event));
+        }
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Stopped);
+        record_blocked_stop_from_env().unwrap();
+        let closed = Session::load(&path).unwrap();
+        assert_eq!(closed.status, AgentStatus::Stopped);
+        assert!(!closed.restore_window_on_startup);
+
+        // Explicit launch enables restore before the new child's hooks run.
+        session.restore_window_on_startup = true;
+        session.save(&sessions_dir).unwrap();
+        record_blocked_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Running);
+        handle_with_input("Stop", "{}").unwrap();
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Idle);
     }
 }

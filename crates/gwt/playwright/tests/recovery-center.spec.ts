@@ -41,6 +41,25 @@ test.describe("Recovery Center", () => {
     await expect(modal.locator(".recovery-center-row")).toHaveCount(2);
   });
 
+  test("distinguishes missing storage and displays an explicit action rejection", async ({ page }) => {
+    await page.evaluate(() => { (window as any).__recoveryCenterMissing = true; });
+    await runPaletteCommand(page, "Open Recovery Center");
+    const modal = page.locator("#recovery-center-modal");
+    await expect(modal.getByRole("status").filter({ hasText: "No recovery Store" }))
+      .toHaveText("No recovery Store was found for this project.");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+      (window as any).__recoveryCenterMissing = false;
+      (window as any).__recoveryCenterReject = true;
+    });
+    await runPaletteCommand(page, "Open Recovery Center");
+    await modal.locator("#recovery-center-state-filter").selectOption("all");
+    await modal.getByRole("button", { name: "Open Board history" }).click();
+    await expect(modal.getByRole("alert"))
+      .toHaveText("Recovery action handle opaque-acknowledged is invalid: generation mismatch");
+    await expect(modal.getByRole("dialog", { name: "Recovery Center" })).toBeVisible();
+  });
+
   test("renders all public facets and reuses the Board deep-link path", async ({
     page,
   }, testInfo) => {
@@ -205,15 +224,17 @@ async function installRecoveryCenterBackend(page: any): Promise<void> {
             kind: "recovery_center_state",
             request_id: message.request_id,
             generation: 41,
-            status: "ready",
-            items: recoveryItems,
+            status: (window as any).__recoveryCenterMissing ? "not_found" : "ready",
+            items: (window as any).__recoveryCenterMissing ? [] : recoveryItems,
           });
         } else if (message?.kind === "open_recovery_center_board_entry") {
           this.emit({
             kind: "recovery_center_board_entry",
             request_id: message.request_id,
             generation: message.generation,
-            board_entry_id: "board-entry-public-42",
+            ...((window as any).__recoveryCenterReject
+              ? { error: `Recovery action handle ${message.action_handle} is invalid: generation mismatch` }
+              : { board_entry_id: "board-entry-public-42" }),
           });
         }
       }

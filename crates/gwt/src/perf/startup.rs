@@ -16,6 +16,7 @@ use super::{summary::PerfLogRecord, PerfRecord};
 #[serde(rename_all = "snake_case")]
 pub enum StartupPhase {
     ProcessStart,
+    TrayReady,
     RuntimeInit,
     WorkspaceRestore,
     ProjectStateLoad,
@@ -24,6 +25,10 @@ pub enum StartupPhase {
     CanvasReady,
     FirstFrame,
     RestoreDrain,
+    /// Issue #4520 AC-3: the restore drain's own phases, so a slow drain is
+    /// attributable in the report rather than only in the tracing log.
+    RestoreDrainResume,
+    RestoreDrainPmEnsure,
     PtyStart,
     IndexRuntimeReady,
     ShellInteractive,
@@ -31,12 +36,28 @@ pub enum StartupPhase {
     /// Issue #4378: one `git worktree list` run during startup. Unlike the
     /// milestones above it can repeat, so it is counted rather than missing.
     WorktreeInventory,
+    /// Each logged Git completion during the startup observation window.
+    GitCommand,
+    /// Issue #4415: repository identity discovery, counted separately from
+    /// other commands while remaining part of the overall Git totals.
+    GitCommonDir,
+    /// Issue #4520 AC-2: one GUI event-loop dispatch that blocked past
+    /// [`EVENT_LOOP_STALL_MS`] during the startup observation window.
+    EventLoopStall,
 }
+
+/// Issue #4520 AC-2: an event-loop dispatch longer than this is a stall.
+pub const EVENT_LOOP_STALL_MS: f64 = 100.0;
+
+/// Git commands and event-loop stalls are observed for this long after process
+/// start, since background startup work can outlive the restore drain.
+const STARTUP_OBSERVATION_MS: f64 = 600_000.0;
 
 impl StartupPhase {
     pub fn name(self) -> &'static str {
         match self {
             Self::ProcessStart => "process_start",
+            Self::TrayReady => "tray_ready",
             Self::RuntimeInit => "runtime_init",
             Self::WorkspaceRestore => "workspace_restore",
             Self::ProjectStateLoad => "project_state_load",
@@ -45,16 +66,22 @@ impl StartupPhase {
             Self::CanvasReady => "canvas_ready",
             Self::FirstFrame => "first_frame",
             Self::RestoreDrain => "restore_drain",
+            Self::RestoreDrainResume => "restore_drain_resume",
+            Self::RestoreDrainPmEnsure => "restore_drain_pm_ensure",
             Self::PtyStart => "pty_start",
             Self::IndexRuntimeReady => "index_runtime_ready",
             Self::ShellInteractive => "shell_interactive",
             Self::TerminalInteractive => "terminal_interactive",
             Self::WorktreeInventory => "worktree_inventory",
+            Self::GitCommand => "git_command",
+            Self::GitCommonDir => "git_common_dir",
+            Self::EventLoopStall => "event_loop_stall",
         }
     }
 
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::ProcessStart,
+        Self::TrayReady,
         Self::RuntimeInit,
         Self::WorkspaceRestore,
         Self::ProjectStateLoad,
@@ -83,6 +110,13 @@ pub struct StartupSample {
     /// How many items the phase processed, e.g. Session files parsed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
+    #[serde(default)]
+    pub git_spawn_count: u64,
+    #[serde(default)]
+    pub git_duration_ms: f64,
+    /// The dispatch label of an [`StartupPhase::EventLoopStall`] row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
 }
 
 struct TerminalReadiness {
@@ -122,7 +156,24 @@ impl StartupRun {
         start_ms: f64,
         duration_ms: f64,
     ) -> Option<PerfRecord> {
-        self.counted_phase(phase, start_ms, duration_ms, None)
+        self.counted_phase(phase, start_ms, duration_ms, None, (0, 0.0))
+    }
+
+    pub fn phase_with_git(
+        &mut self,
+        phase: StartupPhase,
+        start_ms: f64,
+        duration_ms: f64,
+        git_spawn_count: u64,
+        git_duration_ms: f64,
+    ) -> Option<PerfRecord> {
+        self.counted_phase(
+            phase,
+            start_ms,
+            duration_ms,
+            None,
+            (git_spawn_count, git_duration_ms),
+        )
     }
 
     /// Issue #4377 (AC-4): the Session ledger read on the startup thread and
@@ -138,6 +189,7 @@ impl StartupRun {
             start_ms,
             duration_ms,
             Some(count),
+            (0, 0.0),
         )
     }
 
@@ -147,6 +199,7 @@ impl StartupRun {
         start_ms: f64,
         duration_ms: f64,
         count: Option<usize>,
+        git_cost: (u64, f64),
     ) -> Option<PerfRecord> {
         if !start_ms.is_finite()
             || !duration_ms.is_finite()
@@ -157,7 +210,7 @@ impl StartupRun {
             return None;
         }
         self.seen.insert(phase);
-        Some(self.sample(phase, start_ms, duration_ms, None, count))
+        Some(self.sample(phase, start_ms, duration_ms, None, count, git_cost))
     }
 
     fn sample(
@@ -167,6 +220,7 @@ impl StartupRun {
         duration_ms: f64,
         window_id: Option<String>,
         count: Option<usize>,
+        git_cost: (u64, f64),
     ) -> PerfRecord {
         PerfRecord::startup(
             StartupSample {
@@ -177,6 +231,9 @@ impl StartupRun {
                 restored_window_count: self.restored_window_count,
                 window_id,
                 count,
+                git_spawn_count: git_cost.0,
+                git_duration_ms: git_cost.1,
+                event: None,
             },
             duration_ms,
         )
@@ -235,6 +292,7 @@ impl StartupRun {
             (elapsed_ms - start_ms).max(0.0),
             Some(super::sanitize_ui_action_field(id)),
             None,
+            (0, 0.0),
         )];
         records.extend(self.record_interactive(id, elapsed_ms));
         records
@@ -250,6 +308,68 @@ impl StartupRun {
 
     pub fn forget_terminal(&mut self, id: &str) {
         self.terminals.remove(id);
+    }
+
+    /// Background startup work can outlive restore drain; record completed Git
+    /// commands for the first ten minutes without counting phase overlap twice.
+    fn git_command(&self, label: &str, elapsed_ms: f64, duration_ms: f64) -> Option<PerfRecord> {
+        if !elapsed_ms.is_finite()
+            || !(0.0..=STARTUP_OBSERVATION_MS).contains(&elapsed_ms)
+            || !duration_ms.is_finite()
+            || duration_ms < 0.0
+        {
+            return None;
+        }
+        let common_dir = label.starts_with("git rev-parse ")
+            && label
+                .split_whitespace()
+                .any(|arg| arg == "--git-common-dir");
+        Some(self.sample(
+            if common_dir {
+                StartupPhase::GitCommonDir
+            } else {
+                StartupPhase::GitCommand
+            },
+            (elapsed_ms - duration_ms).max(0.0),
+            duration_ms,
+            None,
+            Some(1),
+            (1, duration_ms),
+        ))
+    }
+
+    /// Issue #4520 AC-2: one event-loop dispatch named `event` that ended at
+    /// `elapsed_ms` after holding the loop for `duration_ms`. Rows repeat, and
+    /// dispatches within the budget or after the observation window are not
+    /// recorded.
+    pub fn event_loop_stall(
+        &self,
+        event: &str,
+        elapsed_ms: f64,
+        duration_ms: f64,
+    ) -> Option<PerfRecord> {
+        if !elapsed_ms.is_finite()
+            || !(0.0..=STARTUP_OBSERVATION_MS).contains(&elapsed_ms)
+            || !duration_ms.is_finite()
+            || duration_ms <= EVENT_LOOP_STALL_MS
+        {
+            return None;
+        }
+        Some(PerfRecord::startup(
+            StartupSample {
+                startup_id: self.id.clone(),
+                process_started_at: self.started_at,
+                phase: StartupPhase::EventLoopStall,
+                start_ms: (elapsed_ms - duration_ms).max(0.0),
+                restored_window_count: self.restored_window_count,
+                window_id: None,
+                count: None,
+                git_spawn_count: 0,
+                git_duration_ms: 0.0,
+                event: Some(super::sanitize_ui_action_field(event)),
+            },
+            duration_ms,
+        ))
     }
 
     /// Issue #4378 AC-4: one startup worktree listing. Rows repeat on purpose
@@ -270,6 +390,7 @@ impl StartupRun {
             duration_ms,
             None,
             None,
+            (1, duration_ms),
         ))
     }
 }
@@ -293,7 +414,16 @@ pub fn begin(started: Instant) {
         record(StartupPhase::ProcessStart, started, 0.0);
         // Issue #4378 AC-4: every `git worktree list`, whichever caller runs it.
         gwt_git::worktree::set_worktree_list_observer(record_worktree_inventory);
+        gwt_core::process::set_git_command_observer(record_git_command);
     }
+}
+
+fn record_git_command(label: &str, duration_ms: u64) {
+    update(|run, elapsed| {
+        run.git_command(label, elapsed, duration_ms as f64)
+            .into_iter()
+            .collect()
+    });
 }
 
 fn update(action: impl FnOnce(&mut StartupRun, f64) -> Vec<PerfRecord>) {
@@ -346,6 +476,16 @@ pub fn record_worktree_inventory(started: Instant) {
     let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
     record_at(started, |run, offset| {
         run.worktree_inventory(offset, duration_ms)
+    });
+}
+
+/// Issue #4520 AC-2: record a GUI event-loop dispatch that just finished
+/// after holding the loop for `duration_ms`.
+pub fn event_loop_stall(event: &str, duration_ms: f64) {
+    update(|run, elapsed| {
+        run.event_loop_stall(event, elapsed, duration_ms)
+            .into_iter()
+            .collect()
     });
 }
 
@@ -406,22 +546,33 @@ pub fn forget_terminal(id: &str) {
 pub struct PhaseTimer {
     phase: StartupPhase,
     started: Instant,
+    git_count: u64,
+    git_duration_ms: u64,
 }
 impl PhaseTimer {
     pub fn start(phase: StartupPhase) -> Self {
         Self {
             phase,
             started: Instant::now(),
+            git_count: gwt_core::process::thread_git_spawn_count(),
+            git_duration_ms: gwt_core::process::thread_git_duration_ms(),
         }
     }
 }
 impl Drop for PhaseTimer {
     fn drop(&mut self) {
-        record(
-            self.phase,
-            self.started,
-            self.started.elapsed().as_secs_f64() * 1_000.0,
-        );
+        let count = gwt_core::process::thread_git_spawn_count().saturating_sub(self.git_count);
+        let git_ms =
+            gwt_core::process::thread_git_duration_ms().saturating_sub(self.git_duration_ms);
+        record_at(self.started, |run, offset| {
+            run.phase_with_git(
+                self.phase,
+                offset,
+                self.started.elapsed().as_secs_f64() * 1_000.0,
+                count,
+                git_ms as f64,
+            )
+        });
     }
 }
 
@@ -435,6 +586,10 @@ pub struct StartupPhaseResult {
     pub window_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
+    pub git_spawn_count: u64,
+    pub git_duration_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -446,10 +601,22 @@ pub struct StartupReport {
     pub missing_phases: Vec<StartupPhase>,
     pub first_frame_budget_ms: f64,
     pub first_frame_within_budget: Option<bool>,
+    pub tray_budget_ms: f64,
+    pub tray_within_budget: Option<bool>,
     /// Issue #4378 AC-4: `git worktree list` runs during startup and their
     /// total cost. Each run is also a `worktree_inventory` row in `phases`.
     pub worktree_inventory_count: usize,
     pub worktree_inventory_ms: f64,
+    /// Independent completion totals, excluding overlapping phase/inventory rows.
+    pub git_spawn_count: u64,
+    pub git_duration_ms: f64,
+    /// Issue #4415: common-directory subprocesses only, including fallbacks.
+    pub git_common_dir_count: usize,
+    pub git_common_dir_ms: f64,
+    /// Issue #4520 AC-2: event-loop dispatches that blocked past 100 ms, and
+    /// the longest one. Each is also an `event_loop_stall` row in `phases`.
+    pub event_loop_stall_count: usize,
+    pub event_loop_stall_max_ms: f64,
 }
 
 pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
@@ -484,6 +651,9 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
             end_ms: sample.start_ms + record.value,
             window_id: sample.window_id.clone(),
             count: sample.count,
+            git_spawn_count: sample.git_spawn_count,
+            git_duration_ms: sample.git_duration_ms,
+            event: sample.event.clone(),
         })
         .collect::<Vec<_>>();
     let first_frame_budget_ms = if restored_window_count == 0 {
@@ -499,11 +669,34 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         .into_iter()
         .filter(|phase| !phases.iter().any(|present| present.phase == *phase))
         .collect();
+    let tray_budget_ms = 2_000.0;
+    let tray_within_budget = phases
+        .iter()
+        .find(|phase| phase.phase == StartupPhase::TrayReady)
+        .map(|phase| phase.end_ms <= tray_budget_ms);
     let inventory = phases
         .iter()
         .filter(|phase| phase.phase == StartupPhase::WorktreeInventory);
     let worktree_inventory_count = inventory.clone().count();
     let worktree_inventory_ms = inventory.map(|phase| phase.duration_ms).sum();
+    let git_commands = phases.iter().filter(|phase| {
+        matches!(
+            phase.phase,
+            StartupPhase::GitCommand | StartupPhase::GitCommonDir
+        )
+    });
+    let git_spawn_count = git_commands.clone().count() as u64;
+    let git_duration_ms = git_commands.map(|phase| phase.duration_ms).sum();
+    let common_dir = phases
+        .iter()
+        .filter(|phase| phase.phase == StartupPhase::GitCommonDir);
+    let git_common_dir_count = common_dir.clone().count();
+    let git_common_dir_ms = common_dir.fold(0.0, |total, phase| total + phase.duration_ms);
+    let stalls = phases
+        .iter()
+        .filter(|phase| phase.phase == StartupPhase::EventLoopStall);
+    let event_loop_stall_count = stalls.clone().count();
+    let event_loop_stall_max_ms = stalls.map(|phase| phase.duration_ms).fold(0.0, f64::max);
     Some(StartupReport {
         startup_id: newest.startup_id.clone(),
         process_started_at: newest.process_started_at,
@@ -512,13 +705,84 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         missing_phases,
         first_frame_budget_ms,
         first_frame_within_budget,
+        tray_budget_ms,
+        tray_within_budget,
         worktree_inventory_count,
         worktree_inventory_ms,
+        git_spawn_count,
+        git_duration_ms,
+        git_common_dir_count,
+        git_common_dir_ms,
+        event_loop_stall_count,
+        event_loop_stall_max_ms,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_git_commands_repeat_after_restore_and_total_without_phase_overlap() {
+        let mut run = StartupRun::new(Utc::now());
+        let records = [
+            run.phase_with_git(StartupPhase::ProjectStateLoad, 0.0, 500.0, 2, 300.0)
+                .unwrap(),
+            run.worktree_inventory(100.0, 200.0).unwrap(),
+            run.git_command(
+                "git rev-parse --path-format=absolute --git-common-dir",
+                300.0,
+                200.0,
+            )
+            .unwrap(),
+            run.phase(StartupPhase::RestoreDrain, 0.0, 500.0).unwrap(),
+            run.git_command("git status", 700.0, 100.0).unwrap(),
+        ];
+        assert!(run
+            .git_command("git rev-parse --git-common-dir", 600_001.0, 10.0)
+            .is_none());
+        let report =
+            latest_startup(&records.into_iter().map(read_record).collect::<Vec<_>>()).unwrap();
+        assert_eq!(report.git_spawn_count, 2);
+        assert_eq!(report.git_duration_ms, 300.0);
+        assert_eq!(report.git_common_dir_count, 1);
+        assert_eq!(report.git_common_dir_ms, 200.0);
+        assert!(!report.missing_phases.contains(&StartupPhase::GitCommand));
+        let git = report
+            .phases
+            .iter()
+            .filter(|phase| {
+                matches!(
+                    phase.phase,
+                    StartupPhase::GitCommand | StartupPhase::GitCommonDir
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(git.len(), 2);
+        assert_eq!(
+            (git[0].start_ms, git[0].end_ms, git[0].count),
+            (100.0, 300.0, Some(1))
+        );
+    }
+
+    #[test]
+    fn startup_phase_reports_git_cost_and_tray_budget() {
+        let mut run = super::StartupRun::new(chrono::Utc::now());
+        let record = run
+            .phase_with_git(super::StartupPhase::ProjectStateLoad, 50.0, 400.0, 3, 210.0)
+            .unwrap();
+        let tray = run
+            .phase(super::StartupPhase::TrayReady, 0.0, 1900.0)
+            .unwrap();
+        let report = super::latest_startup(&[read_record(record), read_record(tray)]).unwrap();
+        assert_eq!(report.phases[0].git_spawn_count, 3);
+        assert_eq!(report.phases[0].git_duration_ms, 210.0);
+        assert_eq!(report.tray_within_budget, Some(true));
+        assert!(!report.missing_phases.contains(&StartupPhase::GitCommand));
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(serialized["git_common_dir_count"], 0);
+        assert_eq!(serialized["git_common_dir_ms"], 0.0);
+        assert!(!report.git_common_dir_ms.is_sign_negative());
+    }
+
     #[test]
     fn first_input_can_be_ready_in_a_new_pm_before_restored_terminals() {
         let mut run = super::StartupRun::new(chrono::Utc::now());
@@ -643,6 +907,64 @@ mod tests {
         let report = latest_startup(&records).unwrap();
         assert_eq!(report.worktree_inventory_count, 2);
         assert_eq!(report.worktree_inventory_ms, 490.0);
+    }
+
+    /// Issue #4520 AC-2 / AC-3: the restore drain's phases and every event-loop
+    /// dispatch that blocked past 100 ms reach the startup report, not only
+    /// the tracing log.
+    #[test]
+    fn startup_report_carries_restore_drain_breakdown_and_event_loop_stalls() {
+        let mut run = StartupRun::new(Utc::now());
+        let records = [
+            run.phase_with_git(StartupPhase::RestoreDrainResume, 1_000.0, 20.0, 0, 0.0)
+                .unwrap(),
+            run.phase_with_git(
+                StartupPhase::RestoreDrainPmEnsure,
+                1_020.0,
+                3_687.0,
+                2,
+                3_600.0,
+            )
+            .unwrap(),
+            run.phase(StartupPhase::RestoreDrain, 1_000.0, 3_707.0)
+                .unwrap(),
+            run.event_loop_stall("StartupAutoResumeReady", 4_707.0, 3_707.0)
+                .unwrap(),
+            run.event_loop_stall("WorkMergeStatus", 9_000.0, 150.0)
+                .unwrap(),
+        ];
+        assert!(run.event_loop_stall("Refresh", 9_500.0, 100.0).is_none());
+        assert!(run.event_loop_stall("Late", 600_001.0, 500.0).is_none());
+
+        let records = records.into_iter().map(read_record).collect::<Vec<_>>();
+        let report = latest_startup(&records).unwrap();
+        let pm_ensure = report
+            .phases
+            .iter()
+            .find(|p| p.phase == StartupPhase::RestoreDrainPmEnsure)
+            .unwrap();
+        assert_eq!(
+            (
+                pm_ensure.start_ms,
+                pm_ensure.duration_ms,
+                pm_ensure.git_spawn_count
+            ),
+            (1_020.0, 3_687.0, 2)
+        );
+        assert!(report
+            .phases
+            .iter()
+            .any(|p| p.phase == StartupPhase::RestoreDrainResume));
+        let stalls = report
+            .phases
+            .iter()
+            .filter(|p| p.phase == StartupPhase::EventLoopStall)
+            .collect::<Vec<_>>();
+        assert_eq!(stalls.len(), 2);
+        assert_eq!(stalls[0].event.as_deref(), Some("StartupAutoResumeReady"));
+        assert_eq!((stalls[0].start_ms, stalls[0].end_ms), (1_000.0, 4_707.0));
+        assert_eq!(report.event_loop_stall_count, 2);
+        assert_eq!(report.event_loop_stall_max_ms, 3_707.0);
     }
 
     #[test]

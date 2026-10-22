@@ -19,7 +19,8 @@
 //! while preserving the broadcast/persist contract through the existing
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
-use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
+use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection, WindowSurfaceOwner};
+use std::time::Instant;
 
 use super::{
     close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
@@ -108,13 +109,19 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, board_all_view_windows);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
+        $visit!($runtime, $id, initial_launch_workers);
+        $visit!($runtime, $id, pending_launch_completions);
+        $visit!($runtime, $id, pending_launch_delivery_acks);
+        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
+        $visit!($runtime, $id, pending_fresh_execution_finalizations);
         $visit!($runtime, $id, pending_auto_resume_sources);
-        $visit!($runtime, $id, pending_tool_runtime_migrations);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, pending_runtime_outputs);
         $visit!($runtime, $id, window_last_output_at);
         $visit!($runtime, $id, window_hook_states);
         $visit!($runtime, $id, window_approval_waiting);
@@ -129,11 +136,64 @@ macro_rules! window_scoped_state {
 }
 
 impl AppRuntime {
+    /// Agent lifecycle requests must preserve recent evidence from their actual target.
+    /// Human canvas close and runtime terminal cleanup do not call this guard.
+    pub(super) fn agent_close_board_check(
+        &self,
+        principal: &gwt::agent_capability::AgentSessionPrincipal,
+        id: &str,
+    ) -> Option<String> {
+        let (tab, window) = self.tabs.iter().find_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| super::combined_window_id(&tab.id, &window.id) == id)
+                .map(|window| (tab, window))
+        })?;
+        let target_session = window.session_id.as_deref();
+        let target_owner = window
+            .linked_issue_number
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number)
+                })
+            })
+            .or_else(|| self.issue_monitor_issue_number_for_window(&tab.project_root, id))
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+                        .ok()
+                        .and_then(|session| session.linked_issue_number)
+                })
+            });
+        match gwt::board_read_receipts::recent_owner_unread(
+            &tab.project_root,
+            principal.session_id(),
+            target_session,
+            target_owner,
+            chrono::Utc::now(),
+        ) {
+            Ok(entries) if !entries.is_empty() => Some(
+                gwt::board_read_receipts::read_required_message("pane.close", &entries),
+            ),
+            Ok(_) => None,
+            Err(error) => {
+                let warning = gwt::board_read_receipts::warning(error);
+                tracing::warn!(%warning, window_id = id, "agent pane close Board observation failed open");
+                None
+            }
+        }
+    }
+
     pub(crate) fn create_window_events(
         &mut self,
         context: &super::ProjectContext,
         preset: WindowPreset,
         bounds: WindowGeometry,
+        surface_owner: Option<WindowSurfaceOwner>,
     ) -> Vec<OutboundEvent> {
         if preset.is_removed_legacy() {
             return Vec::new();
@@ -142,7 +202,12 @@ impl AppRuntime {
             return Vec::new();
         }
         let tab_id = context.tab_id.clone();
-        if shares_work_surface_singleton(preset) {
+        let surface_owner = surface_owner
+            .filter(|owner| *owner != WindowSurfaceOwner::Pm || !preset.is_agent_terminal());
+        if shares_work_surface_singleton(preset)
+            || (preset.canonical_surface_preset() == WindowPreset::Settings
+                && surface_owner == Some(WindowSurfaceOwner::Pm))
+        {
             let existing_id = {
                 let Some(tab) = self.tab_mut(&tab_id) else {
                     return Vec::new();
@@ -152,7 +217,11 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .filter(|window| {
+                        window.surface_owner == surface_owner
+                            && (shares_work_surface_singleton(window.preset)
+                                || window.preset == WindowPreset::Settings)
+                    })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
                 if let Some(existing_id) = existing_id.as_deref() {
@@ -167,11 +236,14 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
+        let preset = preset.canonical_surface_preset();
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset, bounds.clone())
+            let window = tab.workspace.add_window(preset, bounds.clone());
+            tab.workspace.set_surface_owner(&window.id, surface_owner);
+            window
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -446,14 +518,32 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        let Some(project_key) = self.project_key_for_window(id).cloned() else {
+            return Vec::new();
+        };
         let updated = {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.dock_agent_window_to_issue(&address.raw_id)
+            let issue_number = tab
+                .workspace
+                .window(&address.raw_id)
+                .and_then(|window| window.linked_issue_number);
+            tab.workspace
+                .dock_agent_window_to_issue(&address.raw_id)
+                .map_err(|reason| (reason, issue_number))
         };
-        if !updated {
-            return Vec::new();
+        if let Err((reason, issue_number)) = updated {
+            return vec![OutboundEvent::project(
+                project_key,
+                BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "warn".to_string(),
+                    message: format!("Cannot return to list: {reason}."),
+                    issue_number,
+                },
+            )];
         }
         self.activate_tab_for_window_events(address.tab_id)
     }
@@ -677,6 +767,7 @@ impl AppRuntime {
             };
         }
         // Issue #4084: the review-dispatch marker dies with its window.
+        self.invalidate_workspace_projection_patch(&context.tab_id);
         self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
         // in-flight restore marker must not outlive its window.
@@ -717,6 +808,8 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) {
+        self.invalidate_launch_delivery_ack(id);
+        self.pending_launch_completions.remove(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
@@ -760,6 +853,7 @@ impl AppRuntime {
             self_close_ticket,
             closing_window_generation,
         );
+        self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);
     }
 
@@ -782,6 +876,8 @@ impl AppRuntime {
         // primitive that `close_window_events` uses, so no PTY management is
         // reimplemented. `stop_window_runtime` also persists the Paused Work
         // marker for an agent session via `mark_agent_session_stopped`.
+        // Qualify the transition while its exact runtime incarnation still exists.
+        self.observe_notification_transition_at(id, WindowProcessStatus::Stopped, Instant::now());
         self.stop_window_runtime(id);
         // Render the surviving window as Stopped. `stop_window_runtime` already
         // removed the pty/hook tracking, so the workspace record is the source

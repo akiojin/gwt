@@ -30,6 +30,14 @@ pub struct Operation {
 /// first. Kept sorted so a diff against the dispatch source stays readable.
 pub const OPERATIONS: &[Operation] = &[
     Operation {
+        name: "actions.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.dispatch",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.job_logs",
         aliases: &["actions.job-logs"],
     },
@@ -38,7 +46,15 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "actions.queued",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.rerun",
+        aliases: &[],
+    },
+    Operation {
+        name: "board.config.set",
         aliases: &[],
     },
     Operation {
@@ -51,6 +67,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "board.show",
+        aliases: &[],
+    },
+    Operation {
+        name: "board.sync",
         aliases: &[],
     },
     Operation {
@@ -142,6 +162,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "discussion.create",
+        aliases: &[],
+    },
+    Operation {
         name: "discussion.update",
         aliases: &[],
     },
@@ -182,7 +206,27 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "execution.settle_delivered",
+        aliases: &[],
+    },
+    Operation {
         name: "execution.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.process",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.retry",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.status",
         aliases: &[],
     },
     Operation {
@@ -278,6 +322,18 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.priority-set"],
     },
     Operation {
+        name: "issue.monitor.tiers",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.tiers.set",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.tier.set",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.profiles",
         aliases: &[],
     },
@@ -296,6 +352,14 @@ pub const OPERATIONS: &[Operation] = &[
     // The operator's hand on the implementation queue: list what is queued,
     // put an Issue in, take one out, and reorder what is left.
     Operation {
+        name: "issue.monitor.queue.auto_refill",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.demote",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.queue.list",
         aliases: &[],
     },
@@ -309,6 +373,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.queue.remove",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.urgent_limit",
         aliases: &[],
     },
     Operation {
@@ -329,6 +397,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.requeue",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.recovery.record",
         aliases: &[],
     },
     Operation {
@@ -416,6 +488,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.name",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.read",
         aliases: &[],
     },
@@ -456,11 +532,63 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.approval.request",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.revoke",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.capabilities",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.operation.execute",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.peer.send",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.plan.apply",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.plan.status",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.message.send",
         aliases: &["pm.pane.send"],
     },
     Operation {
         name: "pm.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.status.set",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.report.post",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.report.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.pause",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.resume",
         aliases: &[],
     },
     Operation {
@@ -472,11 +600,31 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.close",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.auto_merge.enable",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.reopen",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.review.submit",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.comment",
         aliases: &[],
     },
     Operation {
         name: "pr.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.create_from_ci",
         aliases: &[],
     },
     Operation {
@@ -489,6 +637,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.edit",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.head_check",
         aliases: &[],
     },
     Operation {
@@ -520,6 +672,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "provider.reset",
+        aliases: &[],
+    },
+    Operation {
+        name: "provider.reset.proposals",
+        aliases: &[],
+    },
+    Operation {
         name: "register.abort",
         aliases: &[],
     },
@@ -540,11 +700,39 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.metadata.set",
+        aliases: &[],
+    },
+    Operation {
+        name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.required_checks.update",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.settings.set",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
         aliases: &[],
     },
     Operation {
+        name: "update.settings.set",
+        aliases: &[],
+    },
+    Operation {
+        name: "update.settings.status",
+        aliases: &[],
+    },
+    Operation {
         name: "verify.adjudicate",
+        aliases: &[],
+    },
+    Operation {
+        name: "verify.cancel",
         aliases: &[],
     },
     Operation {
@@ -576,6 +764,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "verify.status",
+        aliases: &[],
+    },
+    Operation {
         name: "workflow.bypass",
         aliases: &[],
     },
@@ -592,6 +784,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.events_reconcile",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.join",
         aliases: &[],
     },
@@ -602,6 +798,14 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.projection_prune",
         aliases: &["workspace.projection-prune"],
+    },
+    Operation {
+        name: "workspace.receipt",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.close",
+        aliases: &[],
     },
     Operation {
         name: "workspace.store_consolidate",
@@ -700,7 +904,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// The existing wording opens the message unchanged so log greps still match;
 /// the candidates follow it. When nothing is close, the namespace's actual
 /// operations are listed rather than nothing — an invented name like
-/// `pr.merge` was never a typo of anything, and the caller still has to learn
+/// `pr.nonexistent_operation` is no typo, and the caller still has to learn
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and
@@ -746,6 +950,10 @@ mod tests {
     /// it.
     #[test]
     fn catalog_covers_every_dispatched_operation() {
+        assert!(
+            names().any(|name| name == "actions.dispatch"),
+            "Issue #4249 Phase 6 operation is callable"
+        );
         let source = include_str!("json_envelope.rs");
         let mut dispatched: std::collections::BTreeSet<String> = Default::default();
         let mut inside = false;

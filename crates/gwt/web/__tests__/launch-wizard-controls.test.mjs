@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 import {
   chooseLaunchControlKind,
   reasoningSliderModel,
@@ -20,6 +21,22 @@ import {
   buildToggleField,
   buildChoiceOrSelectField,
 } from "../launch-controls.js";
+
+test("AC-11: wizard visibility publishes opening, ready and closed facts", () => {
+  const source = readFileSync(new URL("../launch-wizard-surface.js", import.meta.url), "utf8");
+  const start = source.indexOf("      function publishLaunchWizardVisibility(");
+  assert.notEqual(start, -1);
+  const end = source.indexOf("      function ", start + 15);
+  const visibilityModel = createUiStateStore({ open: false });
+  const apply = new Function("visibilityModel", "launchWizard", "launchWizardOpenError", "launchWizardOpening",
+    `${source.slice(start, end)}; publishLaunchWizardVisibility();`);
+  apply(visibilityModel, null, null, { title: "Start Work" });
+  assert.equal(visibilityModel.read().open, true);
+  apply(visibilityModel, { title: "Start Work" }, null, null);
+  assert.equal(visibilityModel.read().open, true);
+  apply(visibilityModel, null, null, null);
+  assert.equal(visibilityModel.read().open, false);
+});
 
 // --- fixtures (mirror the Rust DTO values served to the frontend) ----------
 
@@ -30,11 +47,11 @@ const CODEX_REASONING = [
   { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
 ];
 
-// SPEC-1921 US-20 / FR-122 (+ Issue #3962 AC-4 — 2026-09-05 snapshot) — Codex
+// SPEC-1921 US-20 / FR-122 (+ Issue #4677 — 2026-09-23 snapshot) — Codex
 // reasoning ladders scale per model. The backend sends 6 stops for
-// gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops for
-// gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 /
-// gpt-5.4-mini / gpt-5.3-codex-spark (low..xhigh). There is NO Auto row for
+// gpt-6-astra / gpt-6-sol / gpt-5.6-sol / gpt-5.6-terra (low..ultra),
+// 5 stops for gpt-6-luna / gpt-5.6-luna (low..max), and the existing
+// 4 stops for gpt-5.5 (low..xhigh). There is NO Auto row for
 // Codex — the whole ladder is ordinal, so no stop is lifted out of the slider.
 const CODEX_REASONING_6 = [
   { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
@@ -71,14 +88,14 @@ const AGENT_OPTIONS_FEW = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
 ];
 
 const AGENT_OPTIONS_MANY = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
   { value: "copilot", label: "GitHub Copilot" },
   { value: "custom-a", label: "My Custom Agent" },
 ];
@@ -141,8 +158,8 @@ test("chooseLaunchControlKind picks segmented for few short options", () => {
   assert.equal(chooseLaunchControlKind(TARGET_OPTIONS), "segmented");
 });
 
-test("chooseLaunchControlKind falls back to select for current built-in agent labels", () => {
-  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "select");
+test("chooseLaunchControlKind uses segmented for four short built-in agent labels", () => {
+  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "segmented");
 });
 
 test("chooseLaunchControlKind falls back to select past the count threshold", () => {
@@ -359,8 +376,8 @@ test("buildReasoningField renders the 5-stop Codex ladder and commits 'max' at t
 });
 
 test("buildReasoningField commits 'xhigh' at the top of the 4-stop Codex ladder", () => {
-  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4-mini /
-  // gpt-5.3-codex-spark keep the four-stop ladder that tops out at Extra high /
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5
+  // keeps the four-stop ladder that tops out at Extra high /
   // stored value 'xhigh'.
   const doc = bootDom();
   const sent = [];
@@ -512,7 +529,7 @@ test("Launch Wizard の共通 reasoning control は Effort として set_reasoni
 test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(
     wizardSource,
-    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    /function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
     "wizard start methods must classify history, focus, and new-launch intents independently",
   );
   assert.match(

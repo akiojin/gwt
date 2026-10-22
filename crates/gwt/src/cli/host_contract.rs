@@ -416,7 +416,7 @@ pub fn preflight(stage: &str) -> Result<PreflightOutcome, HostContractDiagnosis>
 ///
 /// Flip this to `true` once a Host serving `/internal/host-contract` has
 /// shipped and the fleet has rolled forward; nothing else has to change.
-pub const REFUSE_HOSTS_PREDATING_THE_CONTRACT_ROUTE: bool = false;
+pub const REFUSE_HOSTS_PREDATING_THE_CONTRACT_ROUTE: bool = true;
 
 impl HostContractDiagnosis {
     /// Whether this verdict stops the operation.
@@ -790,15 +790,16 @@ mod tests {
         HOST_PROCESS.store(restore, std::sync::atomic::Ordering::SeqCst);
     }
 
-    // The staged-rollout clause, stated as a test so it cannot drift silently.
+    // The staged-rollout clause, now released (#4595), stated as a test so it
+    // cannot drift silently.
     //
-    // A Host that predates the contract route is still probed, classified and
-    // reported as incompatible — the diagnosis is identical either way. Only
-    // the refusal is staged, because the first release to carry this contract
-    // necessarily faces Hosts that predate it, and refusing them would strand
-    // every running agent behind an app restart it cannot perform for itself.
+    // A Host that predates the contract route used to be probed, classified
+    // and reported as incompatible without being refused, because the first
+    // release to carry this contract necessarily faced Hosts that predated it.
+    // Hosts serving the route have shipped since v9.102.0, so a pre-contract
+    // Host is now refused exactly like every other incompatible Host.
     #[test]
-    fn only_the_refusal_of_a_pre_contract_host_is_staged() {
+    fn a_pre_contract_host_is_refused_like_every_other_incompatible_host() {
         let request = request();
         let route_missing = classify(
             HostContractProbe::Rejected {
@@ -811,13 +812,12 @@ mod tests {
             !route_missing.is_compatible(),
             "a 404 Host is not compatible"
         );
-        assert_eq!(
+        assert!(
             route_missing.refuses(),
-            REFUSE_HOSTS_PREDATING_THE_CONTRACT_ROUTE,
-            "the pre-contract Host refusal must follow its staging flag alone"
+            "a Host that predates the contract route must be refused once released"
         );
 
-        // Every other incompatible verdict refuses now, staged flag or not.
+        // Every other incompatible verdict refuses too.
         let mut old = receipt(&request);
         old.execution_generation_contract_version =
             REQUIRED_EXECUTION_GENERATION_CONTRACT_VERSION - 1;
@@ -850,11 +850,7 @@ mod tests {
             ),
             classify(answered(old), &request),
         ] {
-            assert!(
-                verdict.refuses(),
-                "{} must refuse regardless of staging",
-                verdict.outcome.code()
-            );
+            assert!(verdict.refuses(), "{} must refuse", verdict.outcome.code());
         }
 
         assert!(
@@ -880,6 +876,15 @@ mod tests {
     #[test]
     fn every_bridged_authority_request_preflights_the_host_contract() {
         let bridge = include_str!("../daemon_runtime.rs");
+        let contract_guard = bridge
+            .split("fn require_contract(")
+            .nth(1)
+            .expect("bridge observation retains the Host contract guard");
+        assert!(contract_guard
+            .split("pub fn send_execution_adoption")
+            .next()
+            .unwrap()
+            .contains("crate::cli::host_contract::preflight(stage)"));
         for (sender, stage) in [
             (
                 "fn send_execution_continuation_via_agent_bridge_detailed(",
@@ -895,11 +900,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{sender} no longer exists in daemon_runtime.rs"));
             let body = &bridge[start..];
             let guard = body
-                .find("crate::cli::host_contract::require(")
+                .find(".require_contract(")
                 .unwrap_or_else(|| panic!("{sender} does not preflight the Host contract"));
             assert!(
-                body[guard..]
-                    .starts_with(&format!("crate::cli::host_contract::require(\"{stage}\")")),
+                body[guard..].starts_with(&format!(".require_contract(\"{stage}\")")),
                 "{sender} preflights with the wrong stage"
             );
             // The guard has to precede the request itself.
@@ -1039,6 +1043,39 @@ mod tests {
                 .outcome
                 .code(),
             "invalid_receipt"
+        );
+
+        HOST_PROCESS.store(restore, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // #4595 AC-4: with the pre-contract refusal released, a bridged caller
+    // whose Host predates the route is stopped at the gate, and the refusal
+    // tells the agent what to run next and what must happen first.
+    #[test]
+    fn a_bridged_caller_is_refused_by_a_host_that_predates_the_route() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = is_host_process();
+        HOST_PROCESS.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let (old, _old_shutdown) = spawn_host(|_| (404, String::new()));
+        let _url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &old);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "capability-token");
+
+        let error = require("execution-continuation")
+            .expect_err("a Host that predates the contract route is refused");
+        let message = error.to_string();
+        assert!(message.contains("execution-continuation"), "{message}");
+        assert!(message.contains("route_missing"), "{message}");
+        assert!(message.contains("update the running gwt Host"), "{message}");
+        assert!(
+            message.contains("then run JSON operation `execution.status`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("No local authority fallback was attempted"),
+            "{message}"
         );
 
         HOST_PROCESS.store(restore, std::sync::atomic::Ordering::SeqCst);

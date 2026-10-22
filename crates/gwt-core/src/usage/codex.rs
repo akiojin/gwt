@@ -90,7 +90,7 @@ pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<Code
     parse_rate_limits_at(rate_limits, Some(now))
 }
 
-fn parse_rate_limits_at(
+pub(super) fn parse_rate_limits_at(
     rate_limits: &Value,
     observed_at: Option<DateTime<Utc>>,
 ) -> Option<CodexAccount> {
@@ -111,8 +111,7 @@ fn parse_rate_limits_at(
     let limit_reached = rate_limits
         .get("rate_limit_reached_type")
         .map(|v| !v.is_null())
-        .unwrap_or(false)
-        || windows.iter().any(|w| w.used_percent >= 100.0);
+        .unwrap_or(false);
     Some(CodexAccount {
         windows,
         plan,
@@ -399,18 +398,23 @@ fn visit_rollouts(dir: &Path, f: &mut impl FnMut(PathBuf, std::time::SystemTime)
     }
 }
 
-/// Locate a rollout file whose name contains the given session id (uuid).
+/// Match the full session id at the end of a rollout filename without allocating.
+pub(super) fn rollout_matches_session(path: &Path, session_id: &str) -> bool {
+    !session_id.is_empty()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .and_then(|stem| stem.strip_suffix(session_id))
+            .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+/// Locate a rollout file for the exact session id (uuid).
 pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = home.join("sessions");
     let mut found = None;
     visit_rollouts(&sessions, &mut |path, _| {
-        if found.is_none()
-            && path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.contains(session_id))
-                .unwrap_or(false)
-        {
+        if found.is_none() && rollout_matches_session(&path, session_id) {
             found = Some(path);
         }
     });
@@ -433,6 +437,26 @@ pub fn read_codex_account_since(
     now: DateTime<Utc>,
     authenticated_at: Option<DateTime<Utc>>,
 ) -> ProviderUsage {
+    read_codex_account_with(home, now, authenticated_at, || {
+        recent_rollouts(home, 8)
+            .into_iter()
+            .filter_map(|path| {
+                let text = fs::read_to_string(path).ok()?;
+                let (payload, observed_at) = last_token_count_event(&text)?;
+                let account = parse_rate_limits_at(payload.get("rate_limits")?, observed_at)?;
+                Some((account, observed_at))
+            })
+            .collect()
+    })
+}
+
+/// Share account attribution/freshness rules with the poll-owned offset cache.
+pub(super) fn read_codex_account_with(
+    home: &Path,
+    now: DateTime<Utc>,
+    authenticated_at: Option<DateTime<Utc>>,
+    read: impl FnOnce() -> Vec<(CodexAccount, Option<DateTime<Utc>>)>,
+) -> ProviderUsage {
     let auth = fs::read_to_string(home.join("auth.json")).ok();
     let account_id = auth.as_deref().and_then(parse_auth_account_identity);
     if account_id.is_none() {
@@ -440,24 +464,12 @@ pub fn read_codex_account_since(
     }
     let account_label = auth.as_deref().and_then(parse_auth_account_label);
     let mut newest: Option<(CodexAccount, Option<DateTime<Utc>>)> = None;
-    for path in recent_rollouts(home, 8) {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some((payload, observed_at)) = last_token_count_event(&text) else {
-            continue;
-        };
+    for (acc, observed_at) in read() {
         if observed_at.is_some_and(|at| at > now)
             || authenticated_at.is_some_and(|boundary| observed_at.is_none_or(|at| at < boundary))
         {
             continue;
         }
-        let Some(acc) = payload
-            .get("rate_limits")
-            .and_then(|limits| parse_rate_limits_at(limits, observed_at))
-        else {
-            continue;
-        };
         if newest
             .as_ref()
             .is_none_or(|(_, previous)| observed_at > *previous)
@@ -480,6 +492,7 @@ pub fn read_codex_account_since(
         account_id,
         account_label,
         plan: acc.plan,
+        extra_usage: None,
         windows: acc.windows,
         limit_reached: acc.limit_reached,
         state: if let Some(at) = fetched_at {
@@ -709,6 +722,29 @@ mod tests {
         });
         let acc = parse_rate_limits(&rl, now()).unwrap();
         assert!(acc.limit_reached);
+    }
+
+    /// Issue #5037: the live account continued serving requests at 100% with
+    /// credits, and the provider explicitly reported no refusal.
+    #[test]
+    fn a_full_subscription_with_credits_is_not_a_provider_refusal() {
+        let mut limits = serde_json::json!({
+            "primary": {"used_percent": 100, "window_minutes": 10080},
+            "rate_limit_reached_type": null,
+            "credits": {"has_credits": true, "unlimited": false}
+        });
+        let account = parse_rate_limits(&limits, now()).unwrap();
+        assert_eq!(account.windows[0].used_percent, 100.0);
+        assert!(
+            !account.limit_reached,
+            "available credits keep the account usable"
+        );
+
+        limits["rate_limit_reached_type"] = serde_json::json!("usage_limit");
+        assert!(
+            parse_rate_limits(&limits, now()).unwrap().limit_reached,
+            "an explicit provider refusal still takes precedence"
+        );
     }
 
     #[test]
