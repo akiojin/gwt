@@ -38,7 +38,7 @@ impl ProcessSnapshot {
             processes: system
                 .processes()
                 .values()
-                .filter(|process| process.status() != ProcessStatus::Zombie)
+                .filter(|process| is_live(process))
                 .map(|process| ProcessEntry {
                     parent_pid: process.parent().map(sysinfo::Pid::as_u32),
                     process: LiveProcess {
@@ -86,6 +86,40 @@ impl ProcessSnapshot {
             .collect();
         descendants.sort_by_key(|process| process.pid);
         descendants
+    }
+}
+
+fn is_live(process: &sysinfo::Process) -> bool {
+    if process.status() == ProcessStatus::Zombie {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use windows::{
+            core::{Owned, HRESULT},
+            Win32::{
+                Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
+                System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            },
+        };
+
+        // Windows sysinfo can report Run after exit while a Child handle is
+        // retained. Exclude only proven exits; inaccessible processes remain.
+        // SAFETY: request only wait access without inheriting the owned handle.
+        let handle =
+            match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process.pid().as_u32()) } {
+                Ok(handle) => unsafe { Owned::new(handle) },
+                Err(error) => {
+                    return error.code() != HRESULT::from_win32(ERROR_INVALID_PARAMETER.0);
+                }
+            };
+        // SAFETY: the owned process handle stays valid through this immediate
+        // probe. A failed wait is uncertain and must not remove the process.
+        unsafe { WaitForSingleObject(*handle, 0) != WAIT_OBJECT_0 }
+    }
+    #[cfg(not(windows))]
+    {
+        true
     }
 }
 
