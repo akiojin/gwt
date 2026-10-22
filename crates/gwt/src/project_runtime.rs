@@ -2,6 +2,8 @@
 //!
 //! These functions return the owned pane. Callers install it and retain the
 //! handshake guard through publication or uncertain-launch reconciliation.
+pub mod launch_output_mirror;
+
 use gwt_terminal::{
     pty::{ProcessPolicy, SpawnConfig},
     Pane,
