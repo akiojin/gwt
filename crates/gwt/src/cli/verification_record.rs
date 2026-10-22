@@ -1669,7 +1669,9 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
 /// undelivered predecessor shard still dirties the tracked store, so no
 /// delivery pressure is lost. An unreadable authority keeps the obligation.
 fn open_obligation_is_superseded(worktree: &Path, record: &WorkEventSettlementRecord) -> bool {
-    match work_event_receipt_authorizes_current_generation(worktree, record) {
+    // A takeover preserves provenance, but its new writer must still be able
+    // to replace an inherited pending mutation with its own terminal update.
+    match work_event_receipt_authorizes_current_writer(worktree, record) {
         Ok(authorized) => !authorized,
         Err(error) => {
             tracing::warn!(%error, "open Work event obligation authority is unreadable");
@@ -1881,7 +1883,7 @@ fn persist_work_event_settlement_record_to_resolved_dir(
 /// #5216 / FR-026: verified delivery ends only its own bookkeeping obligation.
 /// Called under the owner write lease after the durable Completed transition.
 /// Preserve dirty/pending facts and immutable events as audit evidence; another
-/// Session or generation must still settle its own receipt independently.
+/// generation or unaudited Session must still settle its receipt independently.
 pub(crate) fn close_completed_work_event_obligation_locked(
     worktree: &Path,
     execution: &execution_state::ExecutionControlRecord,
@@ -1889,6 +1891,7 @@ pub(crate) fn close_completed_work_event_obligation_locked(
     if execution.status != execution_state::ExecutionControlStatus::Completed
         || execution.completion_evidence.is_none()
         || !execution_state::integrity_ok(execution)
+        || execution_state::load(worktree)?.as_ref() != Some(execution)
     {
         return Ok(());
     }
@@ -1896,7 +1899,8 @@ pub(crate) fn close_completed_work_event_obligation_locked(
         return Ok(());
     };
     if !receipt.obligation_open
-        || receipt.session_id != execution.primary_session_id
+        || (receipt.execution_binding.is_none()
+            && receipt.session_id != execution.primary_session_id)
         || !work_event_receipt_authorizes_current_generation(worktree, &receipt)?
     {
         return Ok(());
@@ -2466,12 +2470,9 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     }
 }
 
-/// Authenticate a Work settlement receipt against the authoritative current
-/// generation. A receipt may name the exact current binding or an authentic
-/// same-Session lifecycle prefix (for example, the Active head immediately
-/// before that generation settled as Completed). Generation successors,
-/// takeovers, foreign Sessions, and arbitrary heads remain unauthorized.
-pub(crate) fn work_event_receipt_authorizes_current_generation(
+/// Keep pending-mutation replacement scoped to the current writer. Historical
+/// takeover provenance alone must not pin that writer to an older request.
+fn work_event_receipt_authorizes_current_writer(
     worktree: &Path,
     receipt: &WorkEventSettlementRecord,
 ) -> io::Result<bool> {
@@ -2493,16 +2494,40 @@ pub(crate) fn work_event_receipt_authorizes_current_generation(
     }
 }
 
+/// A receipt belongs to its generation even after an audited writer takeover.
+/// Authenticate its exact historical writer/head without granting producing or
+/// verification authority. Successor generations and forged prefixes still fail.
+pub(crate) fn work_event_receipt_authorizes_current_generation(
+    worktree: &Path,
+    receipt: &WorkEventSettlementRecord,
+) -> io::Result<bool> {
+    let Some(binding) = receipt.execution_binding.as_ref() else {
+        return work_event_receipt_authorizes_current_writer(worktree, receipt);
+    };
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok(false);
+    };
+    execution_state::execution_binding_has_current_generation_provenance(
+        worktree,
+        execution_state::ExecutionOwnerKey {
+            kind: execution.owner_kind,
+            number: execution.owner_number,
+        },
+        &receipt.session_id,
+        binding,
+    )
+}
+
 /// #4523: `execution.reopen` appends its Blocked -> Active lifecycle event to
 /// the same generation, which advances `ledger_head_hash` and would otherwise
 /// invalidate the very record the reopen consumed — forcing a second, identical
 /// full verification matrix before the first PR mutation.
 ///
 /// A run record may therefore name the exact current binding or an authentic
-/// same-Session lifecycle prefix of the current generation, exactly as
-/// [`work_event_receipt_authorizes_current_generation`] already allows for Work
-/// settlement receipts. Predecessors, successors, takeovers, and foreign
-/// Sessions stay refused, and worktree freshness remains a separate gate.
+/// same-Session lifecycle prefix of the current generation. Unlike bookkeeping
+/// provenance, verification remains writer-scoped. Predecessors, successors,
+/// takeovers, and foreign Sessions stay refused, and worktree freshness remains
+/// a separate gate.
 fn record_binding_authorizes_current_generation(
     worktree: &Path,
     session_id: &str,
@@ -12581,6 +12606,24 @@ fn default_integration_test_builds_a_guarded_binary() {
             .expect("execution generation binding exists")
     }
 
+    fn take_over_work_event_generation(worktree: &Path, from: &str, to: &str) {
+        let request = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: format!("receipt-takeover-{to}"),
+            principal_id: "receipt-takeover-principal".to_string(),
+            work_id: None,
+            source: Some("continue-work:handoff".to_string()),
+            from_session_id: from.to_string(),
+            to_session_id: to.to_string(),
+            reason: "verified stale owner".to_string(),
+            requested_at: Utc::now(),
+        };
+        let owner = generation_scoped_owner();
+        crate::cli::execution_state::prepare_generation_takeover(worktree, owner, &request)
+            .expect("prepare receipt generation takeover");
+        crate::cli::execution_state::activate_generation_takeover(worktree, owner, &request)
+            .expect("activate receipt generation takeover");
+    }
+
     fn persist_generation_scoped_session(
         worktree: &Path,
         session_id: &str,
@@ -13822,7 +13865,7 @@ fn default_integration_test_builds_a_guarded_binary() {
     }
 
     #[test]
-    fn generation_scoped_work_settlement_rejects_takeover_suffix() {
+    fn generation_scoped_work_settlement_accepts_audited_takeover_history() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13830,37 +13873,75 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked();
-        let owner = generation_scoped_owner();
         let session_id = "session-settlement-before-takeover";
 
         initialize_generation_scoped_execution(&fixture.repo, session_id);
         let receipt = save_work_event_settlement_record(&fixture.repo, session_id, false)
             .expect("persist pre-takeover Work settlement receipt");
         assert!(receipt.status.is_settled());
-        let request = crate::cli::execution_state::GenerationTakeoverRequest {
-            operation_id: "operation-settlement-takeover".to_string(),
-            principal_id: "principal-settlement-takeover".to_string(),
-            work_id: Some("work-settlement-takeover".to_string()),
-            source: Some("continue-work:handoff".to_string()),
-            from_session_id: session_id.to_string(),
-            to_session_id: "session-settlement-after-takeover".to_string(),
-            reason: "verified stale owner".to_string(),
-            requested_at: Utc::now(),
-        };
-        crate::cli::execution_state::prepare_generation_takeover(&fixture.repo, owner, &request)
-            .expect("prepare same-generation takeover");
-        crate::cli::execution_state::activate_generation_takeover(&fixture.repo, owner, &request)
-            .expect("activate same-generation takeover");
+        take_over_work_event_generation(
+            &fixture.repo,
+            session_id,
+            "session-settlement-after-takeover",
+        );
 
         assert_eq!(
             crate::cli::execution_state::diagnose(&fixture.repo, None)
                 .work_event_receipt_matches_current_generation,
-            Some(false),
-            "a takeover is not a same-Session lifecycle descendant",
+            Some(true),
+            "an audited takeover preserves the receipt's generation provenance",
         );
-        let refusal = work_event_settlement_refusal(&fixture.repo)
-            .expect("a pre-takeover receipt must not authorize the new owner");
-        assert!(refusal.contains("generation"), "{refusal}");
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+        assert!(
+            open_obligation_is_superseded(&fixture.repo, &receipt),
+            "the new writer's Done must still be able to replace an inherited receipt"
+        );
+    }
+
+    #[test]
+    fn completed_legacy_execution_preserves_foreign_work_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let current_session = "legacy-current-writer";
+        execution_state::materialize_at_launch(
+            &fixture.repo,
+            owner.kind,
+            owner.number,
+            current_session,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        fixture.append_event("foreign-legacy-work");
+        let foreign =
+            save_work_event_settlement_record(&fixture.repo, "foreign-legacy-writer", true)
+                .unwrap();
+        assert!(foreign.obligation_open);
+        assert!(foreign.execution_binding.is_none());
+        plan_and_run(
+            &fixture.repo,
+            current_session,
+            &["git --version".to_string()],
+        );
+        assert!(execution_state::settle_completed_best_effort_guarded(
+            &fixture.repo,
+            current_session,
+            owner.number,
+            None,
+        ));
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap(),
+            foreign,
+            "a ledgerless completion cannot inherit a foreign Session's obligation"
+        );
     }
 
     #[test]
@@ -13879,7 +13960,14 @@ fn default_integration_test_builds_a_guarded_binary() {
             crate::cli::execution_state::settle(
                 &fixture.repo,
                 "session-settlement-predecessor",
-                crate::cli::execution_state::ExecutionSettlement::Completed,
+                crate::cli::execution_state::ExecutionSettlement::CompletedWithEvidence {
+                    evidence: execution_state::ExecutionCompletionEvidence {
+                        verification_record_id: "predecessor-run".into(),
+                        verification_run_hash: "predecessor-run-hash".into(),
+                        verification_plan_hash: "predecessor-plan-hash".into(),
+                        used_typed_quarantine: false,
+                    },
+                },
             )
             .expect("settle predecessor before its delivery receipt"),
             crate::cli::execution_state::SettleResult::Settled(_)
@@ -13888,6 +13976,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
                 .expect("load terminal predecessor binding")
                 .expect("terminal predecessor binding exists");
+        let completed = execution_state::load(&fixture.repo).unwrap().unwrap();
         let receipt = save_work_event_settlement_record(
             &fixture.repo,
             "session-settlement-predecessor",
@@ -13916,6 +14005,21 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(
             refusal.contains("workspace.update") && refusal.contains("current generation"),
             "a live Work refusal must name the terminal workspace.update the current generation still owes: {refusal}"
+        );
+
+        let mut current_receipt = receipt;
+        current_receipt.session_id = request.initial_session_id;
+        current_receipt.execution_binding =
+            execution_state::current_execution_binding(&fixture.repo, owner).unwrap();
+        current_receipt.obligation_open = true;
+        persist_work_event_settlement_record(&fixture.repo, &current_receipt).unwrap();
+        close_completed_work_event_obligation_locked(&fixture.repo, &completed).unwrap();
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .unwrap()
+                .unwrap(),
+            current_receipt,
+            "a predecessor completion must not close the current generation's receipt"
         );
     }
 
@@ -15332,6 +15436,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
         let session_id = "session-shard-lost";
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
         let updated_at = Utc::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
@@ -15385,11 +15490,38 @@ fn default_integration_test_builds_a_guarded_binary() {
             "{refusal}"
         );
 
-        // #5216: verified delivery can close this obligation independently of
-        // bookkeeping. Later refreshes must retain the unpersisted identity.
-        let mut completed = refreshed;
-        completed.obligation_open = false;
-        persist_work_event_settlement_record(&fixture.repo, &completed).unwrap();
+        // FR-3590-T1: a verified takeover completes without resending the
+        // predecessor's unconfirmed terminal mutation or losing its identity.
+        let current_session = "session-shard-lost-takeover";
+        take_over_work_event_generation(&fixture.repo, session_id, current_session);
+        let owner = generation_scoped_owner();
+        let binding = execution_state::current_execution_binding(&fixture.repo, owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_scoped_session(&fixture.repo, current_session, binding, 1);
+        plan_and_run(
+            &fixture.repo,
+            current_session,
+            &["git --version".to_string()],
+        );
+        assert!(execution_state::settle_completed_best_effort_guarded(
+            &fixture.repo,
+            current_session,
+            owner.number,
+            None,
+        ));
+        let completed = load_work_event_settlement_record(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !completed.obligation_open,
+            "audited takeover must close the obligation"
+        );
+        assert_eq!(completed.status, refreshed.status);
+        assert_eq!(completed.pending_delivery, refreshed.pending_delivery);
+        assert_eq!(completed.session_id, refreshed.session_id);
+        assert_eq!(completed.execution_binding, refreshed.execution_binding);
+        assert!(!fixture.event_shard_path(&event.id).exists());
         assert_eq!(
             save_work_event_settlement_record(&fixture.repo, session_id, false).unwrap(),
             completed,
