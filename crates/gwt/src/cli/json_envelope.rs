@@ -806,6 +806,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
             })
         }
         "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
@@ -5269,6 +5272,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
             })
@@ -5279,6 +5283,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
             })
@@ -5752,6 +5757,8 @@ mod tests {
         for (operation, mut params) in [
             ("issue.monitor.priority-move", json!({"number":42})),
             ("issue.monitor.priority-set", json!({"issue_numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
         ] {
             let unconditional = ok(operation, params.clone());
             params["expected_priority_order"] = json!([]);

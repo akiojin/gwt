@@ -829,6 +829,9 @@ body cannot hold `plan` / `tasks` sections.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
+  For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard
+  from a fresh status read. On conflict, re-read status and reconsider the
+  instruction; no queue admission, hold clearing or scan request occurs.
   It only moves the issue to the priority head and triggers an
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
@@ -4176,6 +4179,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         let intake = unwrapped(&claude);
         for phrase in [
             "`expected_priority_order`",
+            "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
             "full saved `priority_order`",
             "re-read status and reconsider",
             "`pm.plan.status`",
