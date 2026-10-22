@@ -894,6 +894,8 @@ fn run_monitor_status<E: CliEnv>(
     ))
     .map_err(io_as_api_error)?;
     output["priority_order"] = serde_json::json!(prefs.priority_order);
+    output["monitor_runtime_stop_requests"] =
+        serde_json::json!(prefs.monitor_runtime_stop_requests);
     output["config_token"] = serde_json::json!(prefs.config_token());
     output["saved_config"] = prefs.config_observation();
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
@@ -2945,12 +2947,10 @@ fn issues_held_by_provider(
 /// evaluated the identity, so a scan running concurrently cannot observe a
 /// half-applied stop.
 ///
-/// This operation does not tear the pane down, and deliberately so. Once the
-/// launch is revoked and held, `pane.close` on the returned window is inert —
-/// [`crate::IssueMonitorState::requeue_window_at`] finds no launch to requeue
-/// and the issue is terminal — so the safe teardown the PM already has under
-/// FR-066 composes with this stop instead of needing a second, redundant
-/// daemon→GUI channel that could disagree with it.
+/// A live exact runtime is revoked in the same transaction. Its owning host
+/// stops the captured PTY through the existing runtime worker, including after
+/// the pane has disappeared. The execution generation remains Active so an
+/// explicit Session resume can continue through a new runtime incarnation.
 ///
 /// Issue #4200: the launch row is only one of the two holds a launch takes on
 /// an Issue. The other is its execution generation. Revoking queue intent does
@@ -2981,7 +2981,7 @@ fn run_monitor_stop<E: CliEnv>(
             .launch_identity(number);
     let caller_session =
         crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
-    let (target_session, mut board_warning) = if caller_session.is_some() {
+    let (target_session, mut board_warning) = if observed_identity.active {
         match monitor_target_session(
             &project_root,
             number,
@@ -3034,29 +3034,53 @@ fn run_monitor_stop<E: CliEnv>(
         tracing::warn!(%warning, "Monitor stop Board observation failed open");
     }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (_, (outcome, identity)) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
-        // Issue #3992 AC-3: read before mutating, so a refusal reports the
-        // identity it disagreed with rather than one a later write changed.
-        let identity = monitor.launch_identity(number);
-        let outcome = monitor.stop_only_with_settlement(
-            &target,
-            reason,
-            &now,
-            monitor_execution_settlement(&project_root, number),
-        );
-        if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
-            if remove_from_queue {
-                monitor.terminal_queue_remove(&[number], &now);
+    let (_, (outcome, identity, runtime_stop_request)) =
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            // Issue #3992 AC-3: read before mutating, so a refusal reports the
+            // identity it disagreed with rather than one a later write changed.
+            let identity = monitor.launch_identity(number);
+            let outcome = monitor.stop_only_with_settlement(
+                &target,
+                reason,
+                &now,
+                monitor_execution_settlement(&project_root, number),
+            );
+            let mut runtime_stop_request = None;
+            if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+                if identity.active {
+                    runtime_stop_request = crate::monitor_duplicate_runtime::capture_stop_request(
+                        &project_root,
+                        number,
+                        identity.window_id.as_deref().unwrap_or_default(),
+                        target_session.as_deref(),
+                        &now,
+                    )?;
+                }
+                if remove_from_queue {
+                    monitor.terminal_queue_remove(&[number], &now);
+                }
+                *prefs = monitor.prefs();
+                if let Some(request) = &runtime_stop_request {
+                    if !prefs.monitor_runtime_stop_requests.iter().any(|existing| {
+                        existing.session_id == request.session_id
+                            && existing.execution_identity == request.execution_identity
+                            && existing.host_pid == request.host_pid
+                            && existing.host_started_at == request.host_started_at
+                            && existing.runtime_incarnation == request.runtime_incarnation
+                            && existing.child_pid == request.child_pid
+                            && existing.child_started_at == request.child_started_at
+                    }) {
+                        prefs.monitor_runtime_stop_requests.push(request.clone());
+                    }
+                }
             }
-            *prefs = monitor.prefs();
-        }
-        Ok((outcome, identity))
-    })
-    .map_err(io_as_api_error)?;
+            Ok((outcome, identity, runtime_stop_request))
+        })
+        .map_err(io_as_api_error)?;
 
     let (status, stopped_window_id) = match &outcome {
         crate::IssueMonitorStopOutcome::Stopped { window_id } => {
@@ -3099,8 +3123,15 @@ fn run_monitor_stop<E: CliEnv>(
             "removed_from_queue": remove_from_queue,
             "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
+            "runtime_stop": if runtime_stop_request.is_some() { "requested" } else { "not_requested" },
+            "runtime_stop_request": runtime_stop_request,
+            "runtime_target_source": if runtime_stop_request.is_some() {
+                if target_session.is_some() { "persisted_window_session" } else { "unique_current_execution_holder" }
+            } else { "none" },
             // Say what is left to do rather than implying the pane is gone.
-            "pane_teardown": if stopped_window_id.is_some() {
+            "pane_teardown": if runtime_stop_request.is_some() {
+                "the owning host will stop the exact captured runtime; the diagnostic pane can be closed separately"
+            } else if stopped_window_id.is_some() {
                 "close the returned window with pane.close — the launch is already revoked, so the close cannot requeue or relaunch it"
             } else {
                 "none"
@@ -3208,6 +3239,35 @@ fn release_revoked_launch_generation(
     number: u64,
     reason: &str,
 ) -> Result<crate::cli::execution_state::LaunchGenerationRelease, String> {
+    // A captured live runtime was revoked, not its execution contract. Keep
+    // this fence after exit so a faster host worker or a repeated stop cannot
+    // reinterpret its Stopped Session as permission to terminalize the ECR.
+    if let Some(hold) =
+        crate::cli::execution_state::owner_generation_hold_for_project(project_root, number)
+            .map_err(|error| error.to_string())?
+    {
+        if hold.status == crate::cli::execution_state::ExecutionControlStatus::Active {
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+            )
+            .map_err(|error| error.to_string())?;
+            if prefs.monitor_runtime_stop_requests.iter().any(|request| {
+                request.issue_number == number
+                    && request.session_id == hold.holder_session_id
+                    && request
+                        .execution_identity
+                        .execution_binding
+                        .identity
+                        .generation_id
+                        == hold.generation_id
+            }) {
+                return Ok(crate::cli::execution_state::LaunchGenerationRelease::Held {
+                    generation_id: hold.generation_id,
+                    detail: "exact runtime revoked; resume its Session with a new runtime incarnation to continue the Active execution",
+                });
+            }
+        }
+    }
     let worktrees = crate::worktree_inventory::enumerate_worktrees(project_root, None)
         .map(|entries| {
             entries
@@ -6896,6 +6956,7 @@ mod tests {
             child_started_at: 0,
             started_at: "2026-10-01T00:00:00Z".to_string(),
             launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+            launch_entrypoint: None,
             restore_source_session_id: None,
         }
     }

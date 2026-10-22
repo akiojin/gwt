@@ -563,6 +563,14 @@ membership while holding the Issue. Launch failures show their category and
 the next recovery operation; repeated unchanged failures stop automatic retries
 after the configured attempt limit.
 
+For a live launch, stop also asks its owning host to terminate the exact agent
+and its descendants, including when its pane is gone. `runtime_stop: requested`
+acknowledges the request; check `issue.monitor.status` for process exit.
+Its `active_sessions` lists live PIDs, worktrees, and known `launch_entrypoint`
+values independently of panes. A stopped runtime cannot run verification;
+explicitly resume its Session to continue existing work with a fresh runtime.
+If the target runtime cannot be identified safely, stop refuses the change.
+
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
 Issues lead the queue in assignment order by default, without changing the saved

@@ -2024,6 +2024,7 @@ mod tests {
                 child_started_at: (after.timestamp() + offset) as u64,
                 started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
                 launch_origin: origin,
+                launch_entrypoint: None,
                 restore_source_session_id: Some("source".to_string()),
             }
         })
