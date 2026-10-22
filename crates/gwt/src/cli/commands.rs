@@ -224,6 +224,7 @@ pub enum IssueCommand {
     },
     MonitorQueueDemote {
         project_root: Option<std::path::PathBuf>,
+        expected_urgent_queue_token: Option<String>,
         number: u64,
     },
     MonitorConfigSet {

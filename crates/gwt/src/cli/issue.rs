@@ -342,18 +342,29 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::MonitorQueueDemote {
             project_root,
+            expected_urgent_queue_token,
             number,
         } => {
             let root = issue_monitor_project_root(env, project_root.as_deref())?;
-            crate::try_mutate_issue_monitor_prefs(
+            let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
                 &crate::issue_monitor_prefs_path_for_repo_path(&root),
                 |prefs| {
+                    if expected_urgent_queue_token.as_ref().is_some_and(|expected| {
+                        *expected != prefs.urgent_queue.observation_token()
+                    }) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "urgent queue changed since observation; re-read issue.monitor.queue.list and reconsider the demotion before retrying",
+                        ));
+                    }
                     prefs.urgent_queue.demoted.insert(number);
                     Ok(())
                 },
             )
             .map_err(io_as_api_error)?;
-            run_monitor_queue_list(env, Some(&root), None, out)?
+            out.push_str(&monitor_queue_reply(&prefs, None).to_string());
+            out.push('\n');
+            0
         }
         IssueCommand::MonitorLaunchNow {
             project_root,
@@ -1599,6 +1610,7 @@ fn monitor_queue_reply(
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
     let mut projection =
         serde_json::to_value(prefs.urgent_queue.projection(&queue)).expect("queue serializes");
+    projection["urgent_queue_token"] = prefs.urgent_queue.observation_token().into();
     projection["queue_order"] = serde_json::json!(queue
         .entries
         .iter()
@@ -9604,6 +9616,32 @@ mod tests {
                 assert_eq!(listed["entries"][0]["number"], 3);
             }
         }
+        let saved =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .unwrap();
+        let token = monitor_queue_reply(&saved, None)["urgent_queue_token"].clone();
+        assert!(token.as_str().is_some_and(|value| !value.is_empty()));
+        for (field, value) in [
+            ("limit", serde_json::json!(4)),
+            ("demoted", serde_json::json!([3])),
+            ("grants", serde_json::json!({})),
+        ] {
+            let mut changed = serde_json::to_value(&saved).unwrap();
+            changed["urgent_queue"][field] = value;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert_ne!(
+                monitor_queue_reply(&changed, None)["urgent_queue_token"],
+                token
+            );
+        }
+        let mut unrelated = saved;
+        unrelated.terminal_queues.clear();
+        unrelated.priority_order = vec![42];
+        unrelated.last_scan_at = Some("2026-10-22T00:01:00Z".into());
+        assert_eq!(
+            monitor_queue_reply(&unrelated, Some("another-host"))["urgent_queue_token"],
+            token
+        );
     }
 
     #[test]
@@ -9763,6 +9801,49 @@ mod tests {
         assert_eq!(reply["entries"][1]["kind"], "issue");
         assert_eq!(reply["saved_config"], saved.config_observation());
         assert_eq!(reply["config_token"], saved.config_token());
+        let demote_token = reply["urgent_queue_token"].clone();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.urgent_queue.grants.get_mut(&2).unwrap().assigned_by = Some("new-actor".into());
+            Ok(())
+        })
+        .unwrap();
+        let before_demote = std::fs::read(&prefs_path).unwrap();
+        let mut demote = |token: serde_json::Value| {
+            let crate::cli::CliCommand::Issue(command) =
+                crate::cli::json_envelope::parse_operation(
+                    "issue.monitor.queue.demote",
+                    &serde_json::json!({"number": 2, "expected_urgent_queue_token": token}),
+                )
+                .unwrap()
+            else {
+                panic!("demote command")
+            };
+            let mut out = String::new();
+            (run(&mut env, command, &mut out), out)
+        };
+        let (result, out) = demote(demote_token);
+        let error = result.expect_err("unseen urgent assignment must refuse demotion");
+        assert!(
+            error.to_string().contains("urgent queue changed"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("issue.monitor.queue.list"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before_demote);
+        let fresh = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let (result, out) = demote(monitor_queue_reply(&fresh, None)["urgent_queue_token"].clone());
+        assert_eq!(result.unwrap(), 0);
+        let demoted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(demoted.urgent_queue.demoted.contains(&2));
+        assert_eq!(demoted.terminal_queues, fresh.terminal_queues);
+        assert_eq!(demoted.urgent_queue.grants, fresh.urgent_queue.grants);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            monitor_queue_reply(&demoted, None)
+        );
         for (operation, params) in [
             (
                 "issue.monitor.queue.urgent_limit",
@@ -9925,6 +10006,7 @@ mod tests {
         assert_eq!(listed["entries"][0]["assigned_by"], "alice");
         assert_eq!(listed["entries"][1]["assigned_at"], "2026-10-03T00:01:00Z");
         listed.as_object_mut().unwrap().remove("queue_order");
+        listed.as_object_mut().unwrap().remove("urgent_queue_token");
         out.clear();
         run_monitor_status(&env, None, &mut out).unwrap();
         let status: serde_json::Value = serde_json::from_str(&out).unwrap();
