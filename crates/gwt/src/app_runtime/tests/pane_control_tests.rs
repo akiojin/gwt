@@ -2442,6 +2442,22 @@ fn agent_pane_close_removes_restored_session_husk_without_claiming_tree_exit() {
         .set_session_id("agent-husk", Some("restored-session".to_string())));
     let (mut runtime, recorded) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let mut session = gwt_agent::Session::new(&project, "work/restored", gwt_agent::AgentId::Codex);
+    session.id = "restored-session".to_string();
+    session.status = gwt_agent::AgentStatus::Running;
+    session.restore_window_on_startup = true;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist restored Session");
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    let mut active = sample_active_agent_session("tab-project", "tab-project::agent-husk");
+    active.session_id = session.id.clone();
+    active.branch_name = session.branch.clone();
+    active.worktree_path = project.clone();
+    active.agent_project_root = project.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(active.window_id.clone(), active);
     runtime.window_lookup.remove("tab-project::agent-husk");
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -2475,6 +2491,11 @@ fn agent_pane_close_removes_restored_session_husk_without_claiming_tree_exit() {
     for finalizer in queued {
         finalizer();
     }
+    let durable =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .expect("reload restored Session");
+    assert_eq!(durable.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!durable.restore_window_on_startup);
     let recorded = recorded
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

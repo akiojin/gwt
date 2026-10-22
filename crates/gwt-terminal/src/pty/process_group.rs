@@ -3,9 +3,9 @@
 //! - Windows: Wraps the child in a Job Object with
 //!   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so that closing the job handle
 //!   terminates the child and every descendant it spawned.
-//! - Unix: `portable_pty` already places the child in its own session
-//!   (setsid), so the child's pid is also its process group id. On drop we
-//!   send `SIGKILL` to the group via `killpg` without waiting (Issue #3705).
+//! - Unix: `portable_pty` places the child in its own session (setsid).
+//!   Nonblocking termination signals its original process group; background
+//!   confirmation also reclaims other groups in that captured session.
 
 #[cfg(windows)]
 mod imp {
@@ -153,16 +153,48 @@ mod imp {
     #[derive(Default)]
     pub struct ProcessGroup {
         pgid: Option<Pid>,
+        session_id: Option<Pid>,
+        captured_root: Option<NativeProcess>,
         termination_requested: bool,
+        tree_exited: bool,
     }
 
     impl ProcessGroup {
         pub fn attach(pid: u32) -> Result<Self, String> {
             // portable_pty spawns each child in its own session via setsid,
-            // so the child's pid is also its process group id.
+            // so only this exact PID can be the owned SID. Never adopt a
+            // caller/shared session if an unexpected child lacks setsid.
+            let pid = i32::try_from(pid)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or("invalid PTY child PID")?;
+            let captured_root = match process_session(pid)? {
+                Some(session_id) => {
+                    if session_id != pid {
+                        return Err(format!("PTY child {pid} does not lead its own session"));
+                    }
+                    let root = native_process(pid)?;
+                    if root.is_some_and(|root| root.session_id != pid) {
+                        return Err(format!("PTY child {pid} changed session during attachment"));
+                    }
+                    root
+                }
+                None => {
+                    if native_process(pid)?.is_some() {
+                        return Err(format!("PTY child {pid} reappeared during attachment"));
+                    }
+                    None
+                }
+            };
+            // A short-lived child may already be reaped. Its SID still comes
+            // from portable_pty's setsid contract, never a different live SID.
+            let pid = Pid::from_raw(pid);
             Ok(Self {
-                pgid: Some(Pid::from_raw(pid as i32)),
+                pgid: Some(pid),
+                session_id: Some(pid),
+                captured_root,
                 termination_requested: false,
+                tree_exited: false,
             })
         }
 
@@ -219,6 +251,7 @@ mod imp {
                 return Ok(());
             }
             let pgid = self.pgid.ok_or("PTY process group was not captured")?;
+            self.validate_root_identity()?;
             match killpg(pgid, Signal::SIGKILL) {
                 Ok(()) => {}
                 Err(Errno::ESRCH) => self.pgid = None,
@@ -228,28 +261,262 @@ mod imp {
             Ok(())
         }
 
-        /// A live leader is not required: wait for every captured group member.
+        /// Reclaim every group in the captured PTY session, even after its
+        /// leader was reaped. Verification commands and shell job control can
+        /// create other PGIDs without leaving that session.
         pub fn terminate_and_wait(&mut self, timeout: Duration) -> Result<bool, String> {
-            let started = Instant::now();
-            self.terminate()?;
-            let Some(pgid) = self.pgid else {
+            if self.tree_exited {
                 return Ok(true);
-            };
+            }
+            let session_id = self
+                .session_id
+                .ok_or("PTY process session was not captured")?
+                .as_raw();
+            let started = Instant::now();
+            let mut captured = Vec::<NativeProcess>::new();
             loop {
-                match killpg(pgid, None) {
-                    Err(Errno::ESRCH) => {
-                        self.pgid = None;
-                        return Ok(true);
+                // A complete native census is required. An absent original
+                // PGID or a partial/failed snapshot cannot prove tree exit.
+                self.validate_root_identity()?;
+                let observed = session_processes(session_id)?;
+                let mut live = observed.iter().any(|process| process.running);
+                for process in observed {
+                    if !captured.iter().any(|known| known.same_identity(&process)) {
+                        captured.push(process);
                     }
-                    Err(error) => return Err(format!("probe PTY process group {pgid}: {error}")),
-                    Ok(()) => {}
                 }
+                for process in &captured {
+                    let Some(current) = native_process(process.pid)? else {
+                        continue;
+                    };
+                    if !process.same_identity(&current) || !current.running {
+                        continue;
+                    }
+                    live = true;
+                    self.validate_root_identity()?;
+                    // SAFETY: the native PID/start identity was revalidated
+                    // against a member of this exact captured PTY session.
+                    if unsafe { libc::kill(current.pid, libc::SIGKILL) } == -1 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::ESRCH) {
+                            return Err(format!(
+                                "terminate PTY session member {}: {error}",
+                                current.pid
+                            ));
+                        }
+                    }
+                }
+                self.termination_requested = true;
+                if !live {
+                    self.pgid = None;
+                    self.tree_exited = true;
+                    return Ok(true);
+                }
+                // Re-enumerate after signalling: a still-running descendant
+                // may have forked since the previous census. Native zombies
+                // have exited and cannot keep working or holding a lease.
                 let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                     return Ok(false);
                 };
                 std::thread::sleep(remaining.min(Duration::from_millis(10)));
             }
         }
+
+        fn validate_root_identity(&self) -> Result<(), String> {
+            let pid = self
+                .session_id
+                .ok_or("PTY process session was not captured")?
+                .as_raw();
+            let Some(current) = native_process(pid)? else {
+                // The reaped leader need not remain alive while other groups
+                // still belong to its captured session.
+                return Ok(());
+            };
+            if current.session_id == pid
+                && self
+                    .captured_root
+                    .is_some_and(|root| root.same_identity(&current))
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "PTY root identity changed for captured session {pid}"
+                ))
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct NativeProcess {
+        pid: libc::pid_t,
+        session_id: libc::pid_t,
+        started: [u64; 2],
+        running: bool,
+    }
+
+    impl NativeProcess {
+        fn same_identity(&self, other: &Self) -> bool {
+            self.pid == other.pid && self.started == other.started
+        }
+    }
+
+    fn process_session(pid: libc::pid_t) -> Result<Option<libc::pid_t>, String> {
+        // SAFETY: getsid only observes the named PID.
+        let session_id = unsafe { libc::getsid(pid) };
+        if session_id >= 0 {
+            return Ok(Some(session_id));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(None)
+        } else {
+            Err(format!("observe session of process {pid}: {error}"))
+        }
+    }
+
+    fn session_processes(session_id: libc::pid_t) -> Result<Vec<NativeProcess>, String> {
+        let pids = native_process_ids()?;
+        if !pids.contains(&(std::process::id() as libc::pid_t)) {
+            return Err("native process census omitted the observing process".into());
+        }
+        let mut processes = Vec::new();
+        for pid in pids {
+            if process_session(pid)? != Some(session_id) {
+                continue;
+            }
+            if let Some(process) = native_process(pid)? {
+                if process.session_id != session_id {
+                    return Err(format!("process {pid} changed session during PTY census"));
+                }
+                processes.push(process);
+            }
+        }
+        Ok(processes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_process_ids() -> Result<Vec<libc::pid_t>, String> {
+        std::fs::read_dir("/proc")
+            .map_err(|error| format!("enumerate PTY session processes: {error}"))?
+            .filter_map(|entry| match entry {
+                Ok(entry) => entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<libc::pid_t>().ok())
+                    .filter(|pid| *pid > 0)
+                    .map(Ok),
+                Err(error) => Some(Err(format!("incomplete process enumeration: {error}"))),
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_process(pid: libc::pid_t) -> Result<Option<NativeProcess>, String> {
+        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("observe PTY session process {pid}: {error}")),
+        };
+        let fields = stat
+            .iter()
+            .rposition(|byte| *byte == b')')
+            .and_then(|end| std::str::from_utf8(&stat[end + 1..]).ok())
+            .map(|fields| fields.split_whitespace().collect::<Vec<_>>())
+            .filter(|fields| fields.len() >= 20)
+            .ok_or_else(|| format!("incomplete native process record for {pid}"))?;
+        let session_id = fields[3]
+            .parse()
+            .map_err(|error| format!("invalid native session for {pid}: {error}"))?;
+        let started = fields[19]
+            .parse()
+            .map_err(|error| format!("invalid native start identity for {pid}: {error}"))?;
+        Ok(Some(NativeProcess {
+            pid,
+            session_id,
+            started: [started, 0],
+            running: !matches!(fields[0], "Z" | "X"),
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_process_ids() -> Result<Vec<libc::pid_t>, String> {
+        // SAFETY: the first call asks for capacity without writing a buffer.
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if count <= 0 {
+            return Err(format!(
+                "enumerate PTY session processes: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut pids = vec![0; count as usize + 32];
+        // Retry a full buffer, never accept a silently truncated census.
+        for _ in 0..4 {
+            let size = i32::try_from(pids.len() * std::mem::size_of::<libc::pid_t>())
+                .map_err(|_| "native process census exceeds buffer limit")?;
+            // SAFETY: the initialized PID buffer has exactly `size` bytes.
+            let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+            if count <= 0 {
+                return Err(format!(
+                    "observe native process census: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if (count as usize) < pids.len() {
+                pids.truncate(count as usize);
+                pids.retain(|pid| *pid > 0);
+                return Ok(pids);
+            }
+            pids.resize(pids.len() * 2, 0);
+        }
+        Err("native process census remained truncated".into())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_process(pid: libc::pid_t) -> Result<Option<NativeProcess>, String> {
+        // SAFETY: proc_pidinfo receives the exact native structure and size.
+        let info = unsafe {
+            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            let size = std::mem::size_of_val(&info) as libc::c_int;
+            let observed = libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            );
+            if observed != size {
+                let error = std::io::Error::last_os_error();
+                if observed == 0 && error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "incomplete native process record for {pid}: {error}"
+                ));
+            }
+            if info.pbi_pid != pid as u32 {
+                return Err(format!("native process identity changed for {pid}"));
+            }
+            info
+        };
+        let Some(session_id) = process_session(pid)? else {
+            return Ok(None);
+        };
+        Ok(Some(NativeProcess {
+            pid,
+            session_id,
+            started: [info.pbi_start_tvsec, info.pbi_start_tvusec],
+            running: info.pbi_status != libc::SZOMB,
+        }))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn native_process_ids() -> Result<Vec<libc::pid_t>, String> {
+        Err("native PTY session observation is unsupported on this Unix platform".into())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn native_process(_pid: libc::pid_t) -> Result<Option<NativeProcess>, String> {
+        Err("native PTY process observation is unsupported on this Unix platform".into())
     }
 
     impl Drop for ProcessGroup {
@@ -304,6 +571,168 @@ mod tests {
             super::imp::apply_group_nice(4242, 10, |_, _| Ok(())),
             Ok(())
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the regression owns a session leader and its independently grouped child"
+    )]
+    fn tree_confirmation_reclaims_a_separate_group_after_the_leader_is_reaped() {
+        use std::{os::unix::process::CommandExt, process::Command, time::Duration};
+
+        struct Fixture {
+            leader: std::process::Child,
+            descendant: Option<u32>,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(pid) = self.descendant {
+                    // SAFETY: only reclaim the fixture child while it still
+                    // belongs to the captured session, including on RED.
+                    unsafe {
+                        if libc::getsid(pid as libc::pid_t) == self.leader.id() as libc::pid_t {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                    }
+                }
+                let _ = self.leader.kill();
+                let _ = self.leader.wait();
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let child_path = directory.path().join("child.pid");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "pty::process_group::tests::separate_group_child_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_SEPARATE_GROUP_CHILD_PID", &child_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: setsid is async-signal-safe and gives this owned fixture
+        // the same session/group topology as a portable_pty child.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut fixture = Fixture {
+            leader: command.spawn().unwrap(),
+            descendant: None,
+        };
+        let leader_pid = fixture.leader.id();
+        let mut group = super::ProcessGroup::attach(leader_pid).unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds the real child's PID publication; ordering is established by the published PID, not elapsed time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let child_pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&child_path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline This watchdog prevents fixture startup from hanging the test.
+                std::time::Instant::now() < deadline,
+                "separate-group child did not publish its PID"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        fixture.descendant = Some(child_pid);
+        // SAFETY: these calls only observe the exact fixture child.
+        unsafe {
+            assert_eq!(
+                libc::getpgid(child_pid as libc::pid_t),
+                child_pid as libc::pid_t
+            );
+            assert_eq!(
+                libc::getsid(child_pid as libc::pid_t),
+                leader_pid as libc::pid_t
+            );
+        }
+        assert!(fixture_child_is_running(child_pid));
+
+        // Match pane close's existing nonblocking kill followed by a later
+        // finalizer: original-group absence must not hide the other group.
+        group.terminate().unwrap();
+        fixture.leader.wait().unwrap();
+        let confirmed = group.terminate_and_wait(Duration::from_secs(2)).unwrap();
+        let survived_confirmation = fixture_child_is_running(child_pid);
+        assert!(confirmed, "the captured tree did not finish teardown");
+        assert!(
+            !survived_confirmation,
+            "tree confirmation succeeded while separate-group child {child_pid} was running"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the subprocess fixture intentionally creates an independent owned process group"
+    )]
+    fn separate_group_child_fixture() {
+        use std::{os::unix::process::CommandExt, process::Command};
+
+        let Some(path) = std::env::var_os("GWT_SEPARATE_GROUP_CHILD_PID") else {
+            return;
+        };
+        // SAFETY: this is a dedicated subprocess fixture. Ignoring HUP keeps
+        // leader exit from independently terminating the observed child.
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        }
+        let mut child = Command::new("/bin/sleep")
+            .arg("600")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(path, child.id().to_string()).unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_child_is_running(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => {
+                let (_, fields) = stat.rsplit_once(')').expect("native process stat");
+                !matches!(fields.split_whitespace().next(), Some("Z" | "X"))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("could not observe fixture child {pid}: {error}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_child_is_running(pid: u32) -> bool {
+        // SAFETY: proc_pidinfo fills this correctly sized native structure.
+        unsafe {
+            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            let size = std::mem::size_of_val(&info) as libc::c_int;
+            let observed = libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            );
+            if observed == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return false;
+            }
+            assert_eq!(observed, size, "could not observe fixture child {pid}");
+            info.pbi_status != libc::SZOMB
+        }
     }
 
     /// Issue #4405 AC-2: the cap lifts only while the lease holder runs in

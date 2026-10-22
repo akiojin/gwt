@@ -1054,12 +1054,13 @@ impl AppRuntime {
                 }
             };
 
-            // A restored Session without a captured PTY provides no proof that
-            // its process tree exited, even if its former leader is gone.
-            let mut local_process_exited = runtime.is_none()
+            let mut local_process_exited = runtime.is_none();
+            // Local cleanup still applies to a restored Session, but without
+            // a captured PTY its peer reply cannot confirm process-tree exit.
+            let peer_exit_unconfirmed = runtime.is_none()
                 && peer_reply
                     .as_ref()
-                    .is_none_or(|reply| reply.session_id.is_none());
+                    .is_some_and(|reply| reply.session_id.is_some());
             let mut terminal_persisted = session.is_none();
             if let Some(pty) = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty)) {
                 let kill_and_reap = || gwt::session_finalizer::kill_and_reap(&pty, &window_id);
@@ -1117,12 +1118,13 @@ impl AppRuntime {
             }
 
             if let Some(reply) = peer_reply {
+                let process_tree_exited = local_process_exited && !peer_exit_unconfirmed;
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply.client_id,
                     BackendEvent::PaneCloseResult {
-                        ok: local_process_exited,
+                        ok: process_tree_exited,
                         window_id: window_id.clone(),
-                        reason: (!local_process_exited)
+                        reason: (!process_tree_exited)
                             .then(|| "process-tree exit was not confirmed".to_string()),
                     },
                 )]));

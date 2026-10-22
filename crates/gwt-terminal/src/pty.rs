@@ -600,6 +600,8 @@ pub struct PtyHandle {
     /// Issue #5839: published by the parsed active screen. Protected prompt
     /// injection must not feed Codex's Transcript/Find input surface.
     transcript_overlay: AtomicBool,
+    /// Published only after bounded confirmation that the captured tree exited.
+    tree_exit_confirmed: AtomicBool,
     #[cfg(target_os = "macos")]
     reap_requested: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -864,6 +866,7 @@ impl PtyHandle {
             generation_active: AtomicBool::new(true),
             bracketed_paste: AtomicBool::new(false),
             transcript_overlay: AtomicBool::new(false),
+            tree_exit_confirmed: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -1243,9 +1246,18 @@ impl PtyHandle {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
         };
-        group
+        let exited = group
             .terminate_and_wait(timeout)
-            .map_err(|details| TerminalError::PtyIoError { details })
+            .map_err(|details| TerminalError::PtyIoError { details })?;
+        if exited {
+            self.tree_exit_confirmed.store(true, Ordering::Release);
+        }
+        Ok(exited)
+    }
+
+    /// Whether the captured tree's exit has been confirmed, beyond leader reap.
+    pub fn tree_exit_confirmed(&self) -> bool {
+        self.tree_exit_confirmed.load(Ordering::Acquire)
     }
 
     /// Returns the OS process id of the spawned child, if available.

@@ -5404,7 +5404,7 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     )
 }
 
-/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// Clean up one exact captured holder runtime, including a historical generation.
 /// The caller must recheck its captured runtime proof under this lease before
 /// signalling the PTY. This authority never permits producing operations.
 pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
@@ -5495,13 +5495,33 @@ fn with_current_session_execution_identity_lease<T>(
                 .as_ref()
                 != Some(expected)
                 || canonical_worktree != context.worktree
-                || !current_execution_binding_matches_context(
+            {
+                return Ok(None);
+            }
+            let binding_matches = match authority {
+                CurrentExecutionBindingAuthority::RuntimeCleanup => {
+                    let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+                        return Ok(None);
+                    };
+                    ledger.generations.iter().any(|generation| {
+                        generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                            && authority.allows(ledger.effective_status_for(generation))
+                            && execution_binding_matches_historical_prefix(
+                                &ledger,
+                                generation,
+                                &expected.session_id,
+                                &binding.identity,
+                            )
+                    })
+                }
+                _ => current_execution_binding_matches_context(
                     context,
                     &expected.session_id,
                     &binding.identity,
                     authority,
-                )?
-            {
+                )?,
+            };
+            if !binding_matches {
                 return Ok(None);
             }
             Ok(Some(operation()))
@@ -22808,6 +22828,21 @@ mod tests {
             LegacyActiveDisposition::Unknown,
         )
         .unwrap();
+        let predecessor_binding = current_execution_binding(predecessor_dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            predecessor_dir.path(),
+            owner,
+            "session-original",
+            predecessor_binding,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor =
+            gwt_agent::Session::load(&sessions_dir.join("session-original.toml")).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&predecessor)
+            .unwrap()
+            .unwrap();
 
         let request = successor_request("operation-new-worktree", "principal-a", "continue-work");
         prepare_successor(successor_dir.path(), owner, &request).unwrap();
@@ -22825,6 +22860,38 @@ mod tests {
             !integrity_ok(&loaded),
             "a stale predecessor projection must fail closed instead of reviving completion"
         );
+        let ledger_before =
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap();
+        let successor_before = generation_authority_bytes(successor_dir.path(), owner);
+        assert!(
+            with_current_active_session_execution_identity_lease(&sessions_dir, &identity, || ())
+                .unwrap_or(None)
+                .is_none(),
+            "a historical predecessor must never regain producing authority"
+        );
+        assert_eq!(
+            with_current_runtime_cleanup_session_execution_identity_lease(
+                &sessions_dir,
+                &identity,
+                || "captured predecessor cleanup",
+            )
+            .expect("historical cleanup must not require the old worktree pointer"),
+            Some("captured predecessor cleanup"),
+        );
+        assert_eq!(
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap(),
+            ledger_before,
+            "cleanup authority must not change the owner ledger"
+        );
+        assert_eq!(
+            generation_authority_bytes(successor_dir.path(), owner),
+            successor_before,
+            "cleanup authority must not change successor projections"
+        );
+        assert!(!predecessor_trusted_dir
+            .join(GENERATION_POINTER_FILE)
+            .exists());
+        assert!(!generation_pointer_path(predecessor_dir.path()).exists());
     }
 
     #[test]

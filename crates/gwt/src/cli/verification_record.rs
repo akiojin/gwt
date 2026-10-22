@@ -6234,9 +6234,14 @@ fn verify_runtime_not_revoked(worktree: &Path, session_id: &str) -> io::Result<(
         || runtime.child_started_at != crate::process::host_process_start_time(child_pid)
         || (child_pid != std::process::id()
             && !crate::process::is_descendant_of(std::process::id(), child_pid))
-        || requests
-            .iter()
-            .any(|request| request.matches_runtime(session_id, host_pid, &runtime))
+        || requests.iter().any(|request| {
+            // A writable sidecar cannot revive the stopped OS process or
+            // its callers. The child can outlive its original GUI host.
+            crate::process::host_process_start_time(request.child_pid)
+                == Some(request.child_started_at)
+                && (request.child_pid == std::process::id()
+                    || crate::process::is_descendant_of(std::process::id(), request.child_pid))
+        })
     {
         return Err(denied());
     }
@@ -12864,11 +12869,9 @@ fn default_integration_test_builds_a_guarded_binary() {
             "runtime_incarnation": 17, "child_pid": pid, "child_started_at": started,
             "requested_at": Utc::now().to_rfc3339(),
         }]);
-        crate::save_issue_monitor_prefs(
-            &crate::issue_monitor_prefs_path_for_repo_path(dir.path()),
-            &serde_json::from_value(prefs).unwrap(),
-        )
-        .unwrap();
+        let mut prefs: crate::IssueMonitorPrefs = serde_json::from_value(prefs).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
         let before = verification_artifact_bytes(dir.path());
         let error = run_verify_cli_as(
             dir.path(),
@@ -12893,8 +12896,46 @@ fn default_integration_test_builds_a_guarded_binary() {
         runtime.runtime_incarnation = Some(18);
         runtime.save(&path).unwrap();
         assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "changing only the sidecar incarnation cannot revive the revoked OS process"
+        );
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+        // The actual caller is beneath this still-live OS parent. Retargeting
+        // the sidecar child to the caller cannot escape its revoked ancestry.
+        let mut processes = sysinfo::System::new();
+        let caller = sysinfo::Pid::from_u32(pid);
+        processes.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[caller]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        let parent_pid = processes
+            .process(caller)
+            .and_then(sysinfo::Process::parent)
+            .unwrap()
+            .as_u32();
+        let parent_started = crate::process::host_process_start_time(parent_pid).unwrap();
+        assert!(crate::process::is_descendant_of(pid, parent_pid));
+        prefs.monitor_runtime_stop_requests[0].child_pid = parent_pid;
+        prefs.monitor_runtime_stop_requests[0].child_started_at = parent_started;
+        // The revoked child remains authoritative after its old host is gone.
+        prefs.monitor_runtime_stop_requests[0].host_started_at = started.saturating_sub(1);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), session_id).is_err(),
+            "a descendant of the revoked process cannot use a retargeted sidecar"
+        );
+        assert_eq!(verification_artifact_bytes(dir.path()), before);
+
+        // Model a historical receipt whose PID has since been reused by this
+        // new OS process. Its actual start identity is independently validated.
+        prefs.monitor_runtime_stop_requests[0].child_pid = pid;
+        prefs.monitor_runtime_stop_requests[0].child_started_at = started.saturating_sub(1);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(
             snapshot_verification_caller_authority(dir.path(), session_id).is_ok(),
-            "an explicit resume to a new incarnation needs no full-matrix recovery"
+            "a fresh OS process incarnation can resume without a full-matrix recovery"
         );
         let _missing_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
         assert!(
