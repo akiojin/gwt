@@ -1062,7 +1062,7 @@ fn release_http_failure(
             .parse::<i64>()
             .ok()
             .filter(|seconds| *seconds >= 0)
-            .and_then(|seconds| chrono::Duration::try_seconds(seconds))
+            .and_then(chrono::Duration::try_seconds)
             .and_then(|delay| now.checked_add_signed(delay))
             .or_else(|| {
                 chrono::DateTime::parse_from_rfc2822(value)
