@@ -20,9 +20,9 @@
 //! could only be recovered by re-running the job. These tests pin the
 //! properties that keep an install stall from looking like a test failure.
 //!
-//! Issue #6080 removes those runtime installs from the frontend job entirely:
+//! Issue #6080 removes those runtime installs from the browser step:
 //! the official, version-matched Playwright image supplies browsers and system
-//! dependencies. The bounded installer remains available for local callers.
+//! dependencies. Host regressions retain their existing Git/Rust toolchain.
 
 use std::fs;
 use std::path::PathBuf;
@@ -81,28 +81,17 @@ const VERSION_FILE: &str = "scripts/playwright-version.txt";
 /// The image contains the browser revision required by the pinned npm package.
 /// A different version makes Playwright search for absent browser executables.
 #[test]
-fn frontend_uses_the_official_noble_image_at_the_pinned_playwright_version() {
+fn frontend_runs_only_browser_specs_in_the_pinned_official_image() {
     let job = frontend_job();
     assert!(
-        !job.contains("oven-sh/setup-bun@"),
-        "the image lacks unzip; frontend scripts must use their existing Node/npm fallback"
+        !job.contains("\n    container:"),
+        "host regressions need the hosted runner's Git/Rust toolchain"
     );
-    let version = read(VERSION_FILE);
-    let image = format!(
-        "image: mcr.microsoft.com/playwright:v{}-noble",
-        version.trim()
-    );
-    let container = job
-        .split("\n    container:")
-        .nth(1)
-        .expect("the frontend job must run inside the Playwright container")
-        .split("\n    steps:")
-        .next()
-        .expect("split always yields a first segment");
-    assert!(
-        container.lines().any(|line| line.trim() == image),
-        "the frontend container must use `{image}` to match {VERSION_FILE}:\n{job}"
-    );
+    let browser = frontend_step("Run WebView E2E (embedded Playwright specs)");
+    assert!(browser.contains(VERSION_FILE));
+    assert!(browser.contains("docker run --rm"));
+    assert!(browser.contains("mcr.microsoft.com/playwright:v${version}-noble"));
+    assert!(browser.contains("target=/workspace"));
 }
 
 /// No apt transaction means runner feeds and background dpkg locks cannot

@@ -1032,15 +1032,12 @@ jobs:
     needs: [changes, source-sync]
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
-    # Keep this tag aligned with scripts/playwright-version.txt (contract tested).
-    # Browsers and OS dependencies are baked in; no apt/dpkg step runs here.
-    container:
-      image: mcr.microsoft.com/playwright:v1.49.1-noble
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - uses: oven-sh/setup-bun@v2
       - name: Run verification reporter regressions
         run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs scripts/coverage-summary.test.mjs
       - name: Run frontend unit tests
@@ -1059,7 +1056,15 @@ jobs:
       # page.route, so they run without a live gwt. live-gwt specs self-skip
       # when GWT_PLAYWRIGHT_BASE_URL is unset.
       - name: Run WebView E2E (embedded Playwright specs)
-        run: bash scripts/run-visual-tests.sh
+        # Keep Git/Rust-based regressions on the hosted runner. Only browser
+        # specs need this image's baked-in browsers and OS dependencies.
+        run: |
+          version="$(tr -d '[:space:]' < scripts/playwright-version.txt)"
+          docker run --rm --ipc=host \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+            --workdir /workspace --env CI=true \
+            "mcr.microsoft.com/playwright:v${version}-noble" \
+            bash scripts/run-visual-tests.sh
         timeout-minutes: 15
 
   report-post-merge-failure:
