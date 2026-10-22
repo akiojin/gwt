@@ -195,7 +195,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn issue_5644_fresh_observations_do_not_starve_full_scan_commit() {
-        let _env_lock = crate::env_test_lock().lock().unwrap();
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _budget = super::super::pin_prefs_hang_guard();
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
