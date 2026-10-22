@@ -20828,6 +20828,7 @@ exit 1
         prepared_retry.clear_retry_hold(42);
         let refreshed_acceptance = crate::issue_monitor_gate::AcceptanceSnapshot {
             ids: vec!["AC-2".to_string()],
+            criterion_texts: Some(vec![("AC-2".to_string(), "refreshed".to_string())]),
             visual_surface: false,
         };
         prepared_retry.capture_acceptance_snapshot(42, refreshed_acceptance.clone());
