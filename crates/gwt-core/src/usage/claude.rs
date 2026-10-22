@@ -72,44 +72,51 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
     // Older CLI schemas expose model_scoped; the live endpoint exposes raw
     // weekly_scoped limits. Prefer a named window when both are present.
     if !windows.iter().any(|w| w.kind == WindowKind::FableWeekly) {
-        let model_scoped = v
-            .get("model_scoped")
+        let live = v
+            .get("limits")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .find(|limit| {
-                limit
-                    .get("display_name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
-            })
-            .and_then(|limit| claude_window(limit, WindowKind::FableWeekly, now));
-        let fable = model_scoped.or_else(|| {
-            let limit = v.get("limits")?.as_array()?.iter().find(|limit| {
                 limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped")
                     && limit
                         .pointer("/scope/model/display_name")
                         .and_then(Value::as_str)
                         .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
                     && limit.pointer("/scope/surface").is_none_or(Value::is_null)
-            })?;
-            let normalized = serde_json::json!({
-                "utilization": limit.get("percent"),
-                "resets_at": limit.get("resets_at"),
+            })
+            .and_then(|limit| {
+                let normalized = serde_json::json!({
+                    "utilization": limit.get("percent"),
+                    "resets_at": limit.get("resets_at"),
+                });
+                claude_window(&normalized, WindowKind::FableWeekly, now)
             });
-            claude_window(&normalized, WindowKind::FableWeekly, now)
+        let fable = live.or_else(|| {
+            v.get("model_scoped")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|limit| {
+                    limit
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
+                })
+                .and_then(|limit| claude_window(limit, WindowKind::FableWeekly, now))
         });
         if let Some(fable) = fable {
             windows.push(fable);
         }
     }
-    let extra_usage = v
-        .get("extra_usage")
-        .and_then(|extra| serde_json::from_value::<ExtraUsage>(extra.clone()).ok())
-        .map(|mut extra| {
+    let extra_usage = match v.get("extra_usage") {
+        None | Some(Value::Null) => None,
+        Some(extra) => {
+            let mut extra = serde_json::from_value::<ExtraUsage>(extra.clone()).ok()?;
             extra.utilization = extra.utilization.map(super::types::clamp_percent);
-            extra
-        });
+            Some(extra)
+        }
+    };
     if windows.is_empty() && extra_usage.is_none() {
         return None;
     }
@@ -554,6 +561,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(absent.extra_usage, None);
+    }
+
+    #[test]
+    fn live_fable_limit_takes_priority_over_legacy_model_scoped() {
+        let body = r#"{
+            "model_scoped":[{"display_name":"Fable","utilization":20}],
+            "limits":[{"kind":"weekly_scoped","percent":100,
+                "scope":{"model":{"display_name":"Fable"},"surface":null}}]
+        }"#;
+        let acc = parse_oauth_usage(body, now()).unwrap();
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].used_percent, 100.0);
+        assert!(acc.limit_reached);
+    }
+
+    #[test]
+    fn malformed_credits_reject_the_response_to_preserve_last_good() {
+        let body = r#"{"five_hour":{"utilization":10},
+            "extra_usage":{"is_enabled":true,"used_credits":"invalid"}}"#;
+        assert!(parse_oauth_usage(body, now()).is_none());
     }
 
     #[test]
