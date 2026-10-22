@@ -14511,6 +14511,20 @@ impl IssueMonitorState {
                 Some((item.issue.number, deliveries.get(branch)?.clone()))
             })
             .collect();
+        // Use the same current-launch delivery boundary as completion_anomaly.
+        // Keep the verdict/SHA (including a failed review's veto) intact; only
+        // the old failure message and its hook remediation are now obsolete.
+        let delivered: Vec<_> = self
+            .merged_deliveries
+            .keys()
+            .copied()
+            .filter(|number| self.merged_delivery_postdates_launch(*number))
+            .collect();
+        for number in delivered {
+            if let Some(record) = self.autonomous_records.get_mut(&number) {
+                record.last_failure_message = None;
+            }
+        }
     }
 
     /// Whether `delivery` may still be settled for `issue_number`. Fail-closed:
@@ -31347,6 +31361,7 @@ mod tests {
                 AcceptanceSnapshot {
                     ids: vec!["AC-1".into()],
                     visual_surface: false,
+                    criterion_texts: Some(vec![("AC-1".into(), "original".into())]),
                 },
             );
             monitor.begin_review(5248, 5260, "reviewed-head");
@@ -40128,6 +40143,7 @@ mod tests {
         use gwt_git::branch_protection::BranchProtectionStatus;
         let ok = AcceptanceCriteria {
             ids: vec!["AC-1".to_string()],
+            criterion_texts: vec![("AC-1".into(), "requirement".into())],
             machine_checkable: true,
             visual_surface: false,
             unchecked: vec!["AC-1".to_string()],
@@ -40135,6 +40151,7 @@ mod tests {
         };
         let no_criteria = AcceptanceCriteria {
             ids: vec![],
+            criterion_texts: vec![],
             machine_checkable: false,
             visual_surface: false,
             unchecked: vec![],
@@ -46400,6 +46417,14 @@ mod tests {
             &[checked_issue(42), checked_issue(43)],
             "2026-09-01T00:00:00Z",
         );
+        let failure = "acceptance criteria changed after launch";
+        for issue in [42, 43] {
+            let record = monitor.autonomous_record_mut(issue);
+            record.phase = AutonomousPhase::Implementing;
+            record.reviewed_sha = Some("old-head".into());
+            record.review_passed = Some(true);
+            record.last_failure_message = Some(failure.into());
+        }
         let mut deliveries = BTreeMap::new();
         deliveries.insert(
             "work/issue-42".to_string(),
@@ -46417,6 +46442,39 @@ mod tests {
             delivered.completion_reason.as_deref(),
             Some("delivered_by_pr_7")
         );
+        assert_eq!(delivered.last_failure_message, None);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().last_failure_message,
+            None
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(true)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .reviewed_sha
+                .as_deref(),
+            Some("old-head")
+        );
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .gate_remediation_reason()
+            .is_none());
+        assert_eq!(
+            monitor
+                .prefs()
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == 42)
+                .unwrap()
+                .last_failure_message,
+            None,
+            "Issue #6061: the persisted delivery also clears stale failure state"
+        );
         let undelivered = status
             .inbox
             .iter()
@@ -46424,6 +46482,7 @@ mod tests {
             .expect("undelivered row");
         assert!(!undelivered.recoverable_merged);
         assert_eq!(undelivered.completion_reason, None);
+        assert_eq!(undelivered.last_failure_message.as_deref(), Some(failure));
 
         // Issue #5002 AC-1/4: delivery is only an annotation. Explain the
         // actual planner exclusion even with free capacity and remaining work.
@@ -49108,6 +49167,8 @@ mod tests {
             .next_launch_request("2026-10-01T10:00:00Z")
             .is_some());
         monitor.complete_active_launch_at(4740, "tab-1::agent-1", "2026-10-01T10:00:05Z");
+        monitor.autonomous_record_mut(4740).last_failure_message =
+            Some("current launch failure".into());
         let branch = monitor.active_launched_branches()[0].1.clone();
         let merged = BTreeSet::from([branch.clone()]);
 
@@ -49117,6 +49178,15 @@ mod tests {
             merged_delivery(4808, "aaa", "2026-09-30T12:00:00Z"),
         );
         monitor.record_merged_deliveries(&deliveries);
+        assert_eq!(
+            monitor
+                .autonomous_record(4740)
+                .unwrap()
+                .last_failure_message
+                .as_deref(),
+            Some("current launch failure"),
+            "Issue #6061: a previous launch's delivery cannot clear this failure"
+        );
         assert!(
             monitor
                 .reconcile_merged_branches_at(&merged, "2026-10-01T10:00:30Z")
