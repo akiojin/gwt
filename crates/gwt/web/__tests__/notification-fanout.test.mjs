@@ -12,10 +12,12 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseHTML } from "linkedom";
 
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
 import { createUiStateStore } from "../ui-state-store.js";
 import { notificationForTransition } from "../agent-completion-notifications.js";
+import { createNotificationCenter } from "../notification-center.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -82,7 +84,7 @@ test("issue_monitor_toast records into the notification center with the Issue Mo
   const block = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
   assert.ok(block, "Monitor notifications must be recorded by a model subscriber");
   const calls = recordCalls(block);
-  assert.equal(calls.length, 1, "exactly one history record per event");
+  assert.equal(calls.length, 1, "ordinary Monitor events keep one history record path");
   const call = calls[0];
   assert.match(call, /kind:\s*"issue-monitor"/);
   assert.match(call, /level:\s*event\?\.level/);
@@ -92,11 +94,11 @@ test("issue_monitor_toast records into the notification center with the Issue Mo
   assert.match(call, /message:\s*event\?\.message/);
   assert.match(call, /issueNumber:\s*event\?\.issue_number/);
   assert.doesNotMatch(call, /event\?\.title/, "do not copy the dead `event?.title` read");
-  // FR-011: the history record must not be gated by any display path.
+  // FR-011: ordinary Monitor events reach history independently of display.
   const recordAt = block.indexOf("notificationCenter.record(");
   const firstIf = block.indexOf("if (");
   assert.match(block, /if \(!event\) return;/, "initial null state creates no history entry");
-  assert.ok(firstIf < recordAt, "only the initial null state gates recording");
+  assert.ok(firstIf < recordAt, "the initial null state is ignored before recording");
 });
 
 test("Monitor model snapshots are immutable and repeated events each reach history once", () => {
@@ -119,6 +121,42 @@ test("Monitor model snapshots are immutable and repeated events each reach histo
   receive(first);
   assert.equal(records.length, 2, "identical notifications must not be coalesced");
   assert.deepEqual(records.map(record => record.message), ["retry", "retry"]);
+});
+
+test("launch requested repeats share one Issue row until dismissed or cleared", () => {
+  const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(initialization);
+  const { document } = parseHTML("<!doctype html><html><body></body></html>");
+  const center = createNotificationCenter({ document });
+  center.mount(document.body);
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", `
+    ${initialization}
+    return event => {
+      ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
+    };
+  `)(createUiStateStore, notificationForTransition, center);
+  const launch = { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 3852 };
+  for (let i = 0; i < 4; i += 1) receive(launch);
+  assert.equal(center.count(), 1, "repeated launch attempts share one visible row");
+  assert.equal(center.unreadCount(), 1);
+  receive({ ...launch, issue_number: 3853 });
+  assert.equal(center.count(), 2, "each Issue keeps its own launch notice");
+  receive({ ...launch, level: "error" });
+  receive({ ...launch, notification_transition: "needs_human" });
+  assert.equal(center.count(), 4, "errors and typed transitions remain independent events");
+  assert.match(document.body.textContent, /Needs human #3852/);
+  const launchRow = document.querySelector('[data-error-key="issue-monitor:launch-requested:3852"]');
+  assert.ok(launchRow);
+  assert.match(launchRow.textContent, /Issue Monitor #3852/);
+  assert.equal(launchRow.querySelector(".notification-center__count"), null);
+  launchRow.querySelector(".notification-center__dismiss")
+    .dispatchEvent(new document.defaultView.Event("click", { bubbles: true }));
+  assert.equal(center.count(), 3);
+  receive(launch);
+  assert.equal(center.count(), 4, "a later launch is visible after dismissal");
+  center.clearAll();
+  receive(launch);
+  assert.equal(center.count(), 1, "clear all also releases the keyed row");
 });
 
 // --- T-017: completion / attention / board-mention seams (FR-011, Sc 3, Sc 7) ---

@@ -2244,6 +2244,17 @@ fn run_monitor_launch_now<E: CliEnv>(
         || vec!["monitor_status_unavailable: admission has not been observed".to_string()],
         |status| monitor_admission_exclusions(status, &prefs, number),
     );
+    // The published scan may predate this operation's settings. The prefs
+    // transaction above is authoritative for enabled and pool/Auto bootstrap.
+    admission_exclusions
+        .retain(|reason| !matches!(reason.as_str(), "monitor_disabled" | "no_launch_profile"));
+    if !prefs.enabled {
+        admission_exclusions.push("monitor_disabled".to_string());
+    }
+    if !crate::IssueMonitorState::with_prefs(Default::default(), prefs.clone()).has_launch_profile()
+    {
+        admission_exclusions.push("no_launch_profile".to_string());
+    }
     if admission_hold.is_some()
         && !admission_exclusions
             .iter()
@@ -2254,6 +2265,19 @@ fn run_monitor_launch_now<E: CliEnv>(
     if !github_backoff.is_empty() {
         admission_exclusions.push("github_refusal_window".to_string());
     }
+    // Membership and first-scan observations can still be converging after
+    // enqueue. Only known admission blockers make an accepted scan fail.
+    let admission_blocked = admission_exclusions.iter().any(|reason| {
+        matches!(
+            reason.as_str(),
+            "monitor_disabled"
+                | "no_launch_profile"
+                | "gui_disconnected"
+                | "github_auth_required"
+                | "max_active_saturated"
+                | "github_refusal_window"
+        )
+    });
 
     out.push_str(
         &serde_json::json!({
@@ -2281,7 +2305,11 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(
-        if delivery.scan_requested && admission_hold.is_none() && admission_error.is_none() {
+        if delivery.scan_requested
+            && admission_hold.is_none()
+            && admission_error.is_none()
+            && !admission_blocked
+        {
             0
         } else {
             1
@@ -2344,8 +2372,14 @@ fn monitor_admission_exclusions(
     let occupied = status
         .occupied_slot_count
         .unwrap_or(status.active_launches.len() + status.review_windows.len());
-    if occupied.saturating_add(status.pending_claim_issues.as_ref().map_or(0, Vec::len))
-        >= status.max_active
+    let target_reserved = status.active_launches.contains(&number)
+        || status
+            .pending_claim_issues
+            .as_ref()
+            .is_some_and(|pending| pending.contains(&number));
+    if !target_reserved
+        && occupied.saturating_add(status.pending_claim_issues.as_ref().map_or(0, Vec::len))
+            >= status.max_active
     {
         add("max_active_saturated");
     }
@@ -9204,12 +9238,13 @@ mod tests {
                 address_tx
                     .send(listener.local_addr().expect("Windows scan mock address"))
                     .expect("publish Windows scan mock address");
-                let (stream, _) =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
-                        .await
-                        .expect("Windows launch_now must connect to the GUI scan authority")
-                        .expect("accept scan client");
-                let mut socket = tokio::time::timeout(
+                for _ in 0..3 {
+                    let (stream, _) =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                            .await
+                            .expect("Windows launch_now must connect to the GUI scan authority")
+                            .expect("accept scan client");
+                    let mut socket = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     tokio_tungstenite::accept_hdr_async(
                         stream,
@@ -9232,33 +9267,34 @@ mod tests {
                 .await
                 .expect("Windows scan client must complete its WebSocket handshake")
                 .expect("accept authenticated scan WebSocket");
-                let message =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                    let message =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                            .await
+                            .expect("Windows scan client must send its request frame")
+                            .expect("scan request frame")
+                            .expect("valid scan request frame");
+                    let text = message.into_text().expect("text scan request");
+                    let request: serde_json::Value =
+                        serde_json::from_str(text.as_ref()).expect("scan request JSON");
+                    assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
+                    assert_eq!(request["expected_project_scope"], expected_scope);
+                    assert!(
+                        request.get("project_root").is_none(),
+                        "the Windows request must not claim project authority"
+                    );
+                    socket
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "kind": "issue_monitor_scan_request_result",
+                                "accepted": true,
+                                "reason": null,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
                         .await
-                        .expect("Windows scan client must send its request frame")
-                        .expect("scan request frame")
-                        .expect("valid scan request frame");
-                let text = message.into_text().expect("text scan request");
-                let request: serde_json::Value =
-                    serde_json::from_str(text.as_ref()).expect("scan request JSON");
-                assert_eq!(request["kind"], "agent_issue_monitor_scan_now");
-                assert_eq!(request["expected_project_scope"], expected_scope);
-                assert!(
-                    request.get("project_root").is_none(),
-                    "the Windows request must not claim project authority"
-                );
-                socket
-                    .send(Message::Text(
-                        serde_json::json!({
-                            "kind": "issue_monitor_scan_request_result",
-                            "accepted": true,
-                            "reason": null,
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await
-                    .expect("send immediate scan acknowledgement");
+                        .expect("send immediate scan acknowledgement");
+                }
             });
         });
         let address = address_rx
@@ -9273,7 +9309,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
-        let code = run(
+        let without_profile_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
                 expected_priority_order: None,
@@ -9283,9 +9319,50 @@ mod tests {
             &mut out,
         )
         .expect("Windows launch_now result");
+        let without_profile: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("without-profile result");
+        let mut prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.launch_auto = true;
+        prefs.enabled = false;
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        out.clear();
+        let disabled_code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("disabled Monitor result");
+        let disabled: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        prefs.enabled = true;
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
+                project_root: None,
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("enabled Auto Monitor result");
         server.join().expect("Windows scan mock thread");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
+        assert_eq!(without_profile_code, 1, "{without_profile}");
+        assert!(without_profile["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("no_launch_profile")));
+        assert_eq!(disabled_code, 1, "{disabled}");
+        assert!(disabled["admission_exclusions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("monitor_disabled")));
         assert_eq!(code, 0);
         assert_eq!(result["priority_updated"], true);
         assert_eq!(result["priority_order"], serde_json::json!([42, 7]));
@@ -9600,6 +9677,25 @@ mod tests {
         assert!(
             output["inbox"][0].get("exclusion_reason").is_none(),
             "resolved membership reasons must also disappear from status output"
+        );
+        status.max_active = 1;
+        status.occupied_slot_count = Some(1);
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["max_active_saturated"]
+        );
+        status.active_launches = vec![42];
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["runtime_or_launch_reservation_present"],
+            "the target's existing slot is not a refusal to launch the target"
+        );
+        status.active_launches.clear();
+        status.pending_claim_issues = Some(vec![42]);
+        assert_eq!(
+            monitor_admission_exclusions(&status, &prefs, 42),
+            vec!["claim_pending"],
+            "a target claim already reserves capacity for this instruction"
         );
     }
 
