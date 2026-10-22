@@ -11,8 +11,6 @@ Execute one scoped work item through implementation, verification, and delivery.
 
 Keep the same owner through TDD, verify.plan → verify.run, Ready PR, and CI auto-merge. Confirm delivery against the configured base. Preserve execution authority and recovery audits; use No Action only for a proven delivered owner with zero source surface.
 
-## Autonomous continuation
-
 With `execution.status` reporting `launch_route: autonomous`, resolve reversible,
 in-scope choices using the smallest safe default. Do not stop to wait for a PM reply
 or say "ready for the next instruction" after posting a decision. Record

@@ -5,6 +5,9 @@ use super::*;
 /// delivery. The notification carries a Board pointer, never the post's body.
 #[test]
 fn issue_4359_board_decision_notifies_mentioned_idle_session_once_with_shared_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for agent_id in ["codex", "opencode"] {
         let temp = tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path());
