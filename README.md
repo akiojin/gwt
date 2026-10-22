@@ -590,7 +590,14 @@ matches only an empty saved order; `null` is rejected. Omitting the parameter ke
 the existing behavior. The comparison protects the current order value, without
 tracking intervening history or other configuration changes. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. The registered PM for the repository
+mode, or set a positive `max_active` limit. For a conditional settings change,
+read `saved_config` and `config_token` from `issue.monitor.status`, then pass that
+token as `expected_config_token` to `config.set`. A mismatch leaves preferences
+unchanged and requests no scan; read status again and reconsider the change.
+Read back a successful change. The token compares saved configuration values;
+it excludes runtime observations and does not track intervening history. Omitting
+it keeps existing behavior; `null` is rejected. An older daemon refuses guarded
+changes rather than applying them without the guard. The registered PM for the repository
 can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
 to enable them. Idle agent windows free their slot on
 their own: each scan classifies every launched window as

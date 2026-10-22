@@ -550,7 +550,13 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
 他の設定変更は検出しません。
 `issue.monitor.config.set` は処理停止、Autonomous
-モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
+モード無効化、正の `max_active` 上限設定に対応します。条件付きで設定を変更する場合は、
+`issue.monitor.status` の `saved_config` と `config_token` を読み、同じトークンを
+`config.set` の `expected_config_token` として渡します。不一致なら設定を保存せず、
+scan も要求しません。status を再読して変更を再判断し、成功後も読み戻して確認します。
+比較対象は保存設定の値で、runtime の観測値や途中の変更履歴は対象外です。
+省略時は従来互換、`null` は拒否します。旧 daemon はガードを外して適用せず、
+ガード付き変更を拒否します。リポジトリの登録済み PM は
 `enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
