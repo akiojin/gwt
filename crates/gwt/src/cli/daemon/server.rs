@@ -1084,6 +1084,12 @@ fn spawn_issue_monitor_worker_with_lease(
                                 let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let launch_ack = matches!(&control, IssueMonitorControl::Launched { .. });
                                 let window_snapshot = matches!(&control, IssueMonitorControl::WindowSnapshot { .. });
+                                let observation_kind = match &control {
+                                    IssueMonitorControl::WindowSnapshot { .. } => Some("window-snapshot"),
+                                    IssueMonitorControl::Heartbeat { .. } => Some("heartbeat"),
+                                    IssueMonitorControl::ScanNow => Some("scan-request"),
+                                    _ => None,
+                                };
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -1098,6 +1104,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 let previous_limit = monitor.effective_max_active_agents();
                                 monitor.refresh_agent_capacity(&scope.project_root);
                                 let capacity_changed = previous_limit != monitor.effective_max_active_agents();
+                                let observation_baseline = observation_kind.map(|_| monitor.clone());
                                 let completed_delivery_stage = match &control {
                                     IssueMonitorControl::LaunchDeliveryMaterialized {
                                         issue_number, delivery_id, materializer_id, materializer_window_id,
@@ -1142,7 +1149,19 @@ fn spawn_issue_monitor_worker_with_lease(
                                     && completed_delivery_stage.as_ref().is_some_and(|before| {
                                         monitor.prefs().pending_launch_deliveries.contains(before)
                                     });
-                                let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage;
+                                let coalesced_observation = matches!(outcome, IssueMonitorControlCommit::Committed { authority_changed: false, .. })
+                                    && observation_baseline.as_ref().is_some_and(|before| {
+                                        monitor.scan_observations_compatible_with(before, &chrono::Utc::now().to_rfc3339())
+                                    });
+                                let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage || coalesced_observation;
+                                tracing::info!(
+                                    target: "gwt.issue_monitor.scan",
+                                    project_root = %scope.project_root.display(),
+                                    control = observation_kind.unwrap_or("state-control"),
+                                    captured_revision = revision,
+                                    invalidates_scan = !launch_authority_unchanged || capacity_changed,
+                                    "Issue Monitor control scan fence"
+                                );
                                 if !launch_authority_unchanged || capacity_changed {
                                     revision = next_revision;
                                 }
@@ -1321,6 +1340,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     in_flight_admission = None;
                     match admission_result {
                         Ok(Ok(proposal)) => {
+                            let before = monitor.prefs();
                             if accept_completed_issue_monitor_scan(
                                 &scope.project_root,
                                 &prefs_path,
@@ -1331,13 +1351,16 @@ fn spawn_issue_monitor_worker_with_lease(
                                 captured_authority_epoch,
                                 captured_deadline,
                             ) {
-                                // Fence the full scan's older clone before it
-                                // can replace the newly committed admission.
-                                let Some(next_revision) = revision.checked_add(1) else {
-                                    tracing::error!("issue monitor revision exhausted; stopping worker");
-                                    break;
-                                };
-                                revision = next_revision;
+                                // Only an actual admission change fences the full
+                                // scan. A no-op requested by ScanNow must not
+                                // starve the candidate refresh it is waiting for.
+                                if monitor.prefs() != before {
+                                    let Some(next_revision) = revision.checked_add(1) else {
+                                        tracing::error!("issue monitor revision exhausted; stopping worker");
+                                        break;
+                                    };
+                                    revision = next_revision;
+                                }
                                 effect_execution_requested = !monitor.pending_effects().is_empty();
                                 publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                             } else if captured_revision != revision {
@@ -4764,8 +4787,12 @@ fn commit_issue_monitor_scan_if_current(
 ) -> bool {
     let _timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("durable-commit");
     if monitor.effect_authority_epoch() != captured_authority_epoch {
+        tracing::info!(target: "gwt.issue_monitor.scan", project_root = %project_root.display(),
+            captured_authority_epoch, current_authority_epoch = monitor.effect_authority_epoch(),
+            reason = "authority-changed", "Issue Monitor scan proposal rejected");
         return false;
     }
+    scanned.merge_scan_observations_from(monitor);
     // A long scan owns its proposals, while the live driver owns the latest
     // machine observation. Preserve refreshed capacity even when its numeric
     // cap did not change (and therefore did not fence the scan by revision).
@@ -4786,6 +4813,15 @@ fn commit_issue_monitor_scan_if_current(
     let execution_observations =
         crate::issue_monitor_worker::read_execution_observations(project_root, &execution_owners);
     let execution_observed_at = chrono::Utc::now().to_rfc3339();
+    // Session and execution-ledger reads belong to the scan observation budget,
+    // not the short prefs writer budget. The observation/ACK ordering fence is
+    // still applied after the latest disk state is adopted under the lock.
+    let (live_launch_owners, live_observed_at) =
+        crate::issue_monitor_worker::read_verified_live_launch_owners(
+            &scanned,
+            project_root,
+            &execution_observed_at,
+        );
     let recovery_baseline = monitor.prefs();
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
@@ -4800,9 +4836,9 @@ fn commit_issue_monitor_scan_if_current(
                 .reconcile_dead_terminal_launches(&execution_observations, &execution_observed_at);
             // A rebase can import the stale owner this scan just disproved.
             // Revalidate the producing Session after adopting the latest ACKs.
-            crate::issue_monitor_worker::reconcile_verified_live_launch_bindings(
-                &mut scanned,
-                project_root,
+            scanned.reconcile_observed_launch_bindings(
+                &live_launch_owners,
+                &live_observed_at,
                 &chrono::Utc::now().to_rfc3339(),
             );
             for effect in proposed_effects.iter().cloned() {
@@ -4864,9 +4900,12 @@ fn accept_completed_issue_monitor_scan(
     // let a result that was ready just before the watchdog boundary commit
     // after that boundary.
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(captured_deadline);
-    if gwt_core::operation_deadline::now() >= captured_deadline
-        || captured_revision != current_revision
-    {
+    let expired = gwt_core::operation_deadline::now() >= captured_deadline;
+    if expired || captured_revision != current_revision {
+        tracing::info!(target: "gwt.issue_monitor.scan", project_root = %project_root.display(),
+            captured_revision, current_revision,
+            reason = if expired { "deadline-expired" } else { "revision-changed" },
+            "Issue Monitor scan proposal rejected");
         return false;
     }
     commit_issue_monitor_scan_if_current(
@@ -7417,6 +7456,114 @@ mod authority_recovery_contract_tests {
         assert_eq!(fs::read(marker).expect("reload authority fence"), malformed);
         assert!(loaded.authority_lease.is_some());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn issue_4783_scan_commit_does_not_restore_a_binding_removed_by_verified_ownership() {
+    use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+    use tempfile::TempDir;
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = TempDir::new().unwrap();
+    let _home = ScopedGwtHome::set(temp.path().join("home"));
+    let _session_env = [
+        ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+        ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+    ];
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+    let owner = ExecutionOwnerKey {
+        kind: ExecutionOwnerKind::Issue,
+        number: 4783,
+    };
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-4783", gwt_agent::AgentId::Codex);
+    session.linked_issue_number = Some(owner.number);
+    session.update_status(gwt_agent::AgentStatus::Running);
+    execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        &session.id,
+        "gwt-execute",
+        false,
+    )
+    .unwrap();
+    execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        execution_state::LegacyActiveDisposition::Live,
+    )
+    .unwrap();
+    session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session.id.clone(),
+        repo_hash: session.repo_hash.clone().unwrap(),
+        owner_kind: "issue".into(),
+        owner_number: owner.number,
+        identity: execution_state::current_execution_binding(&repo, owner)
+            .unwrap()
+            .unwrap(),
+        capability_generation: 1,
+    });
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    let shared = "tab-1::agent-87";
+    let initial = crate::IssueMonitorPrefs {
+        launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+            issue_number: 5023,
+            window_id: shared.into(),
+        }],
+        launch_bindings: std::collections::BTreeMap::from([(shared.into(), 5023)]),
+        ..Default::default()
+    };
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+    crate::save_issue_monitor_prefs(&prefs_path, &initial).unwrap();
+    let mut canonical = test_monitor_with_prefs(Default::default(), initial);
+    let mut scanned = canonical.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    scanned.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+        project_tab_id: "tab-1".into(),
+        observed_at: now.clone(),
+        windows: vec![crate::IssueMonitorWindowObservation {
+            monitor_owned: true,
+            window_id: shared.into(),
+            issue_number: Some(4783),
+            status: crate::WindowState::Running,
+            review_dispatch: false,
+            hold_reason: None,
+            last_output_at: None,
+            session_id: Some(session.id),
+        }],
+    });
+    crate::issue_monitor_worker::reconcile_verified_live_launch_bindings(&mut scanned, &repo, &now);
+    assert_eq!(
+        scanned.launched_window_id(5023),
+        None,
+        "the scan proves the id was reused"
+    );
+
+    assert!(commit_issue_monitor_scan_if_current(
+        &repo,
+        &prefs_path,
+        &mut canonical,
+        scanned,
+        0,
+    ));
+    assert_eq!(
+        canonical.launched_window_id(5023),
+        None,
+        "the disk rebase must not revive the old owner"
+    );
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert!(!persisted
+        .launched_issues
+        .iter()
+        .any(|row| row.issue_number == 5023));
+    assert_ne!(persisted.launch_bindings.get(shared), Some(&5023));
 }
 
 // The server fixtures below run fake `gh` shell scripts and raw Unix
@@ -19115,116 +19262,6 @@ exit 1
             monitor.pending_effects()[0].state,
             crate::IssueMonitorEffectState::Prepared
         );
-    }
-
-    #[test]
-    fn issue_4783_scan_commit_does_not_restore_a_binding_removed_by_verified_ownership() {
-        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().unwrap();
-        let _home = ScopedGwtHome::set(temp.path().join("home"));
-        let _session_env = [
-            ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
-            ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
-        ];
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
-        let owner = ExecutionOwnerKey {
-            kind: ExecutionOwnerKind::Issue,
-            number: 4783,
-        };
-        let mut session =
-            gwt_agent::Session::new(&repo, "work/issue-4783", gwt_agent::AgentId::Codex);
-        session.linked_issue_number = Some(owner.number);
-        session.update_status(gwt_agent::AgentStatus::Running);
-        execution_state::materialize_at_launch(
-            &repo,
-            owner.kind,
-            owner.number,
-            &session.id,
-            "gwt-execute",
-            false,
-        )
-        .unwrap();
-        execution_state::ensure_generation_ledger(
-            &repo,
-            owner,
-            execution_state::LegacyActiveDisposition::Live,
-        )
-        .unwrap();
-        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: session.id.clone(),
-            repo_hash: session.repo_hash.clone().unwrap(),
-            owner_kind: "issue".into(),
-            owner_number: owner.number,
-            identity: execution_state::current_execution_binding(&repo, owner)
-                .unwrap()
-                .unwrap(),
-            capability_generation: 1,
-        });
-        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
-        let shared = "tab-1::agent-87";
-        let initial = crate::IssueMonitorPrefs {
-            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
-                issue_number: 5023,
-                window_id: shared.into(),
-            }],
-            launch_bindings: std::collections::BTreeMap::from([(shared.into(), 5023)]),
-            ..Default::default()
-        };
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(&prefs_path, &initial).unwrap();
-        let mut canonical = test_monitor_with_prefs(Default::default(), initial);
-        let mut scanned = canonical.clone();
-        let now = chrono::Utc::now().to_rfc3339();
-        scanned.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
-            project_tab_id: "tab-1".into(),
-            observed_at: now.clone(),
-            windows: vec![crate::IssueMonitorWindowObservation {
-                monitor_owned: true,
-                window_id: shared.into(),
-                issue_number: Some(4783),
-                status: crate::WindowState::Running,
-                review_dispatch: false,
-                hold_reason: None,
-                last_output_at: None,
-                session_id: Some(session.id),
-            }],
-        });
-        crate::issue_monitor_worker::reconcile_verified_live_launch_bindings(
-            &mut scanned,
-            &repo,
-            &now,
-        );
-        assert_eq!(
-            scanned.launched_window_id(5023),
-            None,
-            "the scan proves the id was reused"
-        );
-
-        assert!(super::commit_issue_monitor_scan_if_current(
-            &repo,
-            &prefs_path,
-            &mut canonical,
-            scanned,
-            0,
-        ));
-        assert_eq!(
-            canonical.launched_window_id(5023),
-            None,
-            "the disk rebase must not revive the old owner"
-        );
-        let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
-        assert!(!persisted
-            .launched_issues
-            .iter()
-            .any(|row| row.issue_number == 5023));
-        assert_ne!(persisted.launch_bindings.get(shared), Some(&5023));
     }
 
     #[test]

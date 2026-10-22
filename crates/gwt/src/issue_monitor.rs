@@ -21473,6 +21473,112 @@ impl IssueMonitorState {
         self.record_window_snapshot_with_origin(snapshot, host, project_tabs);
     }
 
+    /// Fresh observations may advance without invalidating an in-flight scan
+    /// unless they change its window identity or a recovery decision.
+    pub(crate) fn scan_observations_compatible_with(&self, previous: &Self, now: &str) -> bool {
+        let topology = |snapshot: &Option<IssueMonitorWindowSnapshot>| {
+            snapshot.as_ref().map(|snapshot| {
+                let mut snapshot = snapshot.clone();
+                snapshot.observed_at.clear();
+                for window in &mut snapshot.windows {
+                    window.last_output_at = None;
+                }
+                snapshot
+                    .windows
+                    .sort_by(|left, right| left.window_id.cmp(&right.window_id));
+                snapshot
+            })
+        };
+        if topology(&self.window_snapshot) != topology(&previous.window_snapshot)
+            || self.window_snapshot_host != previous.window_snapshot_host
+            || self.window_snapshot_tabs != previous.window_snapshot_tabs
+            || self.fresh_window_snapshot(now).is_some()
+                != previous.fresh_window_snapshot(now).is_some()
+            || self
+                .verified_live_window_owners
+                .as_ref()
+                .map(|(_, owners)| owners)
+                != previous
+                    .verified_live_window_owners
+                    .as_ref()
+                    .map(|(_, owners)| owners)
+            || self.stuck_autonomous_issues(now) != previous.stuck_autonomous_issues(now)
+            || self.launched_windows.len() != previous.launched_windows.len()
+            || self.launched_windows.iter().any(|(issue, window)| {
+                previous.launched_windows.get(issue) != Some(window)
+                    || self
+                        .silent_launch_release_reason(*issue, window, now)
+                        .is_some()
+                        != previous
+                            .silent_launch_release_reason(*issue, window, now)
+                            .is_some()
+            })
+        {
+            return false;
+        }
+
+        let mut current = self.prefs();
+        let mut previous = previous.prefs();
+        current.last_control_receipt = None;
+        previous.last_control_receipt = None;
+        for record in current
+            .autonomous_records
+            .iter_mut()
+            .chain(previous.autonomous_records.iter_mut())
+        {
+            record.last_heartbeat = None;
+        }
+        current == previous
+    }
+
+    /// Keep observations received while a scan ran, without replaying a stale
+    /// heartbeat over the scan's own progress or newer steering request.
+    pub(crate) fn merge_scan_observations_from(&mut self, live: &Self) {
+        if let Some(snapshot) = &live.window_snapshot {
+            self.record_window_snapshot_with_origin(
+                snapshot.clone(),
+                live.window_snapshot_host,
+                live.window_snapshot_tabs.clone(),
+            );
+        }
+        if self.window_snapshot == live.window_snapshot
+            && self.window_snapshot_host == live.window_snapshot_host
+            && self.window_snapshot_tabs == live.window_snapshot_tabs
+        {
+            self.verified_live_window_owners = live.verified_live_window_owners.clone();
+        }
+        for (issue, observed) in &live.autonomous_records {
+            let Some(record) = self.autonomous_records.get_mut(issue) else {
+                continue;
+            };
+            let Some(heartbeat) = observed.last_heartbeat.as_deref() else {
+                continue;
+            };
+            let Ok(observed_at) = chrono::DateTime::parse_from_rfc3339(heartbeat) else {
+                continue;
+            };
+            if record
+                .last_heartbeat
+                .as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|current| current > observed_at)
+            {
+                continue;
+            }
+            record.last_heartbeat = Some(heartbeat.to_string());
+            if record
+                .steering
+                .as_ref()
+                .and_then(|steering| {
+                    chrono::DateTime::parse_from_rfc3339(&steering.requested_at).ok()
+                })
+                .is_some_and(|requested_at| observed_at >= requested_at)
+            {
+                record.steering = None;
+            }
+        }
+    }
+
     fn record_window_snapshot_with_origin(
         &mut self,
         snapshot: IssueMonitorWindowSnapshot,
@@ -40484,11 +40590,38 @@ mod tests {
                 .as_slice(),
             [(42, AutonomousFailureOutcome::SteeringRequested { count: 2 })]
         ));
+        let mut scanned = monitor.clone();
+        let mut late_heartbeat = monitor.clone();
+        late_heartbeat.record_autonomous_heartbeat(42, "2026-06-29T00:01:00Z");
+        scanned.merge_scan_observations_from(&late_heartbeat);
+        assert_eq!(
+            scanned
+                .autonomous_record(42)
+                .unwrap()
+                .steering
+                .as_ref()
+                .unwrap()
+                .requested_at,
+            "2026-06-29T01:31:00Z",
+            "a late heartbeat cannot answer a newer steering request"
+        );
         // Progress after steering clears the request.
         monitor.record_autonomous_heartbeat(42, "2026-06-29T01:32:00Z");
         assert!(monitor
             .autonomous_record(42)
             .is_some_and(|record| record.steering.is_none()));
+        scanned.merge_scan_observations_from(&monitor);
+        scanned.merge_scan_observations_from(&late_heartbeat);
+        assert_eq!(
+            scanned
+                .autonomous_record(42)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some("2026-06-29T01:32:00Z"),
+            "scan commit keeps the newest heartbeat"
+        );
+        assert!(scanned.autonomous_record(42).unwrap().steering.is_none());
     }
 
     /// Issue #4608: the bound pane as the canvas saw it at `observed_at`.
@@ -40529,6 +40662,17 @@ mod tests {
             Some("2026-06-29T00:10:00Z"),
             None,
         ));
+        let mut resumed = monitor.clone();
+        resumed.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T01:00:01Z",
+            WindowState::Running,
+            Some("2026-06-29T01:00:00Z"),
+            None,
+        ));
+        assert!(
+            !resumed.scan_observations_compatible_with(&monitor, "2026-06-29T01:00:01Z"),
+            "new output must fence a scan that could release the silent pane"
+        );
         assert_eq!(
             monitor
                 .agent_status_at("2026-06-29T01:00:00Z")
@@ -40611,6 +40755,25 @@ mod tests {
                 last_output_at,
                 None,
             ));
+            let mut refreshed = monitor.clone();
+            refreshed.record_window_snapshot(silent_pane_snapshot(
+                "2026-06-29T01:00:01Z",
+                WindowState::Running,
+                last_output_at.map(|_| "2026-06-29T01:00:00Z"),
+                None,
+            ));
+            assert!(
+                refreshed.scan_observations_compatible_with(&monitor, "2026-06-29T01:00:01Z"),
+                "continuing pane output must not starve an in-flight scan"
+            );
+            let mut scanned = monitor.clone();
+            scanned.merge_scan_observations_from(&refreshed);
+            assert_eq!(scanned.window_snapshot, refreshed.window_snapshot);
+            refreshed.record_autonomous_heartbeat(42, "2026-06-29T01:00:01Z");
+            assert!(
+                !refreshed.scan_observations_compatible_with(&monitor, "2026-06-29T01:00:01Z"),
+                "new liveness must fence an obsolete stuck decision"
+            );
             let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
             assert!(
                 matches!(
