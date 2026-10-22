@@ -238,6 +238,13 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
         WindowProcessStatus::Running,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut review_session =
+        gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    review_session.id = "review-session-42".to_string();
+    review_session.review_dispatch = true;
+    review_session
+        .save(&runtime.sessions_dir)
+        .expect("persist completed review launch Session");
     let review_window_id = combined_window_id("tab-1", "agent-review");
     runtime
         .window_hook_states

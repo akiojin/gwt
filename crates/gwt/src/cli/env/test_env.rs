@@ -242,7 +242,7 @@ impl CliEnv for TestEnv {
     }
     fn deliver_feedback(
         &mut self,
-        record: &gwt_core::feedback::FeedbackRecord,
+        record: &gwt_core::feedback::PublicFeedback,
     ) -> Result<u64, gwt_github::client::OwnerMutationError> {
         super::super::feedback::send_to_upstream(&self.client, record)
     }

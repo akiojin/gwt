@@ -848,6 +848,15 @@ body cannot hold `plan` / `tasks` sections.
   `enabled` / `autonomous_mode` ON or OFF. Other JSON callers may only turn
   them OFF; enabling either requires the GUI. `max_active` changes are allowed
   for everyone.
+  For `issue.monitor.config.set`, read a fresh status and decide from its
+  `saved_config` observation. Pass that same response's
+  `config_token` as `expected_config_token`. Config conflicts leave preferences unchanged
+  and request no scan. Re-read status and reconsider the change instead of blindly
+  retrying, then read back a successful change. Saved configuration is distinct
+  from effective capacity and launch observations. If a daemon cannot handle the
+  guarded request, keep the refusal; never drop the guard or write around the daemon.
+  Omitting the guard retains legacy behavior. This value comparison does not detect
+  ABA history or protect other control operations.
   `launch_agent` (`codex` / `claude`) switches the saved launch profile's
   agent from the CLI (Issue #3923): model and reasoning reset to that
   agent's defaults, the wizard's runtime and Docker choices are kept, and
@@ -4186,6 +4195,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`config_token` as `expected_config_token`",
+            "Config conflicts leave preferences unchanged",
+            "For `issue.monitor.config.set`, read a fresh status",
             "`expected_queue_order`",
             "For `issue.monitor.queue.move` and `issue.monitor.queue.remove`",
             "saved `queue_order`, not the urgent display order",

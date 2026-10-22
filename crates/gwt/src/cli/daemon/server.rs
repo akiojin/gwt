@@ -1213,6 +1213,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     revision = next_revision;
                     let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     let immediate_admission = matches!(&accepted.control, IssueMonitorControl::ScanNow);
+                    let authority_epoch_before_retry = monitor.effect_authority_epoch();
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1253,17 +1254,28 @@ fn spawn_issue_monitor_worker_with_lease(
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
                         rejection @ (IssueMonitorControlCommit::Rejected
+                        | IssueMonitorControlCommit::ConfigConflict
                         | IssueMonitorControlCommit::WaitNotLaunched) => {
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
                                 .committed_front();
                             if let Some(completion) = completion {
-                                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
-                                    IssueMonitorControlQueueError::WaitNotLaunched
-                                } else {
-                                    IssueMonitorControlQueueError::Rejected
+                                completion.reject(match rejection {
+                                    IssueMonitorControlCommit::ConfigConflict => IssueMonitorControlQueueError::ConfigConflict,
+                                    IssueMonitorControlCommit::WaitNotLaunched => IssueMonitorControlQueueError::WaitNotLaunched,
+                                    _ => IssueMonitorControlQueueError::Rejected,
                                 });
+                            }
+                            if authorizing {
+                                let authority_changed = monitor.effect_authority_epoch() != authority_epoch_before_retry;
+                                reconcile_deferred_grant_after_authority_commit(
+                                    &prefs_path,
+                                    &mut monitor,
+                                    &mut deferred_grant_result,
+                                    authority_changed,
+                                    drained,
+                                );
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -1271,6 +1283,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                     effect_permit.reopen();
                                 }
                             }
+                            effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
                         IssueMonitorControlCommit::RetryableFailure => {
                             pending_authority_controls
@@ -2222,6 +2235,11 @@ enum IssueMonitorControl {
         at: String,
     },
     MaxActiveAgents(Option<usize>),
+    IdentifiedMaxActiveAgents {
+        max_active_agents: Option<usize>,
+        control_id: String,
+        changed_at: String,
+    },
     PriorityOrder(Vec<u64>),
     /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
     /// the user's own act, so the entries are attributed to the operator.
@@ -2260,6 +2278,7 @@ enum IssueMonitorControl {
         expected_reset_at: String,
     },
     ConfigSet {
+        expected_config_token: Option<String>,
         allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -2366,6 +2385,18 @@ struct AcceptedIssueMonitorControl {
 
 impl AcceptedIssueMonitorControl {
     fn new(control: IssueMonitorControl) -> Self {
+        if let IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents,
+            control_id,
+            changed_at,
+        } = control
+        {
+            return Self {
+                control_id,
+                processed_at: changed_at,
+                control: IssueMonitorControl::MaxActiveAgents(max_active_agents),
+            };
+        }
         Self {
             control_id: uuid::Uuid::new_v4().to_string(),
             processed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2381,6 +2412,7 @@ enum IssueMonitorControlCommit {
         authority_changed: bool,
     },
     Rejected,
+    ConfigConflict,
     WaitNotLaunched,
     RetryableFailure,
     TerminalFailure,
@@ -2605,12 +2637,20 @@ fn apply_or_queue_issue_monitor_control(
             }
         }
         rejection @ (IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched) => {
+            if authorizing {
+                effect_permit.reopen();
+            }
             if let Some(completion) = completion {
-                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
-                    IssueMonitorControlQueueError::WaitNotLaunched
-                } else {
-                    IssueMonitorControlQueueError::Rejected
+                completion.reject(match rejection {
+                    IssueMonitorControlCommit::ConfigConflict => {
+                        IssueMonitorControlQueueError::ConfigConflict
+                    }
+                    IssueMonitorControlCommit::WaitNotLaunched => {
+                        IssueMonitorControlQueueError::WaitNotLaunched
+                    }
+                    _ => IssueMonitorControlQueueError::Rejected,
                 });
             }
         }
@@ -2696,6 +2736,7 @@ fn try_apply_issue_monitor_control(
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
         IssueMonitorControl::ConfigSet {
+            expected_config_token: _,
             allowed_labels,
             enabled,
             autonomous_mode,
@@ -3042,6 +3083,18 @@ fn apply_routine_issue_monitor_control(
             let _ = monitor.invalidate_autonomous_wait(issue_number, &by, &reason, &at);
             false
         }
+        IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents,
+            changed_at,
+            ..
+        } => {
+            monitor.set_max_active_agents_override_with_source(
+                max_active_agents,
+                crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                &changed_at,
+            );
+            true
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
@@ -3320,6 +3373,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     match try_apply_issue_monitor_control_with_disk_migration(prefs_path, monitor, control) {
         IssueMonitorControlCommit::Committed { should_scan, .. } => should_scan,
         IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::RetryableFailure
         | IssueMonitorControlCommit::TerminalFailure => false,
@@ -3399,11 +3453,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         .last_control_receipt()
         .is_some_and(|receipt| receipt.control_id == accepted.control_id);
     let mut receipt_convergence_failed = false;
-    let mut machine_policy_failed = false;
     let mut rejected = None;
+    let mut config_conflict = false;
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
-    let transaction = crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
+    let transaction = crate::issue_monitor::try_mutate_issue_monitor_prefs_recovering_observed(
         prefs_path,
         &recovery_baseline,
         on_first_contention,
@@ -3430,14 +3484,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                             &accepted.control,
                         );
                     }
-                    let authority_epoch_before = converged.effect_authority_epoch();
                     let converged_result = try_apply_issue_monitor_control(
                         &mut converged,
                         accepted.control.clone(),
                         &accepted.processed_at,
                     );
-                    let converged_authority_changed =
-                        converged.effect_authority_epoch() != authority_epoch_before;
                     if failure_control {
                         // Failure fences restore the committed retry snapshot,
                         // and exact-source failures consume their source. Apply
@@ -3446,8 +3497,9 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         converged.rebase_daemon_driver_prefs(disk);
                     }
                     converged.set_last_control_receipt(receipt.clone());
+                    // Authority change is historical receipt evidence; compare
+                    // project-owned fields independently of the shared policy.
                     if converged_result != Some(receipt.should_scan)
-                        || converged_authority_changed != receipt.authority_changed
                         || !crate::issue_monitor::monitor_project_prefs_equal(
                             prefs_path,
                             &converged.prefs(),
@@ -3455,18 +3507,68 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         )
                     {
                         receipt_convergence_failed = true;
-                        return;
+                        return Ok(());
                     }
                     candidate = converged;
-                    if crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
-                        if let Ok(Some(policy)) = crate::machine_agent_settings::load() {
-                            candidate.apply_machine_policy(&policy);
+                }
+                if crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    crate::machine_agent_settings::load()?.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "shared machine agent policy is missing during receipt replay",
+                        )
+                    })?;
+                    let explicit_max_active = matches!(
+                        &accepted.control,
+                        IssueMonitorControl::MaxActiveAgents(_)
+                    ) || matches!(&accepted.control, IssueMonitorControl::ConfigSet { max_active_agents, max_active_auto, .. }
+                            if max_active_agents.is_some() || *max_active_auto);
+                    if explicit_max_active {
+                        // Project comparisons omit machine-owned fields. Bind
+                        // those fields to the original durable change as well.
+                        let mut intent = candidate.clone();
+                        if try_apply_issue_monitor_control(
+                            &mut intent,
+                            accepted.control.clone(),
+                            &accepted.processed_at,
+                        )
+                        .is_none()
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "invalid replayed Max active change",
+                            ));
                         }
+                        intent.persist_machine_max_active_change(&accepted.control_id)?;
                     }
+                    let policy = crate::machine_agent_settings::load()?.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "shared machine agent policy is missing during receipt replay",
+                        )
+                    })?;
+                    candidate.apply_machine_policy(&policy);
                 }
                 applied = Some(Some(receipt.should_scan));
                 authority_changed = receipt.authority_changed;
-                return;
+                return Ok(());
+            }
+            if let IssueMonitorControl::ConfigSet {
+                expected_config_token,
+                ..
+            } = &accepted.control
+            {
+                if !crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    if let Err(error) =
+                        crate::issue_monitor::check_expected_issue_monitor_config_token(
+                            disk,
+                            expected_config_token.as_deref(),
+                        )
+                    {
+                        config_conflict = true;
+                        return Err(error);
+                    }
+                }
             }
             if fenced_agent_failure {
                 // Only fresh admissions compare their source with canonical disk.
@@ -3478,7 +3580,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 );
                 if !issue_monitor_agent_failure_source_matches(&accepted.control, &canonical) {
                     rejected = Some(IssueMonitorControlCommit::Rejected);
-                    return;
+                    return Ok(());
                 }
             }
             let authority_epoch_before = candidate.effect_authority_epoch();
@@ -3502,13 +3604,13 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 // An unrecorded wait is refused, not ACKed and not a terminal
                 // failure of the control lane (Issue #5066).
                 rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
-                return;
+                return Ok(());
             }
             if (typed_failure || fenced_agent_failure || refused_launch_binding)
                 && applied == Some(Some(false))
             {
                 rejected = Some(IssueMonitorControlCommit::Rejected);
-                return;
+                return Ok(());
             }
             if applied.is_some_and(|result| result.is_some()) {
                 let explicit_max_active =
@@ -3516,15 +3618,41 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         || matches!(&accepted.control,
                     IssueMonitorControl::ConfigSet { max_active_agents, max_active_auto, .. }
                     if max_active_agents.is_some() || *max_active_auto);
-                if explicit_max_active
-                    && crate::issue_monitor::machine_managed_monitor_prefs(prefs_path)
-                {
-                    if let Err(error) =
-                        candidate.persist_machine_max_active_change(&accepted.control_id)
+                if crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    if let IssueMonitorControl::ConfigSet {
+                        expected_config_token,
+                        ..
+                    } = &accepted.control
                     {
-                        tracing::warn!(%error, "machine Max active change failed");
-                        machine_policy_failed = true;
-                        return;
+                        let requested = candidate
+                            .prefs()
+                            .max_active_last_change
+                            .filter(|_| explicit_max_active);
+                        let policy = crate::machine_agent_settings::checked_update(
+                            disk,
+                            expected_config_token.as_deref(),
+                            requested.as_ref(),
+                            &accepted.control_id,
+                        )
+                        .inspect_err(|error| {
+                            if error.to_string()
+                                == crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR
+                            {
+                                config_conflict = true;
+                                candidate = monitor.clone();
+                                rebase_issue_monitor_control_candidate(
+                                    &mut candidate,
+                                    disk,
+                                    &accepted.control,
+                                );
+                                if let Ok(Some(policy)) = crate::machine_agent_settings::load() {
+                                    candidate.apply_machine_policy(&policy);
+                                }
+                            }
+                        })?;
+                        candidate.apply_machine_policy(&policy);
+                    } else if explicit_max_active {
+                        candidate.persist_machine_max_active_change(&accepted.control_id)?;
                     }
                 }
                 candidate.set_last_control_receipt(crate::IssueMonitorControlReceipt {
@@ -3534,16 +3662,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 });
                 *disk = candidate.prefs();
             }
+            Ok(())
         },
     );
     match transaction {
         Ok(_) => {
-            if machine_policy_failed {
-                monitor.record_control_commit_error(
-                    "machine Max active policy could not be saved; retry the accepted control",
-                );
-                return IssueMonitorControlCommit::RetryableFailure;
-            }
             if let Some(rejection) = rejected {
                 *monitor = candidate;
                 return rejection;
@@ -3562,6 +3685,12 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 should_scan,
                 authority_changed,
             }
+        }
+        Err(_) if config_conflict => {
+            // Refusing this write must still converge the driver's authority
+            // before its effect permit can reopen on a newer disk snapshot.
+            *monitor = candidate;
+            IssueMonitorControlCommit::ConfigConflict
         }
         Err(error) => {
             tracing::warn!(
@@ -3978,10 +4107,27 @@ fn decode_issue_monitor_control_in_repo(
                     updated_at: updated_at.to_string(),
                 });
             }
-            if let Some(config) = payload
-                .get("config_set")
-                .and_then(serde_json::Value::as_object)
-            {
+            let guarded_config = payload.get("config_set_if_matches");
+            let legacy_config = payload.get("config_set");
+            if guarded_config.is_some() && legacy_config.is_some() {
+                return None;
+            }
+            if let Some(config) = guarded_config.or(legacy_config) {
+                let config = config.as_object()?;
+                // A separate discriminator makes old daemons reject guarded
+                // writes instead of silently applying them unconditionally.
+                let expected_config_token = if guarded_config.is_some() {
+                    let token = config.get("expected_config_token")?.as_str()?;
+                    if token.trim().is_empty() {
+                        return None;
+                    }
+                    Some(token.to_string())
+                } else {
+                    if config.contains_key("expected_config_token") {
+                        return None;
+                    }
+                    None
+                };
                 if config.contains_key("auto_apply_updates") {
                     return None;
                 }
@@ -4066,6 +4212,7 @@ fn decode_issue_monitor_control_in_repo(
                     return None;
                 }
                 return Some(IssueMonitorControl::ConfigSet {
+                    expected_config_token,
                     allowed_labels,
                     enabled,
                     autonomous_mode,
@@ -4261,6 +4408,17 @@ fn decode_issue_monitor_control_in_repo(
                             .filter(|value| *value > 0)?,
                     )
                 };
+                if payload.get("control_id").is_some() || payload.get("changed_at").is_some() {
+                    let control_id = payload.get("control_id")?.as_str()?;
+                    uuid::Uuid::parse_str(control_id).ok()?;
+                    let changed_at = payload.get("changed_at")?.as_str()?;
+                    chrono::DateTime::parse_from_rfc3339(changed_at).ok()?;
+                    return Some(IssueMonitorControl::IdentifiedMaxActiveAgents {
+                        max_active_agents,
+                        control_id: control_id.to_string(),
+                        changed_at: changed_at.to_string(),
+                    });
+                }
                 return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
             }
             if let Some(claim) = payload.get("claim_launch_delivery") {
@@ -10135,11 +10293,22 @@ exit 0
             crate::load_issue_monitor_prefs(&a).unwrap(),
         );
         let mut stale = monitor.clone();
-        let first = super::AcceptedIssueMonitorControl {
-            control_id: "project-a-shared-limit".into(),
-            processed_at: "2026-10-22T00:00:00Z".into(),
-            control: super::IssueMonitorControl::MaxActiveAgents(Some(5)),
-        };
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "max_active_agents": 5,
+                "control_id": uuid::Uuid::new_v4().to_string(),
+                "changed_at": "2026-10-22T00:00:00Z",
+            }),
+            std::process::id() + 1,
+        );
+        let first = super::AcceptedIssueMonitorControl::new(
+            decode_issue_monitor_control_for_test(payload.clone()).unwrap(),
+        );
+        let replay = super::AcceptedIssueMonitorControl::new(
+            decode_issue_monitor_control_for_test(payload).unwrap(),
+        );
+        assert_eq!(first, replay);
         assert!(matches!(
             apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
@@ -10161,7 +10330,7 @@ exit 0
             super::IssueMonitorControlCommit::Committed { .. }
         ));
         assert!(matches!(
-            apply_accepted_control_for_test(&a, &mut stale, first),
+            apply_accepted_control_for_test(&a, &mut stale, replay.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
         assert_eq!(stale.max_active_agents_override(), Some(3));
@@ -10179,6 +10348,107 @@ exit 0
             crate::load_issue_monitor_prefs(&b)
                 .unwrap()
                 .max_active_last_change
+        );
+        fs::remove_file(crate::machine_agent_settings::path()).unwrap();
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a, &mut stale, replay
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure,
+            "a durable project receipt cannot ACK a missing machine policy"
+        );
+    }
+
+    #[test]
+    fn machine_guarded_config_retry_preserves_a_later_project_change() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let a = gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        let b = gwt_core::paths::gwt_projects_dir().join("b/project-state/issue-monitor.json");
+        for path in [&a, &b] {
+            crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
+        }
+        let initial = crate::load_issue_monitor_prefs(&a).unwrap();
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": initial.config_token(),
+                    "max_active_agents": 5,
+                    "allowed_labels": ["guarded-a"],
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .unwrap();
+        let first = super::AcceptedIssueMonitorControl::new(control);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let _fault = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            crate::machine_agent_settings::path(),
+        );
+        fs::write(
+            crate::machine_agent_settings::path().with_extension("parent-sync-fail-once"),
+            "fail",
+        )
+        .unwrap();
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a,
+                &mut monitor,
+                first.clone()
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        );
+        assert!(crate::load_issue_monitor_prefs(&a)
+            .unwrap()
+            .last_control_receipt
+            .is_none());
+        let mut other = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&b).unwrap(),
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(
+                &b,
+                &mut other,
+                super::AcceptedIssueMonitorControl::new(IssueMonitorControl::MaxActiveAgents(
+                    Some(3)
+                ))
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(matches!(
+            apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(monitor.max_active_agents_override(), Some(3));
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a).unwrap().allowed_labels,
+            vec!["guarded-a"]
+        );
+        let before = fs::read(crate::machine_agent_settings::path()).unwrap();
+        let mut divergent = first;
+        if let IssueMonitorControl::ConfigSet {
+            max_active_agents, ..
+        } = &mut divergent.control
+        {
+            *max_active_agents = Some(6);
+        }
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a,
+                &mut monitor,
+                divergent
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        );
+        assert_eq!(
+            fs::read(crate::machine_agent_settings::path()).unwrap(),
+            before
         );
     }
 
@@ -12698,6 +12968,242 @@ exit 0
         );
     }
 
+    #[tokio::test]
+    async fn issue_monitor_config_set_if_matches_refuses_stale_observation_without_commit() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 2,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut saved = serde_json::to_value(&initial).expect("prefs value");
+        saved["future_extension"] = serde_json::json!({"must_survive_refusal": true});
+        let before = serde_json::to_vec(&saved).expect("noncanonical prefs bytes");
+        fs::write(&prefs_path, &before).expect("seed prefs");
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": "stale-config-token",
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                    "update_drain": true,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("guarded config frame must decode before its observation is compared");
+
+        let (should_scan, completion) =
+            apply_control_and_wait_for_completion(&prefs_path, &mut monitor, control).await;
+
+        let error = completion.expect_err("stale config observation must be refused");
+        assert!(error.message().contains("config"));
+        assert!(error.message().contains("re-read issue.monitor.status"));
+        assert!(!should_scan, "a conflict must not request a scan");
+        assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        assert_eq!(
+            monitor.prefs(),
+            initial,
+            "no volatile config or receipt change"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_if_matches_replays_receipt_before_comparing_token() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            max_active_agents: 2,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let observed_token = initial.config_token();
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": observed_token,
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("fresh guarded frame");
+        let accepted = super::AcceptedIssueMonitorControl::new(control);
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
+        let mut stale = monitor.clone();
+
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut monitor, accepted.clone()),
+            super::IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
+        let committed = crate::load_issue_monitor_prefs(&prefs_path).expect("committed prefs");
+        assert_eq!(committed.max_active_agents, 4);
+        assert!(!committed.enabled && !committed.autonomous_mode);
+        assert_eq!(committed.effect_authority_epoch, 9);
+        let receipt = committed
+            .last_control_receipt
+            .as_ref()
+            .expect("durable receipt");
+        assert!(receipt.authority_changed);
+        assert_eq!(receipt.control_id, accepted.control_id);
+        assert_ne!(committed.config_token(), observed_token);
+        let before_replay = fs::read(&prefs_path).expect("receipt bytes");
+        let mut divergent = accepted.clone();
+        if let IssueMonitorControl::ConfigSet {
+            max_active_agents, ..
+        } = &mut divergent.control
+        {
+            *max_active_agents = Some(5);
+        }
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut stale.clone(),
+                divergent,
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure,
+            "a matching receipt ID cannot acknowledge a divergent full snapshot"
+        );
+        assert_eq!(
+            fs::read(&prefs_path).expect("divergence bytes"),
+            before_replay
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut stale, accepted),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(stale.prefs(), committed);
+        assert_eq!(
+            fs::read(&prefs_path).expect("replayed bytes"),
+            before_replay
+        );
+    }
+
+    #[test]
+    fn issue_monitor_config_conflict_rebases_authority_and_reopens_only_new_permit() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let stale_prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let latest = crate::IssueMonitorPrefs {
+            enabled: false,
+            effect_authority_epoch: 8,
+            ..stale_prefs.clone()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &latest).expect("seed newer authority");
+        let before = fs::read(&prefs_path).expect("canonical bytes");
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), stale_prefs.clone());
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": stale_prefs.config_token(),
+                    "enabled": false,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("guarded OFF frame");
+        let mut permit = super::IssueMonitorEffectPermit::new();
+        let old_permit = permit.capture();
+        let mut pending = None;
+        let outcome = super::apply_or_queue_issue_monitor_control(
+            &BroadcastHub::new(),
+            &prefs_path,
+            &mut monitor,
+            control,
+            &mut permit,
+            &mut pending,
+            None,
+        );
+
+        assert_eq!(outcome, super::IssueMonitorControlCommit::ConfigConflict);
+        assert!(!outcome.should_scan());
+        assert!(
+            pending.is_none(),
+            "conflict must not block the control lane"
+        );
+        assert!(!old_permit.load(Ordering::Acquire));
+        assert!(permit.capture().load(Ordering::Acquire));
+        assert!(
+            !monitor.prefs().enabled,
+            "new permit must see canonical OFF"
+        );
+        assert_eq!(monitor.effect_authority_epoch(), 8);
+        assert_eq!(fs::read(&prefs_path).expect("unchanged bytes"), before);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decoder_refuses_missing_or_ignored_guards() {
+        for config in [
+            serde_json::json!({"max_active_agents": 4}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": null}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": ""}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": "  "}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": 42}),
+        ] {
+            assert!(
+                decode_issue_monitor_control_for_test(
+                    crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"config_set_if_matches": config}),
+                        std::process::id() + 1,
+                    )
+                )
+                .is_none(),
+                "malformed guarded config must fail closed: {config}"
+            );
+        }
+        for payload in [
+            serde_json::json!({"config_set": {
+                "max_active_agents": 4, "expected_config_token": "stale-config-token",
+            }}),
+            serde_json::json!({
+                "config_set": {"max_active_agents": 4},
+                "config_set_if_matches": {
+                    "max_active_agents": 5, "expected_config_token": "stale-config-token",
+                },
+            }),
+        ] {
+            assert!(
+                decode_issue_monitor_control_for_test(
+                    crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        payload.clone(),
+                        std::process::id() + 1,
+                    )
+                )
+                .is_none(),
+                "a legacy or mixed frame must never discard its guard: {payload}"
+            );
+        }
+    }
+
     #[test]
     fn issue_monitor_config_set_allowed_labels_commits_atomically() {
         let _prefs_budget = pin_prefs_hang_guard();
@@ -12765,6 +13271,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -12787,6 +13294,7 @@ exit 0
         assert_eq!(
             raise_control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -12936,6 +13444,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -13175,6 +13684,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -13431,6 +13941,7 @@ exit 0
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),

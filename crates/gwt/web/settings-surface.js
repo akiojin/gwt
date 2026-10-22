@@ -353,8 +353,18 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   panel.updateMaxActiveStatus(status);
   mode.addEventListener("change", () => {
+    const wasAuto = max.disabled;
     delete panel.dataset.maxActiveDraft;
     max.disabled = mode.value === "auto";
+    if (!max.disabled && wasAuto) {
+      const capacity = latestStatus?.agent_capacity;
+      const machineWorkers = Number.isFinite(capacity?.machine_budget)
+        ? capacity.machine_budget - (capacity.other_pm_agents ?? 0) - Math.max(capacity.own_pm_agents ?? 0, 1)
+        : (latestStatus?.max_active_agents ?? 0)
+          + Math.max(0, (capacity?.other_live_agents ?? 0) - (capacity?.other_pm_agents ?? 0))
+          + (capacity?.own_untracked_workers ?? 0);
+      max.value = String(Math.max(1, machineWorkers));
+    }
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
     committedMax = max.disabled ? null : Number(max.value);
     updateApply();

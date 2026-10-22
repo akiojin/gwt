@@ -45,7 +45,7 @@ pub trait CliEnv {
     fn repo_path(&self) -> &std::path::Path;
     fn deliver_feedback(
         &mut self,
-        record: &gwt_core::feedback::FeedbackRecord,
+        record: &gwt_core::feedback::PublicFeedback,
     ) -> Result<u64, gwt_github::client::OwnerMutationError> {
         use gwt_github::client::{http::HttpIssueClient, OwnerMutationError, ResolutionDeadline};
         let deadline = ResolutionDeadline::new(

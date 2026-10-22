@@ -54,10 +54,58 @@ test("shared migration state preserves tab fences and modal actions", async ({ p
   await inject({ kind: "migration_progress", tab_id: detected.tab_id, phase: "bareify", percent: 42 });
   await expect(dialog.locator("progress")).toHaveAttribute("value", "42");
   await expect(dialog).toContainText("Building bare repository");
+  await dialog.hover();
+  await dialog.focus();
+  const burst = async (last: number, suspendRaf: boolean) => page.evaluate(async ({ tabId, last, suspendRaf }) => {
+    const dialog = document.querySelector('#migration-modal .modal-shell')!;
+    const before = dialog.innerHTML;
+    const focused = document.activeElement;
+    const originalRaf = window.requestAnimationFrame;
+    if (suspendRaf) window.requestAnimationFrame = () => 0;
+    let renders = 0;
+    const started = performance.now();
+    let timer: ReturnType<typeof setTimeout>;
+    let observer: MutationObserver | undefined;
+    try {
+      const rendered = new Promise<void>((resolve, reject) => {
+        observer = new MutationObserver(records => {
+          renders += records.reduce((count, record) => count + [...record.addedNodes]
+            .filter(node => node.nodeName === 'PROGRESS').length, 0);
+          if (dialog.querySelector('progress')?.getAttribute('value') === String(last)) resolve();
+        });
+        observer.observe(dialog, { childList: true });
+        timer = setTimeout(() => reject(new Error('migration frame did not render within one second')), 1000);
+      });
+      for (let percent = last - 49; percent <= last; percent += 1) {
+        window.dispatchEvent(new CustomEvent('__gwt_test_inject', { detail: {
+          kind: 'migration_progress', tab_id: tabId, phase: 'bareify', percent,
+        } }));
+      }
+      window.dispatchEvent(new CustomEvent('__gwt_test_inject', { detail: {
+        kind: 'migration_progress', tab_id: 'unrelated', phase: 'cleanup', percent: 99,
+      } }));
+      const unchangedBeforeFrame = dialog.innerHTML === before;
+      await rendered;
+      return { unchangedBeforeFrame, renders, elapsed: performance.now() - started,
+        focused: document.activeElement === focused, hovered: dialog.matches(':hover') };
+    } finally {
+      clearTimeout(timer!);
+      observer?.disconnect();
+      window.requestAnimationFrame = originalRaf;
+    }
+  }, { tabId: detected.tab_id, last, suspendRaf });
+  for (const suspendRaf of [false, true]) {
+    const result = await burst(suspendRaf ? 75 : 50, suspendRaf);
+    expect(result).toMatchObject({ unchangedBeforeFrame: true, renders: 1, focused: true, hovered: true });
+    expect(result.elapsed).toBeLessThan(1000);
+    await testInfo.attach(suspendRaf ? "migration-fallback" : "migration-frame", {
+      body: JSON.stringify(result), contentType: "application/json",
+    });
+  }
   await inject({ kind: "migration_progress", tab_id: "other-tab", phase: "cleanup", percent: 90 });
   await inject({ kind: "migration_done", tab_id: "other-tab" });
   await inject({ kind: "migration_error", tab_id: "other-tab", message: "Unrelated failure" });
-  await expect(dialog.locator("progress")).toHaveAttribute("value", "42");
+  await expect(dialog.locator("progress")).toHaveAttribute("value", "75");
   await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`migration-running-${theme}.png`) });
   const failure = { kind: "migration_error", tab_id: detected.tab_id, phase: "worktrees", message: "Fixture failure", recovery: "rolled_back" };
   await inject(failure);

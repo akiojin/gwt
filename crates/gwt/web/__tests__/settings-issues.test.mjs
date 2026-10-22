@@ -165,25 +165,34 @@ test("Issues disclosure reuses authoritative launch controls and returns them to
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
-test("Auto capacity is read-only until Manual is selected", () => {
+test("Auto capacity is read-only and Manual starts with the machine worker limit", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
-    status: { max_active_agents: 4, max_active_agents_override: null }, send: m => sent.push(m) });
+    status: { max_active_agents: 3, max_active_agents_override: null,
+      agent_capacity: { machine_budget: 7, own_pm_agents: 1, other_live_agents: 3, other_pm_agents: 1 } },
+    send: m => sent.push(m) });
   const max = panel.querySelector('[aria-label="Max active"]');
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(max.disabled, true);
   assert.equal(mode.value, "auto");
-  assert.equal(max.value, "4");
+  assert.equal(max.value, "3");
   max.value = "9";
   max.dispatchEvent(new Event("input"));
   max.dispatchEvent(new Event("change"));
   panel.querySelector('[aria-label="Apply Max active"]').click();
   assert.deepEqual(sent, [], "Auto never sends a numeric override");
-  max.value = "4";
+  max.value = "3";
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+  assert.equal(max.value, "5", "the project allocation of three must not become the shared Manual request");
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 5 }]);
+  panel.updateMaxActiveStatus({ max_active_agents: 3, max_active_agents_override: null,
+    agent_capacity: { machine_budget: null, other_live_agents: 3, other_pm_agents: 1, own_untracked_workers: 1 } });
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.equal(max.value, "6", "unknown machine capacity reconstructs the full current worker allowance");
+  assert.equal(sent.at(-1).max_active_agents, 6);
 });
 
 test("Max active stepper edits commit once on Apply and survive status redraw", () => {

@@ -105,8 +105,8 @@ fn failed_report_and_issue_body_preserve_the_entire_refusal() {
     assert_eq!(saved.input, report);
     assert_eq!(saved.state, FeedbackState::Failed);
     assert!(saved.render_issue().contains(&report.refusal));
-    assert!(saved.render_issue().contains("source-project"));
-    assert!(saved.render_issue().contains("error-123"));
+    assert!(!saved.render_issue().contains("source-project"));
+    assert!(!saved.render_issue().contains("error-123"));
 }
 
 #[test]
@@ -160,18 +160,14 @@ fn public_snapshot_masks_private_content_without_changing_the_local_report() {
         .input
         .refusal
         .starts_with("before\r\n***redacted***\r\n***redacted***\r\n"));
-    assert_ne!(public.context.project_root, record.context.project_root);
-    assert_eq!(public.context.project_hash, record.context.project_hash);
+    assert!(!public.render_issue().contains("project_root"));
+    assert!(!public.render_issue().contains("project_hash"));
     assert_eq!(public.marker(), record.marker());
     assert_eq!(
         public.input.refusal.matches("\r\n").count(),
         report.refusal.matches("\r\n").count()
     );
-    assert!(public
-        .input
-        .body
-        .starts_with("before [REDACTED CODE] after\n\n"));
-    assert!(public.input.body.ends_with("\n\nend"));
+    assert!(public.input.body.is_empty());
     assert_eq!(store.read(&record.id).unwrap().input, report);
 }
 
@@ -191,6 +187,128 @@ fn public_snapshot_keeps_safe_refusal_bytes_without_truncation() {
         record.public_snapshot().input.refusal.as_bytes(),
         report.refusal.as_bytes()
     );
+}
+
+#[test]
+fn public_report_contains_only_gwt_diagnostics_and_no_source_identifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("private-product");
+    repo(
+        &source,
+        "https://github.com/private-team/private-product.git",
+    );
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.title = "workspace.update refuses private-product".into();
+    report.refusal = format!("workspace.update: authority_mismatch (http_status=409) at {} commit a123456789abcdef0123456789abcdef012345678", source.display());
+    report.reproduction = "In private-product branch feature/secret-ticket, issue #4781, HEAD a123456789abcdef0123456789abcdef012345678, run `workspace.update`; exit_code=64".into();
+    report.workaround = Some("private-product: run `execution.status`".into());
+    report.body = "Private monorepo uses a confidential framework".into();
+    let original = report.clone();
+    let (record, _) = store.submit(report, context(&source), Utc::now()).unwrap();
+    let public = record.public_snapshot();
+    let rendered = format!("{}\n{}", public.input.title, public.render_issue());
+    for forbidden in [
+        "project_hash",
+        "project_root",
+        "active_agents",
+        "source-project",
+        "private-product",
+        "private-team",
+        "feature/secret-ticket",
+        "4781",
+        "a123456789abcdef0123456789abcdef012345678",
+        "Private monorepo",
+        "error-123",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "outbound report exposed {forbidden}"
+        );
+    }
+    assert!(rendered.contains("http_status=409"));
+    assert!(rendered.contains("authority_mismatch"));
+    assert!(rendered.contains("workspace.update"));
+    assert!(rendered.contains("execution.status"));
+    assert!(rendered.contains("exit_code=64"));
+    assert!(rendered.contains("gwtd_version"));
+    assert_eq!(store.read(&record.id).unwrap().input, original);
+}
+
+#[test]
+fn approval_explains_removed_categories_and_unreadable_mask_ratio() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.title = "failure".into();
+    report.operation = "workspace.update".into();
+    report.reproduction = "unconfirmed".into();
+    report.refusal = "/private/source.rs ".repeat(100);
+    let (record, _) = store
+        .submit(report, context(dir.path()), Utc::now())
+        .unwrap();
+    let summary = record.public_snapshot().privacy_summary();
+    assert!(summary.contains("file paths"));
+    assert!(summary.contains("Privacy masks:"));
+    assert!(summary.contains("may be unreadable"));
+    assert!(summary.contains("Unknown project-specific names may remain"));
+    assert!(!summary.contains("/private/source.rs"));
+}
+
+#[test]
+fn masking_preserves_gwt_diagnostic_literals_and_large_numeric_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.refusal = "`workspace.update` rejected: timeout_ns=1000000000\n(http_status=409), code=authority_mismatch; exit_code=64\n`execution_id=366a102c-4096-4185-aa5b-f07683fed026`\n`state=active`\n```text\ngwtd: operation=workspace.update failed\nhttp_status=409\ncode=authority_mismatch\n```\n".into();
+    let (record, _) = store
+        .submit(report.clone(), context(dir.path()), Utc::now())
+        .unwrap();
+    assert_eq!(record.public_snapshot().input.refusal, report.refusal);
+}
+
+#[test]
+fn masking_removes_source_blocks_and_mixed_case_environment_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.refusal = "before\n```python\ncustomer_discount = 0.137\n```\n`customer_discount = 0.137`\nprivate_setting=confidential-value\nPrivateSetting=second-secret\nhttp_status=409 private_setting=third-secret\nPRIVATE_PIN=123456\nafter".into();
+    let (record, _) = store
+        .submit(report, context(dir.path()), Utc::now())
+        .unwrap();
+    let public = record.public_snapshot();
+    for hidden in [
+        "customer_discount",
+        "0.137",
+        "confidential-value",
+        "second-secret",
+        "third-secret",
+        "123456",
+    ] {
+        assert!(!public.render_issue().contains(hidden));
+    }
+    assert!(public.input.refusal.starts_with("before\n"));
+    assert!(public.input.refusal.ends_with("\nafter"));
+    assert!(public.input.refusal.contains("http_status=409"));
+}
+
+#[test]
+fn masking_handles_punctuation_in_repository_names_and_other_branch_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".private-product");
+    repo(
+        &root,
+        "https://github.com/private-team/.private-product.git",
+    );
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let mut report = input();
+    report.reproduction =
+        "In .private-product on branch confidential-release, call `execution.status`".into();
+    let (record, _) = store.submit(report, context(&root), Utc::now()).unwrap();
+    let text = record.public_snapshot().render_issue();
+    assert!(!text.contains(".private-product"));
+    assert!(!text.contains("confidential-release"));
+    assert!(text.contains("execution.status"));
 }
 
 #[test]

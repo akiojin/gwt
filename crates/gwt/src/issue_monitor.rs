@@ -1366,6 +1366,36 @@ fn dedupe_launch_profile_pool(
 }
 
 impl IssueMonitorPrefs {
+    /// Saved inputs observed by guarded config writes, excluding runtime state.
+    pub fn config_observation(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "autonomous_mode": self.autonomous_mode,
+            "allowed_labels": self.allowed_labels,
+            "max_active_mode": self.max_active_agents_mode,
+            "max_active_agents_override":
+                (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
+                    .then_some(self.max_active_agents),
+            "auto_close_merged_issues": self.auto_close_merged_issues,
+            "launch_profiles": self.launch_profile_pool(),
+            "launch_auto": self.launch_auto,
+            "launch_tiers": self.launch_tiers,
+            "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
+                "version": drain.version,
+                "since": drain.since,
+                "reason": drain.reason,
+                "automatic": drain.automatic,
+            })),
+        })
+    }
+
+    /// Value-CAS token for exactly [`Self::config_observation`], not history.
+    pub fn config_token(&self) -> String {
+        let observation = serde_json::to_vec(&self.config_observation())
+            .expect("saved Issue Monitor configuration serializes");
+        format!("config-v1:{:x}", Sha256::digest(observation))
+    }
+
     /// SPEC #3914 FR-001: the ordered launch candidate pool. A pre-#3914 file
     /// carrying only `launch_profile` reads as a one-element pool.
     pub fn launch_profile_pool(&self) -> Vec<IssueMonitorLaunchProfile> {
@@ -1509,6 +1539,31 @@ impl IssueMonitorPrefs {
             enabled,
         )
     }
+}
+
+pub(crate) const ISSUE_MONITOR_CONFIG_CONFLICT_ERROR: &str =
+    "Issue Monitor config changed since observation; re-read issue.monitor.status and reconsider the saved configuration before retrying";
+
+/// Call only under the prefs writer lock, before applying any config change.
+pub(crate) fn check_expected_issue_monitor_config_token(
+    prefs: &IssueMonitorPrefs,
+    expected: Option<&str>,
+) -> io::Result<()> {
+    if let Some(expected) = expected {
+        if expected.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected_config_token must be a nonempty string",
+            ));
+        }
+        if expected != prefs.config_token() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6914,6 +6969,22 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
     on_first_contention: impl FnMut(),
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
+    try_mutate_issue_monitor_prefs_recovering_observed(
+        path,
+        recovery_baseline,
+        on_first_contention,
+        |prefs| Ok(mutation(prefs)),
+    )
+}
+
+/// Preserve recovery semantics while allowing validation to refuse before save.
+#[track_caller]
+pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
+    path: &Path,
+    recovery_baseline: &IssueMonitorPrefs,
+    on_first_contention: impl FnMut(),
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
     with_issue_monitor_prefs_lock_observed(path, on_first_contention, || {
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
@@ -6947,7 +7018,7 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
             }
             Err(error) => return Err(error),
         };
-        let result = mutation(&mut prefs);
+        let result = mutation(&mut prefs)?;
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
@@ -10152,8 +10223,7 @@ impl IssueMonitorState {
             return Some(self.effect_authority_epoch);
         }
         let pending_claims = self.pending_claim_issue_numbers();
-        let next_epoch =
-            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        let next_epoch = self.advance_effect_authority_epoch()?;
 
         self.config.enabled = enabled;
         self.launch_auth_required = false;
@@ -10221,10 +10291,23 @@ impl IssueMonitorState {
         Some(next_epoch)
     }
 
-    /// Advance authority for a control that changes daemon decision state but
-    /// does not itself require a compensation rewrite.
+    /// Revoke pending effects and their pre-spawn eligibility together. Work
+    /// already handed to a launch or materializer keeps its lifecycle state.
     pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
-        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+        let pending_claims = self.pending_claim_issue_numbers();
+        let epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        for number in pending_claims {
+            if !self.active_launches.contains(&number)
+                && !self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == number)
+            {
+                self.clear_provisional_implementation(number);
+            }
+        }
+        Some(epoch)
     }
 
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
@@ -11494,7 +11577,9 @@ impl IssueMonitorState {
             .is_some_and(|current| {
                 parse_rfc3339_utc(&current.observed_at).is_some_and(|current_at| {
                     incoming_at < current_at
-                        || (incoming_at == current_at && observation.hold.is_some())
+                        // Ambiguous equal-time evidence must retain a proven hold.
+                        || (incoming_at == current_at
+                            && (current.hold.is_some() || observation.hold.is_none()))
                 })
             })
         {
@@ -13865,7 +13950,7 @@ impl IssueMonitorState {
 
     /// Issues this project could be running right now.
     ///
-    /// Queued work whose retry floor has not passed is deliberately parked
+    /// Work waiting on an open PR or whose retry floor has not passed is parked
     /// (Issue #3616 quota holds live here), and an issue already escalated to
     /// `NeedsHuman` is on a human's desk rather than the fleet's. Counting
     /// either would raise a blackout for a fleet that is behaving correctly.
@@ -13873,11 +13958,13 @@ impl IssueMonitorState {
         let queued = self
             .queue
             .iter()
+            .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
             .filter(|issue_number| self.retry_ready_for_saved_profile(**issue_number, now))
             .count();
         let held = self
             .failed_issues
             .keys()
+            .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
             .filter(|issue_number| {
                 self.autonomous_records
                     .get(issue_number)
@@ -13984,8 +14071,7 @@ impl IssueMonitorState {
         if self.auto_close_merged_issues == value {
             return Some(self.effect_authority_epoch);
         }
-        let next_epoch =
-            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        let next_epoch = self.advance_effect_authority_epoch()?;
         self.auto_close_merged_issues = value;
         Some(next_epoch)
     }
@@ -14701,28 +14787,12 @@ impl IssueMonitorState {
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
         let previous_mode = self.autonomous_mode;
-        let pending_claims = self.pending_claim_issue_numbers();
-        let epoch = advance_autonomous_effect_authority(
-            &mut self.autonomous_mode,
-            &mut self.effect_authority_epoch,
-            &mut self.pending_effects,
-            enabled,
-        )?;
-        if previous_mode != enabled {
-            self.capture_legacy_update_drain_origin(previous_mode);
-            // The authority change cancels these acquisitions, not queued work
-            // or deliveries already handed to the materializer.
-            for number in pending_claims {
-                if !self.active_launches.contains(&number)
-                    && !self
-                        .pending_launch_deliveries
-                        .iter()
-                        .any(|delivery| delivery.issue_number == number)
-                {
-                    self.clear_provisional_implementation(number);
-                }
-            }
+        if previous_mode == enabled {
+            return Some(self.effect_authority_epoch);
         }
+        let epoch = self.advance_effect_authority_epoch()?;
+        self.autonomous_mode = enabled;
+        self.capture_legacy_update_drain_origin(previous_mode);
         Some(epoch)
     }
 
@@ -36400,10 +36470,22 @@ mod tests {
         assert_eq!(enabled.prefs(), enabled_before);
         assert_eq!(enabled.set_enabled_with_effect_revocation(false), None);
         assert_eq!(enabled.prefs(), enabled_before, "OFF overflow is atomic");
+        assert_eq!(enabled.advance_effect_authority_epoch(), None);
+        assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(
+            enabled.set_auto_close_merged_issues_with_effect_revocation(None),
+            Some(u64::MAX)
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(
+            enabled.set_auto_close_merged_issues_with_effect_revocation(Some(false)),
+            None
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
     }
 
     #[test]
-    fn autonomous_off_clears_cancelled_claim_phases_across_restart_and_rebase() {
+    fn authority_changes_clear_cancelled_claim_phases_across_restart_and_rebase() {
         let now = "2026-10-22T00:00:00Z";
         let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".into()],
@@ -36431,6 +36513,44 @@ mod tests {
         );
         let attempting = monitor.pending_effects()[1].clone();
         assert!(monitor.mark_pending_effect_attempting(&attempting.attempt_key()));
+        let mut auto_close = monitor.clone();
+        let mut authority = monitor.clone();
+        let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        auto_close
+            .set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        cold.set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        authority.advance_effect_authority_epoch().unwrap();
+        for cancelled in [auto_close, authority, cold] {
+            assert!(cancelled.autonomous_in_flight_issues().is_empty());
+            assert!(cancelled.terminal_queue_contains(42));
+            assert!(cancelled.terminal_queue_contains(43));
+            assert_eq!(cancelled.attempt_count(42), 1);
+            assert_eq!(cancelled.attempt_count(43), 1);
+            assert_eq!(
+                cancelled
+                    .pending_effects()
+                    .iter()
+                    .filter(|effect| matches!(
+                        effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim { .. }
+                    ))
+                    .count(),
+                1
+            );
+            let mut stale = monitor.clone();
+            stale.rebase_daemon_driver_prefs(&cancelled.prefs());
+            assert!(stale.autonomous_in_flight_issues().is_empty());
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), cancelled.prefs());
+            assert!(restored.autonomous_in_flight_issues().is_empty());
+            scan_issue_monitor_candidates(&mut restored, &candidates, now);
+            assert_eq!(
+                restored.prepare_autonomous_candidate(&candidates[0], &protection, now),
+                EligibilityDecision::Eligible
+            );
+            assert_eq!(restored.attempt_count(42), 1);
+        }
         let mut stale = monitor.clone();
         let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
 
@@ -38540,14 +38660,22 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut auto_close = autonomous.clone();
+        auto_close
+            .set_auto_close_merged_issues_with_effect_revocation(Some(false))
+            .unwrap();
+        let mut authority = autonomous.clone();
+        authority.advance_effect_authority_epoch().unwrap();
         autonomous
             .set_autonomous_mode_with_effect_revocation(false)
             .unwrap();
-        for number in [42, 43, 44, 45, 46] {
-            assert_eq!(
-                autonomous.autonomous_record(number).unwrap().phase,
-                AutonomousPhase::Implementing
-            );
+        for controlled in [autonomous, auto_close, authority] {
+            for number in [42, 43, 44, 45, 46] {
+                assert_eq!(
+                    controlled.autonomous_record(number).unwrap().phase,
+                    AutonomousPhase::Implementing
+                );
+            }
         }
 
         let mut stale = monitor.clone();
@@ -39681,6 +39809,49 @@ mod tests {
 
         super::sync_parent_directory(&missing_parent)
             .expect("non-Unix durable writers do not open directory handles");
+    }
+
+    #[test]
+    fn config_token_excludes_auto_capacity_and_drain_blocker_observations() {
+        let mut prefs = IssueMonitorPrefs {
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
+            update_drain: Some(IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: "2026-10-22T00:00:00Z".to_string(),
+                reason: IssueMonitorUpdateDrainReason::Manual,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..IssueMonitorPrefs::default()
+        };
+        let observation = prefs.config_observation();
+        let token = prefs.config_token();
+        assert_eq!(
+            observation["max_active_agents_override"],
+            serde_json::Value::Null
+        );
+        assert!(observation["update_drain"].get("blocking").is_none());
+        prefs.max_active_agents += 1;
+        prefs.priority_order.push(42);
+        prefs.last_scan_at = Some("2026-10-22T00:01:00Z".to_string());
+        prefs
+            .update_drain
+            .as_mut()
+            .unwrap()
+            .blocking
+            .push(crate::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 });
+        assert_eq!(prefs.config_observation(), observation);
+        assert_eq!(prefs.config_token(), token);
+
+        prefs.max_active_agents_mode = IssueMonitorMaxActiveMode::Manual;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["max_active_agents_override"],
+            serde_json::json!(prefs.max_active_agents)
+        );
+        let manual_token = prefs.config_token();
+        prefs.max_active_agents += 1;
+        assert_ne!(prefs.config_token(), manual_token);
     }
 
     #[test]
@@ -41413,6 +41584,8 @@ mod tests {
             );
             scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
             assert!(monitor.open_pr_launch_held(42));
+            assert_eq!(monitor.runnable_backlog_len(now), 0);
+            assert!(monitor.agent_status_at(now).agent_blackout.is_none());
             assert_eq!(
                 monitor.inbox_item(42).unwrap().state,
                 MonitorInboxState::Queued
@@ -41447,6 +41620,7 @@ mod tests {
         monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), now);
         scan_issue_monitor_candidates(&mut monitor, &[candidate], now);
         assert!(!monitor.open_pr_launch_held(42));
+        assert_eq!(monitor.runnable_backlog_len(now), 1);
         assert_eq!(
             monitor
                 .clone()
@@ -41458,6 +41632,26 @@ mod tests {
                 .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false);
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0].issue_number, 42);
+    }
+
+    #[test]
+    fn issue_4157_equal_timestamp_release_cannot_override_a_hold_in_either_order() {
+        let hold = Some(IssueMonitorOpenPrHold {
+            pr_number: 7,
+            lifecycle: "MERGE-CANDIDATE".into(),
+        });
+        for observations in [[hold.clone(), None], [None, hold.clone()]] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            for observation in observations {
+                monitor.reconcile_open_pr_holds(
+                    &BTreeMap::from([(42, observation)]),
+                    "2026-06-26T00:01:00Z",
+                );
+            }
+            assert!(monitor.open_pr_launch_held(42));
+            monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:02:00Z");
+            assert!(!monitor.open_pr_launch_held(42));
+        }
     }
 
     #[test]
