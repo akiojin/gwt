@@ -1193,7 +1193,6 @@ pub(crate) fn load_monitor_agent_status(
     }
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
-    let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor = authority.clone();
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
@@ -1205,7 +1204,8 @@ pub(crate) fn load_monitor_agent_status(
     // (this used to report the literal string `gwtd-status`) told every reader
     // the monitor had just run, which is exactly how a permanently stopped
     // monitor kept looking healthy.
-    monitor.restore_persisted_last_scan_at(persisted_last_scan_at);
+    monitor.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
+    monitor.restore_persisted_scan_diagnostics(&prefs);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
@@ -6132,8 +6132,11 @@ where
         let (generation, snapshot) = match Cache::new(env.cache_root())
             .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
         {
-            ValidatedCacheEntry::Fresh(entry) => return Ok(entry.entry),
-            ValidatedCacheEntry::Stale(entry) => (entry.generation, Some(entry.entry.snapshot)),
+            // A concurrent reader may publish a pre-mutation snapshot with a
+            // fresh receipt. Authoritative refresh callers still need a fetch.
+            ValidatedCacheEntry::Fresh(entry) | ValidatedCacheEntry::Stale(entry) => {
+                (entry.generation, Some(entry.entry.snapshot))
+            }
             ValidatedCacheEntry::Unvalidated(entry) => (entry.generation, None),
             ValidatedCacheEntry::Missing { generation } => (generation, None),
         };
@@ -6257,14 +6260,17 @@ fn load_fresh_validated_entry(
     number: IssueNumber,
     expected_generation: Option<&CacheGeneration>,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let generation =
-        match cache.load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)? {
-            ValidatedCacheEntry::Fresh(entry) => return Ok(entry.entry),
-            ValidatedCacheEntry::Stale(entry) | ValidatedCacheEntry::Unvalidated(entry) => {
-                entry.generation
-            }
-            ValidatedCacheEntry::Missing { generation } => generation,
-        };
+    let generation = match cache
+        .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
+    {
+        ValidatedCacheEntry::Fresh(entry) if entry.generation.as_ref() == expected_generation => {
+            return Ok(entry.entry);
+        }
+        ValidatedCacheEntry::Fresh(entry)
+        | ValidatedCacheEntry::Stale(entry)
+        | ValidatedCacheEntry::Unvalidated(entry) => entry.generation,
+        ValidatedCacheEntry::Missing { generation } => generation,
+    };
     if generation.as_ref() != expected_generation {
         return Err(SpecOpsError::CacheConflict(number));
     }
@@ -11273,6 +11279,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11370,6 +11379,9 @@ mod tests {
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11519,6 +11531,9 @@ mod tests {
                 }],
                 inbox_coverage: None,
                 closure_held: Vec::new(),
+                last_scan_error: None,
+                scan_aborted: false,
+                last_error_source: None,
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
@@ -11606,6 +11621,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
@@ -11893,6 +11911,8 @@ mod tests {
             .remove("max_active_agents_override");
         assert_eq!(status["released"], serde_json::json!([]));
         status.as_object_mut().unwrap().remove("released");
+        assert_eq!(status["scan_aborted"], false);
+        status.as_object_mut().unwrap().remove("scan_aborted");
         for pointer in ["/inbox", "/urgent_queue/entries"] {
             for row in status.pointer_mut(pointer).unwrap().as_array_mut().unwrap() {
                 assert_eq!(row["kind"], "issue");
@@ -12062,6 +12082,44 @@ mod tests {
                 .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
             "a scan that last ran in 2020 must read as stalled: {status}"
         );
+    }
+
+    #[test]
+    fn issue_3924_status_restores_scan_failure_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let scan_error = serde_json::json!({
+            "phase": "candidate-load", "message": "original candidate load failure",
+            "recorded_at": now,
+        });
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["enabled"] = serde_json::json!(true);
+        prefs["last_scan_at"] = serde_json::json!(now);
+        prefs["last_scan_error"] = scan_error.clone();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .unwrap();
+        let status: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(status["last_scan_error"], scan_error);
+        assert_eq!(status["last_error_source"], "scan_failure");
+        assert_eq!(status["scan_aborted"], true);
+        assert!(status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("original candidate load failure"));
     }
 
     /// Issue #4087 AC-1: the PM reads from the status snapshot that the full
@@ -15492,6 +15550,9 @@ command = "my-agent-cli"
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,
@@ -16620,6 +16681,56 @@ command = "my-agent-cli"
             rows[0].message
         );
         assert_eq!(rows[0].target.issue, Some(42));
+    }
+
+    #[test]
+    fn final_validated_read_rejects_a_different_fresh_generation() {
+        let temp = TempDir::new().unwrap();
+        let cache = Cache::new(temp.path().to_path_buf());
+        let snapshot = sample_issue_snapshot();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+        let generation = cache.current_generation(snapshot.number).unwrap();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+
+        let error = load_fresh_validated_entry(&cache, snapshot.number, generation.as_ref())
+            .expect_err("a new validated generation must be revalidated by this reader");
+
+        assert!(matches!(error, SpecOpsError::CacheConflict(_)), "{error}");
+    }
+
+    #[test]
+    fn authoritative_refresh_revalidates_a_concurrent_fresh_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let old = sample_issue_snapshot();
+        let mut remote = old.clone();
+        remote.state = IssueState::Closed;
+        remote.updated_at = UpdatedAt::new("2026-10-22T00:00:00Z");
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        env.client.after_next_fetch(move || {
+            // Another targeted reader fetched before the mutation, but only
+            // publishes its snapshot and fresh receipt during our readback.
+            let cache = Cache::new(cache_root);
+            cache.write_snapshot(&old).unwrap();
+            assert!(cache
+                .renew_validation_receipt_if_current(&old)
+                .unwrap()
+                .renewed());
+        });
+
+        let entry = refresh_issue_cache_with_index_rebuild(&mut env, remote.number, |_| Ok(()))
+            .expect("authoritative retry must fetch the post-mutation state");
+
+        assert_eq!(entry.snapshot.state, IssueState::Closed);
+        assert_eq!(entry.snapshot.updated_at, remote.updated_at);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
     }
 
     #[test]

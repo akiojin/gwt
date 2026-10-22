@@ -4430,6 +4430,7 @@ mod tests {
                 project_key: project_a(),
                 handle: handle.clone(),
                 monitor_runtime: None,
+                pm_delivery_replay: Mutex::new(None),
             }),
         );
         state.clients.register_scoped(
@@ -4544,6 +4545,7 @@ mod tests {
                 project_key: project_a(),
                 handle: stale_generation,
                 monitor_runtime: None,
+                pm_delivery_replay: Mutex::new(None),
             }),
         );
 
@@ -4602,6 +4604,7 @@ mod tests {
                 project_key: project_a(),
                 handle: pane.shared_pty(),
                 monitor_runtime: None,
+                pm_delivery_replay: Mutex::new(None),
             }),
         );
 
@@ -4671,6 +4674,7 @@ mod tests {
                 project_key: project_a(),
                 handle: pane.shared_pty(),
                 monitor_runtime: None,
+                pm_delivery_replay: Mutex::new(None),
             }),
         );
 

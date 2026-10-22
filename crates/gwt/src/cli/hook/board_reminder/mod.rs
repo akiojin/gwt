@@ -19,6 +19,7 @@
 //!   pure planner, and writes the JSON envelope to stdout
 
 mod format;
+mod issue_context;
 mod plan;
 mod texts;
 
@@ -819,6 +820,9 @@ pub fn compute_plan(
         plan.output = replace_with_terminal_settlement_reminder(plan.output, intent_event);
     } else if is_resident_pm {
         plan.output = replace_with_pm_reminder(plan.output);
+    }
+    if intent_event == IntentBoundaryEvent::SessionStart && !is_resident_pm {
+        issue_context::append(&mut plan.output, session, &audience_scope);
     }
     if intent_event != IntentBoundaryEvent::Stop {
         if let Some(context) =
@@ -2441,6 +2445,148 @@ mod tests {
         assert_eq!(keys[0], session.id);
         assert_eq!(keys[1], format!("session:{}", session.id));
         assert_eq!(keys[2], "agent:codex");
+    }
+
+    #[test]
+    fn issue_4241_new_session_receives_prior_decision_handoff_and_comments() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo, "https://github.com/example/startup-context.git");
+        let mut session = make_session(&repo, "work/issue-4241", "Codex");
+        session.linked_issue_number = Some(4241);
+        let predecessor = session.clone();
+        predecessor
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .unwrap();
+        session.id = uuid::Uuid::new_v4().to_string();
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                Some("workspace-current"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        let now = Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap();
+        let old = now - chrono::Duration::days(3);
+        for (kind, body, owners, audience) in [
+            (
+                BoardEntryKind::Decision,
+                "PM: the previous blocker is resolved; continue delivery",
+                vec![],
+                "workspace-current",
+            ),
+            (
+                BoardEntryKind::Handoff,
+                "Previous session: implementation remains to be delivered",
+                vec![],
+                "workspace-current",
+            ),
+            (
+                BoardEntryKind::Decision,
+                "foreign issue decision",
+                vec!["4242".into()],
+                "workspace-current",
+            ),
+            (
+                BoardEntryKind::Decision,
+                "private other workspace decision",
+                vec!["4241".into()],
+                "workspace-other",
+            ),
+            (
+                BoardEntryKind::Decision,
+                "same issue broadcast decision",
+                vec!["4241".into()],
+                "",
+            ),
+            (
+                BoardEntryKind::Decision,
+                "unrelated broadcast decision",
+                vec![],
+                "",
+            ),
+        ] {
+            let mut post = entry("PM", kind, body, "work/pm", "previous-session", old)
+                .with_audience(audience.split_whitespace().collect::<Vec<_>>())
+                .with_target_owners(vec![format!("session:{}", predecessor.id)]);
+            post.related_owners = owners;
+            if post.kind == BoardEntryKind::Handoff {
+                post.origin_session_id = Some(predecessor.id.clone());
+                post.target_owners = vec!["agent:pm".into()];
+            }
+            post_entry(&repo, post).unwrap();
+        }
+        // Ordinary recent Board traffic must not crowd out the owner context.
+        for index in 0..21 {
+            post_entry(
+                &repo,
+                entry(
+                    "Other",
+                    BoardEntryKind::Status,
+                    &format!("recent traffic {index}"),
+                    "work/other",
+                    "other",
+                    now,
+                ),
+            )
+            .unwrap();
+        }
+        let cache = gwt_github::Cache::new(
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap(),
+        );
+        cache
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(4241),
+                author_login: Some("owner".into()),
+                title: "Startup context".into(),
+                body: "Accepted scope".into(),
+                labels: vec![],
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt(now.to_rfc3339()),
+                comments: vec![gwt_github::CommentSnapshot {
+                    id: gwt_github::CommentId(1234),
+                    body: "Handoff: focused tests passed; finish the PR".into(),
+                    updated_at: gwt_github::UpdatedAt(old.to_rfc3339()),
+                }],
+            })
+            .unwrap();
+        let plan = compute_plan("SessionStart", &session, now)
+            .unwrap()
+            .unwrap();
+        let text = additional_context(&plan.output);
+        assert!(text.contains("the previous blocker is resolved"), "{text}");
+        assert!(
+            text.contains("implementation remains to be delivered"),
+            "{text}"
+        );
+        assert!(text.contains("comment:1234"), "{text}");
+        assert!(
+            text.contains("focused tests passed; finish the PR"),
+            "{text}"
+        );
+        assert!(text.contains("untrusted context"), "{text}");
+        assert!(text.contains("Do not repeat a resolved blocker"), "{text}");
+        assert!(text.contains("same issue broadcast decision"), "{text}");
+        assert!(
+            text.contains("before declaring execution.blocked"),
+            "{text}"
+        );
+        assert!(!text.contains("foreign issue decision"), "{text}");
+        assert!(!text.contains("private other workspace decision"), "{text}");
+        assert!(!text.contains("unrelated broadcast decision"), "{text}");
+
+        let prompt = compute_plan("UserPromptSubmit", &session, now)
+            .unwrap()
+            .unwrap();
+        assert!(!additional_context(&prompt.output).contains("comment:1234"));
+        session.linked_issue_number = Some(4242);
+        let other = compute_plan("SessionStart", &session, now)
+            .unwrap()
+            .unwrap();
+        assert!(!additional_context(&other.output).contains("comment:1234"));
+        assert!(!additional_context(&other.output).contains("the previous blocker is resolved"));
     }
 
     #[test]
