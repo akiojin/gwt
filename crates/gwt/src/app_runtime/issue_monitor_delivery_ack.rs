@@ -240,6 +240,17 @@ fn acknowledge_delivery(input: LaunchDeliveryAckInput) -> IssueMonitorLaunchDeli
             result,
         );
     }
+    if let Err((error, stage)) = &result {
+        tracing::warn!(
+            error = %error,
+            operation = *stage,
+            issue_number = identity.issue_number,
+            delivery_id = ?identity.delivery_id,
+            window_id = %identity.window_id,
+            project_root = %identity.monitor_project_root.display(),
+            "issue monitor launch delivery ACK is unconfirmed; inspect pending_launch_deliveries"
+        );
+    }
     let result = result.map(|result| {
         let semantic_receipt_settled = input.identity.current.load(Ordering::Acquire)
             && input
