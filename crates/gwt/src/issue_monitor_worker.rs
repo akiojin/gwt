@@ -900,6 +900,7 @@ pub fn reconcile_issue_monitor_windows_with_observations(
             .collect(),
     );
     monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
+    monitor.reconcile_cancelled_claim_phases(settlements, now);
     monitor.recover_stuck_autonomous(now);
     let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
