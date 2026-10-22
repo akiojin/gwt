@@ -12822,6 +12822,9 @@ mod tests {
 
     #[test]
     fn issue_monitor_config_set_reports_partial_shared_policy_save() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
