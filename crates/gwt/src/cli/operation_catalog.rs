@@ -500,6 +500,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["pane.stop"],
     },
     Operation {
+        name: "pane.health",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.list",
         aliases: &[],
     },

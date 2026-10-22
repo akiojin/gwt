@@ -319,6 +319,20 @@ JSONレポートで返します。対応が取れない行、worktreeの重複�
 `fleet.orphan.terminate` はプロセス対象のみ受け付けます。対象ごとにreceiptを返し、
 世代変更、未対応backend、プロセス終端未確認を報告します。通常closeへはfallbackしません。
 
+`pane.health` は既存の workspace と runtime sidecar の状態から、GUI event loop に
+依存せずプロジェクトの pane health を読み取ります。応答の `output` 文字列を JSON として
+読んだ `panes` 配列に、各 pane の `classification`、`reason_code`、`recommended_action`
+を返します。`params.id` を省略すると全 pane、`pane.list` の ID（raw pane ID も可）を
+渡すと単一 pane が対象です。
+推奨 action は判断材料であり、この operation 自体は close・relaunch・stop・requeue
+を実行しません。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
 既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
 workflow のファイル名を許可します。
@@ -540,6 +554,17 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 外れます。`params.remove_from_queue` を `false` にすると、保留したままキューへの
 所属を維持します。起動失敗には原因の分類と次の回復操作を表示し、同じ原因の失敗が
 続いた場合は設定済みの試行上限後に自動再試行を止めます。
+
+live な launch の停止では、pane が消えていても、その host に対象の agent と子孫
+プロセスの終了を要求します。`runtime_stop: requested` は要求の受付を示すため、
+終了は `issue.monitor.status` で確認してください。`active_sessions` は pane の有無に
+関係なく生存 PID・worktree・既知の `launch_entrypoint` を返します。
+停止した runtime は検証を開始できません。既存の作業を続けるには、Session を明示的に
+再開して新しい runtime を起動します。対象を安全に特定できない場合は、停止を拒否します。
+別の pane に対する `pane.close` は、プロセスツリーの終了後に `closed` を返します。
+タイムアウト時や、復元した Session の PTY を捕捉できない場合は終了未確認のエラーと
+なります。自分の pane を閉じる場合は、呼び出した agent が終了する前に
+`close requested` を返します。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -1064,6 +1089,10 @@ agent の停止や pane close が Board の未読を報告した場合は、同�
 JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
 自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
 宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
+
+Board の decision が idle の agent session（`session:<id>`）を mention すると、
+gwt は裁定を読んで続行するよう対象 agent に 1 行の通知を送ります。
+Board が再更新されても同じ通知は繰り返しません。
 
 JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
 コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。

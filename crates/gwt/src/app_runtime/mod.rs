@@ -2451,13 +2451,11 @@ impl ProjectTabRuntime {
     }
 }
 
-/// Whether a GUI-local Issue Monitor pass may refresh the read-only cache.
-/// Successful daemon controls do not run a local pass at all: the daemon is the
-/// sole writer and broadcasts the committed projection. When publication is
-/// unavailable, `Scan` preserves the GUI's read model without granting Unix
-/// GUI code authority to execute remote effects.
+/// GUI-local controls project cached state; background workers own scans.
+/// Tests retain the legacy full pass to exercise scan/commit reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueMonitorScanPolicy {
+    #[cfg(test)]
     Scan,
     CacheOnly,
 }
@@ -4430,6 +4428,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         latest.refresh_agent_capacity(project_root);
+        // The disk-authoritative rebase precedes this background preparation.
+        // Observe here so recovery uses the sample that will actually persist.
+        gwt::issue_monitor_worker::refresh_issue_monitor_child_activity(latest, project_root, now);
         latest.expire_stale_unbound_launches(now);
         // Retire exact dead terminal holders before duplicate-binding repair
         // can mistake their displaced projections for unfinished work.
@@ -6838,7 +6839,8 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                    | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                     | Some(gwt::IssueMonitorFailure::Termination { .. }) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
@@ -6879,7 +6881,8 @@ impl AppRuntime {
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
-                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                        Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                         | Some(gwt::IssueMonitorFailure::Termination { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
@@ -7960,6 +7963,16 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { provider }) => {
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_provider_auth_notice(issue_number, window_id, provider) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                                 let Some(issue_number) = issue_number else {
                                     return IssueMonitorFailureCommit::Rejected;
@@ -8016,7 +8029,8 @@ impl AppRuntime {
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
                 if matches!(
                     failure,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                 ) =>
             {
                 PreparedIssueMonitorAgentFailure::Rejected
@@ -8764,12 +8778,38 @@ impl AppRuntime {
         client_id: Option<&str>,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
-        let policy = if cfg!(unix) {
-            IssueMonitorScanPolicy::CacheOnly
-        } else {
-            IssueMonitorScanPolicy::Scan
-        };
-        self.local_issue_monitor_events_with_policy(context, client_id, policy, apply)
+        let mut events = self.local_issue_monitor_events_with_policy(
+            context,
+            client_id,
+            IssueMonitorScanPolicy::CacheOnly,
+            apply,
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
+        let window_snapshot = self.issue_monitor_window_snapshot_for_tab(&context.tab_id, &now);
+        match self.enqueue_issue_monitor_scan_worker(
+            &context.project_root,
+            &prefs_path,
+            &context.tab_id,
+            &now,
+            Vec::new(),
+            window_snapshot,
+        ) {
+            Ok(()) | Err(IssueMonitorScanEnqueueError::AlreadyInFlight) => {}
+            Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error)) => {
+                events.extend(self.issue_monitor_project_notification(
+                    Some(&context.project_root),
+                    BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
+                        notification_transition_id: None,
+                        level: "error".to_string(),
+                        message: format!("Issue Monitor scheduled worker could not start: {error}"),
+                        issue_number: None,
+                    },
+                ));
+            }
+        }
+        events
     }
 
     fn enqueue_issue_monitor_max_active(
@@ -9502,7 +9542,7 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let source_repository = {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
             );
             gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
         };
@@ -12518,6 +12558,7 @@ impl AppRuntime {
             FrontendEvent::SetIssueMonitorEnabled { .. }
                 | FrontendEvent::SetIssueMonitorAutonomousMode { .. }
                 | FrontendEvent::IssueMonitorProfilesSet { .. }
+                | FrontendEvent::GetIssueMonitorProfiles
                 | FrontendEvent::SetIssueMonitorMaxActiveAgents { .. }
                 | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
                 | FrontendEvent::ReorderIssueMonitorIssues { .. }
@@ -12558,7 +12599,9 @@ impl AppRuntime {
                     return Vec::new();
                 }
             }
-            self.invalidate_issue_monitor_list(&context.project_root);
+            if !matches!(event, FrontendEvent::GetIssueMonitorProfiles) {
+                self.invalidate_issue_monitor_list(&context.project_root);
+            }
         }
         match event {
             FrontendEvent::ProjectAggregateAck {
@@ -13873,17 +13916,20 @@ impl AppRuntime {
                 if let Some(reason) = self.agent_close_board_check(&principal, &id) {
                     return refusal(&reason);
                 }
-                let outcome = self.close_window_outcome(&id);
+                let outcome = self.close_peer_window_outcome(&id, client_id.clone());
                 let reason = (!outcome.closed)
                     .then(|| "the backend did not remove the window record".to_string());
-                let mut events = vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::PaneCloseResult {
-                        ok: outcome.closed,
-                        window_id: id,
-                        reason,
-                    },
-                )];
+                let mut events = Vec::new();
+                if !outcome.reply_deferred {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneCloseResult {
+                            ok: outcome.closed,
+                            window_id: id,
+                            reason,
+                        },
+                    ));
+                }
                 events.extend(outcome.events);
                 events
             }

@@ -232,7 +232,7 @@ test("clone progress batches frames while drafts and modal actions stay synchron
       }
       sent.push(message);
     },
-    createNode, windowCatalogModel: { subscribe: () => () => {} },
+    createNode, windowCatalogModel: { subscribeFrame: () => () => {} },
     cloneProjectModal: modalEl, cloneProjectDialog: dialogEl,
     scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
   });

@@ -1,6 +1,104 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.137.1] - 2026-10-22
+
+### Bug Fixes
+
+- **gui:** エージェント状態とMonitor活動時刻を実ペインに追従させる
+- **execution:** Preserve blockers without monitor bindings
+- **monitor:** Report launch blockers and deduplicate retry notices
+- **launch:** Quota 復帰時に終了済みペインから同じ会話を再開する
+- **issue-monitor:** Retain error provenance and record bulk faults once
+- **monitor:** Preserve scans across capacity observations
+- **launch:** Clamp unsupported Astra reasoning overrides
+- **runtime:** Stop exact agent process trees after revocation
+- **pane:** Confirm captured process trees before close success
+- **agents:** Continue autonomous work after board decisions
+- **agents:** Preserve skill and environment test contracts
+- **process-tree:** Exclude exited windows processes from census
+- **monitor:** Require fresh healthy launch snapshots
+- **launch:** 再起動準備中は旧ペインの終了後も会話を予約する
+- **gwtd:** レビュー返信を指定スレッドのみに適用する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4363 pull request
+- **work:** Record review follow-up pull request
+- **work:** Record replacement pull request
+- **work:** Link scan observation fix to PR 6051
+- **work:** Associate issue 4168 with pr 6029
+- **work:** Refresh issue 4168 pr delivery link
+- **work:** Associate issue 4168 with pr 6054
+
+### Testing
+
+- **gui:** プレビューのモード表示と状態チップを区別して検証する
+- **monitor:** Name capacity observation hook type
+- **runtime:** Remove redundant stop fixture borrows
+- **pane:** Align close checks with deferred completion
+- **gwtd:** レビュー返信テストの環境設定を共通 fixture にまとめる
+
+## [9.137.0] - 2026-10-22
+
+### Bug Fixes
+
+- **monitor:** 緊急キュー降格の競合更新を防止する
+- **execution:** Hook活動記録だけの更新で復帰を拒否しない
+- **monitor:** Reject retained panes before launch claims
+- **update:** Authenticate release checks and honor rate-limit deadlines
+- **update:** Satisfy release retry clippy checks
+- **issue-monitor:** Commit sparse profile updates atomically
+- **issue-monitor:** Order profile reads after pending saves
+- **issue-monitor:** Align profile commits with current prefs APIs
+- **verify:** Explain Windows gwtd artifact lock recovery
+- **issue-cache:** Recover targeted reads from generation conflicts
+- **issue-monitor:** Recover unsent delivery ACK failures
+- **execution:** 状態診断と世代回収のレビュー残件を修正
+- **launch:** Degrade resume capability install failures to unbound PTYs
+- **launch:** Preserve capability cleanup on fatal install errors
+- **launch:** Restore prior issue context at session startup
+- **issue-monitor:** Detect live provider reauthentication requests
+- **issue-monitor:** Scan失敗の診断を永続化する
+- **issue-monitor:** 通常の取得上限をscan障害から除外する
+- **issue-monitor:** Preserve local scan timestamps during diagnostic rebase
+- **issue-cache:** Preserve authoritative reads across validated generations
+- **pm:** 配送未確認を区別し同一IDの再送を保護する
+- **pm:** 承認付き送信でも同じ操作IDを保持する
+
+### Features
+
+- **pane:** Add read-only agent health census
+
+### Miscellaneous Tasks
+
+- **work:** Reconcile delivered issue 5876 slices
+- **work:** Issue #3431 の PR 関連付けを記録する
+- **work:** #3590 の Work event を記録
+- **work:** Issue #3590 の PR 配信記録
+- **work:** Record issue 4148 delivery handoff
+- **work:** Link issue 4148 delivery pull request
+- **work:** Record issue 4148 verification handoff
+- **work:** Record issue 4148 verified delivery
+- **work:** Record ac7 successor investigation evidence
+- **work:** Retain ac7 review delivery reference
+- **work:** Issue #3953 の PR 受領イベントを記録
+- **work:** Record issue 4224 delivery pull request
+- **work:** PR #6037 の関連付け履歴を保存する
+
+### Refactor
+
+- **ui:** Index検索結果の描画をフレーム単位に集約
+- **runtime:** Docker起動ログの転送処理をGUIから分離
+- **ui:** Batch windows list rendering by frame
+- **test:** Name the issue fetch hook callback type
+
+### Testing
+
+- **execution:** Cover dependency-held successor recovery
+- **issue-monitor:** Serialize profile receipt fault injection
+- **pane:** Remove platform assumptions from health fixtures
+
 ## [9.136.0] - 2026-10-22
 
 ### Bug Fixes

@@ -584,12 +584,20 @@ struct PreparedIssueMonitorResume {
     )>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PreparedIssueMonitorResumeAttempt {
+    resume: Option<PreparedIssueMonitorResume>,
+    // Preserve the preflight reason across the worker-to-GUI handoff.
+    // No stored session and deliberately fresh launches stay silent.
+    fresh_reason: Option<&'static str>,
+}
+
 #[derive(Debug, Clone)]
 struct IssueMonitorLaunchFacts {
     base_branch: String,
     choice: IssueMonitorLaunchProfileChoice,
     fresh: Option<Result<(LaunchWizardSession, LaunchWizardLaunchRequest), String>>,
-    resume: Result<Option<PreparedIssueMonitorResume>, String>,
+    resume: Result<PreparedIssueMonitorResumeAttempt, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -623,7 +631,10 @@ impl PreparedIssueMonitorDelivery {
         match self.result.as_ref().ok()? {
             IssueMonitorLaunchPreparation::Launch(facts)
                 if facts.fresh.as_ref().is_some_and(Result::is_ok)
-                    && facts.resume.as_ref().is_ok_and(Option::is_none) =>
+                    && facts
+                        .resume
+                        .as_ref()
+                        .is_ok_and(|attempt| attempt.resume.is_none()) =>
             {
                 Some(IssueMonitorLaunchPreparation::Launch(facts.clone()))
             }
@@ -634,7 +645,9 @@ impl PreparedIssueMonitorDelivery {
     fn unsubmitted_handoff_attempt(&self) -> Option<gwt::AutonomousHandoffDeliveryAttempt> {
         let resume = match self.result.as_ref().ok()? {
             IssueMonitorLaunchPreparation::Answer(resume) => resume.as_ref(),
-            IssueMonitorLaunchPreparation::Launch(facts) => facts.resume.as_ref().ok()?.as_ref()?,
+            IssueMonitorLaunchPreparation::Launch(facts) => {
+                facts.resume.as_ref().ok()?.resume.as_ref()?
+            }
         };
         match &resume.handoff_delivery.as_ref()?.1 {
             Ok(Some(gwt::AutonomousHandoffDeliveryPreparation::Ready(attempt))) => {
@@ -774,6 +787,7 @@ fn prepare_issue_monitor_answer(
         profile_config_path,
         Ok(Some(handoff)),
     )?
+    .resume
     .ok_or_else(|| "answered autonomous handoff requires its exact Session".to_string())
 }
 
@@ -887,7 +901,7 @@ fn prepare_issue_monitor_launch(
             base_branch,
             choice,
             fresh: None,
-            resume: Ok(None),
+            resume: Ok(PreparedIssueMonitorResumeAttempt::default()),
         });
     };
     if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
@@ -913,7 +927,7 @@ fn prepare_issue_monitor_launch(
             handoff,
         )
     } else {
-        Ok(None)
+        Ok(PreparedIssueMonitorResumeAttempt::default())
     };
     record_issue_monitor_worker_phase("monitor_resume_facts", &mut phase_started);
     let hydration =
@@ -3511,7 +3525,7 @@ impl AppRuntime {
                     }
                     let facts = prepare_issue_monitor_launch(&context, live_sessions, &request, &cache, &sessions_dir, &profile_config_path, choice, auth_probe, handoff).ok()?;
                     (facts.fresh.as_ref().is_some_and(Result::is_ok)
-                        && facts.resume.as_ref().is_ok_and(Option::is_none))
+                        && facts.resume.as_ref().is_ok_and(|attempt| attempt.resume.is_none()))
                         .then(|| IssueMonitorLaunchPreparation::Launch(Box::new(facts)))
                 })();
                 record_issue_monitor_worker_phase("monitor_facts_prefetch", &mut phase_started);
@@ -3739,7 +3753,7 @@ impl AppRuntime {
                     if request.launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
                         && handoff.as_ref().is_ok_and(Option::is_none)
                         && facts.fresh.as_ref().is_some_and(Result::is_ok)
-                        && facts.resume.as_ref().is_ok_and(Option::is_none)
+                        && facts.resume.as_ref().is_ok_and(|attempt| attempt.resume.is_none())
                         && choice.as_ref().is_ok_and(|choice| choice.as_ref().is_some_and(|choice| choice.profiles == facts.choice.profiles && choice.tier == facts.choice.tier)) => Some(facts),
                 _ => None,
             };
@@ -4266,9 +4280,11 @@ impl AppRuntime {
         let mut session_changed = false;
         if let Ok(preparation) = &delivery.result {
             let resume = match preparation {
-                IssueMonitorLaunchPreparation::Launch(facts) => {
-                    facts.resume.as_ref().ok().and_then(Option::as_ref)
-                }
+                IssueMonitorLaunchPreparation::Launch(facts) => facts
+                    .resume
+                    .as_ref()
+                    .ok()
+                    .and_then(|attempt| attempt.resume.as_ref()),
                 IssueMonitorLaunchPreparation::Answer(resume) => Some(resume.as_ref()),
             };
             if let Some(resume) = resume {
@@ -4755,12 +4771,7 @@ impl AppRuntime {
                     && !self
                         .issue_monitor_review_dispatch_windows
                         .contains(window_id)
-                    && self.window_status(window_id).is_some_and(|status| {
-                        !matches!(
-                            status,
-                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                        )
-                    })
+                    && self.issue_monitor_window_is_live(window_id)
             })
             .map(|(window_id, _)| window_id)
     }
@@ -5046,7 +5057,7 @@ impl AppRuntime {
                 let resume = match prepared.result.as_ref().ok()? {
                     IssueMonitorLaunchPreparation::Answer(resume) => resume.as_ref(),
                     IssueMonitorLaunchPreparation::Launch(facts) => {
-                        facts.resume.as_ref().ok()?.as_ref()?
+                        facts.resume.as_ref().ok()?.resume.as_ref()?
                     }
                 };
                 (resume.autonomous_handoff.is_some() && resume.handoff_delivery.is_some())
@@ -5124,7 +5135,10 @@ impl AppRuntime {
                     linked_issue_kind,
                     delivery_id,
                     &agent_id,
-                    Some(Ok(Some(*resume))),
+                    Some(Ok(PreparedIssueMonitorResumeAttempt {
+                        resume: Some(*resume),
+                        fresh_reason: None,
+                    })),
                     prepared_admission.take(),
                 )?;
                 return events.map(Some).ok_or_else(|| {
@@ -5321,12 +5335,12 @@ impl AppRuntime {
         }
         // Auto uses a fresh launch even at the same tier index: an override
         // may have changed that tier's model or effort since the last launch.
-        let resume_holder_window_id = if review_prompt.is_none()
+        let resume_fresh_reason = if review_prompt.is_none()
             && tier.is_none()
             && (launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
                 || answered_handoff_pending)
         {
-            let (events, holder_window_id) = self.silent_issue_monitor_resume_events(
+            let (events, fresh_reason) = self.silent_issue_monitor_resume_events(
                 &tab_id,
                 &project_root,
                 &target_branch,
@@ -5334,9 +5348,12 @@ impl AppRuntime {
                 linked_issue_kind,
                 delivery_id.clone(),
                 &profile_agent_id,
-                prepared
-                    .as_mut()
-                    .map(|facts| std::mem::replace(&mut facts.resume, Ok(None))),
+                prepared.as_mut().map(|facts| {
+                    std::mem::replace(
+                        &mut facts.resume,
+                        Ok(PreparedIssueMonitorResumeAttempt::default()),
+                    )
+                }),
                 prepared_admission.clone(),
             )?;
             if let Some(mut events) = events {
@@ -5349,7 +5366,7 @@ impl AppRuntime {
                 }
                 return Ok(Some(events));
             }
-            holder_window_id
+            fresh_reason
         } else {
             None
         };
@@ -5561,16 +5578,17 @@ impl AppRuntime {
             issue_number,
             correlation_delivery_id.as_deref(),
         );
-        if let Some(holder_window_id) = resume_holder_window_id {
-            events.push(OutboundEvent::project(context.project_key.clone(), BackendEvent::IssueMonitorToast {
-                notification_transition: None,
-                notification_transition_id: None,
-                level: "warn".to_string(),
-                message: format!(
-                    "Issue Monitor started a fresh session because native conversation is already held by window {holder_window_id}"
-                ),
-                issue_number: Some(issue_number),
-            }));
+        if let Some(reason) = resume_fresh_reason {
+            events.push(OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "warn".to_string(),
+                    message: format!("Issue Monitor started a fresh session because {reason}"),
+                    issue_number: Some(issue_number),
+                },
+            ));
         }
         events.extend(non_head_selection_toast);
         let message = if review_prompt.is_some() {
@@ -5592,8 +5610,8 @@ impl AppRuntime {
     }
 
     /// FR-022: resume an existing agent session for `target_branch` when one is
-    /// available, instead of launching a fresh agent. Returns `Ok(None)` when no
-    /// resumable session exists so the caller falls back to a fresh launch.
+    /// available, instead of launching a fresh agent. When no resume is scheduled,
+    /// return its fallback reason so a successful fresh launch can report it.
     #[allow(clippy::too_many_arguments)]
     fn silent_issue_monitor_resume_events(
         &mut self,
@@ -5604,7 +5622,7 @@ impl AppRuntime {
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         profile_agent_id: &str,
-        prepared: Option<Result<Option<PreparedIssueMonitorResume>, String>>,
+        prepared: Option<Result<PreparedIssueMonitorResumeAttempt, String>>,
         prepared_admission: Option<
             Result<super::launch::PreparedIssueMonitorSpawnAdmission, String>,
         >,
@@ -5628,7 +5646,7 @@ impl AppRuntime {
                 issue_monitor_resume_handoff(project_root, issue_number),
             )?,
         };
-        let resume_facts = prepared.clone();
+        let resume_facts = prepared.resume.clone();
         let Some(PreparedIssueMonitorResume {
             session,
             autonomous_handoff,
@@ -5639,13 +5657,18 @@ impl AppRuntime {
             autonomous_mode,
             handoff_delivery,
             ..
-        }) = prepared
+        }) = prepared.resume
         else {
-            return Ok((None, None));
+            return Ok((None, prepared.fresh_reason.map(str::to_string)));
         };
         if let Some(holder_window_id) = self.issue_monitor_native_conversation_holder(&session) {
             let Some(handoff) = autonomous_handoff.as_ref() else {
-                return Ok((None, Some(holder_window_id)));
+                return Ok((
+                    None,
+                    Some(format!(
+                        "native conversation is already held by window {holder_window_id}"
+                    )),
+                ));
             };
             if !self.active_agent_sessions.contains_key(&holder_window_id) {
                 if handoff_delivery.is_some() {
@@ -5816,7 +5839,7 @@ impl AppRuntime {
                         .to_string(),
                 );
             }
-            return Ok((None, None));
+            return Ok((None, Some("the previous execution is blocked".to_string())));
         }
         // Issue #5696: terminal Work cannot rebound in the same Session,
         // including a Completed owner that has been reopened. The Resume
@@ -5832,13 +5855,19 @@ impl AppRuntime {
                         .to_string(),
                 );
             }
-            return Ok((None, None));
+            return Ok((
+                None,
+                Some("the previous Work requires a new Session".to_string()),
+            ));
         }
         if !worktree_exists {
             config.working_dir = None;
         }
         if config.session_mode != gwt_agent::SessionMode::Resume {
-            return Ok((None, None));
+            return Ok((
+                None,
+                Some("the stored Session has no exact resume handle".to_string()),
+            ));
         }
         // Issue #4217 (AC-2): a resumed monitor launch is still a monitor
         // launch. The route is stamped whatever the preference below says.
@@ -6033,6 +6062,34 @@ impl AppRuntime {
         self.issue_monitor_native_conversation_holder_excluding(candidate, None)
     }
 
+    fn issue_monitor_window_is_live(&self, window_id: &str) -> bool {
+        // In-place restart retains the prior runtime until the new Pane is
+        // installed. Its exit receipt cannot release the current launch's writer.
+        if self.initial_launch_workers.contains_key(window_id)
+            || self.pending_launch_completions.contains_key(window_id)
+        {
+            return true;
+        }
+        // Display overlays can keep an exited quota/recovery pane Waiting or
+        // Running. Preserve that pane, but not its native writer reservation.
+        // Error alone may be a reader failure: only a local exit receipt proves
+        // that child is gone. A busy pane with no readable proof stays reserved.
+        self.window_pty_statuses.get(window_id) != Some(&WindowProcessStatus::Stopped)
+            && !self.runtimes.get(window_id).is_some_and(|runtime| {
+                runtime
+                    .pane
+                    .try_lock()
+                    .ok()
+                    .is_some_and(|pane| pane.last_exit().is_some())
+            })
+            && self.window_status(window_id).is_some_and(|status| {
+                !matches!(
+                    status,
+                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                )
+            })
+    }
+
     pub(super) fn issue_monitor_native_conversation_holder_excluding(
         &self,
         candidate: &gwt_agent::Session,
@@ -6051,14 +6108,7 @@ impl AppRuntime {
             .find_map(|(window_id, active)| {
                 (excluded_window_id != Some(window_id.as_str())
                     && self.window_lookup.contains_key(window_id.as_str())
-                    && self
-                        .window_status(window_id.as_str())
-                        .is_some_and(|status| {
-                            !matches!(
-                                status,
-                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                            )
-                        })
+                    && self.issue_monitor_window_is_live(window_id)
                     && matches_candidate(&active.session_id))
                 .then(|| window_id.clone())
             })
@@ -8400,7 +8450,7 @@ fn prepare_issue_monitor_resume(
     cache: &LaunchWizardMemoryCache,
     profile_config_path: &Result<PathBuf, String>,
     autonomous_handoff: Result<Option<gwt::AutonomousHandoffResumption>, String>,
-) -> Result<Option<PreparedIssueMonitorResume>, String> {
+) -> Result<PreparedIssueMonitorResumeAttempt, String> {
     let autonomous_handoff = autonomous_handoff?;
     let session = if let Some(handoff) = autonomous_handoff.as_ref() {
         let session =
@@ -8426,7 +8476,7 @@ fn prepare_issue_monitor_resume(
     } else {
         let Some(session) = cache.latest_resumable_branch_session(project_root, target_branch)
         else {
-            return Ok(None);
+            return Ok(PreparedIssueMonitorResumeAttempt::default());
         };
         session
     };
@@ -8447,7 +8497,12 @@ fn prepare_issue_monitor_resume(
                     .to_string(),
             );
         }
-        return Ok(None);
+        return Ok(PreparedIssueMonitorResumeAttempt {
+            fresh_reason: Some(
+                "the stored Session provider does not match the current launch profile",
+            ),
+            ..Default::default()
+        });
     }
     if !session_exact_resume_materializable(project_root, &session) {
         if autonomous_handoff.is_some() {
@@ -8455,7 +8510,10 @@ fn prepare_issue_monitor_resume(
                 "answered autonomous handoff Session can no longer be materialized".to_string(),
             );
         }
-        return Ok(None);
+        return Ok(PreparedIssueMonitorResumeAttempt {
+            fresh_reason: Some("the stored Session branch is no longer available"),
+            ..Default::default()
+        });
     }
     let provider_availability = if session.agent_id == gwt_agent::AgentId::GrokBuild {
         let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
@@ -8476,7 +8534,20 @@ fn prepare_issue_monitor_resume(
                     .to_string(),
             );
         }
-        return Ok(None);
+        let reason = match provider_availability {
+            ProviderConversationAvailability::Missing => "native conversation is missing",
+            ProviderConversationAvailability::Foreign => {
+                "native conversation ownership does not match this worktree"
+            }
+            ProviderConversationAvailability::Unknown => {
+                "native conversation could not be verified"
+            }
+            ProviderConversationAvailability::Present => unreachable!(),
+        };
+        return Ok(PreparedIssueMonitorResumeAttempt {
+            fresh_reason: Some(reason),
+            ..Default::default()
+        });
     }
     // Building a resume config resolves its working directory's Git remote and runner.
     // Keep that work with the other launch facts, before returning to the GUI.
@@ -8509,15 +8580,18 @@ fn prepare_issue_monitor_resume(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
             .map(|prefs| prefs.autonomous_mode)
             .unwrap_or(false);
-    Ok(Some(PreparedIssueMonitorResume {
-        session,
-        autonomous_handoff,
-        session_record,
-        config,
-        workspace_resume_context,
-        execution_blocked,
-        worktree_exists,
-        autonomous_mode,
-        handoff_delivery: None,
-    }))
+    Ok(PreparedIssueMonitorResumeAttempt {
+        resume: Some(PreparedIssueMonitorResume {
+            session,
+            autonomous_handoff,
+            session_record,
+            config,
+            workspace_resume_context,
+            execution_blocked,
+            worktree_exists,
+            autonomous_mode,
+            handoff_delivery: None,
+        }),
+        fresh_reason: None,
+    })
 }

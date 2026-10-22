@@ -193,8 +193,79 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
+    async fn issue_5644_capacity_updates_do_not_starve_full_scan_commit() {
+        assert_observations_preserve_scan_commit(true).await;
+    }
+
+    #[test]
+    fn issue_5644_scan_publishes_with_claims_limited_by_latest_capacity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _budget = super::super::pin_prefs_hang_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let scope = fixture_scope(temp.path().join("repo"));
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let now = "2026-10-22T00:00:00Z";
+        let mut monitor = queued_monitor();
+        let mut second = monitor.inbox_item(42).unwrap().issue.clone();
+        second.number = 43;
+        monitor.terminal_queue_push(&[43], "operator", now);
+        monitor.record_candidate(second);
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents_override(None);
+        let mut capacity = crate::agent_capacity::AgentCapacity {
+            measurement_complete: true,
+            recommended_worker_limit: 2,
+            ..Default::default()
+        };
+        monitor.set_agent_capacity(capacity.clone());
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let mut scanned = monitor.clone();
+        assert_eq!(
+            scanned.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            2
+        );
+        scanned.restore_persisted_last_scan_at(Some(now.into()));
+        capacity.recommended_worker_limit = 1;
+        monitor.set_agent_capacity(capacity.clone());
+        let epoch = monitor.effect_authority_epoch();
+        assert!(super::super::commit_issue_monitor_scan_if_current(
+            &scope.project_root,
+            &prefs_path,
+            &mut monitor,
+            scanned,
+            epoch,
+        ));
+        let durable = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(durable.last_scan_at.as_deref(), Some(now));
+        assert_eq!(monitor.status_view().agent_capacity, capacity);
+        assert_eq!(
+            durable.pending_effects.len(),
+            1,
+            "only the latest free slot may acquire a claim"
+        );
+        assert!(matches!(
+            durable.pending_effects[0].payload,
+            crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                ..
+            }
+        ));
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            crate::MonitorInboxState::Queued
+        );
+    }
+
+    #[tokio::test]
     async fn issue_5644_fresh_observations_do_not_starve_full_scan_commit() {
+        assert_observations_preserve_scan_commit(false).await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    async fn assert_observations_preserve_scan_commit(change_capacity: bool) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -204,6 +275,16 @@ mod tests {
         let scope = fixture_scope(temp.path().join("repo"));
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let mut monitor = queued_monitor();
+        monitor.record_monitor_runtime_windows(
+            101,
+            1001,
+            std::collections::BTreeMap::from([(42, 1)]),
+            std::collections::BTreeMap::from([("runtime-42".into(), 42)]),
+            "2026-10-22T00:00:00Z",
+        );
+        if change_capacity {
+            monitor.set_max_active_agents_override(None);
+        }
         let now = chrono::Utc::now().to_rfc3339();
         monitor.record_autonomous_heartbeat(42, &now);
         let mut prefs = monitor.prefs();
@@ -214,6 +295,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
         let sequence = std::sync::atomic::AtomicUsize::new(0);
+        let capacity_sequence = std::sync::atomic::AtomicUsize::new(0);
         let hooks = super::super::IssueMonitorWorkerTestHooks {
             scan_override: Some(Arc::new(move |mut monitor| {
                 let index = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -231,6 +313,17 @@ mod tests {
                 Ok(monitor)
             })),
             admission_override: Some(Arc::new(Ok)),
+            capacity_override: change_capacity.then(|| {
+                Arc::new(move |monitor: &mut IssueMonitorState| {
+                    monitor.set_agent_capacity(crate::agent_capacity::AgentCapacity {
+                        measurement_complete: true,
+                        recommended_worker_limit: 2 + capacity_sequence
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            % 2,
+                        ..Default::default()
+                    });
+                }) as Arc<super::super::IssueMonitorCapacityOverride>
+            }),
             hold_effects: true,
             ..Default::default()
         };
@@ -266,6 +359,14 @@ mod tests {
             // owns it: only its observation time and a fresh heartbeat advance.
             snapshot.observed_at = chrono::Utc::now().to_rfc3339();
             snapshot.windows[0].last_output_at = Some(snapshot.observed_at.clone());
+            // An independent GUI writer refreshes the same physical census.
+            // The next control imports that timestamp through its disk rebase.
+            let mut disk = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            disk.monitor_runtime_counts
+                .get_mut("101:1001")
+                .unwrap()
+                .observed_at = format!("2026-10-22T00:00:{expected:02}Z");
+            crate::save_issue_monitor_prefs(&prefs_path, &disk).unwrap();
             for control in [
                 serde_json::json!({"window_snapshot": snapshot}),
                 serde_json::json!({"heartbeat": {"issue_number": 42, "at": snapshot.observed_at}}),
@@ -293,6 +394,10 @@ mod tests {
             durable.last_scan_at.as_deref(),
             Some("2026-10-22T00:00:02Z"),
             "fresh observations and scan requests must not discard the completed scan"
+        );
+        assert_eq!(
+            durable.monitor_runtime_counts["101:1001"].observed_at, "2026-10-22T00:00:02Z",
+            "scan commit keeps the newest census ordering boundary"
         );
         assert_eq!(
             durable

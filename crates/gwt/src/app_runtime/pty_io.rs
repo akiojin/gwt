@@ -21,6 +21,7 @@ use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::window::PeerPaneCloseReply;
 use base64::Engine as _;
 use gwt::session_finalizer::CloseHandoffReservation;
 
@@ -290,6 +291,9 @@ pub(super) fn drive_verified_pane_submit(
 
     // Give the TUI composer time to consume the body before the first submit.
     settle(PANE_SUBMIT_SETTLE);
+    if body.is_empty() && is_verified()? {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    }
     for submit_attempts in 1..=max_submit_attempts {
         if submit_attempts > 1 && is_verified()? {
             return Ok(VerifiedPaneSubmitOutcome::Verified {
@@ -669,6 +673,7 @@ impl AppRuntime {
                         project_key,
                         handle: Arc::clone(&pty),
                         monitor_runtime,
+                        pm_delivery_replay: Mutex::new(None),
                     }),
                 );
                 drop(guard);
@@ -731,7 +736,8 @@ impl AppRuntime {
     /// ownership first, then run every potentially blocking lifecycle step on
     /// one background finalizer. In particular, the GUI event loop must never
     /// wait for the PTY writer barrier, durable execution leases, child reap,
-    /// or the repo-global WorkItems lock before returning `PaneCloseResult`.
+    /// or the repo-global WorkItems lock. A peer completion reply is dispatched
+    /// separately after process exit has been confirmed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn queue_window_close_finalizer(
         &mut self,
@@ -742,6 +748,7 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
+        peer_reply: Option<PeerPaneCloseReply>,
     ) {
         if let Err(error) = initialize_process_window_close_finalizer() {
             tracing::error!(
@@ -1051,7 +1058,12 @@ impl AppRuntime {
                 }
             };
 
-            let mut local_process_exited = runtime.is_none();
+            // A restored Session without a captured PTY provides no proof that
+            // its process tree exited, even if its former leader is gone.
+            let mut local_process_exited = runtime.is_none()
+                && peer_reply
+                    .as_ref()
+                    .is_none_or(|reply| reply.session_id.is_none());
             let mut terminal_persisted = session.is_none();
             if let Some(pty) = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty)) {
                 let kill_and_reap = || gwt::session_finalizer::kill_and_reap(&pty, &window_id);
@@ -1066,15 +1078,10 @@ impl AppRuntime {
                             &window_id,
                         );
                         terminal_persisted = matches!(&stopped, Ok(Some(())));
-                        local_process_exited = if terminal_persisted {
-                            true
-                        } else {
-                            match pty.try_wait() {
-                                Ok(Some(_)) => true,
-                                Ok(None) => kill_and_reap().unwrap_or(false),
-                                Err(_) => false,
-                            }
-                        };
+                        // Even a reaped leader can leave a live captured group.
+                        // A failed durable finalizer never substitutes for kill.
+                        local_process_exited =
+                            terminal_persisted || kill_and_reap().unwrap_or(false);
                         finalizer_ok &= terminal_persisted;
                         if let Err(error) = stopped {
                             tracing::warn!(
@@ -1111,6 +1118,18 @@ impl AppRuntime {
                         }
                     },
                 }
+            }
+
+            if let Some(reply) = peer_reply {
+                proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                    reply.client_id,
+                    BackendEvent::PaneCloseResult {
+                        ok: local_process_exited,
+                        window_id: window_id.clone(),
+                        reason: (!local_process_exited)
+                            .then(|| "process-tree exit was not confirmed".to_string()),
+                    },
+                )]));
             }
 
             if runtime.is_none() {
@@ -1859,6 +1878,61 @@ mod submit_split_tests {
     #[test]
     fn bare_terminator_has_an_empty_body() {
         assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
+    }
+
+    #[test]
+    fn same_operation_recovery_writes_only_submit_and_honors_a_late_ack() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let first = drive_verified_pane_submit(
+            "protected body\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(false),
+        )
+        .unwrap();
+        assert!(matches!(
+            first,
+            VerifiedPaneSubmitOutcome::Unverified { .. }
+        ));
+        let recovered = drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 4),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+        assert_eq!(
+            *writes.borrow(),
+            [
+                b"protected body".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec()
+            ]
+        );
+        drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |_| panic!("late acknowledged replay must not write"),
+            |_| {},
+            || Ok(true),
+        )
+        .unwrap();
     }
 
     #[test]

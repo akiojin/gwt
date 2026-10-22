@@ -599,12 +599,14 @@ impl CliEnv for DefaultCliEnv {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
         crate::cli::pr::reply_and_resolve_pr_review_threads_via_gh(
             &self.owner,
             &self.repo,
             number,
             body,
+            thread_id,
         )
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
