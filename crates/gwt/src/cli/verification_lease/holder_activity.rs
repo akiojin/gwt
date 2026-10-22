@@ -1092,8 +1092,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
-        use std::os::windows::process::CommandExt;
-        use std::process::{Child, Command, Stdio};
+        use std::process::{Child, Stdio};
 
         struct OwnedChild(Child);
         impl Drop for OwnedChild {
@@ -1108,7 +1107,7 @@ mod tests {
         assert!(progressing_descendants(&[]).is_empty());
         assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)]).is_empty());
         let child = OwnedChild(
-            Command::new("powershell.exe")
+            gwt_core::process::hidden_command("powershell.exe")
                 .args([
                     "-NoLogo",
                     "-NoProfile",
@@ -1119,7 +1118,6 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
                 .spawn()
                 .expect("spawn an owned silent CPU child"),
         );
