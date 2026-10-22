@@ -1060,16 +1060,20 @@ pub(super) fn run<E: CliEnv>(
         PrCommand::ReviewThreadsReplyAndResolve { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let resolved = env
-                .reply_and_resolve_pr_review_threads(number, &body)
+                .reply_and_resolve_pr_review_threads(number, &body, None)
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!(
                 "replied to and resolved {resolved} review threads on PR #{number}\n"
             ));
             0
         }
-        PrCommand::ReviewThreadsReplyAndResolveBody { number, body } => {
+        PrCommand::ReviewThreadsReplyAndResolveBody {
+            number,
+            body,
+            thread_id,
+        } => {
             let resolved = env
-                .reply_and_resolve_pr_review_threads(number, &body)
+                .reply_and_resolve_pr_review_threads(number, &body, thread_id.as_deref())
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!(
                 "replied to and resolved {resolved} review threads on PR #{number}\n"
@@ -6539,8 +6543,86 @@ mod tests {
     // -------------------------------------------------------------------
 
     use crate::cli::test_support::{sample_thread, with_fake_gh, ScopedEnvVar};
-    use crate::cli::PrCreateCall;
+    use crate::cli::{CliCommand, PrCreateCall};
     use std::io;
+
+    #[test]
+    fn issue_3789_review_reply_targets_only_requested_thread() {
+        with_fake_gh("success", |repo_path| {
+            let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+            let argv_file = repo_path.join("gh-argv");
+            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+            let mut env = crate::cli::DefaultCliEnv::new("akiojin", "gwt", repo_path.into());
+            let CliCommand::Pr(command) = crate::cli::json_envelope::parse_operation(
+                "pr.review_threads.reply_and_resolve",
+                &serde_json::json!({"number":12,"thread_id":"thread-2","body":"Fixed target"}),
+            )
+            .expect("parse") else {
+                panic!("PR command")
+            };
+            let mut out = String::new();
+            assert_eq!(run(&mut env, command, &mut out).expect("reply"), 0);
+            let calls = std::fs::read_to_string(argv_file).expect("gh calls");
+            let mutations: Vec<_> = calls
+                .lines()
+                .filter(|line| {
+                    line.contains("addPullRequestReviewThreadReply")
+                        || line.contains("resolveReviewThread")
+                })
+                .collect();
+            assert_eq!(mutations.len(), 2, "{calls}");
+            assert!(
+                mutations
+                    .iter()
+                    .all(|call| call.contains("threadId=thread-2")),
+                "{calls}"
+            );
+            assert!(out.contains("resolved 1 review threads"), "{out}");
+        });
+    }
+
+    #[test]
+    fn issue_3789_review_reply_rejects_unknown_thread_without_mutation() {
+        with_fake_gh("success", |repo_path| {
+            let _session = ScopedEnvVar::unset("GWT_SESSION_ID");
+            let argv_file = repo_path.join("gh-argv");
+            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+            let mut env = crate::cli::DefaultCliEnv::new("akiojin", "gwt", repo_path.into());
+            let CliCommand::Pr(command) = crate::cli::json_envelope::parse_operation(
+                "pr.review_threads.reply_and_resolve",
+                &serde_json::json!({"number":12,"thread_id":"missing","body":"Fixed target"}),
+            )
+            .expect("parse") else {
+                panic!("PR command")
+            };
+            let error = run(&mut env, command, &mut String::new()).expect_err("unknown thread");
+            assert!(error.to_string().contains("missing"), "{error}");
+            let calls = std::fs::read_to_string(argv_file).expect("gh calls");
+            assert!(
+                !calls.contains("addPullRequestReviewThreadReply"),
+                "{calls}"
+            );
+            assert!(!calls.contains("resolveReviewThread"), "{calls}");
+        });
+    }
+
+    #[test]
+    fn issue_3789_review_reply_rejects_array_body_without_mutation() {
+        with_fake_gh("success", |repo_path| {
+            let argv_file = repo_path.join("gh-argv");
+            let _argv = ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &argv_file);
+            let error = reply_and_resolve_pr_review_threads_via_gh(
+                "akiojin",
+                "gwt",
+                12,
+                r#"[{"threadId":"thread-2","body":"Fixed"}]"#,
+                None,
+            )
+            .expect_err("array body must not be posted literally");
+            assert!(error.to_string().contains("thread_id"), "{error}");
+            assert!(!argv_file.exists(), "invalid input must not call gh");
+        });
+    }
 
     #[test]
     fn review_thread_reply_is_skipped_for_duplicate_body() {
@@ -6721,8 +6803,9 @@ mod tests {
             assert_eq!(threads.len(), 2);
             assert_eq!(threads[0].line, Some(10));
 
-            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
-                .expect("reply and resolve");
+            let resolved =
+                reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done", None)
+                    .expect("reply and resolve");
             assert_eq!(resolved, 2);
 
             let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
@@ -6782,8 +6865,9 @@ mod tests {
     #[test]
     fn gh_wrappers_tolerate_resolve_failure_after_remote_state_changes() {
         with_fake_gh("resolve-fails-but-resolved", |_repo_path| {
-            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
-                .expect("resolved after retry");
+            let resolved =
+                reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done", None)
+                    .expect("resolved after retry");
             assert_eq!(resolved, 2);
         });
     }

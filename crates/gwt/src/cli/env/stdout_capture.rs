@@ -239,8 +239,10 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         &mut self,
         number: u64,
         body: &str,
+        thread_id: Option<&str>,
     ) -> io::Result<usize> {
-        self.inner.reply_and_resolve_pr_review_threads(number, body)
+        self.inner
+            .reply_and_resolve_pr_review_threads(number, body, thread_id)
     }
 
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
