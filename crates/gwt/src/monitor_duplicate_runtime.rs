@@ -1170,11 +1170,11 @@ mod stop_tests {
                 vec![request.clone()]
             );
             let reconcile = |entry: &RegisteredMonitorRuntime| {
-                let inventory = crate::session_inventory::ProjectSessionCensus::capture(&sessions)
+                let inventory = crate::session_inventory::ProjectSessionCensus::capture(sessions)
                     .observe(project.path());
                 super::reconcile_project(
                     project.path(),
-                    &sessions,
+                    sessions,
                     std::slice::from_ref(entry),
                     &inventory,
                 )
@@ -1201,7 +1201,7 @@ mod stop_tests {
                 let mut prefs = crate::load_issue_monitor_prefs(&path).unwrap();
                 prefs.monitor_runtime_stop_requests = vec![changed];
                 crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
-                reconcile(&entry);
+                reconcile(entry);
                 assert!(
                     entry.handle.try_wait().unwrap().is_none(),
                     "{mismatch} mismatch killed PTY"
@@ -1227,10 +1227,10 @@ mod stop_tests {
             assert!(process_alive(), "fixture child exited with its leader");
             runtime.status = AgentStatus::Stopped;
             runtime
-                .save(&gwt_agent::runtime_state_path(&sessions, &session.id))
+                .save(&gwt_agent::runtime_state_path(sessions, &session.id))
                 .unwrap();
             session.status = AgentStatus::Stopped;
-            session.save(&sessions).unwrap();
+            session.save(sessions).unwrap();
             // No window or GUI registry is available: drive the actual retained tick.
             let mut retained =
                 BTreeMap::from([((entry.registration.window_id.clone(), 7), entry.clone())]);
