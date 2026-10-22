@@ -4987,6 +4987,32 @@ pub(crate) fn execution_binding_authorizes_current_generation(
         ))
 }
 
+/// Authenticate bookkeeping provenance across audited takeovers of the same
+/// generation. This proves the historical writer and head, never the caller's
+/// authority to produce mutations or reuse another Session's verification.
+pub(crate) fn execution_binding_has_current_generation_provenance(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    receipt_session_id: &str,
+    receipt_binding: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    Ok(
+        current.identity.worktree_binding_hash == worktree_binding_hash(worktree)
+            && execution_binding_matches_historical_prefix(
+                &ledger,
+                current,
+                receipt_session_id,
+                receipt_binding,
+            ),
+    )
+}
+
 /// Recovery-only identity derived from the authoritative owner ledger without
 /// requiring the caller worktree's projection/pointer pair to be readable.
 /// Mutation gates must continue to use [`current_execution_binding`].

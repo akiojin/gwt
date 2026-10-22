@@ -15,6 +15,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         client::IntoClientRequest,
+        error::ProtocolError,
         http::{header::AUTHORIZATION, HeaderValue},
         protocol::{frame::coding::CloseCode, CloseFrame},
         Error as WebSocketError, Message,
@@ -56,6 +57,41 @@ const PM_TARGET_REFUSAL: &str =
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Debug, thiserror::Error)]
+enum PaneRequestError {
+    #[error("{0}")]
+    Operation(String),
+    #[error("{0}")]
+    Network(String),
+}
+
+impl PaneRequestError {
+    fn from_websocket_error(message: String, error: &WebSocketError) -> Self {
+        if matches!(
+            error,
+            WebSocketError::Io(_)
+                | WebSocketError::Tls(_)
+                | WebSocketError::ConnectionClosed
+                | WebSocketError::AlreadyClosed
+                | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+        ) || matches!(error, WebSocketError::Http(response) if response.status().is_server_error())
+        {
+            Self::Network(message)
+        } else {
+            Self::Operation(message)
+        }
+    }
+}
+
+impl From<PaneRequestError> for SpecOpsError {
+    fn from(error: PaneRequestError) -> Self {
+        match error {
+            PaneRequestError::Operation(message) => Self::Operation(message),
+            PaneRequestError::Network(message) => ApiError::Network(message).into(),
+        }
+    }
+}
 
 /// SPEC-3431 FR-124: ask the authenticated GUI authority for one project
 /// Monitor scan. The request intentionally carries no project path; the
@@ -407,25 +443,31 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
 }
 
 /// Close one Work through the capability-authenticated Host connection.
-pub(super) fn close_work(work_id: &str, close_kind: &str) -> Result<Value, String> {
-    let ws_url = pane_websocket_url_from_env()?;
+pub(super) fn close_work(work_id: &str, close_kind: &str) -> Result<Value, SpecOpsError> {
+    let ws_url = pane_websocket_url_from_env().map_err(SpecOpsError::Operation)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| format!("failed to create Work close runtime: {err}"))?;
+        .map_err(|err| {
+            SpecOpsError::Operation(format!("failed to create Work close runtime: {err}"))
+        })?;
     runtime.block_on(close_work_async(&ws_url, work_id, close_kind))
 }
 
-async fn close_work_async(ws_url: &str, work_id: &str, close_kind: &str) -> Result<Value, String> {
-    let mut socket = connect_pane_websocket(ws_url).await?;
-    send_frontend_event(
+async fn close_work_async(
+    ws_url: &str,
+    work_id: &str,
+    close_kind: &str,
+) -> Result<Value, SpecOpsError> {
+    let mut socket = connect_pane_websocket_typed(ws_url).await?;
+    send_frontend_event_typed(
         &mut socket,
         json!({"kind":"close_work","work_id":work_id,"close_kind":close_kind}),
     )
     .await?;
     tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
         loop {
-            let result = next_backend_json_unbounded(&mut socket).await?;
+            let result = next_backend_json_unbounded_typed(&mut socket).await?;
             if result["kind"] != "work_close_result"
                 || result["work_id"] != work_id
                 || result["close_kind"] != close_kind
@@ -435,15 +477,19 @@ async fn close_work_async(ws_url: &str, work_id: &str, close_kind: &str) -> Resu
             if result["ok"].as_bool().is_none()
                 || (result["ok"] == true && result["changed"].as_bool().is_none())
             {
-                return Err(
+                return Err(SpecOpsError::Operation(
                     "invalid Host Work close result; inspect Work state before retrying".into(),
-                );
+                ));
             }
             return Ok(result);
         }
     })
     .await
-    .map_err(|_| "Work close outcome unavailable; inspect Work state before retrying".to_string())?
+    .map_err(|_| {
+        ApiError::Network(
+            "Work close outcome unavailable; inspect Work state before retrying".to_string(),
+        )
+    })?
 }
 
 pub(super) fn live_windows(
@@ -1180,11 +1226,19 @@ fn pane_close_verdict(requested_id: &str, reply: PaneCloseReply) -> Result<Strin
 }
 
 async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
-    let request = pane_websocket_request(ws_url)?;
+    connect_pane_websocket_typed(ws_url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn connect_pane_websocket_typed(ws_url: &str) -> Result<PaneWebSocket, PaneRequestError> {
+    let request = pane_websocket_request(ws_url).map_err(PaneRequestError::Operation)?;
     connect_async(request)
         .await
         .map(|(socket, _)| socket)
-        .map_err(|err| pane_connect_error(ws_url, &err))
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(pane_connect_error(ws_url, &err), &err)
+        })
 }
 
 /// Issue #3667 AC-5: name the two very different conditions behind a failed
@@ -1256,10 +1310,24 @@ fn pane_websocket_request(
 }
 
 async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Result<(), String> {
+    send_frontend_event_typed(socket, payload)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn send_frontend_event_typed(
+    socket: &mut PaneWebSocket,
+    payload: Value,
+) -> Result<(), PaneRequestError> {
     socket
         .send(Message::Text(payload.to_string().into()))
         .await
-        .map_err(|err| format!("pane websocket send failed: {err}"))
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(
+                format!("pane websocket send failed: {err}"),
+                &err,
+            )
+        })
 }
 
 async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
@@ -1276,21 +1344,49 @@ async fn next_backend_json_with_timeout(
 }
 
 async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    next_backend_json_unbounded_typed(socket)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn next_backend_json_unbounded_typed(
+    socket: &mut PaneWebSocket,
+) -> Result<Value, PaneRequestError> {
     let message = socket
         .next()
         .await
-        .ok_or_else(|| "pane websocket closed before backend response".to_string())?
-        .map_err(|err| format!("pane websocket receive failed: {err}"))?;
+        .ok_or_else(|| {
+            PaneRequestError::Network("pane websocket closed before backend response".to_string())
+        })?
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(
+                format!("pane websocket receive failed: {err}"),
+                &err,
+            )
+        })?;
 
     match message {
-        Message::Text(text) => serde_json::from_str(text.as_ref())
-            .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
-        Message::Binary(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
-        Message::Close(frame) => Err(pane_socket_closed_error(frame.as_ref())),
-        other => Err(format!(
+        Message::Text(text) => serde_json::from_str(text.as_ref()).map_err(|err| {
+            PaneRequestError::Operation(format!("pane backend returned invalid JSON: {err}"))
+        }),
+        Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
+            PaneRequestError::Operation(format!("pane backend returned invalid JSON: {err}"))
+        }),
+        Message::Close(frame) => {
+            let message = pane_socket_closed_error(frame.as_ref());
+            Err(
+                if frame.as_ref().is_some_and(|frame| {
+                    frame.code == CloseCode::Policy && !frame.reason.is_empty()
+                }) {
+                    PaneRequestError::Operation(message)
+                } else {
+                    PaneRequestError::Network(message)
+                },
+            )
+        }
+        other => Err(PaneRequestError::Operation(format!(
             "pane backend returned unsupported websocket message: {other:?}"
-        )),
+        ))),
     }
 }
 
@@ -2255,8 +2351,12 @@ mod tests {
         command.arg("60");
         #[cfg(windows)]
         let mut command = {
+            use std::os::windows::process::CommandExt;
+
             let mut command = gwt_core::process::hidden_command("cmd");
             command.args(["/C", "set /p health="]);
+            // Later assertions need a leaf; a hidden console would own conhost.
+            command.creation_flags(windows::Win32::System::Threading::DETACHED_PROCESS.0);
             command
         };
         struct OwnedChild(std::process::Child);
@@ -2652,6 +2752,28 @@ mod tests {
         );
         assert!(unreachable.contains("connect failed"), "{unreachable}");
         assert!(!unreachable.contains("settled"), "{unreachable}");
+
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(settled, &http_409),
+            PaneRequestError::Operation(_)
+        ));
+        let http_503 = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(503)
+                .body(None)
+                .expect("HTTP response"),
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error("Host unavailable".into(), &http_503),
+            PaneRequestError::Network(_)
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(
+                "Host disconnected".into(),
+                &WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+            ),
+            PaneRequestError::Network(_)
+        ));
     }
 
     /// Issue #3667 AC-3: the mutation refusal for a settled session must reach
@@ -4239,15 +4361,41 @@ mod tests {
                     socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"other","close_kind":"discarded","ok":true}).to_string().into())).await.unwrap();
                     socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"work-1","close_kind":"discarded","ok":ok,"changed":changed,"retryable":!ok,"error":if ok {None} else {Some("refresh and retry")} }).to_string().into())).await.unwrap();
                 }
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                next_frontend_json(&mut socket).await;
+                socket.send(Message::Text("invalid JSON".into())).await.unwrap();
+                for frame in [None, Some(CloseFrame { code: CloseCode::Away, reason: "shutting down".into() }), Some(CloseFrame { code: CloseCode::Policy, reason: "execution binding is no longer current".into() })] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    next_frontend_json(&mut socket).await;
+                    socket.send(Message::Close(frame)).await.unwrap();
+                }
             });
             let url = format!("ws://{address}/internal/pane-ws");
             let refusal = close_work_async(&url, "work-1", "discarded").await.unwrap();
             assert_eq!(refusal["ok"], false);
             assert_eq!(refusal["retryable"], true);
             assert_eq!(refusal["error"], "refresh and retry");
-            assert!(close_work_async(&url, "work-1", "discarded").await.unwrap_err().contains("invalid Host"));
+            let invalid_result = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(invalid_result.contains("invalid Host"), "{invalid_result}");
+            assert!(!invalid_result.starts_with("network error:"), "{invalid_result}");
             assert_eq!(close_work_async(&url, "work-1", "discarded").await.unwrap()["changed"], false);
+            let invalid_json = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(invalid_json.contains("invalid JSON"), "{invalid_json}");
+            assert!(!invalid_json.starts_with("network error:"), "{invalid_json}");
+            for expected in ["without a reason", "shutting down"] {
+                let lost_result = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+                assert!(lost_result.starts_with("network error:"), "{lost_result}");
+                assert!(lost_result.contains(expected), "{lost_result}");
+            }
+            let policy = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(!policy.starts_with("network error:"), "{policy}");
+            assert!(policy.contains("execution binding is no longer current"), "{policy}");
+            assert!(policy.contains("observation"), "{policy}");
             server.await.unwrap();
+            let transport = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(transport.starts_with("network error:"), "{transport}");
         });
     }
 

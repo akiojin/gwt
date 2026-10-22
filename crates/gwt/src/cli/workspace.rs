@@ -834,7 +834,7 @@ pub(super) fn run<E: CliEnv>(
             work_id,
             close_kind,
         } => {
-            let result = super::pane::close_work(&work_id, &close_kind).map_err(string_error)?;
+            let result = super::pane::close_work(&work_id, &close_kind)?;
             out.push_str(&result.to_string());
             out.push('\n');
             Ok(if result["ok"].as_bool() == Some(true) {
@@ -978,9 +978,9 @@ pub(super) fn run<E: CliEnv>(
                                 ).ok()).and_then(|status| status.receipt);
                             match recovered {
                                 Some(receipt) => receipt,
-                                None => return Err(string_error(format!(
+                                None => return Err(SpecOpsError::from(ApiError::Network(format!(
                                     "{error}; operation_id={operation_id}, outcome=unconfirmed; inspect JSON operation workspace.receipt with this operation_id; do not resend the update"
-                                ))),
+                                )))),
                             }
                         }
                         Err(error) => return Err(string_error(format!("{error}; operation_id={operation_id}"))),
@@ -3574,7 +3574,7 @@ fn parse_status_category(value: &str) -> Result<WorkspaceStatusCategory, String>
 }
 
 fn string_error(error: String) -> SpecOpsError {
-    SpecOpsError::from(ApiError::Network(error))
+    SpecOpsError::Operation(error)
 }
 
 /// Issue #3448: one incomplete Work whose owner Issue is already closed, plus
@@ -6470,7 +6470,10 @@ pub(crate) mod tests {
         )
         .expect_err("invalid status must fail before the strict transaction");
 
-        assert!(error.to_string().contains("unknown workspace status"));
+        assert_eq!(
+            error.to_string(),
+            "unknown workspace status 'invalid-status'"
+        );
         let after = paths
             .iter()
             .map(|path| std::fs::read(path).ok())
