@@ -1490,13 +1490,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // diagnosis; `issue` or `spec` asks about any owner in this
             // repository, which is how an operator finds out who holds a
             // generation that keeps refusing the queue.
+            reject_unknown_params(params, &["issue", "spec"], "execution.status")?;
             let issue = optional_u64(params, "issue")?;
             let spec = optional_u64(params, "spec")?;
-            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
-                return Err(CliParseError::InvalidJson(
-                    "execution.status accepts only issue or spec".to_string(),
-                ));
-            }
             match (issue, spec) {
                 (Some(_), Some(_)) => {
                     return Err(CliParseError::InvalidJson(
@@ -7357,14 +7353,18 @@ mod tests {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         ));
         assert!(matches!(
-            err("execution.status", json!({"unexpected": true})),
+            ok("execution.status", json!({"issue": null, "spec": null})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"unexpected": null})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts only issue or spec")
+                if message.contains("unexpected")
         ));
         // Issue #3934: an operator must be able to ask who holds any owner's
         // generation, not only the one their own session is bound to.
         assert!(matches!(
-            ok("execution.status", json!({"issue": 3934})),
+            ok("execution.status", json!({"issue": 3934, "spec": null})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner
@@ -7374,7 +7374,7 @@ mod tests {
                 }
         ));
         assert!(matches!(
-            ok("execution.status", json!({"spec": 3885})),
+            ok("execution.status", json!({"issue": null, "spec": 3885})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner

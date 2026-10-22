@@ -3104,7 +3104,7 @@ pub struct OwnerExecutionDiagnosis {
     pub generation_activated_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_session_id: Option<String>,
-    /// Durable holder state: one of the `AgentStatus` names, or `missing` /
+    /// Durable holder state: an `AgentStatus` wire value, or `missing` /
     /// `unreadable` when the durable Session cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_session_state: Option<String>,
@@ -3267,7 +3267,17 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         }
     };
     if let Some(holder) = &holder {
-        diagnosis.holder_session_state = Some(format!("{:?}", holder.status));
+        diagnosis.holder_session_state = Some(
+            match holder.status {
+                gwt_agent::AgentStatus::Unknown => "Unknown",
+                gwt_agent::AgentStatus::Running => "Running",
+                gwt_agent::AgentStatus::Idle => "Idle",
+                gwt_agent::AgentStatus::WaitingInput => "Waiting",
+                gwt_agent::AgentStatus::Stopped => "Stopped",
+                gwt_agent::AgentStatus::Interrupted => "Interrupted",
+            }
+            .to_string(),
+        );
         diagnosis.holder_branch = Some(holder.branch.clone());
         diagnosis.holder_worktree = Some(holder.worktree_path.display().to_string());
         if holder.worktree_path.is_dir() {
@@ -8751,10 +8761,7 @@ pub fn prepare_exact_terminal_active_successor(
                     }
                 }
             }
-            let session_is_terminal = matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            );
+            let session_is_terminal = holder_status_permits_generation_reclaim(session.status);
             if reconcile_active_launch_handshake_under_lease(sessions_dir, expected_session)? {
                 return Err(io::Error::new(
                     ErrorKind::PermissionDenied,
@@ -18494,11 +18501,11 @@ mod tests {
     }
 
     /// Issue #3472: an exact terminal runtime exit record releases the holder
-    /// to a fresh-launch supersede only once the durable Session agrees it
-    /// stopped. A terminal sidecar under a still-Running durable Session is
+    /// to a fresh-launch supersede only once the durable Session is reclaimable.
+    /// A terminal sidecar under a still-Running durable Session is
     /// conflicting evidence and must keep refusing.
     #[test]
-    fn unreachable_holder_requires_durably_stopped_session_for_terminal_proof() {
+    fn unreachable_holder_requires_reclaimable_durable_status_for_terminal_proof() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -18547,7 +18554,7 @@ mod tests {
             unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
                 .unwrap()
                 .is_none(),
-            "a terminal exit record under a non-stopped durable Session must not qualify",
+            "a terminal exit record under a non-reclaimable durable Session must not qualify",
         );
 
         let mut stopped = gwt_agent::Session::load(&session_path).unwrap();
@@ -18567,6 +18574,32 @@ mod tests {
             }),
             "the qualifying holder must carry its exact runtime proof for revalidation",
         );
+
+        stopped.update_status(gwt_agent::AgentStatus::Idle);
+        stopped.save(&sessions_dir).unwrap();
+        let (identity, evidence) =
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .expect("an Idle holder with an exact terminal runtime must qualify");
+        assert!(matches!(
+            evidence,
+            gwt_agent::ManualLaunchRuntimeEvidence::Proof(_)
+        ));
+        let prepared = prepare_exact_terminal_active_successor(
+            dir.path(),
+            owner,
+            &successor_request(
+                "idle-terminal-successor",
+                "gwt-host-manual-launch",
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+            ),
+            &sessions_dir,
+            &identity,
+            evidence,
+            "exact producing runtime terminated before manual Launch Agent",
+        )
+        .expect("successor preparation must accept the same durable states as terminal proof");
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
     }
 
     #[test]
@@ -21471,6 +21504,27 @@ mod tests {
         assert_eq!(held.holder_runtime.as_deref(), Some("host_dead"));
         assert!(held.reclaimable);
         assert_eq!(held.recommended_recovery, "generation-reaper");
+
+        // Issue #3953: the JSON diagnosis uses the Session's canonical wire
+        // values, including WaitingInput -> "Waiting", rather than Debug.
+        for status in [
+            gwt_agent::AgentStatus::Unknown,
+            gwt_agent::AgentStatus::Running,
+            gwt_agent::AgentStatus::WaitingInput,
+            gwt_agent::AgentStatus::Stopped,
+            gwt_agent::AgentStatus::Interrupted,
+            gwt_agent::AgentStatus::Idle,
+        ] {
+            let mut session =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+            session.update_status(status);
+            session.save(&sessions_dir).unwrap();
+            let json = serde_json::to_value(diagnose_owner(worktree.path(), owner)).unwrap();
+            assert_eq!(
+                json["holder_session_state"],
+                serde_json::to_value(status).unwrap()
+            );
+        }
 
         reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
         let released = diagnose_owner(worktree.path(), owner);
