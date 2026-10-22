@@ -83,3 +83,64 @@ test("automatic restore errors stay in Notifications while manual errors open a 
     expect(errors, "console and page errors").toEqual([]);
   });
 });
+
+// Issue #4222: this checks presentation of backend fallback reasons; native
+// conversation ownership and resume selection are exercised by Rust tests.
+test("Issue Monitor fresh-session notifications retain each native conversation fallback reason", async ({ page }, testInfo) => {
+  test.skip(!BASE || !process.env.GWT_PLAYWRIGHT_CHECK_HOME,
+    "requires browser-check checkout binaries and a fresh HOME");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+
+  await withLiveGwtBackendLock(BASE, testInfo, async () => {
+    await gotoLiveGwt(page, BASE);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+    const bell = page.locator("#op-notifications-button");
+    const drawer = page.locator("#notification-center");
+    const rows = drawer.locator(".notification-center__item");
+    await bell.click();
+    await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+    await drawer.getByRole("button", { name: "Close notifications", exact: true }).click();
+
+    const messages = [
+      "Issue Monitor started a fresh session because native conversation is missing",
+      "Issue Monitor started a fresh session because native conversation ownership does not match this worktree",
+      "Issue Monitor started a fresh session because native conversation could not be verified",
+      "Issue Monitor started a fresh session because native conversation is already held by window holder-window",
+    ];
+    for (const [index, message] of messages.entries()) {
+      await page.evaluate(message => {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+          detail: {
+            kind: "issue_monitor_toast", level: "warn", message,
+            issue_number: 4222, notification_transition: null,
+          },
+        }));
+      }, message);
+      await expect(bell.locator(".op-rail__badge")).toHaveText(String(index + 1));
+    }
+
+    await bell.click();
+    await expect(drawer).toBeVisible();
+    await expect(rows).toHaveCount(messages.length);
+    for (const message of messages) {
+      const row = rows.filter({ hasText: message });
+      await expect(row).toHaveCount(1);
+      await expect(row).toHaveAttribute("data-level", "warn");
+      await expect(row).toBeVisible();
+    }
+    await expect(page.locator(".modal-backdrop:visible")).toHaveCount(0);
+    const screenshot = testInfo.outputPath(`native-conversation-fallback-reasons-${theme}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    await testInfo.attach(`native-conversation-fallback-reasons-${theme}`, {
+      path: screenshot, contentType: "image/png",
+    });
+    expect(errors, "console and page errors").toEqual([]);
+  });
+});
