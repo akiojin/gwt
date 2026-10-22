@@ -297,7 +297,8 @@ To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 is one per OS-login user; a second `gwt` invocation prints the existing URL and
 exits instead of starting a second server.
 
-gwtd operations run through stdin JSON envelopes without opening a GUI window:
+gwtd operations run through stdin JSON envelopes without opening the main gwt window.
+Operations requiring consent can show a native OS dialog:
 
 ```bash
 gwtd <<'JSON'
@@ -568,10 +569,26 @@ observed GitHub label actor/time. Missing audit data is shown as unknown.
 Agents and automation can inspect the queue with `issue.monitor.status` and
 change membership/order with `issue.monitor.queue.push`,
 `issue.monitor.queue.remove`, and `issue.monitor.queue.move`. The
+`issue.monitor.queue.list` reply includes the selected terminal's saved
+`queue_order`, separately from the urgent display order. Before a move or removal,
+read the current terminal's list and pass that array as `expected_queue_order`.
+A mismatch rejects the change without modifying preferences; read the list again
+and reconsider, then read back a successful change. An explicit `[]` matches only
+an empty saved queue, `null` is rejected, and omitting the guard keeps existing
+behavior. This compares queue order values, without tracking intervening history,
+urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
-`issue.monitor.priority.set` operations remain available. The
+`issue.monitor.priority.set` operations remain available. To prevent overwriting
+an intervening priority change, read the full `priority_order` from
+`issue.monitor.status` and pass that array as `expected_priority_order` to either
+priority operation or `issue.monitor.launch_now`. A mismatch rejects the update
+before queue admission, hold clearing, or a scan request; read status again and reconsider
+the order, then confirm a successful update by reading it back. An explicit `[]`
+matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
+the existing behavior. The comparison protects the current order value, without
+tracking intervening history or other configuration changes. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. The registered PM for the repository
 can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
@@ -607,6 +624,14 @@ All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
+
+If an autonomous Monitor-launched Codex session ends a turn with “Selected model
+is at capacity”, gwt waits at least 60 seconds, then submits one continuation
+prompt to the same active session. Each session gets at most one automatic
+attempt while the gwt instance remains running. Recovery, manual input,
+approval or quota waits, and a replaced or
+settled session prevent the send. The existing PM notification remains available
+if the attempt fails; manually launched sessions are left for their operator.
 
 Automatic profile selection is opt-in with `issue.monitor.tiers.set` and
 `{"auto":true}`. It supplies three tiers without requiring a profile pool:
@@ -782,6 +807,13 @@ decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
+The PM delegates intake and investigation to at most one auxiliary agent at a
+time, including any delegated event subscription. Further requests wait for that
+agent to finish; queued intake takes precedence over another subscription while
+the PM continues responding and checking status snapshots. Native harness limits
+still apply. If capacity is unknown, the PM may try admission once when its
+auxiliary slot is free; a refusal leaves the work queued without a retry loop.
+
 Ask the PM to link planned Issues to a project goal or an explicit maintenance
 or compliance category. `pm.plan.status` shows the saved planning revision and a
 `policy` assessment with unlinked or invalid work, Now/Next/Later items, and
@@ -789,6 +821,73 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
+their order and duplicates. `observed_issue_states` and `unobserved_issues` use
+distinct Issue numbers in ascending order; typed states retain their supplied
+inbox order without duplicates. Empty or duplicate IDs and invalid traces keep
+separate rows. Membership never expands through a Goal, Milestone or another row.
+Queue/active membership alone supplies no inbox state. Without a Monitor snapshot,
+all direct Issues are unobserved; degraded observations retain their provenance.
+Empty membership yields empty arrays. These observations do not establish health,
+completion, priority or permission to launch work.
+Milestone `target_date_observation` compares an exact `YYYY-MM-DD` target with the
+recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or on
+the target date; missing or invalid dates leave it unknown with named missing inputs.
+It uses no current clock. Read the scan's source and age alongside this observation:
+days past a target do not establish unfinished or overdue work, health or completion.
+`policy.review_dates` lists saved risks followed by decisions, preserving their order,
+IDs and authored review dates. `days_past_review_at_scan` compares exact `YYYY-MM-DD`
+dates with the scan's UTC calendar date, returning zero before or on the review date.
+Missing or invalid inputs leave the count unknown with named missing inputs. It uses
+no current clock; source, scan age and coverage limits still apply. Days past a review
+date do not establish whether a review occurred or authorize action.
+`policy.risks` lists saved risk IDs in order and names blank or whitespace-only
+`id`, `severity`, `probability`, `impact` and `owner` in `missing_inputs`.
+Repeated nonblank exact IDs add `unique_risk_id`; case and surrounding whitespace
+remain significant for identity. Nonblank values remain opaque, and assumptions
+are optional. These diagnostics need no Monitor snapshot and leave review-date
+observations unchanged. Complete metadata does not establish a valid risk assessment
+or authorize action.
+`policy.decisions` lists saved decision IDs in order and names blank or whitespace-only
+`id`, `rationale` and `owner` in `missing_inputs`. It names `options` when the list
+has no nonblank entry. Repeated nonblank exact IDs add `unique_decision_id`; case and
+surrounding whitespace remain significant for identity. Values remain opaque,
+assumptions and `source_revision` are optional, and review dates remain in
+`policy.review_dates`. These diagnostics need no Monitor snapshot. Complete metadata
+does not establish decision quality, approval or action permission.
+`policy.forecasts` preserves saved forecast rows in order, including their ID,
+`source_revision`, `sample_size`, `reported_estimate`, `reported_confidence` and
+`reported_missing_inputs`. `revisions_since_source` is the nonnegative difference
+from `planning_revision`; a future source leaves it null. Zero is a valid source.
+`missing_inputs` always includes `forecast_evidence`, followed by `id` for blank IDs
+or `unique_forecast_id` for repeated exact nonblank IDs, `sample_history` for zero
+samples and `source_revision_ahead_of_planning` for future sources, in that order.
+Case and surrounding whitespace distinguish nonblank IDs; reported missing inputs
+are preserved verbatim. Diagnostic `confidence` remains `unknown`: positive counts,
+equal revisions and authored confidence do not prove verified history, forecast
+quality, approval or action permission. No small-sample threshold or estimate is
+inferred. These diagnostics need no Monitor snapshot; no saved forecasts yields `[]`.
+`policy.decision_revisions` preserves every saved decision ID and `source_revision`
+in order. `revisions_since_source` is the nonnegative numeric difference from
+`planning_revision`, including zero. An absent source leaves the difference null
+with `source_revision` in `missing_inputs`; a source ahead of planning leaves it
+null with `source_revision_ahead_of_planning`. This observation needs no Monitor
+snapshot and keeps `source_revision` optional. A revision difference does not prove
+changed decision inputs, freshness, quality, approval or action permission.
+`policy.recurring_runs` preserves saved recurring rows, IDs and authored `next_run`
+timestamps. `due_at_scan` compares RFC3339 instants, including timezone offsets and
+fractional seconds: it is true at or after `next_run` and false before it. Missing or
+invalid timestamps, including fractional seconds beyond nine digits, leave it unknown
+with `next_run` or `monitor_scan_time` named.
+It uses only the recorded scan, retaining its source, age and coverage limits;
+it does not read the current clock or interpret cadence. A due timestamp does not
+prove missed work or authorize scheduling, Issue creation or launch.
+Each row's `configuration_missing_inputs` separately names empty or whitespace-only
+`id`, `cadence`, `owner`, `miss_policy` and `idempotency_key` settings. Repeated nonblank
+IDs or setting keys add `unique_recurring_id` or `unique_idempotency_key` to every matching
+row. Matches use exact saved strings; trimming only detects missing values. These checks
+do not depend on Monitor availability, interpret cadence, resolve owners or validate policy
+semantics. An empty list does not establish execution permission or enforce deduplication.
 Each Issue trace includes `observed_inbox_states`, including orphan or maintenance
 work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,
@@ -800,6 +899,31 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+Saved WIP policies are compared independently, in saved order, with the distinct
+observed Issue count. `observed_exceeded` means only that this snapshot's count
+strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
+limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
+missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+data the count is null; without policies the list is empty. This comparison does not
+establish canonical WIP, a current breach or permission to act, and does not select
+or combine policies. Verification and full WIP remain missing.
+`policy.capacity.terminal_queue` preserves the supplied host queue projection order,
+repeated Issues and raw `queued_at`, after urgent ordering and label filtering.
+`age_seconds_at_scan` measures queue membership until the supplied Monitor scan,
+respecting RFC3339 offsets and rounding down to whole seconds. Missing, invalid or
+future timestamps leave the duration null with named missing inputs; fractions beyond
+nine digits are rejected rather than truncated. No Monitor or no queue view yields
+null; a supplied view without rows yields []. Keep its source, scan time and coverage:
+an old or degraded snapshot is only an observation then. Legacy omitted queue lists
+also decode to []; neither proves the host or whole project queue is empty. Queue residency is not execution waiting time, an SLA
+or starvation verdict, priority, preemption or permission to launch.
+Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
+idle classification and binding/pane facts. They show elapsed whole seconds from idle start
+to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
+invalid or future start times leave duration unknown with named missing inputs. No Monitor
+yields null; an observed snapshot without idle windows yields an empty list. Read the source
+and scan age alongside these facts. They do not establish queue age, SLA breaches, liveness
+or permission to release, and do not change classification, slots, claims or launches.
 Activity observations show elapsed whole seconds since the last activity of Launching/Launched
 Issues at the Monitor's scan time. They use the supplied timestamps, never the current clock.
 Missing, invalid or activity-after-scan timestamps leave the duration unknown; an unavailable
@@ -818,6 +942,14 @@ cannot establish elapsed time, nor can expiration before start establish remaini
 Unavailable Monitor data yields null, while no matching rows yields an empty list.
 These observations retain scan provenance, omit free-text reasons and resume conditions,
 and do not determine queue age, SLA, liveness or full WIP, or change waits and slots.
+Retry-deadline observations retain each inbox row with a recorded `retry_not_before`,
+including repeated Issues and their states. They show whole seconds remaining at the supplied
+scan time, respecting time-zone offsets and rounding down fractions; elapsed deadlines show zero.
+Missing or invalid times, including `unknown`, leave the duration unknown. Hold age remains
+unknown because the snapshot has no hold-start time. Unavailable Monitor yields null;
+no matching rows yields an empty list. These observations retain Monitor provenance, omit
+invalid timestamp text and free-text reasons, and do not prove an active hold or authorize
+launch, release or any change to retry gates, waits, slots or priority.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
@@ -945,6 +1077,33 @@ entrypoints are:
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent-pane inspection and control
+- `gwt-feedback` — report a gwt problem from any project
+
+For a gwt bug or workflow problem, PM and implementation agents can use
+`gwt-feedback` to collect the affected operation, original refusal,
+reproduction steps, and workaround. The `feedback.create` JSON operation always
+targets `akiojin/gwt` and adds source-project and environment information.
+It saves a local receipt. Outside the actual gwt repository, intake returns
+immediately so project work can continue; sending requires the user's **Send
+feedback** action in a native dialog. Cancellation or an unavailable desktop
+keeps the report locally. The actual gwt repository sends synchronously without
+that prompt and returns the Issue number and URL.
+
+The local receipt keeps the complete original. Public reports automatically mask
+known credentials, environment assignment values, paths (including URLs), and
+Markdown code fragments; the native preview and submission use the same content.
+Unmasked refusal text is preserved without truncation. Masks are conservative
+and cannot detect every arbitrary secret; do not publish the raw receipt.
+
+Use `feedback.status` with the returned request id to obtain the Issue number
+and URL; a similar existing Issue may receive a comment. `feedback.retry`
+accepts declined or failed receipts and asks for fresh external-project consent.
+An uncertain delivery is retained for inspection and is not automatically resent.
+
+Reports are evidence for PM triage. A confirmed bug is linked to a separate,
+curated repair Issue; the raw report cannot launch an agent directly. Feature
+requests and ambiguous reports await the repository owner's adoption decision,
+with the decision and repair link recorded on the report.
 
 SPECs and plain Issues share one search index. SPECs are indexed once as heading
 chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
@@ -1373,6 +1532,12 @@ not loaded as PM configuration. Implementation agents keep their normal
 project configuration. Existing PM conversations are not migrated automatically;
 the isolated directory is used on the next PM session launch.
 
+The PM receives skills for coordination, agent observation, search, request
+intake, and planning, plus their search and registration helpers. Implementation,
+verification, and PR workflow skills remain with implementation agents. Managed
+asset refresh removes old implementation skills and their `gwt-*` command aliases
+from the PM runtime; implementation agents keep the full skill set.
+
 To explicitly supply project policy, add `settings.project_policy_files` to
 `~/.gwt/projects/<project-hash>/project-state/pm.json`, preserving its other
 fields. For example, `"project_policy_files": ["docs/pm-policy.md"]` selects a
@@ -1709,9 +1874,18 @@ Migrated frontend domains use `web/ui-state-store.js` to own immutable data. Rec
 handlers update the model; views subscribe to selectors and render the committed
 snapshot. Retain each unsubscribe function for views that can be removed. Keep
 DOM nodes and renderer functions outside the model. Notifications also run for
-unfocused windows, without a focus or animation-frame trigger. The shared
+unfocused windows, without a focus trigger. `subscribe` consumes every update
+synchronously, including terminal packets. For views, `subscribeFrame` renders
+the initial selection immediately, then batches changed selectors into one
+callback per store using the latest snapshot. A 100 ms timer keeps rendering
+when animation frames stop; unsubscribe or dispose cancels pending work. Usage
+uses this path for its status summary, popover, settings, and Workspace view.
+The shared
 `ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
-the content type. See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
+the content type. Assign `{ type: 'markdown', body, body_html }` to a record's
+`content` when accepting it into the model. Views pass that committed content
+to `renderUiContent`; they do not choose Markdown or accept an injected renderer.
+See [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) for
 the migration inventory and acceptance criteria.
 
 ### Capacity for heavy verification

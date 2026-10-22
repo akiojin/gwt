@@ -10383,6 +10383,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(diagnostics.contains("owner Issue #3755"));
 
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: IssueNumber(3755),
             title: "Flaky bounded sync".to_string(),
             body: String::new(),

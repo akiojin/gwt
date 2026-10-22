@@ -2369,6 +2369,7 @@ mod tests {
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(42),
             title: "delivery".into(),
             body: String::new(),
@@ -2668,6 +2669,7 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(pm_path.clone());
         seed_ci_delivery(&mut env, &request);
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(42),
             title: "delivery".into(),
             body: String::new(),
@@ -3012,6 +3014,7 @@ mod tests {
         seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(42),
             title: "delivery".into(),
             body: String::new(),
@@ -3619,6 +3622,7 @@ mod tests {
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(42),
             title: "delivery".into(),
             body: String::new(),

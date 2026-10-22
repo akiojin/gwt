@@ -2201,10 +2201,9 @@ pub(super) fn ensure_workspace_for_agent(
             (result, recovery.project_state_root)
         }
         None => {
-            return Err(core_error(GwtError::Other(format!(
-                "Session ledger is missing for Session {}",
-                input.agent_session
-            ))));
+            return Err(core_error(GwtError::Other(
+                crate::agent_project_state::missing_session_ledger_message(&input.agent_session),
+            )));
         }
     };
     publish_workspace_change(&publish_root);
@@ -2245,10 +2244,7 @@ fn probe_workspace_ensure_with_recovery(
             return RecoveryProbe::unavailable(
                 "workspace.ensure",
                 protected(Some(GovernanceCause::ManagedIdentity)),
-                format!(
-                    "Session ledger is missing for Session {}",
-                    input.agent_session
-                ),
+                crate::agent_project_state::missing_session_ledger_message(&input.agent_session),
             )
         }
         Err(error) => {
@@ -9872,6 +9868,25 @@ pub(crate) mod tests {
         .expect_err("a missing durable Session must fail closed");
 
         assert!(error.to_string().contains("Session ledger is missing"));
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot be recovered in this Session"),
+            "{message}"
+        );
+        assert!(
+            message.contains("changing agent input or order cannot restore"),
+            "{message}"
+        );
+        assert!(message.contains("issue.monitor.stop"), "{message}");
+        assert!(message.contains("generation_release"), "{message}");
+        assert!(message.contains("issue.monitor.requeue"), "{message}");
+        assert!(message.contains("pane.close"), "{message}");
+        let probe = probe_workspace_ensure(
+            repo.path(),
+            &workspace_ensure_status_candidate("session-missing"),
+        );
+        assert_eq!(probe.governance.retryable, Some(false));
+        assert!(message.contains(probe.reason.as_deref().expect("missing-ledger reason")));
         assert!(
             !current_path.exists(),
             "current projection must stay absent"

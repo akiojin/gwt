@@ -1,5 +1,260 @@
 use super::*;
 
+#[test]
+fn codex_capacity_resume_uses_the_existing_convergence_tick() {
+    let main = include_str!("../../main.rs");
+    let tick = main
+        .split("Event::UserEvent(UserEvent::TerminalConvergenceTick) =>")
+        .nth(1)
+        .unwrap()
+        .split("Event::UserEvent(")
+        .next()
+        .unwrap();
+    assert!(tick.contains("app.sweep_provider_capacity_resumes"));
+}
+
+#[cfg(unix)]
+fn capacity_resume_fixture(
+    temp: &Path,
+) -> (
+    AppRuntime,
+    String,
+    super::super::BlockingTestTaskQueue,
+    std::sync::mpsc::Receiver<String>,
+) {
+    use std::io::Read;
+    let project = temp.join("project");
+    let session_id = "capacity-session";
+    let binding = materialize_active_agent_pane_binding(&project, session_id);
+    let (mut runtime, issuer, _) =
+        active_bound_agent_pane_runtime(temp, &project, session_id, &binding);
+    let id = "tab-project::agent-project".to_string();
+    let mut session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .unwrap();
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    session.save(&runtime.sessions_dir).unwrap();
+    let token = issuer
+        .issue_bound(&project, session_id, binding)
+        .unwrap()
+        .token;
+    runtime.agent_capability_tokens.insert(id.clone(), token);
+    let mut active = sample_active_agent_session("tab-project", &id);
+    active.session_id = session_id.into();
+    active.worktree_path = project.clone();
+    active.agent_project_root = project.display().to_string();
+    active.branch_name = session.branch.clone();
+    runtime.active_agent_sessions.insert(id.clone(), active);
+    runtime.register_pty_writer(&id, Some(&session));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut reader = runtime.runtimes[&id].pane.lock().unwrap().reader().unwrap();
+    let (sender, output) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0
+                || sender
+                    .send(String::from_utf8_lossy(&buffer[..read]).into_owned())
+                    .is_err()
+            {
+                break;
+            }
+        }
+    });
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "running",
+        "PreToolUse",
+        session_id,
+    ));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    (runtime, id, tasks, output)
+}
+
+#[cfg(unix)]
+fn capacity_output_through(output: &std::sync::mpsc::Receiver<String>, marker: &str) -> String {
+    // test-hygiene: allow-wall-clock-deadline Bound the real child PTY reader; its kernel output cannot advance through the injected retry clock.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut observed = String::new();
+    while !observed.contains(marker) {
+        observed.push_str(
+            &output
+                // test-hygiene: allow-wall-clock-deadline Wait for the real PTY submit or input barrier within the same bounded process IO contract.
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("PTY output must reach the marker"),
+        );
+    }
+    observed
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_capacity_resume_submits_once_after_a_quiet_minute() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, id, tasks, output) = capacity_resume_fixture(temp.path());
+    let screen = "■ Selected model is at capacity. Please try again later.\n› ";
+    runtime.observe_provider_api_error(&id, Some(screen));
+    let due = runtime.provider_capacity_resumes["capacity-session"]
+        .due
+        .unwrap();
+    // A turn-ending Stop may arrive after the capacity output; it is not
+    // renewed activity and must preserve the pending retry.
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "waiting",
+        "Stop",
+        "capacity-session",
+    ));
+    assert_eq!(
+        runtime.window_status(&id),
+        Some(WindowProcessStatus::Waiting)
+    );
+    runtime.sweep_provider_capacity_resumes(due - Duration::from_secs(1));
+    assert!(tasks.lock().unwrap().is_empty());
+    runtime.sweep_provider_capacity_resumes(due);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "one bounded retry must be queued"
+    );
+    let task = tasks.lock().unwrap().remove(0);
+    task();
+    let observed = capacity_output_through(&output, "verification gates still apply.\r\n");
+    assert!(observed.contains("[gwt]"), "{observed}");
+    runtime.observe_provider_api_error(&id, Some("Working again\n› "));
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "running",
+        "PreToolUse",
+        "capacity-session",
+    ));
+    runtime.observe_provider_api_error(&id, Some(screen));
+    runtime.sweep_provider_capacity_resumes(due + Duration::from_secs(120));
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "the same Session must not retry twice"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_capacity_resume_rechecks_activity_and_session_authority_after_worker_queueing() {
+    for changed in [
+        "submitted input",
+        "recovery hook",
+        "approval hook",
+        "different API error",
+        "settled execution",
+        "replaced Session",
+    ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, id, tasks, output) = capacity_resume_fixture(temp.path());
+        let pty = Arc::clone(&runtime.runtimes[&id].pty);
+        runtime.observe_provider_api_error(&id, Some("■ Selected model is at capacity"));
+        let due = runtime.provider_capacity_resumes["capacity-session"]
+            .due
+            .unwrap();
+        runtime.sweep_provider_capacity_resumes(due);
+        assert_eq!(tasks.lock().unwrap().len(), 1, "{changed}");
+        match changed {
+            "submitted input" => {
+                // The browser's fast input path bypasses AppRuntime entirely.
+                pty.write_input(b"human turn\r").unwrap();
+                assert!(!pty.has_unsent_user_input());
+            }
+            "recovery hook" => {
+                runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+                    "running",
+                    "PreToolUse",
+                    "capacity-session",
+                ));
+            }
+            "approval hook" => {
+                runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+                    "waiting",
+                    "PermissionRequest",
+                    "capacity-session",
+                ));
+            }
+            "different API error" => {
+                runtime.observe_provider_api_error(&id, Some("API Error: 401 Unauthorized"));
+                assert_eq!(runtime.provider_api_error_holds[&id].http_status, Some(401));
+            }
+            "settled execution" => {
+                gwt::cli::execution_state::settle(
+                    &runtime.active_agent_sessions[&id].worktree_path,
+                    "capacity-session",
+                    gwt::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .unwrap();
+            }
+            "replaced Session" => {
+                let mut replacement =
+                    gwt_agent::Session::load(&runtime.sessions_dir.join("capacity-session.toml"))
+                        .unwrap();
+                replacement.id = "replacement-session".into();
+                runtime
+                    .active_agent_sessions
+                    .get_mut(&id)
+                    .unwrap()
+                    .session_id = replacement.id.clone();
+                runtime.register_pty_writer(&id, Some(&replacement));
+            }
+            _ => unreachable!(),
+        }
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+        pty.write_input(b"GWT_INPUT_BARRIER\r").unwrap();
+        let observed = capacity_output_through(&output, "GWT_INPUT_BARRIER");
+        assert!(!observed.contains("[gwt]"), "{changed}: {observed}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_capacity_resume_rejects_a_replaced_session_before_its_due_tick() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, id, tasks, _) = capacity_resume_fixture(temp.path());
+    runtime.observe_provider_api_error(&id, Some("■ Selected model is at capacity"));
+    let due = runtime.provider_capacity_resumes["capacity-session"]
+        .due
+        .unwrap();
+    let mut replacement =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("capacity-session.toml")).unwrap();
+    replacement.id = "replacement-session".into();
+    let mut binding = replacement.execution_binding.clone().unwrap();
+    binding.session_id = replacement.id.clone();
+    let token = runtime
+        .agent_capability_issuer
+        .as_ref()
+        .unwrap()
+        .issue_bound(&replacement.worktree_path, &replacement.id, binding)
+        .unwrap()
+        .token;
+    runtime.agent_capability_tokens.insert(id.clone(), token);
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = replacement.id.clone();
+    runtime.register_pty_writer(&id, Some(&replacement));
+    runtime.sweep_provider_capacity_resumes(due);
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "a replacement Session must not inherit the old retry"
+    );
+}
+
 /// Issue #4584 AC-1/AC-4: the regression this Issue exists for. A turn ended
 /// on a provider API error and the pane kept reporting `running`.
 ///
@@ -2769,8 +3024,9 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         gwt::IssueMonitorExecutionSettlement::Interrupted,
         "unfinished delivery must reach the existing Monitor fresh-launch recovery"
     );
-    let mut monitor = gwt::IssueMonitorState::new(Default::default());
+    let mut monitor = test_monitor(Default::default());
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: terminal_owner.number,
         title: "Interrupted update delivery".into(),
         labels: Vec::new(),

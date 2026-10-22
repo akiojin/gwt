@@ -282,7 +282,8 @@ Hub の開いているプロジェクト一覧にある **Close Project** を選
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
-`gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
+`gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
+承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
 ```bash
 gwtd <<'JSON'
@@ -533,9 +534,21 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 
 Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor.queue.push`、
 `issue.monitor.queue.remove`、`issue.monitor.queue.move` で所属と順序を変更できます。
+`issue.monitor.queue.list` は、選択端末の保存順 `queue_order` を urgent の表示順と別に返します。
+move/remove の前に現在端末の list を読み、その配列を `expected_queue_order` として渡します。
+不一致なら設定を変更せず拒否するため、list を再読して変更を再判断し、成功後も読み戻します。
+明示的な `[]` は保存キューが空の場合だけ一致し、`null` は拒否します。省略時は従来互換です。
+比較対象はキュー順の値であり、途中の変更履歴、urgent metadata、優先順だけの変更、他の設定変更は検出しません。
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
+途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
+`priority_order` を読み、いずれの優先順操作または `issue.monitor.launch_now` にも同じ配列を
+`expected_priority_order` として渡します。不一致ならキュー追加・hold 解除・scan 要求の前に
+更新を拒否するため、status を再読して指示を再判断し、成功後も
+読み戻して確認します。明示的な `[]` は保存順序が空の場合だけ一致し、`null` は拒否します。
+引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
+他の設定変更は検出しません。
 `issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
 `enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。
@@ -565,6 +578,13 @@ reset がすべて不明なら定期再試行せず、`needs_human_fleet` の
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
+
+Monitor が自律起動した Codex が作業途中に「Selected model is at capacity」で
+ターン終了した場合、gwt は60秒以上待ってから、同じ稼働中 Session に続行指示を
+一度だけ送ります。同じ gwt インスタンスの稼働中、自動送信は Session ごとに最大一回です。
+回復、手動入力、承認・quota
+待ち、Session の置換・精算を検出した場合は送りません。再失敗時も既存の PM 通知を
+保持します。手動起動した Session の続行は操作者が行います。
 
 `issue.monitor.tiers.set` に `{"auto":true}` を渡すと、エージェント・モデル・
 推論レベルの自動選択を有効にできます。候補プールを設定しなくても、Codex Luna /
@@ -719,12 +739,77 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
 同じ会話の中で行われます。
 
+PM が要望の調査などを委譲する補助エージェントは、イベント購読を委譲する場合も含めて
+同時 1 件までです。追加の委譲は完了後に行い、次の購読よりも受付済みの要望を優先します。
+その間も PM は対話と状態スナップショットの確認を続け、harness 側の上限にも従います。
+harness の空き枠が不明な場合は、自身の補助枠が空いているときに限り起動を 1 回試し、
+拒否された作業は連続再試行せず保留します。
+
 計画中の Issue をプロジェクト目標、または明示的な maintenance / compliance
 区分へ紐付けるよう PM に依頼できます。`pm.plan.status` は保存済み計画の revision と、
 未紐付け・不正な紐付け、Now/Next/Later、マイルストーン情報の不足を示す `policy`
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+`policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
+保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
+昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
+空・重複 ID や不正な紐付けも行を分けて保持し、Goal・Milestone・他の行から所属を
+広げません。queue/active 所属だけでは inbox 状態を推定しません。Monitor がなければ
+直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属は
+空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
+マイルストーンの `target_date_observation` は、厳密な `YYYY-MM-DD` の目標日と、
+記録済みスキャンの UTC 暦日を比較します。`days_past_target_at_scan` は目標日の当日・
+以前なら 0、日付が欠落・不正なら不足情報名とともに不明を返し、現在時計を使いません。
+取得元とスキャンの古さも併せて確認してください。目標日からの経過だけでは、未完了の遅延・
+health・完了を証明しません。
+`policy.review_dates` は保存されたリスク、次に意思決定を、保存順・ID・記入済みの
+レビュー日を保持して返します。`days_past_review_at_scan` は厳密な `YYYY-MM-DD` と
+スキャンの UTC 暦日を比較し、レビュー日の当日・以前なら 0 を返します。日付が欠落・
+不正なら不足情報名とともに不明になります。現在時計を使わず、取得元・スキャンの古さ・
+観測範囲の制約も引き継ぎます。レビュー日からの経過は、レビュー実施状況の証明や
+操作の許可にはなりません。
+`policy.risks` は保存順のリスク ID と、空または空白のみの `id`・`severity`・
+`probability`・`impact`・`owner` を示す `missing_inputs` を返します。
+非空 ID の完全一致重複には `unique_risk_id` を追加し、大文字小文字と前後の空白は
+ID の区別に保持します。入力済みの値の意味は評価せず、assumptions は任意です。
+この診断は Monitor の取得を必要とせず、既存のレビュー日観測を維持します。
+情報が揃っていても、リスク評価の妥当性や操作の許可を示しません。
+`policy.decisions` は保存順の意思決定 ID と、空または空白のみの `id`・`rationale`・
+`owner` を示す `missing_inputs` を返します。`options` に空白以外の候補が一つも
+なければ `options` を示します。非空 ID の完全一致重複には `unique_decision_id` を追加し、
+大文字小文字と前後の空白は ID の区別に保持します。入力済みの値の意味は評価せず、
+assumptions と `source_revision` は任意、レビュー日は既存の `policy.review_dates` に任せます。
+この診断は Monitor の取得を必要としません。情報が揃っていても、判断の品質・承認・
+操作の許可を示しません。
+`policy.forecasts` は保存済み予測を保存順で返し、ID・`source_revision`・`sample_size`・
+`reported_estimate`・`reported_confidence`・`reported_missing_inputs` を保持します。
+`revisions_since_source` は `planning_revision` との非負差分で、未来の参照値なら null です。
+参照 revision の 0 は有効です。`missing_inputs` は常に `forecast_evidence` を含み、続いて
+空白 ID の `id` または非空 ID の完全一致重複の `unique_forecast_id`、標本数 0 の
+`sample_history`、未来参照の `source_revision_ahead_of_planning` をこの順で示します。
+非空 ID の大小文字・前後空白は区別し、記入済み不足情報は原文のまま保持します。
+診断の `confidence` は `unknown` のままです。正の標本数・同値 revision・記入済み信頼度は、
+検証済み履歴・予測品質・承認・操作許可を証明しません。小標本の閾値や予測値を推測しません。
+Monitor の取得には依存せず、保存予測がなければ `[]` を返します。
+`policy.decision_revisions` は全保存意思決定の ID と `source_revision` を保存順で返します。
+`revisions_since_source` は現在の `planning_revision` との差分で、0を含む非負の数値です。
+参照 revision が未設定なら差分は null、`missing_inputs` は `source_revision`、
+現在計画より先なら差分は null、`source_revision_ahead_of_planning` を返します。
+Monitor の取得を必要とせず、`source_revision` の設定も任意のままです。
+revision の差は判断の入力変更・鮮度・品質・承認・操作許可を証明しません。
+`policy.recurring_runs` は保存済みの定期作業を、保存順・ID・記入済み `next_run` を
+保持して返します。`due_at_scan` は時差・秒未満の精度を含む RFC3339 の絶対時刻を比較し、
+スキャンが `next_run` と同時刻以降なら true、前なら false を返します。時刻が欠落・
+不正、または小数秒が9桁を超える場合は、`next_run` / `monitor_scan_time` の不足情報名とともに不明になります。
+記録されたスキャンだけを使い、取得元・古さ・観測範囲の制約を保持します。
+現在時計や cadence の解釈は使いません。時刻の到来は未実行の証明や、
+スケジュール・Issue 作成・起動の許可にはなりません。
+各行の `configuration_missing_inputs` は、空または空白のみの `id`・`cadence`・`owner`・
+`miss_policy`・`idempotency_key` を時刻診断とは別に示します。非空の ID や設定キーが重複する場合は、
+一致する全行に `unique_recurring_id`・`unique_idempotency_key` を示します。比較は保存文字列の
+完全一致で、空白の除去は不足判定だけに使います。Monitor の有無には依存せず、cadence の解釈・
+owner の解決・policy の意味検証は行いません。空配列でも実行許可や重複防止の保証にはなりません。
 各 Issue の trace は、未紐付けや maintenance の項目も `observed_inbox_states` を示し、
 claim 競合・保留・失敗の説明に使えます。状態は観測順で重複を除き、inbox の行が無ければ、
 queued / active でも空配列を返します。この観測で目標との整合判定を変えたり、
@@ -734,6 +819,28 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 統合した Issue 一覧はキュー待ちだけの作業を除く下限集合で、全工程の WIP ではありません。
 取得不能な観測は不明のまま扱い、verification と全工程 WIP の不足も示します。
 この診断の読み取りで起動判断や WIP 上限の強制は行いません。
+保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
+`observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
+示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
+必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
+返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
+超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
+`policy.capacity.terminal_queue` は、urgent 順序付けとラベル除外後のホスト別 queue を、
+供給された順序・Issue の重複・元の `queued_at` を保持して返します。
+`age_seconds_at_scan` は queue に所属してから Monitor のスキャン時点までの秒数です。
+RFC3339 の時差を反映し、秒未満を切り捨てます。時刻の欠測・不正・未来は null と不足情報名で
+示し、小数秒が9桁を超える場合は黙って丸めず不明にします。Monitor または queue view が
+なければ null、供給された view に行がなければ [] です。取得元・スキャン時刻・観測範囲も
+併せて確認してください。古い・degraded な snapshot は当時の観測であり、[] はプロジェクト
+全体の queue が空である証明ではありません。旧 payload の queue リスト省略も [] となるため、
+ホスト内の空 queue も証明しません。所属滞留時間は実行待ち時間、SLA 違反、starvation、
+優先順位、preemption や起動許可の判定には使いません。
+idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
+pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
+現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。
+Monitor 不在なら null、観測済み idle window がなければ空リストです。取得元とスキャンの古さも
+併せて確認してください。キュー滞留時間・SLA・活動状態・解放の許可を証明せず、分類・slot・
+claim・起動も変更しません。
 活動観測は、Launching / Launched の Issue の最終活動から Monitor のスキャン時点までの
 経過秒を示します。与えられた時刻だけを使い、現在時刻は参照しません。時刻が欠ける・不正・
 スキャンより未来の場合は経過時間を不明とし、Monitor の取得不能は観測済みの空配列と区別して
@@ -749,6 +856,12 @@ claim 競合の観測は、別の claim に保留される Issue と、スキャ
 経過時間を求めたり、開始前の期限から残時間を求めたりはしません。Monitor が取得できなければ
 null、該当行がなければ空リストです。スキャンの取得元を保持し、理由や再開条件の自由文を省きます。
 キュー滞留時間・SLA・活動状態・全 WIP の判定や、待機・スロットの変更は行いません。
+再試行期限の観測は、`retry_not_before` を持つ inbox 行を、Issue の重複と状態も含めて保持し、
+スキャン時点の残秒を示します。タイムゾーンの差を反映し、端数秒は切り捨て、期限経過は 0 秒です。
+時刻の欠落・不正や `unknown` は残秒を不明とします。開始時刻がないため保留の継続時間も不明です。
+Monitor が取得できなければ null、該当行がなければ空リストを返します。取得元を保持し、不正な
+時刻文字列と理由の自由文を省きます。この観測で保留が有効であることや起動・解除の許可を証明せず、
+再試行ゲート・待機・スロット・優先順も変更しません。
 マイルストーン診断では、明示的な所属 Issue と、一意かつ空でないマイルストーン ID を
 参照するロードマップ項目の Issue について、Monitor inbox の観測状態と未観測番号も示します。
 これは参照の事実であり、目標との整合を証明するものではありません。保留・失敗・claim 競合を
@@ -864,6 +977,32 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+- `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
+
+gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+`gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
+報告できます。JSON operation `feedback.create` の宛先は常に
+`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
+即座に返るため、本来のプロジェクト作業を続けられます。送信には native
+dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
+不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
+Issue 番号と URL を返します。
+
+ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
+環境変数の代入値、URL を含むパス形式、Markdown のコード片を自動で伏せ、
+native preview と送信に同じ内容を使います。伏せ字以外の拒否文は切り詰めません。
+判定は保守的ですが任意の秘密をすべて検出する保証はなく、原文 receipt は公開しないでください。
+
+返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
+URL を確認できます。類似する既存 Issue があればコメントを追記します。
+`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
+では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+自動再送しません。
+
+報告は PM が分類するための証拠として扱います。確認できた不具合は、要件を整理した
+別の修正 Issue に紐付け、原文の報告から直接 agent を起動しません。機能追加や
+判断が曖昧な報告はリポジトリ owner の採用判断を待ち、判断と修正先を報告に記録します。
 
 SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
 `gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
@@ -1268,6 +1407,11 @@ hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが�
 読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は
 自動移行せず、次回の PM セッション起動時から分離されたディレクトリを使います。
 
+PM には coordination、agent 観測、検索、要望受付、計画の skill と、それらが使う
+検索・登録 helper を配布します。実装・検証・PR ワークフローの skill は実装 agent が
+使用します。managed asset の再生成時に、PM runtime に残った実装用 skill と
+`gwt-*` command alias を除去します。実装 agent の skill 一式は従来どおりです。
+
 project 固有の規約を明示的に渡すには、
 `~/.gwt/projects/<project-hash>/project-state/pm.json` の他のフィールドを保持したまま、
 `settings.project_policy_files` を設定してください。
@@ -1586,9 +1730,16 @@ workflow は `run_started_at` から `updated_at`、job は `started_at` から
 移行したフロントエンド domain は `web/ui-state-store.js` で immutable なデータを保持します。
 受信ハンドラはモデルを更新し、各面は selector を購読して確定した snapshot を描画します。
 取り外せる面では購読解除関数を保持し、DOM node と描画関数をモデルに含めません。
-通知は非フォーカスの窓でも動き、focus や animation frame を更新条件にしません。
+通知は非フォーカスの窓でも動き、focus を更新条件にしません。`subscribe` は
+terminal packet を含む各更新を同期で消費します。描画用の `subscribeFrame` は初回の
+選択値を即時描画し、以後は変更された selector をストアごとに 1 回の callback へ
+まとめ、最新 snapshot を描画します。animation frame が停止しても 100 ms timer で
+進み、購読解除や dispose 時は予約を取り消します。Usage のステータス表示・popover・
+設定・Workspace 表示がこの経路を使用します。
 共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
-Markdown 描画を選びます。移行対象と受け入れ条件は
+Markdown 描画を選びます。モデルへの取り込み時に `{ type: 'markdown', body, body_html }`
+をレコードの `content` に設定します。各面は確定した content を `renderUiContent` に渡し、
+Markdown の選択や描画関数の注入を行いません。移行対象と受け入れ条件は
 [SPEC-5016](https://github.com/akiojin/gwt/issues/5016) を参照してください。
 
 ### 重量級検証の容量制御

@@ -614,13 +614,13 @@ test("wizard surface instantiates wizardInteractionGuard with an onFlush callbac
 });
 
 test("launch_wizard_state applier defers via wizardInteractionGuard before mutating state", () => {
-  // The app.js case arm delegates into the surface applier, which must
+  // The app.js case arm commits shared state; its subscriber calls the applier, which must
   // contain a guard.defer({...}) check that returns early before
   // assigning `launchWizard = ...`.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;/,
-    "expected app.js launch_wizard_state case to delegate into the wizard surface",
+    /case\s+"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;/,
+    "expected app.js launch_wizard_state case to commit shared state",
   );
   assert.match(
     wizardSource,

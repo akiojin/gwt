@@ -326,10 +326,11 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     );
     let codex_commands = json_commands(&codex_hooks);
     assert!(
-        codex_commands
-            .iter()
-            .any(|command| command.contains(&cli_bin_text)),
-        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
+        !codex_commands.is_empty()
+            && codex_commands
+                .iter()
+                .all(|command| command.contains("gwtd") && !command.contains(&cli_bin_text)),
+        "shared-root codex hooks must use portable gwtd\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         codex_commands.len(),
         codex_commands
             .iter()
@@ -469,7 +470,17 @@ fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hoo
         .iter()
         .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
         .collect::<Vec<_>>();
-    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, None);
+    // Shared-root Codex hooks use portable gwtd; other providers retain the pin.
+    let portable_hook_bin = stable_hook_bin.parent().unwrap().join("gwtd");
+    std::os::unix::fs::symlink(&stable_hook_bin, &portable_hook_bin)
+        .expect("expose stable hook bin as portable gwtd");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let audit_path = std::env::join_paths(
+        std::iter::once(portable_hook_bin.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose audit PATH");
+    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, Some(&audit_path));
     assert!(
         output.status.success(),
         "browser-check audit failed\nstdout:\n{}\nstderr:\n{}",
@@ -881,6 +892,82 @@ fn materialize_into_pm_worktree(
     worktree
 }
 
+fn gwt_skill_names(root: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(root)
+        .expect("read skill root")
+        .map(|entry| entry.expect("skill entry"))
+        .filter(|entry| entry.path().join("SKILL.md").is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("gwt-"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// SPEC #3431 P1/P2: inspect the files the PM actually receives, including
+/// refresh of a runtime that previously carried implementation entrypoints.
+#[test]
+fn pm_runtime_receives_only_role_skills_and_their_command_aliases() {
+    let expected = [
+        "gwt-agent",
+        "gwt-coordination",
+        "gwt-discussion",
+        "gwt-feedback",
+        "gwt-issue-search",
+        "gwt-plan-spec",
+        "gwt-pm",
+        "gwt-project-search",
+        "gwt-register-issue",
+        "gwt-register-spec",
+        "gwt-search",
+        "gwt-spec-search",
+    ];
+    for (agent, provider) in [
+        (AgentId::ClaudeCode, ".claude"),
+        (AgentId::Codex, ".codex"),
+        (AgentId::GrokBuild, ".claude"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |worktree| {
+            let runtime = worktree.parent().unwrap().join("runtime");
+            for relative in [
+                format!("{provider}/skills/gwt-execute/SKILL.md"),
+                format!("{provider}/skills/user-skill/SKILL.md"),
+                ".claude/commands/gwt-execute.md".to_string(),
+            ] {
+                let path = runtime.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "preserved user content or stale entrypoint").unwrap();
+            }
+        });
+        let runtime = worktree.parent().unwrap().join("runtime");
+        let skills = runtime.join(provider).join("skills");
+        assert_eq!(gwt_skill_names(&skills), expected, "{agent:?}");
+        assert_eq!(
+            std::fs::read_to_string(skills.join("user-skill/SKILL.md")).unwrap(),
+            "preserved user content or stale entrypoint"
+        );
+        for name in expected {
+            read_skill_contract(&skills.join(name).join("SKILL.md"));
+        }
+        let planning =
+            std::fs::read_to_string(skills.join("gwt-plan-spec/references/task-decomposition.md"))
+                .unwrap();
+        assert!(!planning.contains("`gwt-verify`'s `references/test-matrix.md`"));
+        if provider == ".claude" {
+            let commands = runtime.join(".claude/commands");
+            assert!(!commands.join("gwt-execute.md").exists());
+            assert!(commands.join("gwt-plan-spec.md").is_file());
+            for entry in std::fs::read_dir(commands).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let name = path.file_stem().unwrap().to_str().unwrap();
+                assert!(!name.starts_with("gwt-") || expected.contains(&name));
+            }
+        }
+    }
+}
+
 /// SPEC-3431 FR-001 / T-052 regression: the `$gwt-pm` bootstrap prompt only
 /// resolves if the gwt-pm skill survives the launch's own asset refresh.
 ///
@@ -1117,6 +1204,32 @@ fn non_pm_worktree_never_receives_gwt_pm_guidance() {
 
     assert!(!dir.path().join(".claude/skills/gwt-pm").exists());
     assert!(!dir.path().join(".codex/skills/gwt-pm").exists());
+    for provider in [".claude", ".codex"] {
+        assert_eq!(
+            gwt_skill_names(&dir.path().join(provider).join("skills")),
+            [
+                "gwt-agent",
+                "gwt-arch-review",
+                "gwt-build-spec",
+                "gwt-coordination",
+                "gwt-discussion",
+                "gwt-execute",
+                "gwt-feedback",
+                "gwt-fix-issue",
+                "gwt-issue-search",
+                "gwt-manage-pr",
+                "gwt-memory-search",
+                "gwt-plan-spec",
+                "gwt-project-index",
+                "gwt-project-search",
+                "gwt-register-issue",
+                "gwt-register-spec",
+                "gwt-search",
+                "gwt-spec-search",
+                "gwt-verify",
+            ]
+        );
+    }
 }
 
 /// #4057 regression: two materializations running at the same time on

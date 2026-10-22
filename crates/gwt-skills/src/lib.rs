@@ -1578,6 +1578,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_4157_execute_preflight_checks_remote_work_before_implementation() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let guidance = read_asset_contract(
+                materialized
+                    .path()
+                    .join(format!("{provider}/skills/gwt-execute/SKILL.md")),
+            )
+            .unwrap();
+            for required in [
+                "git fetch origin",
+                "git log HEAD..origin/<head>",
+                "`issue.linked_prs`",
+                "Do not infer missing implementation from `origin/develop..HEAD` alone",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{provider} missing: {required}"
+                );
+            }
+        }
+    }
+
     /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
     /// the same bootstrap order as the canonical coordination guidance.
     #[test]

@@ -321,6 +321,11 @@ pub enum IssueMonitorEffectPayload {
         pr_number: u64,
         reviewed_sha: String,
     },
+    /// A one-shot failed CI rerun; its submission reservation survives epochs.
+    RerunFailedCi {
+        issue_number: u64,
+        target: crate::issue_monitor_ci::CiRerunTarget,
+    },
     DisarmAutoMerge {
         issue_number: u64,
         pr_number: u64,
@@ -472,6 +477,7 @@ fn effect_matches_key(
 
 fn mark_effect_attempting(
     pending_effects: &mut [PendingIssueMonitorEffect],
+    consumed_ci_reruns: &mut BTreeSet<String>,
     key: &IssueMonitorEffectAttemptKey,
 ) -> bool {
     let Some(effect) = pending_effects
@@ -482,6 +488,11 @@ fn mark_effect_attempting(
     };
     if effect.state != IssueMonitorEffectState::Prepared {
         return false;
+    }
+    if let IssueMonitorEffectPayload::RerunFailedCi { target, .. } = &effect.payload {
+        if !consumed_ci_reruns.insert(target.effect_id()) {
+            return false;
+        }
     }
     effect.state = IssueMonitorEffectState::Attempting;
     true
@@ -598,6 +609,9 @@ fn revoke_uncommitted_effects_for_closed_issue(
             } | IssueMonitorEffectPayload::SettleMergedIssue {
                 issue_number: pending_issue,
                 ..
+            } | IssueMonitorEffectPayload::RerunFailedCi {
+                issue_number: pending_issue,
+                ..
             } if pending_issue == issue_number
         )
     });
@@ -626,7 +640,8 @@ fn revoke_uncommitted_effects_for_closed_issue(
             | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
-            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => {}
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+            | IssueMonitorEffectPayload::RerunFailedCi { .. } => {}
         }
     }
 }
@@ -739,6 +754,7 @@ fn advance_effect_authority(
                     | IssueMonitorEffectPayload::RenewClaim { .. }
                     | IssueMonitorEffectPayload::ArmAutoMerge { .. }
                     | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+                    | IssueMonitorEffectPayload::RerunFailedCi { .. }
             )
     });
 
@@ -800,7 +816,8 @@ fn advance_effect_authority(
             | IssueMonitorEffectPayload::RemoveQueueLabel { .. }
             | IssueMonitorEffectPayload::RenewClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. }
-            | IssueMonitorEffectPayload::SettleMergedIssue { .. } => continue,
+            | IssueMonitorEffectPayload::SettleMergedIssue { .. }
+            | IssueMonitorEffectPayload::RerunFailedCi { .. } => continue,
         };
         if !already_compensated {
             next_effects.push(PendingIssueMonitorEffect::prepared(
@@ -950,6 +967,21 @@ pub struct IssueMonitorMaxActiveChange {
     pub max_active_agents_override: Option<usize>,
 }
 
+/// Issue #4157: an open PR whose current lifecycle needs no implementation launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorOpenPrHold {
+    pub pr_number: u64,
+    pub lifecycle: String,
+}
+
+/// A successful per-Issue observation, including an explicit release of a hold.
+/// Keeping the release revision prevents stale processes from restoring it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorOpenPrObservation {
+    pub observed_at: String,
+    pub hold: Option<IssueMonitorOpenPrHold>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -1019,6 +1051,9 @@ pub struct IssueMonitorPrefs {
     /// Last locally observed account per provider; timestamps order cross-process rebases.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
+    /// Issue #4157: fresh PR facts and release revisions, joined by observation time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub open_pr_observations: BTreeMap<u64, IssueMonitorOpenPrObservation>,
     /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_drain: Option<IssueMonitorUpdateDrain>,
@@ -1166,6 +1201,9 @@ pub struct IssueMonitorPrefs {
     /// shape of existing prefs files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_effects: Vec<PendingIssueMonitorEffect>,
+    /// One-shot CI submission reservations, never cleared by a new generation.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub consumed_ci_reruns: BTreeSet<String>,
     /// Receipt for the most recently admitted daemon control. The control ID
     /// is generated per admission and reused only by that control's retry, so
     /// one slot is sufficient while the worker enforces a FIFO retry barrier.
@@ -1263,6 +1301,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
+            open_pr_observations: BTreeMap::new(),
             update_drain: None,
             candidate_pool_degradation: None,
             generation_reclaim: None,
@@ -1294,6 +1333,7 @@ impl Default for IssueMonitorPrefs {
             autonomous_records: Vec::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            consumed_ci_reruns: BTreeSet::new(),
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
             last_scan_at: None,
@@ -1425,7 +1465,7 @@ impl IssueMonitorPrefs {
 
     /// Commit the execution fence for an exact Prepared delivery tuple.
     pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
-        mark_effect_attempting(&mut self.pending_effects, key)
+        mark_effect_attempting(&mut self.pending_effects, &mut self.consumed_ci_reruns, key)
     }
 
     /// Remove an Attempting journal entry only when the completed delivery
@@ -2416,6 +2456,9 @@ impl IssueMonitorReadiness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorIssue {
     pub number: u64,
+    /// Original Issue creator supplied by GitHub, absent in legacy snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_login: Option<String>,
     pub title: String,
     pub labels: Vec<String>,
     pub state: IssueMonitorIssueState,
@@ -4616,8 +4659,19 @@ pub struct AutonomousIssueSummary {
     pub review_dispatch_hold: Option<AutonomousReviewDispatchHold>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum IssueMonitorSourceRepository {
+    #[default]
+    Unresolved,
+    UpstreamGwt,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    /// Runtime identity of the repository actually read; never a saved approval.
+    #[serde(skip)]
+    source_repository: IssueMonitorSourceRepository,
     #[serde(default, skip)]
     queue_label_observation: Option<(IssueMonitorCandidateSource, BTreeSet<u64>)>,
     #[serde(default)]
@@ -4696,6 +4750,8 @@ pub struct IssueMonitorState {
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    open_pr_observations: BTreeMap<u64, IssueMonitorOpenPrObservation>,
     /// Issue #4037 AC-1: the update drain, held next to the provider holds it
     /// shares its admission gate with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4773,6 +4829,8 @@ pub struct IssueMonitorState {
     effect_authority_epoch: u64,
     #[serde(default)]
     pending_effects: Vec<PendingIssueMonitorEffect>,
+    #[serde(default)]
+    consumed_ci_reruns: BTreeSet<String>,
     #[serde(default)]
     last_control_receipt: Option<IssueMonitorControlReceipt>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
@@ -5003,7 +5061,11 @@ const ISSUE_MONITOR_NOT_READY_REASON: &str = "plan/tasks の整備が必要（gw
 
 fn issue_monitor_candidate_exclusion(
     issue: &IssueMonitorIssue,
+    source_repository: IssueMonitorSourceRepository,
 ) -> Option<(MonitorInboxState, String)> {
+    if let Some(exclusion) = issue_monitor_source_exclusion(issue, source_repository) {
+        return Some(exclusion);
+    }
     if let Some(label) = issue
         .labels
         .iter()
@@ -5024,6 +5086,53 @@ fn issue_monitor_candidate_exclusion(
             MonitorInboxState::NotReady,
             ISSUE_MONITOR_NOT_READY_REASON.to_string(),
         ));
+    }
+    None
+}
+
+fn issue_monitor_source_exclusion(
+    issue: &IssueMonitorIssue,
+    source_repository: IssueMonitorSourceRepository,
+) -> Option<(MonitorInboxState, String)> {
+    if source_repository != IssueMonitorSourceRepository::Other
+        && (issue
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-feedback"))
+            || issue
+                .body
+                .as_deref()
+                .is_some_and(|body| body.to_ascii_lowercase().contains("<!-- gwt-feedback:")))
+    {
+        return Some((
+            MonitorInboxState::HoldExcluded,
+            "untrusted feedback; PM triage required; use a separate curated execution owner"
+                .to_string(),
+        ));
+    }
+    if source_repository == IssueMonitorSourceRepository::Unresolved {
+        return Some((
+            MonitorInboxState::NotReady,
+            "source repository identity unavailable; refresh required".to_string(),
+        ));
+    }
+    if source_repository == IssueMonitorSourceRepository::UpstreamGwt {
+        let Some(author) = issue
+            .author_login
+            .as_deref()
+            .filter(|author| !author.is_empty())
+        else {
+            return Some((
+                MonitorInboxState::NotReady,
+                "original author unavailable; refresh required".to_string(),
+            ));
+        };
+        if !["akiojin", "github-actions[bot]"]
+            .iter()
+            .any(|trusted| author.eq_ignore_ascii_case(trusted))
+        {
+            return Some((MonitorInboxState::HoldExcluded, "untrusted external Issue; PM triage required; use a separate curated execution owner".to_string()));
+        }
     }
     None
 }
@@ -7224,8 +7333,27 @@ impl IssueMonitorState {
             && crate::process::host_process_start_time(pid) == Some(started_at)
     }
 
+    /// Preserve already resolved project identity across a prefs-only reload.
+    /// Repository provenance is deliberately never restored from disk prefs.
+    pub fn inherit_source_repository(&mut self, source: &Self) {
+        self.source_repository = source.source_repository;
+    }
+
+    pub fn set_source_repository(&mut self, repository: Option<(&str, &str)>) {
+        self.source_repository = match repository {
+            Some((owner, repo))
+                if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") =>
+            {
+                IssueMonitorSourceRepository::UpstreamGwt
+            }
+            Some(_) => IssueMonitorSourceRepository::Other,
+            None => IssueMonitorSourceRepository::Unresolved,
+        };
+    }
+
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
+            source_repository: IssueMonitorSourceRepository::Unresolved,
             queue_label_observation: None,
             config,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -7263,6 +7391,7 @@ impl IssueMonitorState {
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
             provider_quota_accounts: BTreeMap::new(),
+            open_pr_observations: BTreeMap::new(),
             update_drain: None,
             candidate_pool_degradation: None,
             generation_reclaim: None,
@@ -7289,6 +7418,7 @@ impl IssueMonitorState {
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            consumed_ci_reruns: BTreeSet::new(),
             last_control_receipt: None,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
@@ -7351,6 +7481,7 @@ impl IssueMonitorState {
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
         state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
+        state.open_pr_observations = prefs.open_pr_observations;
         state.enforce_provider_quota_hold_releases();
         state.update_drain = prefs.update_drain.clone();
         state.candidate_pool_degradation = prefs.candidate_pool_degradation.clone();
@@ -7467,6 +7598,7 @@ impl IssueMonitorState {
         }
         state.effect_authority_epoch = prefs.effect_authority_epoch;
         state.pending_effects = prefs.pending_effects;
+        state.consumed_ci_reruns = prefs.consumed_ci_reruns;
         state.last_control_receipt = prefs.last_control_receipt;
         state.autonomous_tuning = prefs.autonomous_tuning;
         for record in prefs.autonomous_records {
@@ -7490,6 +7622,7 @@ impl IssueMonitorState {
         state.apply_closed_issue_facts();
         state.enforce_provider_quota_account_bindings();
         state.enforce_provider_quota_hold_releases();
+        state.enforce_open_pr_holds();
         state
     }
 
@@ -7521,6 +7654,7 @@ impl IssueMonitorState {
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
             provider_quota_accounts: self.provider_quota_accounts.clone(),
+            open_pr_observations: self.open_pr_observations.clone(),
             update_drain: self.update_drain.clone(),
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
@@ -7589,6 +7723,7 @@ impl IssueMonitorState {
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
+            consumed_ci_reruns: self.consumed_ci_reruns.clone(),
             last_control_receipt: self.last_control_receipt.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
@@ -8020,6 +8155,7 @@ impl IssueMonitorState {
                         IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
                         | IssueMonitorEffectPayload::RenewClaim { issue_number, .. }
                         | IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+                        | IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. }
                         | IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
                             Some(*issue_number)
                         }
@@ -9919,12 +10055,41 @@ impl IssueMonitorState {
         if self.config.enabled == enabled {
             return Some(self.effect_authority_epoch);
         }
+        let pending_claims = self.pending_claim_issue_numbers();
         let next_epoch =
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
 
         self.config.enabled = enabled;
         self.launch_auth_required = false;
         if !enabled {
+            // OFF cancels pre-spawn work, including candidates whose eligibility
+            // was recorded before a claim. Preserve work already handed over.
+            let cancelled = pending_claims
+                .into_iter()
+                .chain(self.stored_local_terminal_queue_numbers())
+                .chain(self.queue.iter().copied())
+                .chain(
+                    self.pending_launches
+                        .iter()
+                        .map(|launch| launch.issue_number),
+                )
+                .chain(
+                    self.pending_launch_deliveries
+                        .iter()
+                        .map(|delivery| delivery.issue_number),
+                )
+                .filter(|number| {
+                    !self.launched_windows.contains_key(number)
+                        && !self.pending_launch_deliveries.iter().any(|delivery| {
+                            delivery.issue_number == *number
+                                && (delivery.materializer_id.is_some()
+                                    || delivery.materialized_window_id.is_some())
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            for number in cancelled {
+                self.clear_provisional_implementation(number);
+            }
             for delivery in &self.pending_launch_deliveries {
                 let already_pending = self.pending_effects.iter().any(|effect| {
                     matches!(
@@ -10497,13 +10662,13 @@ impl IssueMonitorState {
         self.max_active_agents_mode = disk.max_active_agents_mode;
         self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
-        self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
         self.terminal_queues = disk.terminal_queues.clone();
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
         self.terminal_queue_auto_refill_limit = disk.terminal_queue_auto_refill_limit;
+        self.set_allowed_labels(disk.allowed_labels.clone());
         self.apply_terminal_queue_retirements();
         for entry in urgent_proposals {
             self.admit_observed_urgent(entry.number, &entry.queued_at);
@@ -10538,6 +10703,8 @@ impl IssueMonitorState {
         }
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
+        self.consumed_ci_reruns
+            .extend(disk.consumed_ci_reruns.iter().cloned());
         // Claim mutations commit after rebase. An observer must retain the
         // exact durable identity rather than erase it with its older snapshot.
         self.claim_identities = disk
@@ -11074,6 +11241,9 @@ impl IssueMonitorState {
         issue: IssueMonitorIssue,
         record: &crate::cli::permission_readiness::PermissionReadinessRecord,
     ) {
+        if self.is_autonomous_in_flight(issue.number) {
+            self.set_autonomous_phase(issue.number, AutonomousPhase::Idle);
+        }
         self.queue.retain(|queued| *queued != issue.number);
         self.upsert_inbox(IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
@@ -11151,6 +11321,75 @@ impl IssueMonitorState {
         IssueMonitorProviderQuotaHoldClearOutcome::Cleared {
             released_reset_at,
             released_issues,
+        }
+    }
+
+    /// Apply only successful PR observations. A missing key is unknown, while
+    /// an explicit `None` clears the hold after close, merge, or a repairable failure.
+    pub fn reconcile_open_pr_holds(
+        &mut self,
+        observations: &BTreeMap<u64, Option<IssueMonitorOpenPrHold>>,
+        observed_at: &str,
+    ) {
+        for (issue_number, hold) in observations {
+            self.merge_open_pr_observation(
+                *issue_number,
+                IssueMonitorOpenPrObservation {
+                    observed_at: observed_at.to_string(),
+                    hold: hold.clone(),
+                },
+            );
+        }
+        self.enforce_open_pr_holds();
+    }
+
+    fn merge_open_pr_observation(
+        &mut self,
+        issue_number: u64,
+        observation: IssueMonitorOpenPrObservation,
+    ) {
+        let Some(incoming_at) = parse_rfc3339_utc(&observation.observed_at) else {
+            return;
+        };
+        if self
+            .open_pr_observations
+            .get(&issue_number)
+            .is_some_and(|current| {
+                parse_rfc3339_utc(&current.observed_at).is_some_and(|current_at| {
+                    incoming_at < current_at
+                        || (incoming_at == current_at && observation.hold.is_some())
+                })
+            })
+        {
+            return;
+        }
+        self.open_pr_observations.insert(issue_number, observation);
+    }
+
+    pub fn open_pr_launch_held(&self, issue_number: u64) -> bool {
+        self.open_pr_observations
+            .get(&issue_number)
+            .is_some_and(|observation| observation.hold.is_some())
+    }
+
+    fn enforce_open_pr_holds(&mut self) {
+        let unlaunched = self
+            .open_pr_observations
+            .iter()
+            .filter_map(|(issue_number, observation)| {
+                (observation.hold.is_some()
+                    && !self.active_launches.contains(issue_number)
+                    && !self.has_observed_monitor_runtime(*issue_number))
+                .then_some(*issue_number)
+            })
+            .collect::<Vec<_>>();
+        for issue_number in unlaunched {
+            self.clear_provisional_implementation(issue_number);
+            revoke_uncommitted_claims_for_issue(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                issue_number,
+            );
         }
     }
 
@@ -11248,6 +11487,9 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        for (issue_number, observation) in &disk.open_pr_observations {
+            self.merge_open_pr_observation(*issue_number, observation.clone());
+        }
         for observation in disk.monitor_runtime_counts.values() {
             self.record_monitor_runtime_windows(
                 observation.host_pid,
@@ -11256,6 +11498,35 @@ impl IssueMonitorState {
                 observation.windows.clone(),
                 observation.observed_at.clone(),
             );
+        }
+        // A newer control can revoke eligibility before this scan commits.
+        // Its durable Idle also wins if OFF/ON happened between two scans.
+        if disk.effect_authority_epoch > self.effect_authority_epoch {
+            let cancelled = disk
+                .autonomous_records
+                .iter()
+                .filter(|record| record.phase == AutonomousPhase::Idle)
+                .map(|record| record.issue_number)
+                .filter(|number| {
+                    !self.launched_windows.contains_key(number)
+                        && !disk
+                            .launched_issues
+                            .iter()
+                            .any(|launch| launch.issue_number == *number)
+                        && !self
+                            .pending_launch_deliveries
+                            .iter()
+                            .chain(&disk.pending_launch_deliveries)
+                            .any(|delivery| {
+                                delivery.issue_number == *number
+                                    && (delivery.materializer_id.is_some()
+                                        || delivery.materialized_window_id.is_some())
+                            })
+                })
+                .collect::<Vec<_>>();
+            for number in cancelled {
+                self.clear_provisional_implementation(number);
+            }
         }
         // An exact failover committed elsewhere revokes the old launch. An
         // epoch alone is global; require the issue's explicit fresh-session
@@ -11309,6 +11580,17 @@ impl IssueMonitorState {
             AutonomousRecordRebasePolicy::DiskAuthoritative => {
                 let protected_local_records = rejected_terminal_companions
                     .iter()
+                    // A local continuation can be newer than this GUI commit's
+                    // disk snapshot. Its release, not that old record, owns the
+                    // phase until disk has observed the release watermark.
+                    .chain(
+                        self.released_failures
+                            .iter()
+                            .filter_map(|(issue, release)| {
+                                (release.release_version > disk.failure_release_version)
+                                    .then_some(issue)
+                            }),
+                    )
                     .filter_map(|issue_number| {
                         if self.merged_issues.contains(issue_number) {
                             return None;
@@ -11464,6 +11746,7 @@ impl IssueMonitorState {
                 self.record_candidate(issue.clone());
             }
         }
+        self.enforce_open_pr_holds();
         self.reconcile_terminal_queue();
     }
 
@@ -13153,11 +13436,7 @@ impl IssueMonitorState {
                         exclusion_reason: if item.state == MonitorInboxState::Queued {
                             let mut reasons =
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
-                            reasons.extend(
-                                self.claim_candidate_exclusions(item.issue.number)
-                                    .into_iter()
-                                    .map(str::to_string),
-                            );
+                            reasons.extend(self.claim_candidate_exclusions(item.issue.number));
                             (!reasons.is_empty()).then(|| reasons.join("; "))
                         } else {
                             item.exclusion_reason.clone()
@@ -13818,6 +14097,10 @@ impl IssueMonitorState {
         &self.pending_effects
     }
 
+    pub fn ci_rerun_consumed(&self, effect_id: &str) -> bool {
+        self.consumed_ci_reruns.contains(effect_id)
+    }
+
     pub fn claim_heartbeat_interval_secs(&self) -> u64 {
         self.config.claim_heartbeat_interval_secs()
     }
@@ -13922,11 +14205,10 @@ impl IssueMonitorState {
             ))
     }
 
-    pub fn claim_renewal_attempt_is_ready(
-        &self,
-        effect: &PendingIssueMonitorEffect,
-        now: &str,
-    ) -> bool {
+    pub fn effect_attempt_is_ready(&self, effect: &PendingIssueMonitorEffect, now: &str) -> bool {
+        if self.claim_effect_is_blocked_by_admission(&effect.payload) {
+            return false;
+        }
         let IssueMonitorEffectPayload::RenewClaim {
             issue_number,
             claim_id,
@@ -14183,14 +14465,13 @@ impl IssueMonitorState {
         }
     }
 
-    fn claim_effect_is_blocked_by_provider_hold(
-        &self,
-        payload: &IssueMonitorEffectPayload,
-    ) -> bool {
+    fn claim_effect_is_blocked_by_admission(&self, payload: &IssueMonitorEffectPayload) -> bool {
         matches!(
             payload,
-            IssueMonitorEffectPayload::AcquireClaim { heartbeat_at, .. }
+            IssueMonitorEffectPayload::AcquireClaim { issue_number, heartbeat_at, .. }
                 if self.launch_admission_is_held_at(heartbeat_at)
+                    || self.open_pr_launch_held(*issue_number)
+                    || self.launch_source_exclusion(*issue_number).is_some()
         )
     }
 
@@ -14200,12 +14481,13 @@ impl IssueMonitorState {
         if effect.effect_id.is_empty()
             || effect.state != IssueMonitorEffectState::Prepared
             || effect.authority_epoch != self.effect_authority_epoch
-            || self.claim_effect_is_blocked_by_provider_hold(&effect.payload)
+            || self.claim_effect_is_blocked_by_admission(&effect.payload)
             || (matches!(
                 &effect.payload,
                 IssueMonitorEffectPayload::RenewClaim { .. }
             ) && !self.claim_renewal_is_current(&effect.payload))
             || matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
+            || matches!(&effect.payload, IssueMonitorEffectPayload::RerunFailedCi { target, .. } if self.ci_rerun_consumed(&target.effect_id()))
             || self
                 .pending_effects
                 .iter()
@@ -14226,10 +14508,11 @@ impl IssueMonitorState {
     ) -> Option<IssueMonitorEffectAttemptKey> {
         let effect_id = effect_id.into();
         if effect_id.is_empty()
-            || self.claim_effect_is_blocked_by_provider_hold(&payload)
+            || self.claim_effect_is_blocked_by_admission(&payload)
             || (matches!(&payload, IssueMonitorEffectPayload::RenewClaim { .. })
                 && !self.claim_renewal_is_current(&payload))
             || matches!(&payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if !self.terminal_queue_contains(*issue_number))
+            || matches!(&payload, IssueMonitorEffectPayload::RerunFailedCi { target, .. } if self.ci_rerun_consumed(&target.effect_id()))
             || self
                 .pending_effects
                 .iter()
@@ -14245,7 +14528,15 @@ impl IssueMonitorState {
     }
 
     pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
-        mark_effect_attempting(&mut self.pending_effects, key)
+        if self
+            .pending_effects
+            .iter()
+            .find(|effect| effect_matches_key(effect, key))
+            .is_some_and(|effect| self.claim_effect_is_blocked_by_admission(&effect.payload))
+        {
+            return false;
+        }
+        mark_effect_attempting(&mut self.pending_effects, &mut self.consumed_ci_reruns, key)
     }
 
     pub fn complete_pending_effect(
@@ -14271,6 +14562,7 @@ impl IssueMonitorState {
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
         let previous_mode = self.autonomous_mode;
+        let pending_claims = self.pending_claim_issue_numbers();
         let epoch = advance_autonomous_effect_authority(
             &mut self.autonomous_mode,
             &mut self.effect_authority_epoch,
@@ -14279,6 +14571,18 @@ impl IssueMonitorState {
         )?;
         if previous_mode != enabled {
             self.capture_legacy_update_drain_origin(previous_mode);
+            // The authority change cancels these acquisitions, not queued work
+            // or deliveries already handed to the materializer.
+            for number in pending_claims {
+                if !self.active_launches.contains(&number)
+                    && !self
+                        .pending_launch_deliveries
+                        .iter()
+                        .any(|delivery| delivery.issue_number == number)
+                {
+                    self.clear_provisional_implementation(number);
+                }
+            }
         }
         Some(epoch)
     }
@@ -14400,11 +14704,24 @@ impl IssueMonitorState {
         decision
     }
 
+    /// Eligibility precedes pane creation. Clear only that provisional phase;
+    /// resumed reviews retain a SHA, and physical implementations keep running.
+    fn clear_provisional_implementation(&mut self, issue_number: u64) {
+        if self.autonomous_record(issue_number).is_some_and(|record| {
+            record.phase == AutonomousPhase::Implementing && record.reviewed_sha.is_none()
+        }) && !self.has_monitor_pane_for_issue(issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+        {
+            self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        }
+    }
+
     /// Issue #3944 AC-4: project a readiness failure as `not_ready` with its
     /// reason — the same row state a gwt-spec Issue without plan/tasks gets —
     /// and drop the row from the launch queue. The next scan re-evaluates it,
     /// so fixing the Issue body or the repository settings is the whole remedy.
     fn mark_autonomous_not_ready(&mut self, issue_number: u64, reason: String) {
+        self.clear_provisional_implementation(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         revoke_uncommitted_claims_for_issue(
             &mut self.pending_effects,
@@ -14648,7 +14965,7 @@ impl IssueMonitorState {
     /// Check the current cap at the final boundary before adding a pane.
     /// Only a reservation that has not become a pane supplies its own slot.
     pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
-        if self.update_drain().is_some() {
+        if self.launch_source_exclusion(issue_number).is_some() || self.update_drain().is_some() {
             return false;
         }
         if review_dispatch
@@ -14767,6 +15084,9 @@ impl IssueMonitorState {
     /// Issue #4117 AC-8: an Issue the operator removed from this host's queue
     /// or stopped gets no review dispatch, whatever its autonomous record says.
     fn review_dispatch_exclusion_reason(&self, issue_number: u64) -> Option<String> {
+        if let Some(reason) = self.launch_source_exclusion(issue_number) {
+            return Some(reason);
+        }
         if let Some(reason) = self.stop_only_reason(issue_number) {
             return Some(format!(
                 "Issue #{issue_number} was stopped (issue.monitor.stop: {reason}); no review is dispatched"
@@ -15581,7 +15901,7 @@ impl IssueMonitorState {
             self.label_excluded_issues.remove(&issue_number);
         }
         let mut existing = self.inbox_item(issue_number).cloned();
-        let exclusion = issue_monitor_candidate_exclusion(&issue)
+        let exclusion = issue_monitor_candidate_exclusion(&issue, self.source_repository)
             .or_else(|| {
                 (!allowed).then(|| {
                     (
@@ -15629,6 +15949,11 @@ impl IssueMonitorState {
             );
             if criteria.machine_checkable && !criteria.unchecked.is_empty() {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(
+                    issue_number,
+                    "settled delivery; remaining acceptance criteria",
+                    &format_rfc3339_utc(chrono::Utc::now()),
+                );
                 existing = self.inbox_item(issue_number).cloned();
             }
         }
@@ -15763,6 +16088,7 @@ impl IssueMonitorState {
             state,
             MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
         ) {
+            self.clear_provisional_implementation(issue_number);
             revoke_uncommitted_claims_for_issue(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -16068,6 +16394,19 @@ impl IssueMonitorState {
     fn reconcile_terminal_queue(&mut self) {
         let members = self.local_terminal_queue_numbers();
         self.queue.retain(|number| members.contains(number));
+        // Missing membership alone may be an unobserved running Issue.
+        // Only explicit removals authorize clearing a provisional phase.
+        let unqueued = self
+            .terminal_queue_exclusions
+            .get(&crate::process::current_hostname())
+            .into_iter()
+            .flatten()
+            .filter(|number| !members.contains(number) && !self.active_launches.contains(number))
+            .copied()
+            .collect::<Vec<_>>();
+        for number in unqueued {
+            self.clear_provisional_implementation(number);
+        }
         let removed = self
             .inbox
             .iter()
@@ -16375,10 +16714,11 @@ impl IssueMonitorState {
             return None;
         }
         self.reconcile_terminal_queue();
-        let position = self
-            .queue
-            .iter()
-            .position(|issue| !self.has_observed_monitor_runtime(*issue))?;
+        let position = self.queue.iter().position(|issue| {
+            !self.has_observed_monitor_runtime(*issue)
+                && !self.open_pr_launch_held(*issue)
+                && self.launch_source_exclusion(*issue).is_none()
+        })?;
         let issue_number = self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
@@ -16480,35 +16820,74 @@ impl IssueMonitorState {
 
     /// Shared by the claim planner and its row diagnostics. Delivery
     /// annotations deliberately do not appear here: they are not holds.
-    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<&'static str> {
+    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if let Some(reason) = self.launch_source_exclusion(issue_number) {
+            reasons.push(reason);
+        }
         if !self.terminal_queue_contains(issue_number) {
-            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push");
+            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push".to_string());
         }
         if !self.queue.contains(&issue_number) {
-            reasons.push("not_in_launch_queue: use issue.monitor.launch_now");
+            reasons.push("not_in_launch_queue: use issue.monitor.launch_now".to_string());
         }
         if self.has_observed_monitor_runtime(issue_number) {
-            reasons.push("runtime_already_present");
+            reasons.push("runtime_already_present".to_string());
+        }
+        if let Some(hold) = self
+            .open_pr_observations
+            .get(&issue_number)
+            .and_then(|observation| observation.hold.as_ref())
+        {
+            reasons.push(format!(
+                "open_pr_pending_delivery: PR #{} ({})",
+                hold.pr_number, hold.lifecycle
+            ));
         }
         for effect in &self.pending_effects {
             match effect.payload {
                 IssueMonitorEffectPayload::AcquireClaim {
                     issue_number: owner,
                     ..
-                } if owner == issue_number && !reasons.contains(&"claim_pending") => {
-                    reasons.push("claim_pending");
+                } if owner == issue_number
+                    && !reasons.iter().any(|reason| reason == "claim_pending") =>
+                {
+                    reasons.push("claim_pending".to_string());
                 }
                 IssueMonitorEffectPayload::SettleMergedIssue {
                     issue_number: owner,
                     ..
-                } if owner == issue_number && !reasons.contains(&"merged_settlement_pending") => {
-                    reasons.push("merged_settlement_pending");
+                } if owner == issue_number
+                    && !reasons
+                        .iter()
+                        .any(|reason| reason == "merged_settlement_pending") =>
+                {
+                    reasons.push("merged_settlement_pending".to_string());
                 }
                 _ => {}
             }
         }
         reasons
+    }
+
+    /// Explain why new work lacks trusted source evidence. Existing-pane ACKs
+    /// are checked separately and do not authorize a new materializer or pane.
+    pub fn launch_source_exclusion(&self, issue_number: u64) -> Option<String> {
+        match self.inbox_item(issue_number) {
+            Some(item) => issue_monitor_source_exclusion(&item.issue, self.source_repository)
+                .map(|(_, reason)| reason),
+            None if self.source_repository == IssueMonitorSourceRepository::Other => None,
+            None => Some("Issue provenance unavailable; refresh required".to_string()),
+        }
+    }
+
+    /// Use the same source/provenance gate before emitting queue-admission
+    /// markers outside the durable monitor loop.
+    pub fn source_exclusion(
+        &self,
+        issue: &IssueMonitorIssue,
+    ) -> Option<(MonitorInboxState, String)> {
+        issue_monitor_source_exclusion(issue, self.source_repository)
     }
 
     /// The claim slots still open, paired with the ordered queue entries a
@@ -16617,6 +16996,12 @@ impl IssueMonitorState {
                 }
                 _ => {}
             }
+            // Match synchronous admission before creating a durable claim:
+            // an unattended-incompatible profile must leave no effect or slot.
+            if let Some(record) = self.permission_readiness_block_for_launch(issue_number, now) {
+                self.record_permission_readiness_block(issue, &record);
+                continue;
+            }
             let kind = issue_monitor_linked_issue_kind(&issue);
             let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
             let proposal_id = uuid::Uuid::new_v4();
@@ -16679,6 +17064,8 @@ impl IssueMonitorState {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
                     && !self.has_observed_monitor_runtime(*issue_number)
+                    && !self.open_pr_launch_held(*issue_number)
+                    && self.launch_source_exclusion(*issue_number).is_none()
                     && self.retry_ready_for_saved_profile(*issue_number, now)
             }) else {
                 break;
@@ -16796,10 +17183,19 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         self.pending_launches
             .retain(|request| !durable_issue_numbers.contains(&request.issue_number));
-        let count = self
-            .remaining_materialization_slots()
-            .min(self.pending_launches.len());
-        let mut requests = self.pending_launches.drain(..count).collect::<Vec<_>>();
+        let capacity = self.remaining_materialization_slots();
+        let mut requests = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some(request) = self.pending_launches.pop_front() {
+            if requests.len() < capacity
+                && self.launch_source_exclusion(request.issue_number).is_none()
+            {
+                requests.push(request);
+            } else {
+                retained.push_back(request);
+            }
+        }
+        self.pending_launches = retained;
         requests.extend(
             self.pending_launch_deliveries
                 .iter()
@@ -16986,6 +17382,12 @@ impl IssueMonitorState {
         delivery: &PendingIssueMonitorLaunchDelivery,
         window_id: Option<&str>,
     ) -> bool {
+        if self
+            .launch_source_exclusion(delivery.issue_number)
+            .is_some()
+        {
+            return false;
+        }
         let matches_window = |existing: &str| {
             window_id.is_none_or(|incoming| issue_monitor_window_ids_match(existing, incoming))
         };
@@ -17191,12 +17593,16 @@ impl IssueMonitorState {
             .inbox_item(issue_number)
             .filter(|item| {
                 item.state == MonitorInboxState::Queued
+                    && !self.launch_admission_is_held_at(now)
+                    && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_observed_monitor_runtime(issue_number)
+                    && !self.open_pr_launch_held(issue_number)
                     && self.occupied_slot_count() < self.effective_max_active_agents()
             })
             .map(|item| item.issue.clone())
         else {
+            self.clear_provisional_implementation(issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -17207,6 +17613,21 @@ impl IssueMonitorState {
             );
             return false;
         };
+        // The selected provider can change while the remote claim is in
+        // flight. Refuse before consuming a slot or recovery context, and
+        // compensate the claim that GitHub has already accepted.
+        if let Some(record) = self.permission_readiness_block_for_launch(issue_number, now) {
+            self.record_permission_readiness_block(issue, &record);
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        }
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
@@ -19275,6 +19696,14 @@ impl IssueMonitorState {
     /// exact ReleaseClaim companions make that result harmless without
     /// invalidating unrelated effect authority.
     fn compensate_uncommitted_provider_claims(&mut self) {
+        let mut cancelled_issues = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match &effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(*issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let attempting_claims = self
             .pending_effects
             .iter()
@@ -19322,6 +19751,7 @@ impl IssueMonitorState {
         self.pending_launch_deliveries
             .retain(|delivery| delivery.materializer_id.is_some());
         for delivery in cancelled_deliveries {
+            cancelled_issues.insert(delivery.issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -19358,6 +19788,17 @@ impl IssueMonitorState {
             }
             if !self.queue.contains(&delivery.issue_number) {
                 self.queue.push_back(delivery.issue_number);
+            }
+        }
+        for issue_number in cancelled_issues {
+            // A materializer-owned delivery is already past this cancellation
+            // boundary; only unspawned eligibility may return to Idle.
+            if !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            {
+                self.clear_provisional_implementation(issue_number);
             }
         }
         self.apply_priority_order_to_queue();
@@ -20571,13 +21012,16 @@ impl IssueMonitorState {
         // would reproduce the failure the recovery is undoing.
         self.require_fresh_launch_session(issue_number);
         if let Some(record) = retry_record.as_ref() {
-            // A failure increments attempts before publishing this fence.
-            // Restore only a predecessor: preparation of this same retry may
-            // already have refreshed its acceptance snapshot and phase.
+            // Continuation preserves attempts. A newly adopted release still
+            // supersedes that predecessor, but repeated enforcement must keep
+            // this retry's freshly prepared acceptance snapshot and phase.
             if self
                 .autonomous_records
                 .get(&issue_number)
-                .is_none_or(|current| current.attempts < record.attempts)
+                .is_none_or(|current| {
+                    current.attempts < record.attempts
+                        || (revoke_claims && current.attempts == record.attempts)
+                })
             {
                 self.autonomous_records.insert(issue_number, record.clone());
             }
@@ -20595,12 +21039,19 @@ impl IssueMonitorState {
             record.review_dispatch_hold = None;
         }
         self.review_windows.remove(&issue_number);
+        // Releasing an old launch does not waive the current candidate gate,
+        // including when this fence is replayed after a prefs rebase.
+        let exclusion = self.inbox_item(issue_number).and_then(|item| {
+            issue_monitor_candidate_exclusion(&item.issue, self.source_repository)
+        });
         if let Some(item) = self
             .inbox
             .iter_mut()
             .find(|item| item.issue.number == issue_number)
         {
-            item.state = MonitorInboxState::Queued;
+            item.state = exclusion
+                .as_ref()
+                .map_or(MonitorInboxState::Queued, |(state, _)| *state);
             item.claim_id = None;
             item.launched_window_id = None;
             item.error_message = retry_record.and_then(|record| record.last_failure_message);
@@ -20608,9 +21059,11 @@ impl IssueMonitorState {
             item.blocked_by_claim_id = None;
             item.claim_expires_at = None;
             item.claim_block_issue_updated_at = None;
-            item.exclusion_reason = None;
+            item.exclusion_reason = exclusion.as_ref().map(|(_, reason)| reason.clone());
         }
-        if !self.queue.contains(&issue_number) {
+        if exclusion.is_some() {
+            self.queue.retain(|queued| *queued != issue_number);
+        } else if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
         }
         self.apply_priority_order_to_queue();
@@ -21226,6 +21679,11 @@ impl IssueMonitorState {
             .filter(|(number, window)| {
                 settlements.get(number).is_some_and(|observation| {
                     observation.holder_host_dead
+                        // Inbox payloads are not persisted. At startup wait
+                        // for the candidate read before deciding whether this
+                        // Completed generation finished its owner or one slice.
+                        && (observation.settlement != IssueMonitorExecutionSettlement::Completed
+                            || self.inbox_item(**number).is_some())
                         && matches!(
                             observation.settlement,
                             IssueMonitorExecutionSettlement::Completed
@@ -21289,6 +21747,14 @@ impl IssueMonitorState {
         };
         for (issue_number, window_id) in &self.launched_windows {
             if classified.iter().any(|idle| idle.window_id == *window_id) {
+                continue;
+            }
+            if self.inbox_item(*issue_number).is_none()
+                && settlements.get(issue_number).is_some_and(|observation| {
+                    observation.holder_host_dead
+                        && observation.settlement == IssueMonitorExecutionSettlement::Completed
+                })
+            {
                 continue;
             }
             let owned_here =
@@ -21560,13 +22026,13 @@ impl IssueMonitorState {
             false,
             IdleReleaseScope::FinishedImplementations,
         );
-        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        self.prune_dead_terminal_launches(&mut outcome, settlements, now);
         outcome
     }
 
     fn prune_dead_terminal_launches(
         &mut self,
-        outcome: &IssueMonitorIdleReconciliation,
+        outcome: &mut IssueMonitorIdleReconciliation,
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) {
@@ -21590,9 +22056,58 @@ impl IssueMonitorState {
             }) else {
                 continue;
             };
-            // A settled generation must not return after the stranded-row
-            // grace or a restart. Explicit operator resubmission remains valid.
-            self.terminal_queue_remove(&[number], now);
+            // Completed ends a slice, not an unfinished SPEC. Preserve its
+            // admission and publish the existing rebase fence before queuing a
+            // fresh successor. Other terminal owners retain the retirement rule.
+            let next_slice = settlements[&number].settlement
+                == IssueMonitorExecutionSettlement::Completed
+                && self.terminal_queue_contains(number)
+                && !self.issue_is_closed(number)
+                && !self.merged_issues.contains(&number)
+                && !self.failed_issues.contains_key(&number)
+                && self.inbox_item(number).is_some_and(|item| {
+                    let issue = &item.issue;
+                    issue.state == IssueMonitorIssueState::Open
+                        && has_gwt_spec_label(&issue.labels)
+                        && Self::issue_completion_decision(issue)
+                            == IssueCompletionDecision::Incomplete
+                        && self.allows_issue_labels(issue)
+                        && issue_monitor_candidate_exclusion(issue, self.source_repository)
+                            .is_none()
+                        && {
+                            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                                issue.body.as_deref().unwrap_or(""),
+                            );
+                            criteria.machine_checkable && !criteria.unchecked.is_empty()
+                        }
+                });
+            if next_slice {
+                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
+                outcome.requeued.push(number);
+            } else if settlements[&number].settlement == IssueMonitorExecutionSettlement::Completed
+                && self.terminal_queue_contains(number)
+                && !self.issue_is_closed(number)
+                && !self.merged_issues.contains(&number)
+                && !self.failed_issues.contains_key(&number)
+                && self.inbox_item(number).is_some_and(|item| {
+                    item.issue.state == IssueMonitorIssueState::Open
+                        && has_gwt_spec_label(&item.issue.labels)
+                        && item.issue.readiness == IssueMonitorReadiness::NotReady
+                })
+            {
+                // A failed SPEC read is unknown, not evidence that this owner
+                // finished. Keep its selection while the existing gate waits
+                // for readback, and fence the released launch across rebase.
+                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+                self.fence_automatic_relaunch(
+                    number,
+                    "completed SPEC slice; refresh required",
+                    now,
+                );
+            } else {
+                self.terminal_queue_remove(&[number], now);
+            }
             if let Some(snapshot) = &mut self.window_snapshot {
                 for observed in &mut snapshot.windows {
                     if observed.issue_number == Some(number)
@@ -21812,7 +22327,7 @@ impl IssueMonitorState {
                 );
             }
         }
-        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        self.prune_dead_terminal_launches(&mut outcome, settlements, now);
         outcome
     }
 
@@ -21955,7 +22470,6 @@ impl IssueMonitorState {
     /// transition [`Self::expire_stale_unbound_launches`] makes for a launch
     /// that never bound a window, so the next scan can claim it again.
     fn requeue_released_launch(&mut self, issue_number: u64, reason: &str, now: &str) {
-        let attempts = self.attempt_count(issue_number);
         self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
         self.autonomous_record_mut(issue_number)
             .last_failure_message = Some(format!("binding_dead: {reason}"));
@@ -21966,8 +22480,24 @@ impl IssueMonitorState {
         {
             item.error_message = Some(format!("binding_dead: {reason}"));
         }
-        // The scan commits through a union rebase. Publish the existing retry
-        // fence so its stale disk launch cannot resurrect the phantom slot.
+        self.fence_automatic_relaunch(issue_number, reason, now);
+        // The mode-gated queue would drop this: the dead-binding recovery that
+        // reaches here runs precisely when autonomous mode is OFF, so an
+        // attended operator would never learn the Monitor requeued the Issue.
+        self.push_unconditional_notice(
+            "info",
+            issue_number,
+            format!(
+                "Issue #{issue_number}: requeued after its agent window died with unfinished execution; {reason}"
+            ),
+        );
+    }
+
+    /// Preserve the retry budget and fresh-session policy through scan rebase.
+    /// The monotonic release version also distinguishes successive slices whose
+    /// GitHub Issue revision did not change.
+    fn fence_automatic_relaunch(&mut self, issue_number: u64, reason: &str, now: &str) {
+        let attempts = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let release = IssueMonitorReleasedFailure {
             issue_number,
@@ -21982,16 +22512,6 @@ impl IssueMonitorState {
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number, true);
-        // The mode-gated queue would drop this: the dead-binding recovery that
-        // reaches here runs precisely when autonomous mode is OFF, so an
-        // attended operator would never learn the Monitor requeued the Issue.
-        self.push_unconditional_notice(
-            "info",
-            issue_number,
-            format!(
-                "Issue #{issue_number}: requeued after its agent window died with unfinished execution; {reason}"
-            ),
-        );
     }
 
     /// Free the slot held by `window_id` for `issue_number` without spending an
@@ -22502,7 +23022,7 @@ pub fn scan_issue_monitor_candidates(
         .filter(|issue| {
             issue.state == IssueMonitorIssueState::Open
                 && monitor.allows_issue_labels(issue)
-                && issue_monitor_candidate_exclusion(issue).is_none()
+                && issue_monitor_candidate_exclusion(issue, monitor.source_repository).is_none()
         })
         .map(|issue| issue.number)
         .collect::<Vec<_>>();
@@ -22857,7 +23377,7 @@ mod tests {
         let prefs = IssueMonitorPrefs::default();
         let saved = serde_json::to_value(&prefs).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "auto");
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(monitor.config.max_active, 1);
         assert_eq!(monitor.status_view().max_active_agents, 1);
         assert_eq!(monitor.agent_status().max_active, 1);
@@ -22868,12 +23388,12 @@ mod tests {
         let prefs: IssueMonitorPrefs =
             serde_json::from_str(r#"{"enabled":false,"max_active_agents":1,"priority_order":[]}"#)
                 .unwrap();
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(monitor.config.max_active, 1);
         let saved = serde_json::to_value(monitor.prefs()).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "manual");
         assert_eq!(saved["max_active_agents"], 1);
-        let restored = IssueMonitorState::with_prefs(
+        let restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(saved).unwrap(),
         );
@@ -22882,7 +23402,7 @@ mod tests {
 
     #[test]
     fn agent_capacity_unmeasured_auto_admits_implementation_and_review() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -22914,7 +23434,7 @@ mod tests {
         original["max_active_agents"] = 7.into();
         original["max_active_last_change"] = old_change.clone();
         let original: IssueMonitorPrefs = serde_json::from_value(original).unwrap();
-        let mut stale = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original);
+        let mut stale = test_monitor_with_prefs(IssueMonitorConfig::default(), original);
         stale.set_agent_capacity(AgentCapacity::default());
         assert_eq!(
             serde_json::to_value(stale.agent_status()).unwrap()["max_active_last_change"],
@@ -22942,10 +23462,8 @@ mod tests {
 
     #[test]
     fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
-        let mut monitor = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs::default(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
         let capacity = AgentCapacity {
             measurement_complete: true,
             machine_budget: Some(4),
@@ -22960,7 +23478,7 @@ mod tests {
         monitor.set_agent_capacity(capacity.clone());
         assert_eq!(monitor.effective_max_active_agents(), 8);
         assert_eq!(monitor.max_active_agents_override(), Some(8));
-        let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let manual = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(manual.max_active_agents_override(), Some(8));
         monitor.set_max_active_agents_override(None);
         assert_eq!(monitor.effective_max_active_agents(), 3);
@@ -22987,7 +23505,7 @@ mod tests {
         monitor.refresh_disk_owned_prefs(&IssueMonitorPrefs::default());
         assert_eq!(monitor.effective_max_active_agents(), 3);
         assert_eq!(
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs())
+            test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs())
                 .effective_max_active_agents(),
             3
         );
@@ -23016,7 +23534,7 @@ mod tests {
         monitor.set_agent_capacity(AgentCapacity::default());
         assert_eq!(monitor.effective_max_active_agents(), 0);
         assert_eq!(
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), saved)
+            test_monitor_with_prefs(IssueMonitorConfig::default(), saved)
                 .effective_max_active_agents(),
             0
         );
@@ -23024,10 +23542,8 @@ mod tests {
 
     #[test]
     fn agent_capacity_expired_measurement_retains_last_accepted_limit() {
-        let mut monitor = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs::default(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
         let capacity = AgentCapacity {
             measurement_complete: true,
             machine_budget: Some(4),
@@ -23093,7 +23609,7 @@ mod tests {
 
     #[test]
     fn agent_capacity_launch_delivery_waits_for_fresh_capacity_before_materializing() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
@@ -23188,7 +23704,7 @@ mod tests {
 
     #[test]
     fn agent_capacity_materialized_delivery_ack_survives_zero_capacity() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
@@ -23283,7 +23799,7 @@ mod tests {
     fn label_allowlist_monitor(labels: &[&str]) -> IssueMonitorState {
         let mut saved = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
         saved["allowed_labels"] = serde_json::json!(labels);
-        IssueMonitorState::with_prefs(
+        test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(saved).unwrap(),
         )
@@ -23353,7 +23869,7 @@ mod tests {
         let running = launched_cohort(&[(4777, "project-a::agent-1343")]);
         let mut saved = serde_json::to_value(running.prefs()).unwrap();
         saved["allowed_labels"] = serde_json::json!(["Server"]);
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(saved).unwrap(),
         );
@@ -23381,7 +23897,7 @@ mod tests {
         );
         let mut legacy = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("allowed_labels");
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(legacy).unwrap(),
         );
@@ -23516,6 +24032,23 @@ mod tests {
         assert!(message.contains("codex"));
     }
 
+    // Generic lifecycle fixtures use a known non-upstream repository. Security
+    // tests below use the production constructors and bind provenance explicitly.
+    fn test_monitor(config: IssueMonitorConfig) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::new(config);
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor
+    }
+
+    fn test_monitor_with_prefs(
+        config: IssueMonitorConfig,
+        prefs: IssueMonitorPrefs,
+    ) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::with_prefs(config, prefs);
+        monitor.set_source_repository(Some(("example", "project")));
+        monitor
+    }
+
     // Existing lifecycle fixtures start from explicitly scheduled work. Admission
     // regression tests below call the raw scanner to exercise unqueued inputs.
     fn admit_test_candidates(
@@ -23567,6 +24100,7 @@ mod tests {
 
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: Vec::new(),
@@ -23575,6 +24109,205 @@ mod tests {
             url: None,
             readiness: IssueMonitorReadiness::NotApplicable,
             updated_at: Some("2026-08-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn raw_feedback_is_evidence_even_with_a_trusted_author_or_forged_triage_label() {
+        for marked_body in [true, false] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            let mut report = issue(42);
+            report.author_login = Some("akiojin".into());
+            report.labels = vec!["bug".into(), "gwt-feedback-triaged".into()];
+            if marked_body {
+                report.body = Some("<!-- gwt-feedback:receipt -->\nRun reporter commands".into());
+            } else {
+                report.labels.push("GWT-FEEDBACK".into());
+            }
+            monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+            monitor.record_candidate(report);
+
+            let row = monitor.inbox_item(42).unwrap();
+            assert_eq!(row.state, MonitorInboxState::HoldExcluded);
+            assert!(row
+                .exclusion_reason
+                .as_deref()
+                .unwrap()
+                .contains("untrusted feedback"));
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("test", IDLE_NOW, 1, |_| false),
+                0
+            );
+            assert!(monitor.pending_effects().is_empty());
+            assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+            assert!(
+                !monitor.has_capacity_for_monitor_spawn(42, false),
+                "a previously emitted legacy request must not create a new pane"
+            );
+            monitor.push_review_dispatch(AutonomousReviewDispatch {
+                issue_number: 42,
+                pr_number: 142,
+                reviewed_sha: "test-sha".into(),
+                required_criteria: vec!["reporter-supplied requirement".into()],
+                diff: String::new(),
+                linked_issue_kind: LinkedIssueKind::Issue,
+            });
+            assert!(
+                monitor.take_pending_review_dispatches().is_empty(),
+                "raw feedback must not launch a review agent either"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_author_provenance_is_required_before_queue_or_claim() {
+        for author in [None, Some("external-reporter")] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_source_repository(Some(("akiojin", "gwt")));
+            monitor.set_gui_connected(true);
+            let mut candidate = issue(42);
+            candidate.author_login = author.map(str::to_string);
+            candidate.labels = vec!["bug".into(), "gwt-feedback-triaged".into()];
+            monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+            monitor.record_candidate(candidate);
+
+            let row = monitor.inbox_item(42).unwrap();
+            assert_eq!(
+                row.state,
+                if author.is_none() {
+                    MonitorInboxState::NotReady
+                } else {
+                    MonitorInboxState::HoldExcluded
+                }
+            );
+            assert!(row
+                .exclusion_reason
+                .as_deref()
+                .unwrap()
+                .contains(if author.is_none() {
+                    "original author unavailable"
+                } else {
+                    "PM triage required"
+                }));
+            assert!(monitor.claim_probe_plan(1).1.is_empty());
+            assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+        }
+    }
+
+    #[test]
+    fn upstream_trusted_owners_and_other_repositories_keep_normal_admission() {
+        for (owner, repo, author, raw) in [
+            ("akiojin", "gwt", Some("akiojin"), false),
+            ("akiojin", "gwt", Some("github-actions[bot]"), false),
+            ("example", "project", None, true),
+        ] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_source_repository(Some((owner, repo)));
+            monitor.set_gui_connected(true);
+            let mut candidate = issue(42);
+            candidate.author_login = author.map(str::to_string);
+            candidate.url = Some("https://github.com/akiojin/gwt/issues/42".into());
+            if raw {
+                candidate.body = Some("<!-- gwt-feedback:receipt -->".into());
+            }
+            monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+            monitor.record_candidate(candidate);
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(
+                monitor.next_launch_request(IDLE_NOW).unwrap().issue_number,
+                42
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_restored_work_requires_trust_before_acquisition_and_materialization() {
+        fn selected(author: Option<&str>) -> IssueMonitorState {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_source_repository(Some(("example", "project")));
+            monitor.set_gui_connected(true);
+            let mut candidate = issue(42);
+            candidate.author_login = author.map(str::to_string);
+            monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+            monitor.record_candidate(candidate);
+            monitor
+        }
+
+        // Restored work has either unresolved repository identity or legacy
+        // missing authorship. Neither may acquire or materialize before scan.
+        for (repository, author) in [
+            (None, Some("external-reporter")),
+            (Some(("akiojin", "gwt")), None),
+        ] {
+            let mut original = selected(author);
+            assert_eq!(
+                original.prepare_claim_effects_with_probe("test", IDLE_NOW, 1, |_| false),
+                1
+            );
+            let effect = original.pending_effects()[0].clone();
+            let mut restored =
+                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+            restored.set_source_repository(repository);
+            assert!(!restored.effect_attempt_is_ready(&effect, IDLE_NOW));
+            assert!(!restored.mark_pending_effect_attempting(&effect.attempt_key()));
+            assert!(!restored.apply_confirmed_claim(
+                42,
+                "late-claim",
+                "test",
+                "late-effect",
+                IDLE_NOW
+            ));
+            assert!(restored.pending_launch_deliveries.is_empty());
+            assert!(restored.pending_effects().iter().any(|pending| matches!(
+                &pending.payload,
+                IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                    if claim_id == "late-claim" && owner == "test"
+            )));
+
+            let mut original = selected(author);
+            assert!(original.apply_confirmed_claim(42, "claim", "test", "effect", IDLE_NOW));
+            let delivery = original.pending_launch_deliveries[0].clone();
+            let mut restored =
+                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+            restored.set_source_repository(repository);
+            assert!(restored.take_pending_launch_requests().is_empty());
+            assert!(!restored.claim_launch_delivery(
+                42,
+                &delivery.delivery_id,
+                "gui",
+                100,
+                "tab::agent",
+                |_| false
+            ));
+
+            restored.pending_launch_deliveries.clear();
+            restored
+                .pending_launches
+                .push_back(IssueMonitorLaunchRequest {
+                    issue_number: 42,
+                    branch_name: delivery.branch_name,
+                    linked_issue_kind: delivery.linked_issue_kind,
+                    delivery_id: None,
+                    launch_session_strategy: delivery.launch_session_strategy,
+                });
+            assert!(
+                restored.take_pending_launch_requests().is_empty(),
+                "legacy delivery is also held"
+            );
         }
     }
 
@@ -23589,7 +24322,7 @@ mod tests {
             }],
             ..IssueMonitorPrefs::default()
         };
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let mut first = issue(1);
         first.labels.push("auto-improve".to_string());
         let mut second = issue(2);
@@ -23605,7 +24338,7 @@ mod tests {
     fn agent_status_projects_blocked_claim_from_one_live_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 3,
             ..IssueMonitorConfig::default()
@@ -23744,7 +24477,7 @@ mod tests {
     /// told the PM to read an `inbox` operation that does not exist.
     #[test]
     fn agent_status_snapshot_carries_needs_human_and_inbox() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -23792,7 +24525,7 @@ mod tests {
 
     #[test]
     fn rejected_blocked_claim_removes_a_stale_nonqueued_queue_entry() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -23968,7 +24701,7 @@ mod tests {
 
     #[test]
     fn scan_keeps_queue_visible_when_processing_is_stopped() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: false,
             ..IssueMonitorConfig::default()
         });
@@ -23990,7 +24723,7 @@ mod tests {
 
     #[test]
     fn launched_issue_from_prefs_stays_active_and_is_not_requeued() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -24042,7 +24775,7 @@ mod tests {
         window_id: &str,
     ) -> IssueMonitorState {
         let number = candidate.number;
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&candidate),
@@ -24083,7 +24816,7 @@ mod tests {
             priority_order: vec![7],
             ..IssueMonitorPrefs::default()
         };
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         scan_queued_candidates(
             &mut monitor,
@@ -24134,7 +24867,7 @@ mod tests {
         // to the next handler / the launch ACK's rescan, which re-claimed the
         // same issue (same-owner renewal) and spawned a DUPLICATE agent window
         // (observed live: Max 5 ⇒ 10 windows).
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         let request = monitor
@@ -24144,8 +24877,7 @@ mod tests {
         assert_eq!(monitor.active_count(), 1, "claim holds an active slot");
 
         // Reload from prefs (what every GUI handler does).
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         restored.set_gui_connected(true);
         assert_eq!(
             restored.active_count(),
@@ -24196,7 +24928,7 @@ mod tests {
 
     #[test]
     fn qualified_window_ids_require_the_same_project_tab_prefix() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
@@ -24253,8 +24985,7 @@ mod tests {
         };
         let project_root = Path::new(".");
 
-        let mut live =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+        let mut live = test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
         scan_queued_candidates_with_provenance(
             &mut live,
             &[issue(99)],
@@ -24270,7 +25001,7 @@ mod tests {
         assert!(live.prefs().launched_issues.is_empty());
         assert!(live.prefs().launching_issues.is_empty());
 
-        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        let mut cache = test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs);
         scan_queued_candidates_with_provenance(
             &mut cache,
             &[issue(99)],
@@ -24308,7 +25039,7 @@ mod tests {
         let issues = [issue(42), issue(43)];
         let project_root = Path::new(".");
         let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
 
         scan_queued_candidates_for_project_tab_with_provenance(
             &mut monitor,
@@ -24344,7 +25075,7 @@ mod tests {
         );
         assert_eq!(monitor.active_count(), 2);
 
-        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        let mut cache = test_monitor_with_prefs(IssueMonitorConfig::default(), stale_prefs);
         scan_queued_candidates_for_project_tab_with_provenance(
             &mut cache,
             &issues,
@@ -24390,7 +25121,7 @@ mod tests {
         assert_eq!(monitor.attempt_count(42), 0);
 
         monitor.rebase_daemon_driver_prefs(&stale);
-        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         restored.record_candidate(issue(42));
         assert_eq!(
             restored.active_count(),
@@ -24455,7 +25186,7 @@ mod tests {
 
     #[test]
     fn issue_5140_compatibility_launching_rows_use_the_windowless_deadline() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         assert!(monitor
@@ -24467,7 +25198,7 @@ mod tests {
             let mut prefs = monitor.prefs();
             assert!(prefs.pending_launch_deliveries.is_empty());
             prefs.launching_issues[0].claimed_at = anchor.map(str::to_string);
-            let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
             restored.record_candidate(issue(42));
             assert!(restored
                 .expire_stale_unbound_launches("2026-07-02T00:00:00Z")
@@ -24508,7 +25239,7 @@ mod tests {
     #[test]
     fn issue_5140_windowless_deliveries_time_out_and_release_their_claim() {
         for claimed in [false, true] {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
             scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
             assert!(monitor.apply_confirmed_claim(
                 42,
@@ -24580,7 +25311,7 @@ mod tests {
     #[test]
     fn issue_5140_a_created_window_or_live_runtime_is_not_a_windowless_timeout() {
         for window_created in [false, true] {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
             scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
             assert!(monitor.apply_confirmed_claim(
                 42,
@@ -24624,7 +25355,7 @@ mod tests {
 
     #[test]
     fn issue_5140_timeout_details_do_not_reset_autonomous_failure_escalation() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.autonomous_mode = true;
         monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
         let max = monitor.autonomous_tuning.max_attempts;
@@ -24647,7 +25378,7 @@ mod tests {
     /// contract until the materializer dies and the claim TTL has lapsed.
     #[test]
     fn a_pending_delivery_whose_materializer_died_expires_after_claim_ttl() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -24732,7 +25463,7 @@ mod tests {
 
     #[test]
     fn pending_session_start_diagnosis_uses_only_the_current_fresh_delivery_pane() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
@@ -24817,7 +25548,7 @@ mod tests {
     #[test]
     fn stale_unbound_launch_with_a_live_pane_binds_the_pane_instead_of_requeueing() {
         // The anchor-only shape (no durable delivery).
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
         assert!(monitor
@@ -24848,7 +25579,7 @@ mod tests {
         );
 
         // The durable-delivery shape whose materializer died.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -24933,7 +25664,7 @@ mod tests {
             ),
         ];
         for (label, windows, observed_at) in cases {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
             scan_queued_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
             monitor.set_gui_connected(true);
             assert!(monitor
@@ -24953,7 +25684,7 @@ mod tests {
     /// Issue. Before the fix the half-hour expiry relaunched both Issues.
     #[test]
     fn an_hour_of_scans_without_launch_acks_keeps_one_pane_per_active_issue() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 2,
             ..IssueMonitorConfig::default()
         });
@@ -25022,7 +25753,7 @@ mod tests {
         // from disk, so GUI-written launching/launched claims were invisible —
         // the daemon saw free slots (over-cap claims) and its next persist
         // dropped the GUI's in-flight entries. The merge must absorb both.
-        let mut daemon = IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -25068,7 +25799,7 @@ mod tests {
         // the GitHub claim. A window that kept running while its claim lapsed
         // (rate limit, TTL) must stay Launched, hold its slot, and never
         // re-enter the queue or the claim plan.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 max_active: 3,
                 ..IssueMonitorConfig::default()
@@ -25116,7 +25847,7 @@ mod tests {
         // window is an ownership hand-off (the #4037 / #4033 review windows
         // took over the implementation binding silently). It must leave a
         // reasoned audit entry naming both windows.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -25155,7 +25886,7 @@ mod tests {
         assert_eq!(monitor.prefs().requeue_audit.len(), 1);
 
         // A first binding is not a replacement either.
-        let mut fresh = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut fresh = test_monitor(IssueMonitorConfig::default());
         fresh.complete_active_launch(43, "tab-1::agent-43");
         assert!(fresh.prefs().requeue_audit.is_empty());
     }
@@ -25167,10 +25898,8 @@ mod tests {
         // pair that window with the stale claim of the previous generation —
         // the imported claim would invalidate the exact-identity fence used
         // by live_claim_id / stop_only / failover_restart / requeue.
-        let mut monitor = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs::default(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
         monitor.complete_active_launch(42, "tab-1::agent-new");
         let disk = IssueMonitorPrefs {
             launched_issues: vec![IssueMonitorLaunchedIssue {
@@ -25189,10 +25918,8 @@ mod tests {
         assert_eq!(monitor.launched_window_issue("tab-1::agent-new"), Some(42));
 
         // Control: with no local window the disk row imports window and claim.
-        let mut fresh = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs::default(),
-        );
+        let mut fresh =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
         fresh.merge_inflight_launches_from_disk(&disk);
         assert_eq!(fresh.live_claim_id(42).as_deref(), Some("claim-old"));
         assert_eq!(fresh.launched_window_issue("tab-1::agent-old"), Some(42));
@@ -25205,7 +25932,7 @@ mod tests {
             message: "local explicit failure".to_string(),
             window_id: None,
         };
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 merged_issues: vec![44],
@@ -25383,7 +26110,7 @@ mod tests {
             },
         )
         .expect("seed equal-marker NeedsHuman state");
-        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut stale = test_monitor(IssueMonitorConfig::default());
 
         mutate_issue_monitor_prefs(&path, |disk| {
             stale.rebase_daemon_driver_prefs(disk);
@@ -25394,7 +26121,7 @@ mod tests {
         let persisted = load_issue_monitor_prefs(&path).expect("reload committed prefs");
         assert_eq!(persisted.failed_issues, vec![failure]);
         assert_eq!(persisted.autonomous_records, vec![needs_human]);
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), persisted);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), persisted);
         restored.record_candidate(issue(99));
         assert_eq!(
             restored.inbox_item(99).map(|item| item.state),
@@ -25409,7 +26136,7 @@ mod tests {
             message: "local current failure".to_string(),
             window_id: None,
         };
-        let mut current = IssueMonitorState::with_prefs(
+        let mut current = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 failed_issues: vec![local_failure.clone()],
@@ -25474,7 +26201,7 @@ mod tests {
             "{LEGACY_GIT_LAUNCH_FAILURE_PREFIX}{}",
             project_root.display()
         );
-        let mut migrated = IssueMonitorState::with_prefs(
+        let mut migrated = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 legacy_git_launch_failure_migration_version: 0,
@@ -25576,7 +26303,7 @@ mod tests {
             delivering_since: None,
             review_attempts: None,
         };
-        let mut stale = IssueMonitorState::with_prefs(
+        let mut stale = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -25670,7 +26397,7 @@ mod tests {
             MonitorInboxState::AgentFailed,
             MonitorInboxState::NeedsHuman,
         ] {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            let mut monitor = test_monitor(IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
             });
@@ -25710,7 +26437,7 @@ mod tests {
         // ⇒ cap 0 ⇒ the daemon never refills slots and the GUI's re-entrant
         // scan became the de-facto driver). The scan must refresh GUI-owned
         // fields from disk.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         assert!(!monitor.has_launch_profile());
         let disk = IssueMonitorPrefs {
             launch_profile: Some(IssueMonitorLaunchProfile {
@@ -25802,7 +26529,7 @@ mod tests {
             Some("claim-predecessor"),
             "the close generation must survive the prefs roundtrip"
         );
-        let mut successor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let mut successor = test_monitor_with_prefs(IssueMonitorConfig::default(), durable);
         successor
             .launched_claims
             .insert(42, "claim-successor".to_string());
@@ -26084,7 +26811,7 @@ mod tests {
 
     #[test]
     fn legacy_rate_limit_release_records_the_saved_profiles_provider_hold() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_profile: Some(test_launch_profile("Codex")),
@@ -26164,7 +26891,7 @@ mod tests {
     #[test]
     fn a_provider_quota_hold_is_structured_in_agent_and_gui_status() {
         let profile = test_launch_profile("codex");
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -26613,7 +27340,7 @@ mod tests {
         );
         let decoded: IssueMonitorPrefs =
             serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), decoded);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), decoded);
         assert_eq!(restored.autonomous_record(42).unwrap().tier_input(), 1);
         restored.record_merged(42);
         assert_eq!(restored.prefs().tier_landing_stats().unknown_failures, 1);
@@ -26719,7 +27446,7 @@ mod tests {
         assert_eq!(choice.tier, 1);
         assert_eq!(choice.profile.agent_id, "claude");
         prefs.record_tier_launch(42, choice.tier);
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.record_attempt(42);
         monitor.clear_autonomous_record(42);
         let roundtrip: IssueMonitorPrefs =
@@ -26903,7 +27630,7 @@ mod tests {
     #[test]
     fn slot_occupancy_names_each_occupant_and_its_release_operation() {
         let now = "2026-10-05T15:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -26976,7 +27703,7 @@ mod tests {
     #[test]
     fn slot_occupancy_is_absent_when_the_gate_is_not_max_active() {
         let now = "2026-10-05T15:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 4,
@@ -27005,7 +27732,7 @@ mod tests {
     fn stall_reason_names_the_gate_that_holds_the_queue_and_agrees_with_admission() {
         let now = "2026-09-28T03:00:00Z";
         let unscanned = || {
-            let mut monitor = IssueMonitorState::with_prefs(
+            let mut monitor = test_monitor_with_prefs(
                 IssueMonitorConfig {
                     enabled: true,
                     max_active: 1,
@@ -27073,7 +27800,7 @@ mod tests {
 
         // The runtime gates claims on a saved profile and GitHub auth before
         // this planner runs; `stall_reason` reports them in the same order.
-        let mut unprofiled = IssueMonitorState::with_prefs(
+        let mut unprofiled = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -27101,11 +27828,9 @@ mod tests {
     #[test]
     fn stall_reason_names_a_gui_action_only_for_gui_only_gates() {
         let now = "2026-09-28T03:00:00Z";
-        let status = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs::default(),
-        )
-        .agent_status_at(now);
+        let status =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default())
+                .agent_status_at(now);
         assert_eq!(status.stall_reason, Some(IssueMonitorStallReason::Disabled));
         assert!(status
             .gui_action
@@ -27123,11 +27848,8 @@ mod tests {
     #[test]
     fn a_status_without_stall_reason_reads_as_unknown() {
         let mut value = serde_json::to_value(
-            IssueMonitorState::with_prefs(
-                IssueMonitorConfig::default(),
-                IssueMonitorPrefs::default(),
-            )
-            .agent_status_at("2026-09-28T03:00:00Z"),
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default())
+                .agent_status_at("2026-09-28T03:00:00Z"),
         )
         .expect("serialize");
         value.as_object_mut().unwrap().remove("stall_reason");
@@ -27152,7 +27874,7 @@ mod tests {
         };
         let now = "2026-08-22T03:00:00Z";
 
-        let mut one_held = IssueMonitorState::with_prefs(
+        let mut one_held = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             pool_prefs(BTreeMap::from([(
                 "codex".to_string(),
@@ -27166,7 +27888,7 @@ mod tests {
         assert_eq!(one_held.status_view_at(now).state, "idle");
         assert!(one_held.next_launch_request(now).is_some());
 
-        let mut all_held = IssueMonitorState::with_prefs(
+        let mut all_held = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             pool_prefs(BTreeMap::from([
                 ("codex".to_string(), "2026-08-22T05:00:00Z".to_string()),
@@ -27202,7 +27924,7 @@ mod tests {
     #[test]
     fn update_drain_persists_without_touching_launch_state() {
         let now = "2026-09-07T00:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 3,
@@ -27269,7 +27991,7 @@ mod tests {
         let json = serde_json::to_string(&monitor.prefs()).expect("serialize prefs");
         let restored: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload prefs");
         assert_eq!(restored.update_drain, monitor.prefs().update_drain);
-        let mut reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
+        let mut reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), restored);
         assert_eq!(reloaded.update_drain(), monitor.update_drain());
         assert_eq!(
             reloaded.active_issue_numbers(),
@@ -27307,7 +28029,7 @@ mod tests {
     #[test]
     fn update_drain_stops_new_launches_and_claims_until_cleared() {
         let now = "2026-09-07T00:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -27360,6 +28082,70 @@ mod tests {
             1,
             "clearing the drain resumes claim admission"
         );
+
+        // The drain can begin after GitHub submission but before success is
+        // committed. It must still prevent an unspawnable launch reservation.
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_attempt(42);
+        let effect = monitor.pending_effects()[0].clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected claim acquisition");
+        };
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.91.0", now);
+        assert!(monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert!(monitor.active_issue_numbers().is_empty());
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(&monitor.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
+                if released == claim_id && released_owner == owner));
+
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        restored.set_gui_connected(true);
+        assert!(restored.update_drain().is_some());
+        assert!(restored.terminal_queue_contains(42));
+        // Inbox/launch queue rows are rebuilt by the next candidate scan.
+        restored.record_candidate(issue(42));
+        assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        assert_eq!(restored.attempt_count(42), 1);
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(owner, now, 1, |_| false),
+            0
+        );
+        restored.clear_update_drain();
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(owner, now, 1, |_| false),
+            1
+        );
+        let new_effect = restored.pending_effects().last().unwrap().clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id: new_claim,
+            ..
+        } = &new_effect.payload
+        else {
+            panic!("expected fresh claim acquisition");
+        };
+        assert!(restored.mark_pending_effect_attempting(&new_effect.attempt_key()));
+        assert!(restored
+            .complete_pending_effect(&new_effect.attempt_key())
+            .is_some());
+        assert!(restored.apply_confirmed_claim(42, new_claim, owner, &new_effect.effect_id, now));
+        assert_eq!(restored.active_count(), 1);
+        assert_eq!(restored.take_pending_launch_requests().len(), 1);
     }
 
     /// Issue #4037 AC-6: the drain is one structured projection in both the
@@ -27368,7 +28154,7 @@ mod tests {
     #[test]
     fn update_drain_is_projected_in_agent_and_gui_status() {
         let now = "2026-09-07T00:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -27413,7 +28199,7 @@ mod tests {
             Some("active")
         );
 
-        let mut held = IssueMonitorState::with_prefs(
+        let mut held = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -27457,7 +28243,7 @@ mod tests {
             test_launch_profile("codex"),
             test_launch_profile("claude"),
         ]);
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
         monitor.record_candidate(candidate.clone());
@@ -27488,7 +28274,7 @@ mod tests {
             test_launch_profile("codex"),
             test_launch_profile("claude"),
         ]);
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 8,
@@ -27572,7 +28358,7 @@ mod tests {
         let mut codex = test_launch_profile("codex");
         codex.prefer_for = vec!["type:perf".to_string()];
         prefs.set_launch_profile_pool(vec![codex, test_launch_profile("claude")]);
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let now = "2026-08-22T03:00:00Z";
 
         let status = monitor.status_view_at(now);
@@ -27622,7 +28408,7 @@ mod tests {
             .as_str()
             .is_some_and(|summary| summary.starts_with("auto (2): ")));
 
-        let single = IssueMonitorState::with_prefs(
+        let single = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_profile: Some(test_launch_profile("codex")),
@@ -27678,7 +28464,7 @@ mod tests {
         let later = "2026-08-22T04:00:00Z";
 
         for (local_deadline, disk_deadline) in [(earlier, later), (later, earlier)] {
-            let mut monitor = IssueMonitorState::with_prefs(
+            let mut monitor = test_monitor_with_prefs(
                 IssueMonitorConfig::default(),
                 IssueMonitorPrefs {
                     provider_quota_holds: BTreeMap::from([(
@@ -27704,7 +28490,7 @@ mod tests {
             );
         }
 
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 provider_quota_holds: BTreeMap::from([("codex".to_string(), later.to_string())]),
@@ -27721,7 +28507,7 @@ mod tests {
 
     #[test]
     fn a_healthy_saved_profile_bypasses_another_providers_hold() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -27786,7 +28572,7 @@ mod tests {
         let mut record = AutonomousIssueRecord::new(42);
         record.retry_not_before = Some("2026-08-22T04:00:00Z".to_string());
         record.retry_hold_reason = Some("Codex quota exhausted".to_string());
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -27825,7 +28611,7 @@ mod tests {
     #[test]
     fn ordinary_retry_does_not_bypass_a_coincident_other_provider_hold() {
         let deadline = "2026-08-22T04:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -27869,7 +28655,7 @@ mod tests {
     fn a_saved_profile_provider_hold_gates_every_preclaim_entrypoint() {
         use gwt_github::FakeIssueClient;
 
-        let mut base = IssueMonitorState::with_prefs(
+        let mut base = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -27919,7 +28705,7 @@ mod tests {
         assert_eq!(synchronous.active_count(), 0);
         assert_eq!(synchronous.queued_issue_numbers(), vec![42]);
 
-        let mut no_profile = IssueMonitorState::with_prefs(
+        let mut no_profile = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -27950,7 +28736,7 @@ mod tests {
 
     #[test]
     fn provider_hold_compensates_prepared_attempting_and_unclaimed_work_exactly() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 8,
@@ -28015,6 +28801,11 @@ mod tests {
         ));
         let epoch = monitor.effect_authority_epoch();
 
+        for number in [43, 44, 45] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+            monitor.record_attempt(number);
+        }
+
         assert_eq!(
             monitor.try_hold_provider_usage_limit(
                 42,
@@ -28069,11 +28860,51 @@ mod tests {
         assert!(monitor.queued_issue_numbers().contains(&45));
         assert!(!monitor.active_issue_numbers().contains(&45));
         assert_eq!(monitor.attempt_count(42), 0);
+        for number in [43, 44, 45] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle,
+                "cancelled pre-spawn work for Issue #{number} must not enter review"
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+            assert!(monitor.queued_issue_numbers().contains(&number));
+            assert!(!monitor.is_autonomous_in_flight(number));
+        }
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        for number in [43, 44, 45] {
+            assert_eq!(
+                restored.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle
+            );
+            assert_eq!(restored.attempt_count(number), 1);
+        }
+        restored.set_gui_connected(true);
+        restored.record_candidate(issue(43));
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                8,
+                |_| false
+            ),
+            0
+        );
+        restored.clear_provider_quota_hold("codex", "test release", "2026-08-22T02:03:00Z");
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-22T02:03:00Z",
+                8,
+                |_| false
+            ),
+            1,
+            "cancelled work re-enters ordinary admission after the hold clears"
+        );
     }
 
     #[test]
     fn provider_hold_preserves_materializer_owned_and_confirmed_launches() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 8,
@@ -28165,7 +28996,7 @@ mod tests {
 
     #[test]
     fn provider_hold_restores_fresh_required_from_an_unclaimed_delivery() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 4,
@@ -28215,7 +29046,7 @@ mod tests {
 
     #[test]
     fn prepare_effect_rejects_a_stale_claim_proposal_for_the_held_provider() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_profile: Some(test_launch_profile("codex")),
@@ -28403,7 +29234,7 @@ mod tests {
     fn launch_failures_names_the_cause_behind_a_retry_backoff_stall() {
         const MESSAGE: &str =
             "Codex hook trust is incomplete: Codex would stop this launch on `Hooks need review`";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -28510,7 +29341,7 @@ mod tests {
     #[test]
     fn a_pool_degraded_to_one_provider_records_when_it_degraded_and_keeps_that_instant() {
         let degraded = |holds: BTreeMap<String, String>| {
-            IssueMonitorState::with_prefs(
+            test_monitor_with_prefs(
                 IssueMonitorConfig::default(),
                 IssueMonitorPrefs {
                     launch_profiles: vec![
@@ -28577,7 +29408,7 @@ mod tests {
     /// single-provider project, which is the opposite of a signal.
     #[test]
     fn a_single_candidate_pool_is_not_reported_as_degraded() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_profiles: vec![test_launch_profile("codex")],
@@ -28597,7 +29428,7 @@ mod tests {
     /// the monitor from prefs — no live daemon — still sees when it started.
     #[test]
     fn a_pool_degradation_survives_the_prefs_round_trip() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_profiles: vec![test_launch_profile("codex"), test_launch_profile("claude")],
@@ -28612,8 +29443,7 @@ mod tests {
             .observe_candidate_pool_at("2026-10-03T01:00:00Z")
             .expect("degraded");
 
-        let reloaded =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
 
         assert_eq!(
             reloaded
@@ -28716,8 +29546,7 @@ mod tests {
         // The operator's cap is three; the six launches reached disk anyway,
         // which is exactly the reported 22:47:53 state.
         monitor.set_max_active_agents(3);
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(
             restored.active_count(),
             6,
@@ -28792,8 +29621,7 @@ mod tests {
                 .is_empty(),
             "and it is idempotent — a second pass changes nothing"
         );
-        let reloaded =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered.prefs());
+        let reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), recovered.prefs());
         assert_eq!(
             reloaded.active_count(),
             6,
@@ -28935,7 +29763,7 @@ mod tests {
             ..IssueMonitorPrefs::default()
         };
 
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         assert_eq!(
             restored.active_count(),
@@ -28991,7 +29819,7 @@ mod tests {
             ..IssueMonitorPrefs::default()
         };
 
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         assert_eq!(
             restored.active_count(),
@@ -29024,8 +29852,7 @@ mod tests {
             "a disabled monitor must not persist slots it no longer manages"
         );
 
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(
             restored.active_count(),
             0,
@@ -29040,7 +29867,7 @@ mod tests {
             .iter()
             .map(|(issue_number, _)| issue(*issue_number))
             .collect::<Vec<_>>();
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -29127,7 +29954,7 @@ mod tests {
                 // The pane identity wins over a stale ledger owner.
                 monitor.launch_bindings.insert(shared.to_string(), 42);
             }
-            monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+            monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
             if observed_owner {
                 monitor.record_window_snapshot(IssueMonitorWindowSnapshot {
                     project_tab_id: "project-a".to_string(),
@@ -29228,7 +30055,7 @@ mod tests {
         let mut prefs = monitor.prefs();
         prefs.launched_issues.clear();
         prefs.launched_claims.clear();
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(
             restored.active_count(),
             0,
@@ -29305,7 +30132,7 @@ mod tests {
         let mut parked_driver = monitor.clone();
         // The CLI starts from persisted preferences, with no materialized inbox.
         let mut prefs_only =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         prefs_only.record_window_snapshot(monitor.fresh_window_snapshot(IDLE_NOW).unwrap().clone());
         assert_eq!(
             prefs_only
@@ -29432,7 +30259,7 @@ mod tests {
             monitor.remediate_autonomous_gate(5248, actual_reason, current_body, IDLE_NOW);
 
             let mut restored =
-                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+                test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
             restored.record_candidate(auto_issue(5248, current_body));
             assert_eq!(restored.active_count(), 1, "{reason}");
             assert_eq!(restored.launched_window_id(5248).as_deref(), Some(window));
@@ -29469,7 +30296,7 @@ mod tests {
         let mut prefs = launched_monitor(5023, window).prefs();
         let stale_prefs = prefs.clone();
         prefs.launched_issues.clear();
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let mut observed = idle_observation(window, Some(4783), WindowState::Running, false);
         observed.session_id = Some("Elvor".into());
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, vec![observed]));
@@ -29597,7 +30424,7 @@ mod tests {
 
     #[test]
     fn issue_4783_own_claim_without_session_proof_cannot_readopt() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_bindings: BTreeMap::from([("tab-1::agent-87".into(), 5023)]),
@@ -29622,7 +30449,7 @@ mod tests {
     #[test]
     fn issue_4783_old_owner_observation_cannot_revoke_a_new_ack() {
         let window = "tab-1::agent-87";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_candidate(issue(4783));
         monitor.complete_active_launch_at(4783, window, "2026-10-15T00:01:00Z");
         monitor.record_window_snapshot(idle_snapshot(
@@ -29648,7 +30475,7 @@ mod tests {
         );
         let mut prefs = monitor.prefs();
         prefs.launched_issues.clear();
-        let mut recovered = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut recovered = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         recovered.record_window_snapshot(idle_snapshot(
             "2026-10-15T00:02:00Z",
             vec![idle_observation(
@@ -29679,7 +30506,7 @@ mod tests {
 
         let mut prefs = monitor.prefs();
         prefs.max_active_agents = 1;
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         assert_eq!(
             restored.active_count(),
@@ -29728,7 +30555,7 @@ mod tests {
         let mut prefs = monitor.prefs();
         prefs.launched_issues.clear();
         prefs.launched_claims.clear();
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         restored.record_launch_failed(3868, "stopped: duplicate launch");
 
         let reconciliation = restored.reconcile_launch_bindings(
@@ -29758,7 +30585,7 @@ mod tests {
         );
 
         let foreign = launched_cohort(&[(42, "project-b::agent-9")]);
-        let mut foreign = IssueMonitorState::with_prefs(
+        let mut foreign = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launched_issues: Vec::new(),
@@ -29783,7 +30610,7 @@ mod tests {
         let stale_bindings = (0..10)
             .map(|index| (format!("project-a::agent-{index}"), 100 + index))
             .collect::<BTreeMap<_, _>>();
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launch_bindings: stale_bindings.clone(),
@@ -29966,7 +30793,7 @@ mod tests {
             }],
             ..IssueMonitorPrefs::default()
         };
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         assert!(restored.prefs().launch_bindings.is_empty());
         assert!(restored.active_issue_numbers().is_empty());
@@ -30011,7 +30838,7 @@ mod tests {
         let mut prefs = monitor.prefs();
         prefs.launched_issues.clear();
         prefs.launched_claims.clear();
-        let mut restarted = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         restarted.set_gui_connected(true);
         let second_cohort = [3857, 3860, 3864];
         let candidates = cohort
@@ -30065,7 +30892,7 @@ mod tests {
     /// `daemon.status: stopped` and nobody could tell from the monitor.
     #[test]
     fn concurrent_and_absent_scan_drivers_are_reported_in_last_error() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
 
         assert_eq!(
             monitor.diagnose_scan_drive(
@@ -30175,7 +31002,7 @@ mod tests {
             "AC-5: nor the monitor's own enabled state"
         );
 
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), recovered);
         assert_eq!(
             restored.active_count(),
             3,
@@ -30224,7 +31051,7 @@ mod tests {
             reset.quarantine_path.contains(".corrupt-"),
             "the record must point at the quarantined bytes: {reset:?}"
         );
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), recovered);
         assert!(
             monitor
                 .agent_status_at("2026-09-01T22:45:18Z")
@@ -30252,8 +31079,7 @@ mod tests {
             "AC-5: the operator's opt-in must outlive the process that took it"
         );
         assert!(
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded)
-                .autonomous_mode(),
+            test_monitor_with_prefs(IssueMonitorConfig::default(), reloaded).autonomous_mode(),
             "and the restored monitor must come back autonomous"
         );
     }
@@ -30417,7 +31243,7 @@ mod tests {
 
         let prefs: IssueMonitorPrefs =
             serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         restored.rebase_daemon_driver_prefs(&stale);
         scan_issue_monitor_candidates(&mut restored, &[issue], "2026-10-14T00:01:00Z");
         assert_eq!(
@@ -30449,7 +31275,7 @@ mod tests {
 
     #[test]
     fn issue_4357_pending_launch_cannot_inherit_predecessor_completion() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.active_launches.push(42);
         monitor.record_claimed(issue(42), "claim-42");
         let target = stop_target(&monitor, 42);
@@ -30584,8 +31410,7 @@ mod tests {
             "launch driver stopped responding",
             "2026-09-15T15:00:00Z",
         );
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(!monitor.launch_identity(42).active);
         assert_eq!(monitor.live_claim_id(42), None);
         assert_eq!(monitor.launched_window_id(42), None);
@@ -30608,8 +31433,7 @@ mod tests {
             }
         );
         daemon.rebase_daemon_driver_prefs(&monitor.prefs());
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), daemon.prefs());
         assert_eq!(
             restored.stop_only_reason(42).as_deref(),
             Some("recover unresponsive launch")
@@ -30747,7 +31571,7 @@ mod tests {
         prefs
             .launched_claims
             .insert(42, "gwt-auto-improve:live".to_string());
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         let outcome = monitor.stop_only(
             &IssueMonitorStopTarget {
@@ -30787,7 +31611,7 @@ mod tests {
     /// `execution.blocked` holding its slot with no operator escape at all.
     #[test]
     fn stop_only_accepts_an_operator_claim_id_the_durable_state_cannot_answer() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             stranded_launch_prefs(3950, "project-a::agent-37"),
         );
@@ -30826,7 +31650,7 @@ mod tests {
         prefs
             .launched_claims
             .insert(3950, "gwt-auto-improve:live".to_string());
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
 
         let outcome = monitor.stop_only(
             &IssueMonitorStopTarget {
@@ -30853,7 +31677,7 @@ mod tests {
     /// against a launch that now records none stays a CAS miss.
     #[test]
     fn requeue_exact_window_keeps_the_strict_identity_match() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             stranded_launch_prefs(42, "tab-1::agent-1"),
         );
@@ -30878,7 +31702,7 @@ mod tests {
     /// recovery path at all.
     #[test]
     fn release_stranded_launch_returns_a_row_whose_launch_is_gone_to_the_queue() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(4086)], "2026-09-08T19:00:00Z");
         monitor.complete_active_launch(4086, "project-a::agent-9");
         let target = stop_target(&monitor, 4086);
@@ -30922,7 +31746,7 @@ mod tests {
     /// gate. A row a launch still owns keeps failing closed.
     #[test]
     fn release_stranded_launch_refuses_a_live_launch() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             stranded_launch_prefs(42, "tab-1::agent-1"),
         );
@@ -30992,8 +31816,7 @@ mod tests {
             (4376, "tab-1::agent-2"),
             (4377, "tab-1::agent-3"),
         ]);
-        let mut restarted =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         for number in [4373, 4376, 4377] {
             restarted.record_candidate(issue(number));
         }
@@ -31042,7 +31865,7 @@ mod tests {
     /// than waiting on an operator who may never look.
     #[test]
     fn a_stranded_launched_row_returns_to_the_queue_after_the_grace_period() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(4086)], "2026-09-08T19:00:00Z");
         monitor.complete_active_launch(4086, "project-a::agent-9");
         let target = stop_target(&monitor, 4086);
@@ -31077,7 +31900,7 @@ mod tests {
     /// row that still owns its window and slot is untouched however old it is.
     #[test]
     fn the_stranded_row_sweep_never_touches_a_live_launch() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             stranded_launch_prefs(42, "tab-1::agent-1"),
         );
@@ -31097,7 +31920,7 @@ mod tests {
     /// SPEC-3431 FR-033: only a running or ready-to-run launch can be stopped.
     #[test]
     fn stop_only_rejects_issues_that_are_not_running() {
-        let mut queued = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut queued = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut queued, &[issue(42)], "2026-06-26T00:00:00Z");
         assert_eq!(
             queued.stop_only(
@@ -31195,8 +32018,7 @@ mod tests {
     fn stop_only_works_from_prefs_without_a_scanned_inbox() {
         let launched = launched_monitor(42, "tab-1::agent-1");
         // Exactly what gwtd sees: prefs on disk, no candidate scan.
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), launched.prefs());
         assert!(
             monitor.inbox_item(42).is_none(),
             "precondition: with_prefs restores no inbox"
@@ -31219,8 +32041,7 @@ mod tests {
 
         // The hold has to survive the next prefs roundtrip, or the following
         // scan relaunches the issue the PM just stopped.
-        let reloaded =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(reloaded.active_count(), 0);
         assert_eq!(
             reloaded.stop_only_reason(42).as_deref(),
@@ -31248,7 +32069,7 @@ mod tests {
         assert_eq!(daemon.active_count(), 1);
 
         // The PM's gwtd process: same prefs, no inbox, commits the stop.
-        let mut cli = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        let mut cli = test_monitor_with_prefs(IssueMonitorConfig::default(), daemon.prefs());
         let target = IssueMonitorStopTarget {
             issue_number: 42,
             claim_id: cli.live_claim_id(42),
@@ -31299,7 +32120,7 @@ mod tests {
             "the daemon must not restore the launch it just adopted as stopped"
         );
         assert_eq!(
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), committed)
+            test_monitor_with_prefs(IssueMonitorConfig::default(), committed)
                 .stop_only_reason(42)
                 .as_deref(),
             Some("provider rate limit"),
@@ -31316,7 +32137,7 @@ mod tests {
     /// failure the delayed close causes, arriving from the other direction.
     #[test]
     fn a_launch_ack_after_a_stop_does_not_resurrect_the_issue() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -31493,8 +32314,7 @@ mod tests {
             "provider failover must not spend the NeedsHuman budget"
         );
 
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_queued_candidates(&mut restored, &[issue(42)], "2026-08-13T00:00:01Z");
         assert!(restored.apply_confirmed_claim(
             42,
@@ -31510,7 +32330,7 @@ mod tests {
             IssueMonitorLaunchSessionStrategy::FreshRequired,
             "the durable delivery must retain the failover origin"
         );
-        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let mut replayed = test_monitor_with_prefs(IssueMonitorConfig::default(), durable);
         let first = replayed.take_pending_launch_requests();
         let second = replayed.take_pending_launch_requests();
         assert_eq!(first, second, "an unacked delivery remains replayable");
@@ -31686,7 +32506,7 @@ mod tests {
 
     #[test]
     fn launch_writer_conflict_requires_exact_delivery_materializer_identity() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(
@@ -31782,10 +32602,10 @@ mod tests {
             ..IssueMonitorPrefs::default()
         };
 
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), disk.clone());
         assert!(restored.prefs().queued_launch_session_strategies.is_empty());
 
-        let mut rebased = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut rebased = test_monitor(IssueMonitorConfig::default());
         rebased.record_candidate(issue(42));
         rebased.rebase_gui_observer_prefs(&disk);
         assert!(rebased.prefs().queued_launch_session_strategies.is_empty());
@@ -31874,7 +32694,7 @@ mod tests {
     #[test]
     fn a_failed_inbox_share_is_classified_and_never_reads_as_needing_nobody() {
         let now = "2026-09-10T02:40:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 16,
             ..IssueMonitorConfig::default()
@@ -31970,7 +32790,7 @@ mod tests {
     #[test]
     fn a_small_failed_share_is_not_reported_as_a_surge() {
         let now = "2026-09-10T02:40:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 16,
             ..IssueMonitorConfig::default()
@@ -32010,7 +32830,7 @@ mod tests {
     /// the monitor admitted another one over `max_active`.
     #[test]
     fn duplicate_launch_refused_on_a_held_generation_keeps_the_running_launch_and_its_slot() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -32089,7 +32909,7 @@ mod tests {
     /// still fails its row, which is what Issue #3964's reclaim reads.
     #[test]
     fn generation_conflict_without_a_running_launch_still_fails_the_row() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -32212,8 +33032,7 @@ mod tests {
         requeue: impl FnOnce(&mut IssueMonitorState),
     ) -> IssueMonitorState {
         let mut driver = agent_failed_monitor(number, "stale worktree base");
-        let mut operator =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), driver.prefs());
+        let mut operator = test_monitor_with_prefs(IssueMonitorConfig::default(), driver.prefs());
         requeue(&mut operator);
         let disk: IssueMonitorPrefs =
             serde_json::from_str(&serde_json::to_string(&operator.prefs()).unwrap()).unwrap();
@@ -32303,7 +33122,7 @@ mod tests {
         });
         assert_eq!(delivered_requeue_reason(&blank, 42), None);
 
-        let mut ordinary = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut ordinary = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut ordinary, &[issue(43)], "2026-09-22T21:00:00Z");
         assert!(ordinary.apply_confirmed_claim(
             43,
@@ -32532,7 +33351,7 @@ mod tests {
     /// the state changed when it did not.
     #[test]
     fn requeue_failed_issue_reports_when_nothing_is_held() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
         let before = monitor.prefs();
 
@@ -32560,7 +33379,7 @@ mod tests {
     /// divergent fixture grow the audit by exactly one entry.
     #[test]
     fn release_stranded_generation_failures_stops_after_the_same_generation_is_refused_again() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-09-06T16:44:00Z");
         let divergent_probe = |_: u64| {
             Some(crate::cli::execution_state::OwnerGenerationHold {
@@ -32674,7 +33493,7 @@ mod tests {
     /// clears the count, because that proves it was recovery.
     #[test]
     fn release_stranded_generation_failures_stops_after_repeated_successor_releases() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-09-10T02:00:00Z");
         let successor_probe = |generation: &'static str| {
             move |_: u64| {
@@ -32763,7 +33582,7 @@ mod tests {
                 retry_record: None,
             };
         let stranded = "stranded execution generation released (holder Session Idle); returned to the queue by the Issue Monitor";
-        let monitor = IssueMonitorState::with_prefs(
+        let monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 failure_release_version: 7,
@@ -32805,7 +33624,7 @@ mod tests {
     /// longer Active, the hold has nothing left to protect.
     #[test]
     fn release_stranded_generation_failures_requeues_rows_whose_generation_is_no_longer_active() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             &[issue(42), issue(43), issue(44)],
@@ -32894,7 +33713,7 @@ mod tests {
     /// inbox by hand.
     #[test]
     fn release_stranded_generation_failures_reports_rows_whose_generation_is_still_active() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             &[issue(42), issue(43)],
@@ -33018,7 +33837,7 @@ mod tests {
     /// agent's slot; it stays reported instead.
     #[test]
     fn release_stranded_generation_failures_never_touches_a_row_with_a_live_launch() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-09-05T00:00:00Z");
         monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Interrupted"));
         // A fresh launch of the same Issue is in flight while the failure row
@@ -33066,7 +33885,7 @@ mod tests {
     #[test]
     fn queued_rows_launch_past_an_agent_failed_row_at_the_head_of_the_priority_order() {
         let build = || {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            let mut monitor = test_monitor(IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
             });
@@ -33235,7 +34054,7 @@ mod tests {
         );
 
         let restarted =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_daemon.prefs());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), stale_daemon.prefs());
         assert_eq!(restarted.active_count(), 0);
         assert_eq!(restarted.attempt_count(42), 0);
         assert!(restarted.queued_issue_numbers().contains(&42));
@@ -33269,7 +34088,7 @@ mod tests {
         assert_eq!(fresh.pending_launch_deliveries.len(), 1);
 
         let mut stale_observer =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_release);
+            test_monitor_with_prefs(IssueMonitorConfig::default(), stale_release);
         stale_observer.rebase_daemon_driver_prefs(&fresh);
         assert!(stale_observer.prefs().released_failures.is_empty());
         assert_eq!(stale_observer.active_issue_numbers(), vec![42]);
@@ -33331,7 +34150,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithCompletedTasks,
             "2026-08-26T00:00:00Z",
         );
-        let mut merged = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut merged = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut merged,
             std::slice::from_ref(&complete_spec),
@@ -33344,8 +34163,7 @@ mod tests {
         ));
         merged.record_merged(42);
         assert!(merged.prefs().released_failures.is_empty());
-        let restarted =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), merged.prefs());
+        let restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), merged.prefs());
         assert!(restarted.merged_issues.contains(&42));
         assert!(!restarted.queued_issue_numbers().contains(&42));
 
@@ -33411,6 +34229,7 @@ mod tests {
     fn synchronous_claim_cleanup_preserves_backoff_held_queue_head() {
         use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
         let github_issue = |number| IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: format!("Issue {number}"),
             body: String::new(),
@@ -33422,7 +34241,7 @@ mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
         client.seed(github_issue(43));
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -33449,7 +34268,7 @@ mod tests {
 
     #[test]
     fn requeue_audit_is_bounded_to_the_latest_hundred_releases() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         for issue_number in 1..=101 {
             monitor.record_candidate(issue(issue_number));
             monitor.record_attempt(issue_number);
@@ -33484,7 +34303,7 @@ mod tests {
             operator_requested: false,
             retry_record: None,
         };
-        let mut observer = IssueMonitorState::with_prefs(
+        let mut observer = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 failure_release_version: 100,
@@ -33545,7 +34364,7 @@ mod tests {
         );
 
         // A process still carrying the older release snapshot must not undo it.
-        let mut observer = IssueMonitorState::with_prefs(
+        let mut observer = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 failed_issues: Vec::new(),
@@ -33711,7 +34530,7 @@ mod tests {
     /// exact-claim requirement was unsatisfiable from the PM's side.
     #[test]
     fn agent_status_exposes_the_claim_id_stop_only_requires() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -33781,8 +34600,7 @@ mod tests {
         assert_identity(&monitor, "in memory");
         // The offline status path rebuilds the inbox from prefs plus the Issue
         // cache; the identity has to survive that rebuild.
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_queued_candidates(&mut restored, &[issue(42)], "2026-06-26T00:05:00Z");
         assert_identity(&restored, "after a prefs roundtrip");
         // A relaunch after a stop must not inherit the consumed delivery.
@@ -33852,7 +34670,7 @@ mod tests {
     /// Issue #3712: one launch carried through claim, delivery, materialization
     /// and the GUI ACK, the way the daemon and GUI drive it in production.
     fn acked_delivery_monitor() -> IssueMonitorState {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -33913,8 +34731,7 @@ mod tests {
             delivery_id: row.delivery_id,
             window_id: row.launched_window_id,
         };
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(
             matches!(
                 restored.stop_only(&target, "terminal Work", "2026-09-12T00:00:00Z"),
@@ -33929,8 +34746,7 @@ mod tests {
     #[test]
     fn monitor_exact_failover_releases_a_terminal_row_and_its_old_binding() {
         let mut monitor = launched_monitor(42, "tab-1::agent-old");
-        let mut daemon =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut daemon = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         daemon.record_candidate(issue(42));
         monitor.set_inbox_state(42, MonitorInboxState::NeedsHuman);
         let target = stop_target(&monitor, 42);
@@ -33973,7 +34789,7 @@ mod tests {
     /// launch, slot, and window exactly as it was.
     #[test]
     fn stop_only_touches_no_other_issue() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_max_active_agents(2);
         scan_queued_candidates(
             &mut monitor,
@@ -34033,8 +34849,7 @@ mod tests {
         assert_eq!(monitor.active_count(), 0);
         assert!(monitor.inbox_item(42).is_none());
         assert!(monitor.agent_status().needs_human.is_empty());
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(restored.inbox_item(42).is_none());
     }
 
@@ -34073,7 +34888,7 @@ mod tests {
                 reviewed_sha: "def456".to_string(),
             },
         };
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 effect_authority_epoch: 4,
@@ -34238,8 +35053,7 @@ mod tests {
         );
         assert!(monitor.local_terminal_queue_numbers().is_empty());
         assert!(monitor.inbox_item(7).is_none());
-        let mut restarted =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_issue_monitor_candidates_with_provenance(
             &mut restarted,
             &[],
@@ -34263,7 +35077,7 @@ mod tests {
             2,
             IssueMonitorEffectState::Attempting,
         );
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 effect_authority_epoch: 4,
@@ -34352,7 +35166,7 @@ mod tests {
         let merged: BTreeSet<String> = [branch].into_iter().collect();
 
         // The launch tracking is wiped exactly as a hand repair wipes it.
-        let mut untracked = IssueMonitorState::with_prefs(
+        let mut untracked = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 launched_issues: Vec::new(),
@@ -34438,6 +35252,7 @@ mod tests {
         updated_at: &str,
     ) -> IssueMonitorIssue {
         IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("SPEC {number}"),
             labels: vec!["auto-improve".to_string(), "gwt-spec".to_string()],
@@ -34456,7 +35271,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-08-15T00:00:00Z",
         );
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[candidate], "2026-08-15T00:00:01Z");
         monitor.complete_active_launch(42, "tab-1::agent-1");
         let branch = monitor.active_launched_branches()[0].1.clone();
@@ -34479,7 +35294,7 @@ mod tests {
     fn ordinary_open_work_merge_frees_the_slot_and_requeues_remaining_acceptance() {
         let mut candidate = issue(42);
         candidate.labels.push("auto-improve".to_string());
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&candidate),
@@ -34514,7 +35329,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-08-15T00:00:00Z",
         );
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[candidate], "2026-08-15T00:00:01Z");
         monitor.complete_active_launch(42, "tab-1::agent-1");
         monitor.record_attempt(42);
@@ -34538,7 +35353,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-08-15T00:00:00Z",
         );
-        let mut settled = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut settled = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut settled,
             std::slice::from_ref(&candidate),
@@ -34580,8 +35395,7 @@ mod tests {
             retry_hold_provider: None,
             ..AutonomousIssueRecord::new(42)
         }];
-        let mut observer =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable_reopen);
+        let mut observer = test_monitor_with_prefs(IssueMonitorConfig::default(), durable_reopen);
         observer.rebase_gui_observer_prefs(&successor_disk);
         assert_eq!(observer.active_issue_numbers(), vec![42]);
         assert_eq!(
@@ -34598,7 +35412,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithCompletedTasks,
             "2026-08-15T00:00:00Z",
         );
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&candidate),
@@ -34612,8 +35426,7 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::Merged)
         );
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_queued_candidates_with_provenance(
             &mut restored,
             &[candidate],
@@ -34637,7 +35450,7 @@ mod tests {
             numbers
         );
         let prefs: IssueMonitorPrefs = serde_json::from_str(&legacy).expect("legacy prefs");
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let issues = numbers
             .into_iter()
             .map(|number| {
@@ -34674,7 +35487,7 @@ mod tests {
             r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
         )
         .expect("legacy prefs");
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let mut cached = issue(42);
         cached.labels.push("auto-improve".to_string());
 
@@ -34708,7 +35521,7 @@ mod tests {
                 r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
             )
             .expect("legacy prefs");
-            let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
             let mut candidate = issue(42);
             candidate.labels.push("auto-improve".to_string());
             candidate.updated_at = Some("2026-08-15T00:00:00Z".to_string());
@@ -34739,8 +35552,7 @@ mod tests {
             r#"{"enabled":true,"max_active_agents":1,"priority_order":[],"merged_issues":[42]}"#,
         )
         .expect("legacy prefs");
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale.clone());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), stale.clone());
         let mut candidate = issue(42);
         candidate.labels.push("auto-improve".to_string());
         candidate.updated_at = Some("2026-08-15T00:00:00Z".to_string());
@@ -34766,7 +35578,7 @@ mod tests {
         let mut current = issue(42);
         current.labels.push("auto-improve".to_string());
         current.updated_at = Some("2026-08-10T00:00:00Z".to_string());
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&current),
@@ -34816,7 +35628,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithCompletedTasks,
             "2026-08-10T00:00:00Z",
         );
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&complete_spec),
@@ -34876,7 +35688,7 @@ mod tests {
     fn clear_completion_hold_requeues_live_open_issue_once_and_fences_stale_completion() {
         let mut current = issue(42);
         current.labels.push("auto-improve".to_string());
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             std::slice::from_ref(&current),
@@ -34929,7 +35741,7 @@ mod tests {
             ],
             ..IssueMonitorPrefs::default()
         };
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), completed);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), completed);
         monitor.transition_issue_closure(
             43,
             IssueClosureState::Closed,
@@ -34960,8 +35772,7 @@ mod tests {
         monitor.record_merged(42);
         monitor.complete_active_launch(42, "tab-1::agent-2");
 
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
 
         assert!(!restored.prefs().merged_issues.contains(&42));
         assert_eq!(restored.active_issue_numbers(), vec![42]);
@@ -35029,6 +35840,124 @@ mod tests {
     }
 
     #[test]
+    fn ci_rerun_consumption_survives_restart_and_stale_rebase() {
+        let effect: PendingIssueMonitorEffect = serde_json::from_value(serde_json::json!({
+            "effect_id": "ci-rerun:99:abc123:701",
+            "authority_epoch": 4,
+            "attempt": 0,
+            "state": "prepared",
+            "payload": {
+                "kind": "rerun_failed_ci", "issue_number": 42,
+                "target": {"pr_number": 99, "head_sha": "abc123", "run_id": 701}
+            }
+        }))
+        .expect("CI rerun effect decodes");
+        let mut current = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                effect_authority_epoch: 4,
+                ..Default::default()
+            },
+        );
+        assert!(current.prepare_effect(effect.clone()));
+        let mut stale = current.clone();
+        let mut wrong_key = effect.attempt_key();
+        wrong_key.attempt += 1;
+        assert!(!current.mark_pending_effect_attempting(&wrong_key));
+        assert!(current.mark_pending_effect_attempting(&effect.attempt_key()));
+        assert!(current
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+
+        let saved = serde_json::to_value(current.prefs()).expect("serialize consumed rerun");
+        assert_eq!(
+            saved["consumed_ci_reruns"],
+            serde_json::json!([effect.effect_id])
+        );
+        let restored = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(saved).expect("reload consumed rerun"),
+        );
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(
+            !stale.prepare_effect(effect.clone()),
+            "stale scan cannot repropose a consumed rerun"
+        );
+        let mut observer = restored;
+        observer.rebase_gui_observer_prefs(&IssueMonitorPrefs::default());
+        assert!(
+            !observer.prepare_effect(PendingIssueMonitorEffect::prepared(
+                effect.effect_id,
+                observer.effect_authority_epoch(),
+                effect.payload,
+            )),
+            "an older disk snapshot cannot erase consumption"
+        );
+    }
+
+    #[test]
+    fn ci_rerun_authority_revocation_keeps_consumption_without_compensation() {
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 99,
+            head_sha: "abc123".into(),
+            run_id: 701,
+        };
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let key = monitor
+            .prepare_pending_effect(
+                target.effect_id(),
+                IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: target.clone(),
+                },
+            )
+            .expect("prepare rerun");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let unsubmitted = crate::issue_monitor_ci::CiRerunTarget {
+            run_id: 702,
+            ..target.clone()
+        };
+        assert!(monitor
+            .prepare_pending_effect(
+                unsubmitted.effect_id(),
+                IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: unsubmitted.clone()
+                }
+            )
+            .is_some());
+
+        monitor
+            .set_autonomous_mode_with_effect_revocation(false)
+            .expect("revoke autonomous mode");
+        assert_eq!(
+            monitor.pending_effects().len(),
+            1,
+            "only the historical Attempting entry remains"
+        );
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
+        assert!(!monitor.ci_rerun_consumed(&unsubmitted.effect_id()));
+        monitor.transition_issue_closure(
+            42,
+            IssueClosureState::Closed,
+            IssueClosureEvidence::ExplicitRevision,
+            Some("2026-10-21T00:00:00Z".into()),
+        );
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "close revokes reruns without compensation"
+        );
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
+    }
+
+    #[test]
     fn control_receipt_defaults_absent_and_round_trips_through_state_and_rebase() {
         let legacy = r#"{
             "enabled": true,
@@ -35045,7 +35974,7 @@ mod tests {
             should_scan: true,
             authority_changed: false,
         };
-        let restored = IssueMonitorState::with_prefs(
+        let restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 last_control_receipt: Some(receipt.clone()),
@@ -35054,7 +35983,7 @@ mod tests {
         );
         assert_eq!(restored.prefs().last_control_receipt, Some(receipt.clone()));
 
-        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut stale = test_monitor(IssueMonitorConfig::default());
         stale.rebase_daemon_driver_prefs(&restored.prefs());
         assert_eq!(stale.prefs().last_control_receipt, Some(receipt));
     }
@@ -35197,7 +36126,7 @@ mod tests {
                 launched_work_id: Some("work/issue-42".to_string()),
             },
         };
-        let mut enabled = IssueMonitorState::with_prefs(
+        let mut enabled = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -35206,6 +36135,7 @@ mod tests {
                 ..IssueMonitorPrefs::default()
             },
         );
+        enabled.set_autonomous_phase(42, AutonomousPhase::Implementing);
         let enabled_before = enabled.prefs();
 
         assert_eq!(
@@ -35213,6 +36143,85 @@ mod tests {
             Some(u64::MAX)
         );
         assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(enabled.set_enabled_with_effect_revocation(false), None);
+        assert_eq!(enabled.prefs(), enabled_before, "OFF overflow is atomic");
+    }
+
+    #[test]
+    fn autonomous_off_clears_cancelled_claim_phases_across_restart_and_rebase() {
+        let now = "2026-10-22T00:00:00Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        let candidates =
+            [42, 43].map(|number| auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        scan_queued_candidates(&mut monitor, &candidates, now);
+        for candidate in &candidates {
+            monitor.record_attempt(candidate.number);
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(candidate, &protection, now),
+                EligibilityDecision::Eligible
+            );
+        }
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            2
+        );
+        let attempting = monitor.pending_effects()[1].clone();
+        assert!(monitor.mark_pending_effect_attempting(&attempting.attempt_key()));
+        let mut stale = monitor.clone();
+        let mut cold = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+
+        assert_eq!(
+            monitor.set_autonomous_mode_with_effect_revocation(true),
+            Some(0)
+        );
+        assert_eq!(monitor.autonomous_in_flight_issues(), vec![42, 43]);
+        assert_eq!(
+            monitor.set_autonomous_mode_with_effect_revocation(false),
+            Some(1)
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), vec![42, 43]);
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(
+            monitor
+                .pending_effects()
+                .iter()
+                .filter(|effect| matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ReleaseClaim { .. }
+                ))
+                .count(),
+            1
+        );
+
+        cold.set_autonomous_mode_with_effect_revocation(false)
+            .unwrap();
+        assert!(cold.autonomous_in_flight_issues().is_empty());
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), prefs);
+        restored
+            .set_autonomous_mode_with_effect_revocation(true)
+            .unwrap();
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(stale.autonomous_in_flight_issues().is_empty());
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        scan_issue_monitor_candidates(&mut restored, &candidates, now);
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidates[0], &protection, now),
+            EligibilityDecision::Eligible
+        );
+        assert_eq!(restored.attempt_count(42), 1);
     }
 
     #[test]
@@ -35320,7 +36329,7 @@ mod tests {
     fn issue_4862_late_legacy_ack_cannot_replace_a_repaired_holder_after_reload() {
         let mut monitor = acked_delivery_monitor();
         assert!(monitor.bind_duplicate_runtime_holder(42, "tab-1::agent-42", "tab-1::holder"));
-        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         let before = restored.prefs();
 
         assert!(!restored.complete_active_launch_delivery(42, "tab-1::agent-42", None));
@@ -35453,7 +36462,7 @@ mod tests {
 
     #[test]
     fn issue_4862_holder_repair_cancels_only_the_duplicate_materializer_delivery() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 2,
             ..IssueMonitorConfig::default()
         });
@@ -35478,7 +36487,7 @@ mod tests {
         monitor.complete_active_launch(42, "tab-1::duplicate");
 
         assert!(monitor.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
-        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         assert_eq!(restored.pending_launch_delivery_id(42), None);
         assert_eq!(
             restored.pending_launch_delivery_id(43).as_deref(),
@@ -35587,7 +36596,7 @@ mod tests {
 
     #[test]
     fn monitor_unbound_live_pane_stops_relaunch_across_two_scans() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -35639,7 +36648,7 @@ mod tests {
 
     #[test]
     fn monitor_canvas_counts_untracked_panes_without_double_counting_census() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -35690,7 +36699,7 @@ mod tests {
 
     #[test]
     fn monitor_delivery_rechecks_lowered_max_active_before_materialization() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -35750,7 +36759,7 @@ mod tests {
 
     #[test]
     fn monitor_census_canvas_merge_keeps_distinct_host_same_issue_panes() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_monitor_runtime_counts(
             101,
             1001,
@@ -35792,7 +36801,7 @@ mod tests {
 
     #[test]
     fn monitor_pending_reservation_does_not_replace_a_retained_same_issue_pane() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 2,
             ..IssueMonitorConfig::default()
         });
@@ -35832,7 +36841,7 @@ mod tests {
 
     #[test]
     fn monitor_review_budget_adds_foreign_ledger_and_local_retained_pane() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.review_windows.insert(
             41,
             IssueMonitorReviewWindow {
@@ -35860,7 +36869,7 @@ mod tests {
 
     #[test]
     fn monitor_snapshot_first_intake_parks_unbound_live_pane() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-06T00:00:00Z",
             vec![live_pane_observation(
@@ -35878,7 +36887,7 @@ mod tests {
 
     #[test]
     fn monitor_materialized_delivery_replays_ack_above_lowered_cap() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 2,
             ..IssueMonitorConfig::default()
         });
@@ -35923,7 +36932,7 @@ mod tests {
 
     #[test]
     fn monitor_known_local_tabs_count_retained_panes_and_park_new_candidates() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-06T00:00:00Z",
             vec![
@@ -35949,6 +36958,7 @@ mod tests {
         );
         state["window_snapshot_host"] = serde_json::json!([101, 1001]);
         let mut monitor: IssueMonitorState = serde_json::from_value(state).unwrap();
+        monitor.set_source_repository(Some(("example", "project")));
         assert_eq!(
             monitor.active_count(),
             3,
@@ -35963,7 +36973,7 @@ mod tests {
 
     #[test]
     fn monitor_dead_materializer_reacks_exact_existing_pane_at_cap() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -36044,7 +37054,7 @@ mod tests {
 
     #[test]
     fn monitor_first_materializer_claim_adopts_exact_existing_pane_at_cap() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(42)], "2026-10-06T00:00:00Z");
         assert!(monitor.apply_confirmed_claim(
             42,
@@ -36094,7 +37104,7 @@ mod tests {
 
     #[test]
     fn runtime_process_counts_include_duplicates_and_untracked_launches_in_admission() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 3,
             ..IssueMonitorConfig::default()
@@ -36146,7 +37156,7 @@ mod tests {
 
     #[test]
     fn runtime_process_counts_survive_reload_and_stale_rebase_until_a_new_observation() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let stale = monitor.prefs();
         monitor.record_monitor_runtime_counts(
             101,
@@ -36156,8 +37166,7 @@ mod tests {
         );
         monitor.rebase_daemon_driver_prefs(&stale);
         assert_eq!(monitor.active_count(), 2);
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(restored.active_count(), 2);
         assert!(!restored.record_monitor_runtime_counts(
             101,
@@ -36191,7 +37200,7 @@ mod tests {
         // Phase 7 T-140: the cloned scan may select candidates, but GitHub
         // mutation begins only after the proposal commits and is fenced by the
         // daemon executor. Repeated scans must retain one stable proposal.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -36235,7 +37244,7 @@ mod tests {
 
     #[test]
     fn claim_proposal_planning_preserves_completion_probe_failure() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -36272,7 +37281,7 @@ mod tests {
     /// missing answer.
     #[test]
     fn claim_observations_apply_only_to_their_own_issue_and_defer_the_unprobed() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 3,
             ..IssueMonitorConfig::default()
@@ -36337,7 +37346,7 @@ mod tests {
 
     #[test]
     fn confirmed_claim_persists_and_replays_one_stable_launch_delivery() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..IssueMonitorConfig::default()
@@ -36365,7 +37374,7 @@ mod tests {
             Some(MonitorInboxState::Launching)
         );
 
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let first = restored.take_pending_launch_requests();
         let replay = restored.take_pending_launch_requests();
         assert_eq!(first, replay, "delivery remains replayable until ACK");
@@ -36419,7 +37428,7 @@ mod tests {
     /// failover/failure origin and therefore retains exact-resume continuity.
     #[test]
     fn ordinary_confirmed_claim_uses_resume_if_safe() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(
@@ -36452,7 +37461,7 @@ mod tests {
         let claim_id = format!("gwt-auto-improve:{owner}:42:{now}");
         let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
         let expected_delivery_id = format!("launch:{synchronous_effect_id}");
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -36489,6 +37498,7 @@ mod tests {
             launched_work_id: Some("work/issue-42".to_string()),
         };
         client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(42),
             title: "Issue 42".to_string(),
             body: String::new(),
@@ -36514,7 +37524,7 @@ mod tests {
 
     #[test]
     fn matching_launch_ack_consumes_only_its_delivery_and_legacy_ack_consumes_none() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             // The legacy ACK retains its pane while the new delivery claims another.
             max_active: 3,
@@ -36569,7 +37579,7 @@ mod tests {
         wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
         wire["issue_tiers"]["42"] =
             serde_json::json!({"floor": 2, "launch_tier": 2, "landing_tier": null});
-        monitor = IssueMonitorState::with_prefs(
+        monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(wire).unwrap(),
         );
@@ -36622,7 +37632,7 @@ mod tests {
         let confirmed = serde_json::json!({
             "tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"
         });
-        let mut restored = IssueMonitorState::with_prefs(
+        let mut restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(serde_json::to_value(&acked).unwrap()).unwrap(),
         );
@@ -36653,7 +37663,7 @@ mod tests {
                 .unwrap()
                 .get("confirmed_launch")
                 .is_none()));
-        restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), acked.clone());
+        restored = test_monitor_with_prefs(IssueMonitorConfig::default(), acked.clone());
         restored.record_agent_issue_failed(42, "agent failed");
         assert!(restored
             .tier_facts(None)
@@ -36695,7 +37705,7 @@ mod tests {
 
     #[test]
     fn launch_delivery_materializer_claim_is_single_owner_and_dead_owner_is_recoverable() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -36719,12 +37729,12 @@ mod tests {
         ));
         let mut wire = serde_json::to_value(monitor.prefs()).unwrap();
         wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
-        monitor = IssueMonitorState::with_prefs(
+        monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(wire).unwrap(),
         );
         let mut unmaterialized =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(unmaterialized.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -36744,6 +37754,7 @@ mod tests {
             "gui-a",
             "tab-a::agent-1"
         ));
+        monitor.set_source_repository(None);
         assert!(monitor.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -36759,7 +37770,29 @@ mod tests {
             "same-window recovery preserves the selected tier"
         );
         let mut recovered_same_window =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        recovered_same_window.set_source_repository(None);
+        assert!(
+            !recovered_same_window.claim_launch_delivery(
+                42,
+                "launch:effect-42",
+                "gui-b",
+                202,
+                "tab-a::agent-1",
+                |_| false
+            ),
+            "a saved window ID without a current pane cannot authorize a new materializer"
+        );
+        let mut snapshot = pane_snapshot(
+            IDLE_NOW,
+            vec![live_pane_observation(
+                "tab-a::agent-1",
+                42,
+                WindowState::Running,
+            )],
+        );
+        snapshot.project_tab_id = "tab-a".into();
+        recovered_same_window.record_window_snapshot(snapshot);
         assert!(recovered_same_window.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -36798,6 +37831,7 @@ mod tests {
             Some("tab-a::agent-1")
         );
 
+        monitor.set_source_repository(Some(("example", "project")));
         assert!(monitor.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -36824,7 +37858,7 @@ mod tests {
 
     #[test]
     fn foreign_materializer_cannot_confirm_existing_materialized_or_durable_markers() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
@@ -36880,7 +37914,7 @@ mod tests {
 
     #[test]
     fn autonomous_legacy_failure_cannot_leave_one_issue_queued_and_replayable() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -36925,7 +37959,7 @@ mod tests {
 
     #[test]
     fn autonomous_direct_launch_failure_requeues_without_replaying_old_delivery() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -36978,7 +38012,7 @@ mod tests {
             42,
             "## Acceptance Criteria\n- [ ] AC-1: replacement agent completes the work\n",
         );
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -37027,8 +38061,7 @@ mod tests {
             + chrono::Duration::seconds(1);
         let retry_at = retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_queued_candidates(&mut restored, std::slice::from_ref(&candidate), &retry_at);
         let branch_protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
@@ -37051,7 +38084,7 @@ mod tests {
             durable.pending_launch_deliveries[0].launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
         );
-        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let mut replayed = test_monitor_with_prefs(IssueMonitorConfig::default(), durable);
         let first = replayed.take_pending_launch_requests();
         let second = replayed.take_pending_launch_requests();
         assert_eq!(
@@ -37066,7 +38099,7 @@ mod tests {
 
     #[test]
     fn autonomous_exact_delivery_failure_consumes_outbox_before_retrying() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -37114,12 +38147,25 @@ mod tests {
 
     #[test]
     fn disabling_monitor_compensates_durable_launch_claim_before_clearing_outbox() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
-        monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
-        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_mode(true);
+        let now = "2026-08-01T00:00:00Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        for number in [42, 43] {
+            let candidate = auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+            monitor.record_candidate(candidate.clone());
+            monitor.record_attempt(number);
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+                EligibilityDecision::Eligible
+            );
+        }
         assert!(monitor.apply_confirmed_claim(
             42,
             "claim-42",
@@ -37128,7 +38174,25 @@ mod tests {
             "2026-07-28T00:00:00Z",
         ));
 
+        let mut stale = monitor.clone();
+        let mut rapid_toggle_observer = monitor.clone();
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(cold.set_enabled_with_effect_revocation(false), Some(1));
+        assert_eq!(
+            cold.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle,
+            "cold OFF must cancel the durable queue's pre-claim eligibility"
+        );
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        for number in [42, 43] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle,
+                "OFF must clear the cancelled pre-spawn phase for Issue #{number}"
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+        }
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert!(monitor.prefs().pending_launch_deliveries.is_empty());
         assert!(monitor.pending_effects().iter().any(|effect| matches!(
             &effect.payload,
@@ -37138,11 +38202,117 @@ mod tests {
                 owner,
             } if claim_id == "claim-42" && owner == "host/session"
         )));
+
+        stale.rebase_daemon_driver_prefs(&monitor.prefs());
+        assert!(
+            stale.autonomous_in_flight_issues().is_empty(),
+            "an older scan must not resurrect the phases cancelled by OFF"
+        );
+
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.set_enabled_with_effect_revocation(true), Some(2));
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        rapid_toggle_observer.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(rapid_toggle_observer
+            .autonomous_in_flight_issues()
+            .is_empty());
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&candidate), now);
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+        restored.rebase_daemon_driver_prefs(&monitor.prefs());
+        assert_eq!(
+            restored.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Implementing,
+            "an older OFF snapshot cannot revoke fresh eligibility"
+        );
+    }
+
+    #[test]
+    fn disabling_monitor_preserves_started_work_and_unobserved_records() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_max_active_agents(6);
+        monitor.terminal_queue_push(&[42, 43, 44, 45], "test", "2026-08-01T00:00:00Z");
+        for number in [42, 43, 44, 45] {
+            monitor.record_candidate(issue(number));
+        }
+        for number in [42, 43, 44, 45, 46] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.complete_active_launch(42, "tab::agent-42");
+        assert!(monitor.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-08-01T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            43,
+            "launch:effect-43",
+            "materializer-43",
+            43,
+            "tab::agent-43",
+            |_| false,
+        ));
+        monitor.process_held_issues.insert(44);
+        monitor.autonomous_record_mut(45).reviewed_sha = Some("reviewed-head".into());
+
+        // A mode control can also encounter an older ambiguous claim alongside
+        // started work. Cancelling that effect must not cancel the work.
+        let mut autonomous = monitor.clone();
+        autonomous.set_autonomous_mode(true);
+        for number in [42, 43, 44, 45] {
+            autonomous
+                .prepare_pending_effect(
+                    format!("old-claim-{number}"),
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: number,
+                        claim_id: format!("old-claim-{number}"),
+                        owner: "host/session".into(),
+                        heartbeat_at: "2026-08-01T00:00:00Z".into(),
+                        expires_at: "2026-08-01T00:30:00Z".into(),
+                        launched_work_id: None,
+                    },
+                )
+                .unwrap();
+        }
+        autonomous
+            .set_autonomous_mode_with_effect_revocation(false)
+            .unwrap();
+        for number in [42, 43, 44, 45, 46] {
+            assert_eq!(
+                autonomous.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+        }
+
+        let mut stale = monitor.clone();
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        stale.rebase_daemon_driver_prefs(&monitor.prefs());
+        for number in [42, 43, 44, 45, 46] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+            assert_eq!(
+                stale.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+        }
     }
 
     #[test]
     fn autonomous_legacy_launch_failure_does_not_consume_durable_delivery() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 ..IssueMonitorConfig::default()
@@ -37175,7 +38345,7 @@ mod tests {
     #[test]
     fn claim_proposals_use_distinct_uuid_identity_and_preserve_it_across_retry_restart() {
         fn prepare(owner: &str) -> IssueMonitorState {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            let mut monitor = test_monitor(IssueMonitorConfig {
                 enabled: true,
                 max_active: 1,
                 ..IssueMonitorConfig::default()
@@ -37228,7 +38398,7 @@ mod tests {
         let encoded = serde_json::to_string(&first.prefs()).expect("prefs serialize");
         let restored_prefs: IssueMonitorPrefs =
             serde_json::from_str(&encoded).expect("prefs deserialize");
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), restored_prefs);
         assert_eq!(
             identity(&restored.pending_effects()[0]),
             (first_effect_id, first_claim_id)
@@ -37262,7 +38432,7 @@ mod tests {
             },
         );
         attempting.state = IssueMonitorEffectState::Attempting;
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -37272,7 +38442,23 @@ mod tests {
             },
         );
 
+        monitor.set_autonomous_mode(true);
+        for number in [42, 43] {
+            let candidate = auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(
+                    &candidate,
+                    &gwt_git::branch_protection::BranchProtectionStatus::Verified {
+                        required_checks: vec!["ci".into()],
+                    },
+                    "2026-07-27T00:00:00Z",
+                ),
+                EligibilityDecision::Eligible
+            );
+        }
+
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(4));
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert!(!monitor.config.enabled);
         assert!(monitor.pending_effects().contains(&attempting));
         assert!(!monitor
@@ -37760,7 +38946,7 @@ mod tests {
         let prefs = monitor.prefs();
         assert_eq!(prefs.merged_issues, vec![42]);
 
-        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         scan_queued_candidates(&mut restored, &[complete_spec], "2026-06-26T02:00:00Z");
         assert_eq!(
             restored.inbox_item(42).map(|item| item.state),
@@ -37912,7 +39098,7 @@ mod tests {
 
         assert_eq!(prefs.effect_authority_epoch, 8);
         assert!(prefs.last_scan_driver.is_none());
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(
             monitor.diagnose_scan_drive(
                 IssueMonitorScanDriverKind::Daemon,
@@ -37954,7 +39140,7 @@ mod tests {
         )
         .expect("exclusive lease proves the GUI no longer drives the monitor");
         assert_eq!(prefs.last_scan_at.as_deref(), Some(now));
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(
             monitor.diagnose_scan_drive(
                 IssueMonitorScanDriverKind::Daemon,
@@ -38579,7 +39765,7 @@ mod tests {
             launch_profiles: vec![codex, claude],
             ..IssueMonitorPrefs::default()
         };
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let status = monitor.status_view();
 
         assert!(status.launch_profile_candidates[0].fast_mode);
@@ -38597,7 +39783,7 @@ mod tests {
         // SPEC #3200 T-022: an issue with no autonomous record reports no record,
         // and a freshly created record starts Idle.
         assert_eq!(AutonomousPhase::default(), AutonomousPhase::Idle);
-        let monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let monitor = test_monitor(IssueMonitorConfig::default());
         assert!(monitor.autonomous_record(42).is_none());
         assert_eq!(monitor.attempt_count(42), 0);
     }
@@ -38606,7 +39792,7 @@ mod tests {
     fn attempt_counter_increments_and_clears() {
         // SPEC #3200 T-016 / FR-026: a per-issue attempt counter increments on
         // each attempt and resets when the record is cleared (success/merge).
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         assert_eq!(monitor.record_attempt(7), 1);
         assert_eq!(monitor.record_attempt(7), 2);
         assert_eq!(monitor.attempt_count(7), 2);
@@ -38621,7 +39807,7 @@ mod tests {
         // SPEC #3200 T-022/T-018: phase, the active launch id binding the current
         // attempt, and the acceptance snapshot are all tracked per issue.
         use crate::issue_monitor_gate::classify_acceptance_criteria;
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_autonomous_phase(9, AutonomousPhase::Implementing);
         monitor.set_active_launch_id(9, Some("tab-1::agent-9".to_string()));
         let snapshot =
@@ -39098,7 +40284,7 @@ mod tests {
             let mut original = stuck_monitor(42, "2026-06-29T00:00:00Z");
             original.launched_windows.remove(&42);
             let mut monitor =
-                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+                test_monitor_with_prefs(IssueMonitorConfig::default(), original.prefs());
             monitor.record_candidate(issue(42));
             monitor.record_window_snapshot(pane_snapshot(
                 "2026-06-29T01:00:00Z",
@@ -39160,8 +40346,7 @@ mod tests {
             "2026-06-29T00:01:00Z",
         );
         original.record_monitor_runtime_counts(101, 1001, BTreeMap::from([(42, 1)]), now);
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original.prefs());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), original.prefs());
         monitor.record_candidate(issue(42));
         let before = monitor.prefs();
 
@@ -39558,7 +40743,7 @@ mod tests {
     fn wait_declaration_requires_a_live_launch() {
         // Issue #3844: only the agent that owns a launch can declare a wait for
         // it; a queued or parked row has nothing to suspend.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_autonomous_mode(true);
         assert_eq!(
             monitor.declare_autonomous_wait(42, "順番待ち", "同上", "2026-06-29T00:10:00Z"),
@@ -39809,7 +40994,7 @@ mod tests {
     fn status_view_surfaces_autonomous_mode_and_per_issue_summary() {
         // SPEC #3200 T-048/FR-033: autonomous_mode and per-issue phase / attempts
         // / needs_human are observable in the status view.
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -39850,7 +41035,7 @@ mod tests {
         };
         let unlabelled = issue(43);
 
-        let mut off = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut off = test_monitor(IssueMonitorConfig::default());
         assert!(
             !off.is_autonomous_two_stage_candidate(&labelled),
             "mode off"
@@ -39919,8 +41104,7 @@ mod tests {
         assert_eq!(monitor.queue_len(), 0, "not relaunched");
 
         // Durable roundtrip keeps the settlement.
-        let mut reloaded =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(reloaded.active_count(), 0);
         assert_eq!(reloaded.launched_window_issue(window_id), None);
         assert!(
@@ -39934,12 +41118,264 @@ mod tests {
     }
 
     #[test]
+    fn issue_4157_settled_ready_pr_blocks_three_scans_then_ci_red_relaunches() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: delivery pending\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(1);
+        let target = stop_target(&monitor, 42);
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+        let client = FakeIssueClient::new();
+        client.seed(IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(42),
+            title: candidate.title.clone(),
+            body: candidate.body.clone().unwrap(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: Vec::new(),
+        });
+
+        for (lifecycle, now) in [
+            ("IN-PROGRESS", "2026-06-26T00:01:00Z"),
+            ("BEHIND", "2026-06-26T00:02:00Z"),
+            ("MERGE-CANDIDATE", "2026-06-26T00:03:00Z"),
+        ] {
+            monitor.reconcile_open_pr_holds(
+                &BTreeMap::from([(
+                    42,
+                    Some(IssueMonitorOpenPrHold {
+                        pr_number: 7,
+                        lifecycle: lifecycle.into(),
+                    }),
+                )]),
+                now,
+            );
+            scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&candidate), now);
+            assert!(monitor.open_pr_launch_held(42));
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Queued
+            );
+            let row = monitor.agent_status_at(now).inbox.remove(0);
+            let reason = row.exclusion_reason.expect("the PR hold is visible");
+            assert!(
+                reason.contains("PR #7") && reason.contains(lifecycle),
+                "{reason}"
+            );
+            assert!(row.error_message.is_none());
+            assert!(monitor.clone().next_launch_request(now).is_none());
+            assert!(!monitor.clone().apply_confirmed_claim(
+                42,
+                "late-claim",
+                "host/session",
+                "late-effect",
+                now
+            ));
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+                0
+            );
+            assert!(monitor
+                .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false)
+                .is_empty());
+            assert_eq!(monitor.active_count(), 0);
+        }
+
+        // A successful CI-RED observation removes the non-actionable PR hold.
+        let now = "2026-06-26T00:04:00Z";
+        monitor.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), now);
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], now);
+        assert!(!monitor.open_pr_launch_held(42));
+        assert_eq!(
+            monitor
+                .clone()
+                .prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        let launches =
+            monitor
+                .claim_next_launch_requests_with_probe(&client, "host/session", now, 1, |_| false);
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].issue_number, 42);
+    }
+
+    #[test]
+    fn issue_4157_pr_hold_clear_survives_roundtrip_and_stale_rebase() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        let hold = BTreeMap::from([(
+            42,
+            Some(IssueMonitorOpenPrHold {
+                pr_number: 7,
+                lifecycle: "MERGE-CANDIDATE".into(),
+            }),
+        )]);
+        monitor.reconcile_open_pr_holds(&hold, "2026-06-26T00:01:00Z");
+        let stale: IssueMonitorPrefs =
+            serde_json::from_value(serde_json::to_value(monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), stale.clone());
+        assert!(restored.open_pr_launch_held(42));
+        restored.reconcile_open_pr_holds(&BTreeMap::new(), "2026-06-26T00:02:00Z");
+        assert!(
+            restored.open_pr_launch_held(42),
+            "an unobserved PR preserves its hold"
+        );
+
+        // A closed/merged PR, or one needing owner repair, is a successful clear.
+        restored.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:03:00Z");
+        restored.rebase_daemon_driver_prefs(&stale);
+        assert!(
+            !restored.open_pr_launch_held(42),
+            "a stale hold cannot undo the clear"
+        );
+        let cleared: IssueMonitorPrefs =
+            serde_json::from_value(serde_json::to_value(restored.prefs()).unwrap()).unwrap();
+        monitor.rebase_gui_observer_prefs(&cleared);
+        assert!(!monitor.open_pr_launch_held(42), "a newer disk clear wins");
+        let mut reloaded = test_monitor_with_prefs(IssueMonitorConfig::default(), cleared);
+        reloaded.reconcile_open_pr_holds(&hold, "2026-06-26T00:01:00Z");
+        assert!(
+            !reloaded.open_pr_launch_held(42),
+            "the empty observation revision persists"
+        );
+        reloaded.reconcile_open_pr_holds(&hold, "2026-06-26T00:04:00Z");
+        assert!(
+            reloaded.open_pr_launch_held(42),
+            "a newer PR observation can hold again"
+        );
+    }
+
+    #[test]
+    fn issue_4157_pr_hold_rejects_stale_acquire_claim_proposals() {
+        let now = "2026-06-26T00:00:00Z";
+        let mut monitor = autonomous_state();
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(candidate.clone());
+        monitor.record_attempt(42);
+        let attempts = monitor.attempt_count(42);
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        let payload = IssueMonitorEffectPayload::AcquireClaim {
+            issue_number: 42,
+            claim_id: "claim-42".into(),
+            owner: "host/session".into(),
+            heartbeat_at: "2026-06-26T00:00:00Z".into(),
+            expires_at: "2026-06-26T00:30:00Z".into(),
+            launched_work_id: None,
+        };
+        assert!(monitor
+            .prepare_pending_effect("prepared-before-pr-read", payload.clone())
+            .is_some());
+        let stale_claim = monitor.prefs();
+        monitor.reconcile_open_pr_holds(
+            &BTreeMap::from([(
+                42,
+                Some(IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "MERGE-CANDIDATE".into(),
+                }),
+            )]),
+            "2026-06-26T00:01:00Z",
+        );
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "the PR observation revokes the old prepared claim"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle,
+            "a cancelled pre-spawn candidate must not review the existing PR"
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert!(monitor.terminal_queue_contains(42));
+        assert_eq!(monitor.attempt_count(42), attempts);
+        monitor.rebase_daemon_driver_prefs(&stale_claim);
+        assert!(
+            monitor.pending_effects().is_empty(),
+            "a stale rebase cannot restore the prepared claim"
+        );
+        assert!(!monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            "stale-scan-proposal",
+            monitor.effect_authority_epoch(),
+            payload.clone(),
+        )));
+        assert_eq!(
+            monitor.prepare_pending_effect("stale-direct-proposal", payload),
+            None
+        );
+        assert!(monitor.pending_effects().is_empty());
+
+        // Startup and stale writers must enforce the same cancellation.
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.rebase_daemon_driver_prefs(&stale_claim);
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        assert_eq!(restored.attempt_count(42), attempts);
+        restored.reconcile_open_pr_holds(&BTreeMap::from([(42, None)]), "2026-06-26T00:02:00Z");
+        restored.record_candidate(candidate.clone());
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        restored.config.enabled = true;
+        restored.set_gui_connected(true);
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+    }
+
+    #[test]
+    fn issue_5876_pr_hold_preserves_running_implementation_and_resuming_review() {
+        let mut monitor = autonomous_state();
+        for number in [42, 43, 44] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.complete_active_launch(42, "tab::agent");
+        monitor.process_held_issues.insert(43);
+        monitor.autonomous_record_mut(44).reviewed_sha = Some("reviewed-head".into());
+        let holds = [42, 43, 44]
+            .into_iter()
+            .map(|number| {
+                (
+                    number,
+                    Some(IssueMonitorOpenPrHold {
+                        pr_number: number + 100,
+                        lifecycle: "IN-PROGRESS".into(),
+                    }),
+                )
+            })
+            .collect();
+        monitor.reconcile_open_pr_holds(&holds, "2026-06-26T00:01:00Z");
+        for number in [42, 43, 44] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "PR hold must preserve existing work for Issue #{number}"
+            );
+        }
+    }
+
+    #[test]
     fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
         let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-42".into()));
         monitor.record_autonomous_heartbeat(42, "2026-06-26T00:00:00Z");
         let attempts = monitor.attempt_count(42);
+        let stale = monitor.prefs();
         let target = stop_target(&monitor, 42);
 
         assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
@@ -39962,6 +41398,64 @@ mod tests {
             monitor.prefs().queued_launch_session_strategies.get(&42),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
         );
+
+        // A companion can still hold the pre-settlement launch. Neither
+        // direction of convergence may resurrect that completed slice.
+        let continued = monitor.prefs();
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "old launch stays released");
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        let mut gui = monitor.clone();
+        gui.rebase_gui_observer_prefs(&stale);
+        assert_eq!(
+            gui.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(gui
+            .autonomous_record(42)
+            .unwrap()
+            .active_launch_id
+            .is_none());
+        let mut observer = test_monitor_with_prefs(monitor.config.clone(), stale.clone());
+        observer.rebase_daemon_driver_prefs(&continued);
+        let record = observer.autonomous_record(42).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::Idle);
+        assert!(record.active_launch_id.is_none());
+        assert_eq!(observer.active_count(), 0);
+        assert_eq!(observer.attempt_count(42), attempts);
+
+        // Replaying that same release must retain the next claim's preparation.
+        let mut prepared = observer.clone();
+        prepared.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        prepared.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [ ] AC-2: refreshed next slice\n",
+            )
+            .snapshot(),
+        );
+        let expected = prepared.autonomous_record(42).cloned();
+        prepared.rebase_daemon_driver_prefs(&continued);
+        assert_eq!(prepared.autonomous_record(42), expected.as_ref());
+        prepared.rebase_gui_observer_prefs(&stale);
+        assert_eq!(prepared.autonomous_record(42), expected.as_ref());
+
+        let mut restarted = test_monitor_with_prefs(monitor.config.clone(), gui.prefs());
+        restarted.set_gui_connected(true);
+        restarted.config.enabled = true;
+        restarted.record_candidate(monitor.inbox_item(42).unwrap().issue.clone());
+        let launch = restarted
+            .next_launch_request("2026-06-26T00:02:00Z")
+            .expect("fresh successor after restart");
+        assert_eq!(launch.issue_number, 42);
+        assert_eq!(
+            launch.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(restarted
+            .next_launch_request("2026-06-26T00:02:00Z")
+            .is_none());
+        assert_eq!(restarted.attempt_count(42), attempts);
     }
 
     #[test]
@@ -40051,7 +41545,7 @@ mod tests {
         // the retry relaunches clean; default issues keep theirs for inspection.
         let now = "2026-06-30T00:00:00Z";
 
-        let mut auto = IssueMonitorState::with_prefs(
+        let mut auto = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -40070,7 +41564,7 @@ mod tests {
         );
 
         // autonomous_mode OFF ⇒ keep the window (default human-gated path).
-        let mut def = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut def = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut def, &[auto_issue(42, "b")], now);
         def.record_agent_issue_failed(42, "boom");
         assert!(
@@ -40079,7 +41573,7 @@ mod tests {
         );
 
         // autonomous_mode ON but no auto-merge label ⇒ keep the window.
-        let mut nolabel = IssueMonitorState::with_prefs(
+        let mut nolabel = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -40106,8 +41600,7 @@ mod tests {
         );
 
         // Persisted across a prefs round-trip (daemon/GUI restart).
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(
             restored.take_failed_window(42).as_deref(),
             Some("tab-1::agent-42"),
@@ -40137,7 +41630,7 @@ mod tests {
         );
 
         // A pre-launch failure with no window records nothing to close.
-        let mut no_window = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut no_window = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut no_window, &[issue(44)], "2026-06-30T00:00:00Z");
         no_window.record_launch_failed(44, "could not create branch");
         assert_eq!(no_window.take_failed_window(44), None);
@@ -40189,7 +41682,7 @@ mod tests {
         // persist through a prefs round-trip so a daemon restart does not lose an
         // in-flight autonomous attempt (and does not reset attempts to zero).
         use crate::issue_monitor_gate::classify_acceptance_criteria;
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_attempt(11);
         monitor.record_attempt(11);
         monitor.set_autonomous_phase(11, AutonomousPhase::Reviewing);
@@ -40202,7 +41695,7 @@ mod tests {
         let prefs = monitor.prefs();
         assert_eq!(prefs.autonomous_records.len(), 1);
 
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let record = restored.autonomous_record(11).expect("record restored");
         assert_eq!(record.attempts, 2);
         assert_eq!(record.phase, AutonomousPhase::Reviewing);
@@ -40213,6 +41706,7 @@ mod tests {
 
     fn auto_issue(number: u64, body: &str) -> IssueMonitorIssue {
         IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: vec!["auto-merge".to_string()],
@@ -40226,7 +41720,7 @@ mod tests {
 
     #[test]
     fn explicit_terminal_queue_excludes_unqueued_candidates() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queues.insert(
             crate::process::current_hostname(),
             IssueMonitorTerminalQueue {
@@ -40254,7 +41748,7 @@ mod tests {
     #[test]
     fn urgent_queue_move_uses_displayed_positions_for_normal_entries() {
         let now = "2026-10-03T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[1, 2, 3], "operator", now);
         let mut urgent = issue(3);
         urgent.labels.push("urgent".to_string());
@@ -40268,7 +41762,7 @@ mod tests {
 
     #[test]
     fn missing_terminal_queue_has_no_candidates() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_issue_monitor_candidates(
             &mut monitor,
             &[auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
@@ -40288,10 +41782,25 @@ mod tests {
     #[test]
     fn terminal_queue_remove_cancels_pending_and_refill_respects_removal() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
-        monitor.terminal_queue_push(&[1, 2], "operator", now);
-        monitor.record_candidate(issue(1));
-        monitor.record_candidate(issue(2));
+        let mut monitor = autonomous_state();
+        let candidate = auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[1, 2, 4, 5], "operator", now);
+        monitor.record_candidate(candidate.clone());
+        for number in [2, 4, 5] {
+            monitor.record_candidate(issue(number));
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.process_held_issues.insert(4);
+        monitor.autonomous_record_mut(5).reviewed_sha = Some("reviewed-head".into());
+        monitor.record_attempt(1);
+        let attempts = monitor.attempt_count(1);
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
         monitor.config.enabled = true;
         monitor.set_gui_connected(true);
         assert_eq!(
@@ -40300,7 +41809,20 @@ mod tests {
         );
         let stale_proposal = monitor.pending_effects[0].clone();
         monitor.complete_active_launch_at(2, "tab::agent", now);
-        monitor.terminal_queue_remove(&[1, 2], now);
+        monitor.terminal_queue_remove(&[1, 2, 4, 5], now);
+        assert_eq!(
+            monitor.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle,
+            "removing an unlaunched candidate must clear its provisional phase"
+        );
+        assert_eq!(monitor.attempt_count(1), attempts);
+        for number in [2, 4, 5] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "queue removal must preserve existing work for Issue #{number}"
+            );
+        }
         assert!(!monitor.prepare_effect(stale_proposal));
         assert!(!monitor.queue.contains(&1));
         assert!(monitor.active_launches.contains(&2));
@@ -40315,7 +41837,7 @@ mod tests {
         monitor.terminal_queue_auto_refill = true;
         monitor.terminal_queue_auto_refill_limit = 2;
         let prefs = monitor.prefs();
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(monitor.auto_refill_terminal_queue(&[1, 2, 3], now), 1);
         assert_eq!(monitor.auto_refill_terminal_queue(&[1, 2, 3], now), 0);
         assert_eq!(
@@ -40330,12 +41852,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 3]
         );
+        monitor.terminal_queue_push(&[1], "operator", now);
+        assert!(
+            !monitor.autonomous_in_flight_issues().contains(&1),
+            "readmission must not revive work before fresh eligibility"
+        );
+        monitor.record_candidate(candidate.clone());
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            1
+        );
+        assert_eq!(monitor.attempt_count(1), attempts);
     }
 
     #[test]
     fn urgent_queue_scan_uses_a_bounded_head_without_rewriting_normal_order() {
         let now = "2026-10-03T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..Default::default()
@@ -40393,7 +41933,7 @@ mod tests {
         let now = "2026-10-03T00:00:00Z";
         let mut saved = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
         saved["urgent_queue"] = serde_json::json!({"limit": 1, "demoted": [3]});
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             serde_json::from_value(saved).unwrap(),
         );
@@ -40409,7 +41949,7 @@ mod tests {
         );
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![2, 1, 3]);
         let prefs = monitor.prefs();
-        let mut resumed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut resumed = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         scan_issue_monitor_candidates(&mut resumed, &[third, second], "2026-10-03T00:01:00Z");
         assert_eq!(resumed.local_terminal_queue_numbers(), vec![2, 1, 3]);
         let status = serde_json::to_value(resumed.status_view()).unwrap();
@@ -40419,7 +41959,7 @@ mod tests {
     #[test]
     fn terminal_queue_move_updates_launch_order() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_priority_order(vec![2, 1, 9]);
         monitor.terminal_queue_push(&[1, 2], "operator", now);
         monitor.record_candidate(issue(1));
@@ -40439,14 +41979,33 @@ mod tests {
     #[test]
     fn terminal_queue_disk_rebase_replaces_stale_admission_and_refill_settings() {
         let now = "2026-09-10T00:00:00Z";
-        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut stale = autonomous_state();
         stale.terminal_queue_push(&[1, 2], "operator", now);
         stale.record_candidate(issue(1));
         stale.record_candidate(issue(2));
+        stale.set_autonomous_phase(1, AutonomousPhase::Implementing);
+        stale.record_attempt(1);
         let mut fresh = stale.clone();
         fresh.terminal_queue_remove(&[1], now);
         fresh.set_terminal_queue_auto_refill(true, 3);
+        // Prefs retain phases, but not the transient inbox or launch queue.
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), fresh.prefs());
+        cold.autonomous_record_mut(1).phase = AutonomousPhase::Implementing;
+        assert!(cold.inbox_item(1).is_none());
+        assert!(cold.pending_effects().is_empty());
+        scan_issue_monitor_candidates(&mut cold, &[issue(2)], now);
+        assert_eq!(
+            cold.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        cold.terminal_queue_push(&[1], "operator", now);
+        assert!(!cold.autonomous_in_flight_issues().contains(&1));
+        assert_eq!(cold.attempt_count(1), 1);
         stale.rebase_daemon_driver_prefs(&fresh.prefs());
+        assert_eq!(
+            stale.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Idle
+        );
         assert_eq!(stale.local_terminal_queue_numbers(), vec![2]);
         assert!(!stale.queue.contains(&1));
         assert!(stale.prefs().terminal_queue_auto_refill);
@@ -40454,12 +42013,23 @@ mod tests {
         assert_eq!(stale.auto_refill_terminal_queue(&[1, 2, 3], now), 1);
         stale.terminal_queue_push(&[1], "operator", now);
         assert!(stale.terminal_queue_contains(1));
+
+        let mut observer = stale.clone();
+        observer.terminal_queue_remove(&[1], now);
+        stale.set_allowed_labels(vec!["bug".into()]);
+        stale.set_autonomous_phase(1, AutonomousPhase::Implementing);
+        observer.rebase_gui_observer_prefs(&stale.prefs());
+        assert_eq!(
+            observer.autonomous_record(1).unwrap().phase,
+            AutonomousPhase::Implementing,
+            "new disk readmission must supersede the observer's old removal"
+        );
     }
 
     #[test]
     fn terminal_queue_refill_proposal_survives_rebase_but_manual_removal_wins() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 2);
         let disk = monitor.prefs();
         scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2)], now);
@@ -40482,7 +42052,7 @@ mod tests {
     #[test]
     fn terminal_queue_operator_requeue_readmits_a_manually_removed_failure() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[1], "operator", now);
         monitor.record_candidate(issue(1));
         monitor.record_launch_failed(1, "launch failed");
@@ -40502,7 +42072,7 @@ mod tests {
     #[test]
     fn terminal_queue_refill_retires_completed_work_but_counts_active_work() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 2);
         monitor.terminal_queue_push(&[1, 2], "operator", now);
         monitor.record_candidate(issue(1));
@@ -40520,7 +42090,7 @@ mod tests {
         // An active entry occupies capacity until a terminal fact retires it.
         assert_eq!(monitor.auto_refill_terminal_queue(&[4], now), 0);
         let mut concurrent =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+            test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         concurrent.terminal_queue_push(&[1], "operator", "2026-09-10T00:01:00Z");
         monitor.rebase_daemon_driver_prefs(&concurrent.prefs());
         assert!(
@@ -40550,7 +42120,7 @@ mod tests {
     #[test]
     fn terminal_queue_missing_on_upgrade_preserves_active_launch_observation() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -40585,7 +42155,7 @@ mod tests {
     #[test]
     fn terminal_queue_auto_refill_skips_existing_readiness_exclusions() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_terminal_queue_auto_refill(true, 1);
         let mut held = issue(1);
         held.labels.push("hold".to_string());
@@ -40622,7 +42192,7 @@ mod tests {
 
     #[test]
     fn terminal_queue_operations_are_deduplicated_ordered_and_non_destructive() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[3, 1, 3], "test", "2026-09-10T00:00:00Z");
         assert!(monitor.terminal_queue_move(1, 0, "2026-09-10T00:01:00Z"));
         monitor.terminal_queue_remove(&[3], "2026-09-10T00:02:00Z");
@@ -40642,7 +42212,7 @@ mod tests {
 
     #[test]
     fn status_projects_terminal_queue_counts() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[1], "test", "2026-09-10T00:00:00Z");
         monitor.record_candidate(auto_issue(1, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
         monitor.record_candidate(auto_issue(2, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
@@ -40666,7 +42236,7 @@ mod tests {
 
     #[test]
     fn auto_refill_is_off_by_default_and_orphan_can_be_adopted() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         assert_eq!(
             monitor.auto_refill_terminal_queue(&[1, 2], "2026-09-10T00:00:00Z"),
             0
@@ -40695,7 +42265,7 @@ mod tests {
     fn adopting_orphan_queue_merges_without_duplicate_issue_numbers() {
         let now = "2026-09-10T00:02:00Z";
         let host = crate::process::current_hostname();
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[7], "operator", now);
         monitor.terminal_queues.insert(
             "retired-host".to_string(),
@@ -40736,7 +42306,7 @@ mod tests {
     #[test]
     fn enabled_auto_refill_tops_up_to_total_queue_capacity() {
         let now = "2026-09-10T00:00:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.terminal_queue_auto_refill = true;
         monitor.terminal_queue_auto_refill_limit = 2;
         let host = crate::process::current_hostname();
@@ -40780,7 +42350,7 @@ mod tests {
     #[test]
     fn scan_auto_refill_initializes_missing_queue() {
         let now = "2026-09-10T00:00:00Z";
-        let mut absent = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut absent = test_monitor(IssueMonitorConfig::default());
         absent.terminal_queue_auto_refill = true;
         absent.terminal_queue_auto_refill_limit = 3;
         scan_issue_monitor_candidates(&mut absent, &[issue(1)], now);
@@ -40795,7 +42365,7 @@ mod tests {
             1
         );
 
-        let mut enabled = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut enabled = test_monitor(IssueMonitorConfig::default());
         enabled.terminal_queue_auto_refill = true;
         enabled.terminal_queue_auto_refill_limit = 1;
         enabled.terminal_queue_push(&[], "operator", now);
@@ -40815,7 +42385,7 @@ mod tests {
     }
 
     fn autonomous_state() -> IssueMonitorState {
-        IssueMonitorState::with_prefs(
+        test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -40828,7 +42398,7 @@ mod tests {
     fn prepare_autonomous_candidate_non_candidate_is_human_gate_noop() {
         // SPEC #3200 FR-001/003: autonomous_mode OFF (or no label) ⇒ no autonomous
         // state created; the issue uses the existing human-gated path.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
         };
@@ -40872,14 +42442,34 @@ mod tests {
             std::slice::from_ref(&issue),
             "2026-06-29T00:00:00Z",
         );
+        // A previous scan may already have prepared eligibility and a claim.
+        let verified = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let now = "2026-06-29T00:00:00Z";
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&issue, &verified, now),
+            EligibilityDecision::Eligible
+        );
+        monitor.record_attempt(50);
+        monitor.config.enabled = true;
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![test_launch_profile("Codex")]);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            1
+        );
         let bp = gwt_git::branch_protection::BranchProtectionStatus::Absent;
         let decision = monitor.prepare_autonomous_candidate(&issue, &bp, "2026-06-29T00:00:00Z");
         assert!(matches!(decision, EligibilityDecision::NotReady(_)));
-        assert_ne!(
-            monitor.autonomous_record(50).map(|record| record.phase),
-            Some(AutonomousPhase::NeedsHuman),
-            "a readiness gap never parks the candidate",
+        assert_eq!(
+            monitor.autonomous_record(50).unwrap().phase,
+            AutonomousPhase::Idle,
+            "an unlaunched readiness gap must not remain in flight",
         );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.attempt_count(50), 1);
         assert_eq!(
             monitor.inbox_item(50).map(|item| item.state),
             Some(MonitorInboxState::NotReady)
@@ -40892,6 +42482,13 @@ mod tests {
             !monitor.queued_issue_numbers().contains(&50),
             "not launchable until the repository is ready"
         );
+        monitor.record_candidate(issue.clone());
+        assert_eq!(
+            monitor.prepare_autonomous_candidate(&issue, &verified, now),
+            EligibilityDecision::Eligible,
+            "fixing readiness is sufficient to resume on the next scan"
+        );
+        assert_eq!(monitor.attempt_count(50), 1);
     }
 
     #[test]
@@ -41011,8 +42608,7 @@ mod tests {
         monitor.begin_review(7, 99, "abc123"); // → Reviewing, verdict pending
         let restored_prefs = monitor.prefs();
 
-        let mut restarted =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), restored_prefs);
         assert_eq!(
             restarted.autonomous_record(7).map(|r| r.phase),
             Some(AutonomousPhase::Reviewing),
@@ -41815,8 +43411,7 @@ mod tests {
         monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
         monitor.begin_review(7, 99, "abc123");
         monitor.record_review_verdict(7, false);
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         let record = restored.autonomous_record(7).expect("restored");
         assert_eq!(record.pr_number, Some(99));
         assert_eq!(record.reviewed_sha.as_deref(), Some("abc123"));
@@ -41842,7 +43437,7 @@ mod tests {
 
     #[test]
     fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         monitor.begin_review(42, 7, "aaa");
@@ -41885,7 +43480,7 @@ mod tests {
     /// classifier wrote is not.
     #[test]
     fn legacy_acceptance_failures_are_released_for_reclassification() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             &[issue(42), issue(43), issue(44)],
@@ -41954,7 +43549,7 @@ mod tests {
     #[test]
     fn full_scan_releases_legacy_acceptance_failures() {
         let project_root = tempfile::tempdir().expect("tempdir");
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates_with_provenance(
             &mut monitor,
             &[issue(42)],
@@ -42012,7 +43607,7 @@ mod tests {
             ],
             ..IssueMonitorPrefs::default()
         };
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         scan_queued_candidates(
             &mut monitor,
             &[issue(42), issue(43)],
@@ -42043,7 +43638,7 @@ mod tests {
 
     #[test]
     fn newer_migration_marker_preserves_inbox_only_needs_human_failure() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -42212,8 +43807,7 @@ mod tests {
             recovered.update_drain.as_ref().unwrap().automatic,
             Some(false)
         );
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered.clone());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), recovered.clone());
         monitor.rebase_daemon_driver_prefs(&recovered);
         assert!(
             monitor.update_drain().is_some(),
@@ -42255,7 +43849,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.set_update_drain_with_origin(
             IssueMonitorUpdateDrainReason::Auto,
             "9.110.0",
@@ -42288,7 +43882,7 @@ mod tests {
             );
         }
 
-        let mut legacy_manual = IssueMonitorState::with_prefs(
+        let mut legacy_manual = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -42321,7 +43915,7 @@ mod tests {
     #[test]
     fn update_drain_status_names_its_release_operation() {
         let now = "2026-10-05T19:10:00Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("agent status");
         assert!(agent.get("update_drain_release").is_none());
         monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.110.0", now);
@@ -42348,7 +43942,7 @@ mod tests {
     #[test]
     fn auto_close_merged_issues_defaults_to_autonomous_mode_and_round_trips() {
         // Issue #3917 AC-5: the override defaults to following autonomous_mode.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         assert_eq!(monitor.auto_close_merged_issues(), None);
         assert!(!monitor.auto_close_merged_issues_enabled());
         assert!(monitor
@@ -42372,7 +43966,7 @@ mod tests {
 
         let prefs = monitor.prefs();
         assert_eq!(prefs.auto_close_merged_issues, Some(false));
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(restored.auto_close_merged_issues(), Some(false));
         assert!(restored.autonomous_mode());
         assert!(!restored.auto_close_merged_issues_enabled());
@@ -42448,7 +44042,7 @@ mod tests {
 
     #[test]
     fn merged_issue_settlement_defers_unchecked_acceptance_for_live_launch() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor
             .set_auto_close_merged_issues_with_effect_revocation(Some(true))
             .unwrap();
@@ -42526,7 +44120,7 @@ mod tests {
 
     #[test]
     fn merged_issue_settlement_candidates_join_open_rows_with_merged_branches() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             &[checked_issue(42), checked_issue(43), checked_issue(44)],
@@ -42560,7 +44154,7 @@ mod tests {
 
     #[test]
     fn merged_issue_settlement_is_proposed_once_per_delivery_and_respects_reopen() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         let delivery = merged_delivery(7, "aaa", "2026-09-01T00:00:00Z");
         let close = MergedIssueSettlementAction::Close { delegated: false };
@@ -42654,7 +44248,7 @@ mod tests {
     fn reopened_issue_without_settlement_history_is_left_to_humans() {
         // Pre-feature history: merged, closed by hand, then reopened by a
         // human. gwt never settled anything here, so it must not start now.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-08-01T00:00:01Z");
         monitor.record_released(42);
         let mut reopened = checked_issue(42);
@@ -42688,7 +44282,7 @@ mod tests {
     /// the six Issues relaunched up to fifteen times each were stuck in.
     #[test]
     fn repeatedly_observed_open_row_still_settles_its_merged_delivery() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         for day in 1..=4 {
             let mut observed = checked_issue(42);
             observed.updated_at = Some(format!("2026-09-0{day}T00:00:00Z"));
@@ -42740,7 +44334,7 @@ mod tests {
     /// cannot fire at all while deliveries merge into `develop`.
     #[test]
     fn delivered_open_row_reports_recoverable_merged_from_its_work_branch() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(
             &mut monitor,
             &[checked_issue(42), checked_issue(43)],
@@ -42829,7 +44423,7 @@ mod tests {
     /// delivery instead of treating the annotation as a finished settlement.
     #[test]
     fn await_close_settlement_does_not_bar_a_later_auto_close() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         let mut deliveries = BTreeMap::new();
         deliveries.insert(
@@ -42870,7 +44464,7 @@ mod tests {
 
     #[test]
     fn unmet_and_await_settlements_record_without_closing() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         let mut unmet = issue(43);
         unmet.body =
             Some("## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: later\n".to_string());
@@ -42919,7 +44513,7 @@ mod tests {
         );
         let prefs = monitor.prefs();
         assert_eq!(prefs.merged_issue_settlements.len(), 2);
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(
             restored.merged_issue_settlement(42).map(|s| s.pr_number),
             Some(8)
@@ -42928,7 +44522,7 @@ mod tests {
 
     #[test]
     fn pending_settlement_keeps_the_issue_out_of_claim_candidates() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..IssueMonitorConfig::default()
@@ -42955,7 +44549,7 @@ mod tests {
 
     #[test]
     fn settle_effects_follow_grant_authority_rules() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         let delivery = merged_delivery(7, "aaa", "2026-09-01T00:00:00Z");
         let close = MergedIssueSettlementAction::Close { delegated: false };
@@ -43016,7 +44610,7 @@ mod tests {
     /// provider-wide hold and readmits every issue it was holding.
     #[test]
     fn clearing_a_provider_quota_hold_readmits_the_issues_it_held() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -43127,7 +44721,7 @@ mod tests {
                 "codex": { "account_id": "account-a", "observed_at": "2026-09-02T09:00:00Z" }
         });
         let prefs: IssueMonitorPrefs = serde_json::from_value(stored).unwrap();
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let saved = serde_json::to_value(monitor.prefs()).unwrap();
         assert_eq!(
             saved["provider_quota_accounts"]["codex"]["account_id"],
@@ -43144,7 +44738,7 @@ mod tests {
         prefs
             .provider_quota_hold_evidence
             .insert("codex".into(), quota_hold_evidence_fixture());
-        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let status = serde_json::to_value(monitor.agent_status_at("2026-09-02T10:01:00Z")).unwrap();
         assert_eq!(status["provider_quota_holds"][0]["evidence_stale"], true);
         assert_eq!(status["provider_quota_holds"][0]["evidence_age_secs"], 3600);
@@ -43167,7 +44761,7 @@ mod tests {
                 observed_at: "2026-09-02T09:00:00Z".into(),
             },
         );
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         let record = monitor.autonomous_record_mut(42);
         record.retry_hold_provider = Some("codex".into());
         record.retry_hold_reason = Some("quota".into());
@@ -43184,13 +44778,11 @@ mod tests {
             .get_mut("codex")
             .unwrap()
             .account_id = None;
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
         assert!(monitor.reconcile_provider_account("codex", "account-a", "2026-09-02T09:02:00Z"));
         assert!(monitor.provider_quota_holds.contains_key("codex"));
         monitor.rebase_daemon_driver_prefs(&prefs);
-        let restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert!(restored.provider_quota_holds.contains_key("codex"));
         assert_eq!(
             restored.provider_quota_hold_evidence["codex"].recorded_at,
@@ -43220,8 +44812,7 @@ mod tests {
             monitor.provider_quota_holds.is_empty(),
             "old disk state cannot restore account A"
         );
-        let mut restored =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         restored.rebase_gui_observer_prefs(&before);
         assert!(restored
             .autonomous_record(42)
@@ -43297,7 +44888,7 @@ mod tests {
     /// was formed after it.
     #[test]
     fn a_provider_quota_hold_release_fences_the_stale_hold_but_not_a_newer_one() {
-        let mut daemon = IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -43321,8 +44912,7 @@ mod tests {
             IssueMonitorProviderUsageLimitOutcome::Held
         );
 
-        let mut operator =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        let mut operator = test_monitor_with_prefs(IssueMonitorConfig::default(), daemon.prefs());
         assert!(matches!(
             operator.clear_provider_quota_hold("codex", "PM ruling", "2026-09-02T09:11:00Z"),
             IssueMonitorProviderQuotaHoldClearOutcome::Cleared { .. }
@@ -43381,7 +44971,7 @@ mod tests {
             "an unparsable disk instant cannot replace a valid local fence"
         );
 
-        let restored = IssueMonitorState::with_prefs(
+        let restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 provider_quota_holds: BTreeMap::from([(
@@ -43414,7 +45004,7 @@ mod tests {
     /// choices survive; a profile that was never saved cannot be invented.
     #[test]
     fn switching_the_launch_profile_agent_keeps_runtime_choices_and_lifts_the_hold() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -43475,7 +45065,7 @@ mod tests {
             Err(IssueMonitorLaunchProfileSwitchError::InvalidAgent)
         );
 
-        let mut unsaved = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut unsaved = test_monitor(IssueMonitorConfig::default());
         assert_eq!(
             unsaved.switch_launch_profile_agent("claude"),
             Err(IssueMonitorLaunchProfileSwitchError::NoSavedProfile),
@@ -43539,7 +45129,7 @@ mod tests {
             let mut monitor = if autonomous {
                 autonomous_state()
             } else {
-                IssueMonitorState::new(IssueMonitorConfig::default())
+                test_monitor(IssueMonitorConfig::default())
             };
             scan_queued_candidates(
                 &mut monitor,
@@ -43576,7 +45166,7 @@ mod tests {
         }
 
         // A non-transient failure keeps the human-gated terminal path.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[auto_issue(3928, "b")], now);
         monitor.complete_active_launch(3928, "agent-93");
         monitor.record_agent_issue_failed(3928, "boom");
@@ -43597,7 +45187,7 @@ mod tests {
         let mut monitor = launched_cohort(&[(42, "tab-1::gone")]);
         monitor.record_attempt(42);
         let persisted = monitor.prefs();
-        let mut monitor = IssueMonitorState::with_prefs(monitor.config.clone(), persisted.clone());
+        let mut monitor = test_monitor_with_prefs(monitor.config.clone(), persisted.clone());
         monitor.record_candidate(issue(42));
         let ended = settlements(&[(42, IssueMonitorExecutionSettlement::Blocked)]);
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
@@ -43611,7 +45201,7 @@ mod tests {
             .released
             .is_empty());
         // The fallback driver reloads preferences between its scan cycles.
-        let mut monitor = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut monitor = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         monitor.record_candidate(issue(42));
         let later = "2026-09-07T04:01:00Z";
         monitor.record_window_snapshot(idle_snapshot(later, Vec::new()));
@@ -43619,7 +45209,7 @@ mod tests {
         assert_eq!(outcome.requeued, vec![42]);
         assert_eq!(monitor.attempt_count(42), 1);
         monitor.rebase_daemon_driver_prefs(&persisted);
-        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         restored.record_candidate(issue(42));
         assert_eq!(restored.launched_window_id(42), None);
         assert_eq!(
@@ -43668,6 +45258,164 @@ mod tests {
             );
             assert_eq!(monitor.launched_window_id(42), None);
         }
+    }
+
+    #[test]
+    fn issue_5876_completed_spec_slice_survives_dead_holder_cleanup_and_restart() {
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-09-07T03:00:00Z",
+        );
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
+        observed.get_mut(&42).unwrap().holder_host_dead = true;
+        let attempts = monitor.attempt_count(42);
+
+        // Startup reconciles dead holders before the first candidate read.
+        let mut restarted = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        assert!(restarted.inbox_item(42).is_none());
+        assert!(restarted
+            .reconcile_dead_terminal_launches(&observed, IDLE_NOW)
+            .released
+            .is_empty());
+        assert!(
+            restarted.terminal_queue_contains(42),
+            "unread owner is not retired"
+        );
+        restarted.record_candidate(candidate.clone());
+        monitor = restarted;
+
+        let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+        assert_eq!(outcome.released, vec![42]);
+        assert!(
+            monitor.terminal_queue_contains(42),
+            "unfinished owner keeps admission"
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(monitor.attempt_count(42), attempts);
+        let stale = launched_monitor_for_issue(candidate.clone(), "old-tab::slice").prefs();
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "stale launch cannot return");
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.set_gui_connected(true);
+        restored.config.enabled = true;
+        for _ in 0..2 {
+            restored.record_candidate(candidate.clone());
+            assert!(restored
+                .reconcile_dead_terminal_launches(&observed, IDLE_NOW)
+                .released
+                .is_empty());
+            assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        }
+        let mut admission = restored.clone();
+        let launch = admission
+            .next_launch_request(IDLE_NOW)
+            .expect("automatic successor");
+        assert_eq!(launch.issue_number, 42);
+        assert_eq!(
+            launch.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(
+            admission.next_launch_request(IDLE_NOW).is_none(),
+            "one successor only"
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+
+        // A second slice can finish without changing the Issue revision.
+        // A real confirmed claim consumes the prior release before the ACK.
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "second-slice-claim",
+            "host/session",
+            "second-slice-effect",
+            IDLE_NOW,
+        ));
+        restored.complete_active_launch_at(42, "old-tab::slice-two", "2026-09-07T04:01:00Z");
+        let second_stale = restored.prefs();
+        let second = restored.reconcile_dead_terminal_launches(&observed, "2026-09-07T04:10:00Z");
+        assert_eq!(second.requeued, vec![42]);
+        restored.rebase_daemon_driver_prefs(&second_stale);
+        assert_eq!(restored.active_count(), 0);
+        assert_eq!(restored.queued_issue_numbers(), vec![42]);
+        assert_eq!(restored.attempt_count(42), attempts);
+        assert_eq!(
+            restored
+                .next_launch_request("2026-09-07T04:10:00Z")
+                .unwrap()
+                .launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+    }
+
+    #[test]
+    fn issue_5876_completed_slice_keeps_queue_while_spec_readback_is_not_ready() {
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-09-07T03:00:00Z",
+        );
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.set_active_launch_id(42, Some("old-tab::slice".into()));
+        let attempts = monitor.attempt_count(42);
+        let mut unread = candidate.clone();
+        unread.readiness = IssueMonitorReadiness::NotReady;
+        unread.body = None;
+        monitor.record_candidate(unread.clone());
+        let stale = monitor.prefs();
+        let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
+        observed.get_mut(&42).unwrap().holder_host_dead = true;
+
+        let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+        assert_eq!(outcome.released, vec![42]);
+        assert!(monitor
+            .stored_local_terminal_queue_numbers()
+            .any(|n| n == 42));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .active_launch_id
+            .is_none());
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+
+        monitor.rebase_daemon_driver_prefs(&stale);
+        assert_eq!(monitor.active_count(), 0, "stale launch stays released");
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NotReady
+        );
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.config.enabled = true;
+        restored.set_gui_connected(true);
+        restored.record_candidate(unread);
+        assert_eq!(restored.active_count(), 0, "stale launch stays released");
+        assert!(restored.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(restored.attempt_count(42), attempts);
+        restored.record_candidate(candidate);
+        let next = restored
+            .next_launch_request(IDLE_NOW)
+            .expect("fresh readback resumes");
+        assert_eq!(next.issue_number, 42);
+        assert_eq!(
+            next.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert!(restored.next_launch_request(IDLE_NOW).is_none());
+        assert_eq!(restored.attempt_count(42), attempts);
     }
 
     #[test]
@@ -43882,7 +45630,7 @@ mod tests {
         assert!(reason.contains("binding missing"), "{reason}");
         assert!(reason.contains("agent process absent"), "{reason}");
         assert!(reason.contains("registration grace expired"), "{reason}");
-        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let mut restored = test_monitor_with_prefs(monitor.config.clone(), monitor.prefs());
         restored.record_candidate(issue(42));
         assert_eq!(
             restored.agent_status_at(now).inbox[0]
@@ -44905,7 +46653,7 @@ mod tests {
         // agent-349 still held their previous, already settled occupants.
         let stale_canvas_at = "2026-09-14T10:06:58Z";
         let next_scan_at = "2026-09-14T10:10:09Z";
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -45007,7 +46755,7 @@ mod tests {
 
     #[test]
     fn autonomous_failure_does_not_readopt_its_exited_claim_binding() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
@@ -45053,7 +46801,7 @@ mod tests {
     /// Monitor never confirmed parks the row exactly as before.
     #[test]
     fn issue_4328_a_foreign_claim_on_a_bound_window_still_blocks() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -45105,7 +46853,7 @@ mod tests {
     /// remains active rather than being parked as a foreign claim.
     #[test]
     fn issue_4852_a_claim_from_an_earlier_pid_of_this_host_is_own() {
-        let mut monitor = IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -45132,7 +46880,7 @@ mod tests {
         prefs.launched_issues.clear();
         prefs.launched_claims.clear();
         prefs.pending_launch_deliveries.clear();
-        monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         assert_eq!(monitor.active_count(), 0);
         monitor.record_candidate(issue(4740));
         assert_eq!(
@@ -45172,7 +46920,7 @@ mod tests {
                 std::process::id()
             ),
         ] {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
             monitor.set_gui_connected(true);
             scan_queued_candidates(&mut monitor, &[issue(4740)], "2026-10-01T10:07:15Z");
             assert!(monitor.record_blocked_by_claim(
@@ -45194,7 +46942,7 @@ mod tests {
     /// launch started settles that launch.
     #[test]
     fn issue_4852_a_merge_older_than_the_launch_never_settles_it() {
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         scan_queued_candidates(&mut monitor, &[issue(4740)], "2026-10-01T10:00:00Z");
         monitor.set_gui_connected(true);
         assert!(monitor
@@ -45256,7 +47004,7 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-10-01T09:00:00Z",
         );
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 1,
             ..IssueMonitorConfig::default()
         });
@@ -45397,7 +47145,7 @@ mod tests {
             ),
         ];
         for (label, snapshot, retained_panes) in cases {
-            let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
             scan_queued_candidates(&mut monitor, &[issue(4740)], "2026-10-01T10:00:00Z");
             monitor.set_gui_connected(true);
             assert!(monitor
@@ -45438,7 +47186,7 @@ mod tests {
         let mut prefs = launched_cohort(&[(4308, "tab-1::agent-353")]).prefs();
         prefs.launched_issues.clear();
         prefs.launched_claims.clear();
-        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         monitor.record_candidate(issue(4308));
         monitor.record_candidate(issue(4328));
@@ -45492,7 +47240,7 @@ mod tests {
         let observed_at = "2026-09-14T10:06:58Z";
         let launched_at = "2026-09-14T10:06:59Z";
         let now = "2026-09-14T10:07:15Z";
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
         monitor.record_candidate(issue(4258));
         monitor.complete_active_launch_at(4258, "tab-1::agent-354", launched_at);
         monitor.record_window_snapshot(idle_snapshot(observed_at, Vec::new()));

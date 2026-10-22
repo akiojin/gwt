@@ -55,6 +55,7 @@ tasks=body\n\
 
 fn seed_issue(env: &TestEnv, number: u64, title: &str, spec: &str, tasks: &str, labels: &[&str]) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body(spec, tasks),
@@ -799,6 +800,7 @@ fn spec_audit_parse_accepts_state_flag() {
 
 fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body("spec body", tasks),

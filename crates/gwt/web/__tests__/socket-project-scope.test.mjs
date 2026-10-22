@@ -239,6 +239,7 @@ test("native foreground recovery does not require an observed hidden event", () 
   let resumes = 0;
   let refreshes = 0;
   const reconnects = [];
+  const reports = [];
   const refresh = () => { refreshes++; };
   const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
   const context = {
@@ -246,6 +247,7 @@ test("native foreground recovery does not require an observed hidden event", () 
     socketReceiveDispatcher: { resume() { resumes++; } },
     socketProjectKey: projectA.project_key,
     connectSocket: force => reconnects.push(force),
+    requestVisiblePmReports: force => reports.push(force),
     rearmVisibleTerminalViewportRefreshes: refresh,
     resumeKnowledgeEventRefresh: refresh, refreshVisibleKnowledgeWindows: refresh,
   };
@@ -264,7 +266,32 @@ test("native foreground recovery does not require an observed hidden event", () 
   handler({ isTrusted: true });
   assert.equal(resumes, 1, "backgrounding never requests snapshots");
   assert.equal(refreshes, 12);
+  assert.deepEqual(reports, [true, true, true, true], "visible restores force Reports; hidden notification does not");
   assert.deepEqual(reconnects, [true], "backgrounding never replaces the pending connection");
+});
+
+test("window reveal forces only its visible Reports snapshot and preserves terminal activation", () => {
+  const requests = [], sent = [], activated = [];
+  const pm = { id: "pm", is_pm: true };
+  const context = vm.createContext({
+    document: { hidden: false }, socket: { readyState: 1 }, WebSocket: { OPEN: 1 },
+    socketProjectKey: "project", activeProjectKey: () => "project",
+    activeWorkspace: () => ({ windows: [pm, { id: "other", is_pm: true }] }),
+    pmChatViews: new Map([["pm", { logHost: { hidden: true } }], ["other", { logHost: { hidden: true } }]]),
+    visibleWindowData: () => true,
+    requestPmReports: (id, force) => { requests.push([id, force]); return { kind: "load_pm_reports", id }; },
+    send: request => sent.push(request.id),
+    runTerminalRevealActivation: () => { activated.push("terminal"); return {}; },
+    traceUi() {}, UI_TRACE_EVENT: {},
+  });
+  vm.runInContext(functionSource("requestVisiblePmReports") + "\n" + functionSource("activateTerminalOnReveal"), context);
+  context.activateTerminalOnReveal("pm");
+  assert.deepEqual(requests, [["pm", true]]);
+  assert.deepEqual(sent, ["pm"]);
+  assert.deepEqual(activated, ["terminal"]);
+  context.pmChatViews.get("pm").logHost.hidden = false;
+  context.activateTerminalOnReveal("pm");
+  assert.deepEqual(sent, ["pm"], "Execution log keeps its existing hydration path");
 });
 
 test("foreground recovery replaces the native backlog without replaying mutations", () => {

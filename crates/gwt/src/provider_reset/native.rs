@@ -1,37 +1,37 @@
 //! Human consent from an OS dialog, never from agent-supplied JSON or stdin.
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(test))
-))]
 pub(crate) const APPROVE_LABEL: &str = "Redeem free reset";
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn buttons() -> rfd::MessageButtons {
+fn buttons(action: &str) -> rfd::MessageButtons {
     // The first/default and third/Escape buttons both decline. Inverting an
     // OkCancel pair would make Escape look like approval on some backends.
-    rfd::MessageButtons::YesNoCancelCustom("Cancel".into(), APPROVE_LABEL.into(), "Close".into())
+    rfd::MessageButtons::YesNoCancelCustom("Cancel".into(), action.into(), "Close".into())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn approved(result: rfd::MessageDialogResult) -> bool {
-    matches!(result, rfd::MessageDialogResult::Custom(label) if label == APPROVE_LABEL)
+fn approved(action: &str, result: rfd::MessageDialogResult) -> bool {
+    matches!(result, rfd::MessageDialogResult::Custom(label) if label == action)
+}
+
+pub(crate) fn confirm(prompt: &str) -> Result<bool, String> {
+    confirm_with("GWT — Free Codex reset", APPROVE_LABEL, prompt)
 }
 
 /// Call on gwtd's main thread, outside an async runtime. Linux deliberately
 /// uses GTK directly: rfd's default Linux message backend runs PATH's zenity,
 /// which is not an appropriate authority for an agent-requested approval.
 #[cfg(not(test))]
-pub(crate) fn confirm(prompt: &str) -> Result<bool, String> {
+pub(crate) fn confirm_with(title: &str, action: &str, prompt: &str) -> Result<bool, String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         Ok(approved(
+            action,
             rfd::MessageDialog::new()
-                .set_title("GWT — Free Codex reset")
+                .set_title(title)
                 .set_description(prompt)
                 .set_level(rfd::MessageLevel::Warning)
-                .set_buttons(buttons())
+                .set_buttons(buttons(action))
                 .show(),
         ))
     }
@@ -40,14 +40,18 @@ pub(crate) fn confirm(prompt: &str) -> Result<bool, String> {
         use gtk::prelude::*;
         gtk::init().map_err(|_| "Native confirmation requires an available desktop display")?;
         let dialog = gtk::MessageDialog::builder()
-            .title("GWT — Free Codex reset")
-            .text("Redeem one free Codex reset?")
+            .title(title)
+            .text(if action == APPROVE_LABEL {
+                "Redeem one free Codex reset?"
+            } else {
+                action
+            })
             .secondary_text(prompt)
             .message_type(gtk::MessageType::Warning)
             .modal(true)
             .build();
         dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-        dialog.add_button(APPROVE_LABEL, gtk::ResponseType::Accept);
+        dialog.add_button(action, gtk::ResponseType::Accept);
         dialog.set_default_response(gtk::ResponseType::Cancel);
         let response = dialog.run();
         dialog.close();
@@ -55,13 +59,18 @@ pub(crate) fn confirm(prompt: &str) -> Result<bool, String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        let _ = prompt;
-        Err("Native free-reset confirmation is unavailable on this platform".into())
+        let _ = (title, prompt);
+        Err(if action == APPROVE_LABEL {
+            "Native free-reset confirmation is unavailable on this platform"
+        } else {
+            "Native confirmation is unavailable on this platform"
+        }
+        .into())
     }
 }
 
 #[cfg(test)]
-pub(crate) fn confirm(_prompt: &str) -> Result<bool, String> {
+pub(crate) fn confirm_with(_title: &str, _action: &str, _prompt: &str) -> Result<bool, String> {
     panic!("tests must inject consent instead of displaying a native dialog")
 }
 
@@ -70,9 +79,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generic_action_requires_its_exact_explicit_button() {
+        let action = "Send feedback";
+        let accepts = |result| approved(action, result);
+        assert!(
+            matches!(buttons(action), rfd::MessageButtons::YesNoCancelCustom(first, middle, last)
+            if first == "Cancel" && middle == action && last == "Close")
+        );
+        for label in [
+            "Cancel",
+            "Close",
+            APPROVE_LABEL,
+            "send feedback",
+            "Send feedback ",
+        ] {
+            assert!(!accepts(rfd::MessageDialogResult::Custom(label.into())));
+        }
+        assert!(accepts(rfd::MessageDialogResult::Custom(action.into())));
+    }
+
+    #[test]
     fn only_explicit_middle_button_approves() {
         assert!(
-            matches!(buttons(), rfd::MessageButtons::YesNoCancelCustom(first, middle, last)
+            matches!(buttons(APPROVE_LABEL), rfd::MessageButtons::YesNoCancelCustom(first, middle, last)
             if first == "Cancel" && middle == APPROVE_LABEL && last == "Close")
         );
         for result in [
@@ -83,10 +112,11 @@ mod tests {
             rfd::MessageDialogResult::Custom("Cancel".into()),
             rfd::MessageDialogResult::Custom("Close".into()),
         ] {
-            assert!(!approved(result));
+            assert!(!approved(APPROVE_LABEL, result));
         }
-        assert!(approved(rfd::MessageDialogResult::Custom(
-            APPROVE_LABEL.into()
-        )));
+        assert!(approved(
+            APPROVE_LABEL,
+            rfd::MessageDialogResult::Custom(APPROVE_LABEL.into())
+        ));
     }
 }

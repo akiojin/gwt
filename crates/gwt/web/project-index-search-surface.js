@@ -39,24 +39,37 @@ export function createProjectIndexSearchSurface({
   requestKnowledgeDetail,
   renderIndexPanelInAllSettingsWindows,
   requestFullIndexStatusRefresh,
+  scheduleFrame,
 }) {
       const indexSearchStateMap = new Map();
       const indexSearchModel = createUiStateStore({});
       let indexSearchRequestId = 0;
       const pendingIndexOpenTargetsByPreset = new Map();
-      const indexStatusModel = createUiStateStore({ byProjectRoot: {}, lastChangedProjectRoot: null });
+      const indexStatusModel = createUiStateStore({
+        byProjectRoot: {}, lastChangedProjectRoot: null, renderProjectRoot: null,
+      }, { scheduleFrame });
       function getIndexStatus(projectRoot) {
         const statuses = indexStatusModel.read().byProjectRoot;
         return Object.hasOwn(statuses, projectRoot) ? statuses[projectRoot] : null;
       }
+      // Classify receipts synchronously; only presentation waits for a frame.
+      indexStatusModel.subscribe(snapshot => snapshot.byProjectRoot, () => {
+        const snapshot = indexStatusModel.read();
+        const activeRoot = activeProjectTab()?.project_root;
+        const renderProjectRoot = snapshot.lastChangedProjectRoot === activeRoot
+          ? activeRoot : snapshot.renderProjectRoot === activeRoot ? activeRoot : null;
+        if (renderProjectRoot !== snapshot.renderProjectRoot) {
+          indexStatusModel.update(current => ({ ...current, renderProjectRoot }));
+        }
+      });
       // Independent subscriptions keep both surfaces on the committed snapshot,
       // even if one renderer fails. Initial null avoids late-bound Settings calls.
-      const selectActiveIndexStatus = snapshot => snapshot.lastChangedProjectRoot === activeProjectTab()?.project_root
-        ? snapshot.byProjectRoot[snapshot.lastChangedProjectRoot] : null;
-      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+      const selectActiveIndexStatus = snapshot => snapshot.renderProjectRoot === activeProjectTab()?.project_root
+        ? snapshot.byProjectRoot[snapshot.renderProjectRoot] : null;
+      indexStatusModel.subscribeFrame(selectActiveIndexStatus, status => {
         if (status) renderIndexPanelInAllSettingsWindows();
       });
-      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+      indexStatusModel.subscribeFrame(selectActiveIndexStatus, status => {
         if (status) renderProjectIndexWindows();
       });
 
@@ -70,6 +83,7 @@ export function createProjectIndexSearchSurface({
           return;
         }
         indexStatusModel.update(snapshot => ({
+          ...snapshot,
           lastChangedProjectRoot: projectRoot,
           byProjectRoot: { ...snapshot.byProjectRoot, [projectRoot]: {
             state: status?.state || "",

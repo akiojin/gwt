@@ -21,6 +21,15 @@ test("live backend replays fresh index health after reconnect and completes offl
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(String(error)));
+  let controlledHealth = false;
+  await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+    const server = socket.connectToServer();
+    server.onMessage(message => {
+      const event = typeof message === "string" ? JSON.parse(message) : null;
+      if (!(controlledHealth && event?.kind === "project_index_status")) socket.send(message);
+    });
+    socket.onMessage(message => server.send(message));
+  });
   try {
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     const { table } = await openIndexHealthPanel(page, true, true);
@@ -72,9 +81,80 @@ test("live backend replays fresh index health after reconnect and completes offl
     await expect(reconnected.root.locator(".index-search-status")).toHaveText("No indexed results");
     await expect(reconnected.root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
     await expect(reconnected.root.locator(".index-run-button")).toBeEnabled();
+    await reconnected.root.locator(".index-search-health-summary").hover();
+    await reconnected.root.locator(".index-search-input").focus();
+    controlledHealth = true;
+    const burst = await reconnected.root.evaluate(async (root, projectRoot) => {
+      const summary = root.querySelector(".index-search-health-summary")!;
+      const health = root.querySelector(".index-health-table")!;
+      const before = summary.innerHTML;
+      const focused = document.activeElement;
+      const renders = { summary: 0, table: 0 };
+      const summaryObserver = new MutationObserver(records => {
+        renders.summary += records.reduce((count, record) => count + record.addedNodes.length, 0);
+      });
+      const tableObserver = new MutationObserver(records => {
+        renders.table += records.flatMap(record => Array.from(record.addedNodes))
+          .filter(node => node instanceof Element && node.matches("[data-role='index-settings-table']")).length;
+      });
+      summaryObserver.observe(summary, { childList: true });
+      tableObserver.observe(health, { childList: true });
+      try {
+        for (let count = 1; count <= 50; count++) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+            kind: "project_index_status", project_root: projectRoot, status: {
+              state: "ready", scopes: {
+                issues: { healthy: true, document_count: count },
+                specs: { healthy: true, document_count: 6 },
+              },
+            },
+          } }));
+        }
+        // A trailing inactive project must not erase this frame's active data.
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "project_index_status", project_root: `${projectRoot}/inactive`,
+          status: { state: "error", scopes: {} },
+        } }));
+        const unchanged = summary.innerHTML === before;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { unchanged, renders, summary: summary.textContent,
+          table: health.querySelector("tr[data-scope='issues']")?.textContent,
+          focusPreserved: document.activeElement === focused };
+      } finally {
+        summaryObserver.disconnect();
+        tableObserver.disconnect();
+      }
+    }, status.project_root);
+    expect(burst.unchanged).toBe(true);
+    expect(burst.renders).toEqual({ summary: 1, table: 1 });
+    expect(burst.summary).toContain("2 ready");
+    expect(burst.table).toContain("50 docs");
+    expect(burst.focusPreserved).toBe(true);
+    await testInfo.attach("index-health-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+    const fallbackStarted = Date.now();
+    await page.evaluate(projectRoot => {
+      (window as any).__indexRestoreRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+        kind: "project_index_status", project_root: projectRoot,
+        status: { state: "ready", scopes: { issues: { healthy: true, document_count: 51 } } },
+      } }));
+    }, status.project_root);
+    try {
+      await expect(reconnected.table.locator("tr[data-scope='issues']")).toContainText("51 docs", { timeout: 1000 });
+      expect(Date.now() - fallbackStarted).toBeLessThan(1000);
+      await expect(reconnected.root.locator(".index-search-health-summary")).toContainText("1 ready");
+      await expect(reconnected.root.locator(".index-search-input")).toBeFocused();
+    } finally {
+      await page.evaluate(() => { window.requestAnimationFrame = (window as any).__indexRestoreRaf; });
+    }
+    await reconnected.root.locator("[data-index-tab='health']").click();
+    await expect(reconnected.table.locator("tr[data-scope='issues'] .ready")).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme",
       testInfo.project.name.includes("light") ? "light" : "dark");
-    await page.screenshot({ path: testInfo.outputPath("index-search-live-reconnect.png") });
+    const screenshot = testInfo.outputPath("index-search-live-reconnect.png");
+    await page.screenshot({ path: screenshot });
+    await testInfo.attach("Index health frame", { path: screenshot, contentType: "image/png" });
     expect(errors).toEqual([]);
   } finally {
     await release();

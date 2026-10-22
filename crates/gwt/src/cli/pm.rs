@@ -915,6 +915,23 @@ mod tests {
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
+        assert_eq!(status["policy"]["forecasts"], serde_json::json!([]));
+        assert_eq!(
+            status["policy"]["capacity"].get("terminal_queue"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["capacity"].get("idle_windows"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["capacity"].get("wip_limits"),
+            Some(&serde_json::json!([]))
+        );
+        assert_eq!(
+            status["policy"]["capacity"].get("retry_deadlines"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(
             status["policy"]["capacity"].get("declared_waits"),
             Some(&serde_json::Value::Null)
@@ -940,6 +957,12 @@ mod tests {
             .unwrap()
             .contains(&serde_json::json!("end_to_end_wip")));
         assert_eq!(status["revision"], 1);
+        assert_eq!(status["policy"]["risks"], serde_json::json!([]));
+        assert_eq!(status["policy"]["decisions"], serde_json::json!([]));
+        assert_eq!(
+            status["policy"]["decision_revisions"],
+            serde_json::json!([])
+        );
         assert_eq!(status["goals"][0]["outcome"], "Ship safely");
         assert_eq!(status["policy"]["planning_revision"], 1);
         assert_eq!(
@@ -974,6 +997,14 @@ mod tests {
             2
         );
         crate::pm_planning::mutate_planning_state(&planning_path, 2, |state| {
+            state.latest_forecasts.push(crate::pm_planning::Forecast {
+                id: "release-forecast".into(),
+                source_revision: 1,
+                sample_size: 2,
+                estimate: Some("two days".into()),
+                confidence: Some("high".into()),
+                missing_inputs: vec!["cost".into()],
+            });
             state.roadmap_items.push(crate::pm_planning::RoadmapItem {
                 id: "goal-link".into(),
                 goal_id: Some("goal-1".into()),
@@ -985,14 +1016,81 @@ mod tests {
                 issues: vec![9, 7, 9],
                 ..Default::default()
             });
+            state.risks.push(crate::pm_planning::Risk {
+                id: "release-risk".into(),
+                review_date: Some("2024-03-01".into()),
+                ..Default::default()
+            });
+            state.decisions.push(crate::pm_planning::Decision {
+                id: "release-decision".into(),
+                source_revision: Some(1),
+                ..Default::default()
+            });
+            state
+                .recurring_items
+                .push(crate::pm_planning::RecurringItem {
+                    id: "maintenance".into(),
+                    next_run: Some("2024-03-01T00:30:00Z".into()),
+                    ..Default::default()
+                });
             Ok(())
         })
         .unwrap();
         let bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"]["forecasts"],
+            serde_json::json!([
+                {"id":"release-forecast", "source_revision":1, "sample_size":2,
+                 "reported_estimate":"two days", "reported_confidence":"high",
+                 "reported_missing_inputs":["cost"], "revisions_since_source":2,
+                 "confidence":"unknown", "missing_inputs":["forecast_evidence"]}
+            ])
+        );
+        assert_eq!(
+            status["policy"]["decision_revisions"],
+            serde_json::json!([
+                {"id":"release-decision", "source_revision":1, "revisions_since_source":2, "missing_inputs":[]}
+            ])
+        );
+        assert_eq!(
+            status["policy"]["decisions"],
+            serde_json::json!([
+                {"id":"release-decision", "missing_inputs":["options", "rationale", "owner"]}
+            ])
+        );
+        assert_eq!(
+            status["policy"]["risks"],
+            serde_json::json!([
+                {"id":"release-risk", "missing_inputs":["severity", "probability", "impact", "owner"]}
+            ])
+        );
+        assert_eq!(
+            status["policy"]["recurring_runs"],
+            serde_json::json!([
+                {"id":"maintenance", "next_run":"2024-03-01T00:30:00Z", "due_at_scan":null,
+                 "configuration_missing_inputs":["cadence", "owner", "miss_policy", "idempotency_key"],
+                 "missing_inputs":["monitor_scan_time"]}
+            ])
+        );
+        assert_eq!(
+            status["policy"]["review_dates"],
+            serde_json::json!([
+                {"kind":"risk", "id":"release-risk", "review_date":"2024-03-01",
+                 "scan_date_utc":null, "days_past_review_at_scan":null,
+                 "missing_inputs":["monitor_scan_time"]},
+                {"kind":"decision", "id":"release-decision", "review_date":null,
+                 "scan_date_utc":null, "days_past_review_at_scan":null,
+                 "missing_inputs":["review_date", "monitor_scan_time"]}
+            ])
+        );
         for trace in status["policy"]["issue_traces"].as_array().unwrap() {
             assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
         }
+        let roadmap = &status["policy"]["roadmap_items"][0];
+        assert_eq!(roadmap["issues"], serde_json::json!([9, 7, 9]));
+        assert_eq!(roadmap["observed_issue_states"], serde_json::json!([]));
+        assert_eq!(roadmap["unobserved_issues"], serde_json::json!([7, 9]));
         assert_eq!(
             status["policy"]["goals"][0]["issues"],
             serde_json::json!([7, 9])
@@ -1019,6 +1117,13 @@ mod tests {
         assert_eq!(
             status["policy"]["milestones"][0]["unobserved_issues"],
             serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0].get("target_date_observation"),
+            Some(&serde_json::json!({
+                "scan_date_utc":null, "days_past_target_at_scan":null,
+                "missing_inputs":["target_date", "monitor_scan_time"]
+            }))
         );
         assert_eq!(fs::read(&planning_path).unwrap(), bytes);
     }

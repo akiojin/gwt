@@ -1,11 +1,11 @@
 //! Project-scoped Reports polling. Stable inputs do not decode stores or census.
 
 use super::{project_dir, snapshot_from_inventory, status_path, PmCurrentSnapshot};
+use crate::protocol::PmReportsVersion;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -27,6 +27,19 @@ pub struct PmReportsData {
 }
 
 impl PmReportsData {
+    fn refresh_stale(&mut self, now: DateTime<Utc>) -> bool {
+        let Some(current) = &mut self.current else {
+            return false;
+        };
+        let stale = current
+            .status
+            .as_ref()
+            .and_then(|status| status.stale_minutes(now));
+        let changed = current.stale_minutes != stale;
+        current.stale_minutes = stale;
+        changed
+    }
+
     fn same_content(&self, other: &Self) -> bool {
         self.reports == other.reports
             && self.error == other.error
@@ -53,14 +66,29 @@ pub(super) enum SourceStamp {
 }
 
 /// Shared by viewers of one Project and serialized on the blocking pool.
-#[derive(Default)]
 pub struct PmReportsReader {
     paths: Option<(Vec<PathBuf>, PathBuf)>,
     trees: Option<TreeWatch>,
     preferences: Option<(SourceStamp, SourceStamp)>,
     inputs: Option<Vec<SourceStamp>>,
     data: Option<PmReportsData>,
-    delivered: HashSet<String>,
+    version: PmReportsVersion,
+}
+
+impl Default for PmReportsReader {
+    fn default() -> Self {
+        Self {
+            paths: None,
+            trees: None,
+            preferences: None,
+            inputs: None,
+            data: None,
+            version: PmReportsVersion {
+                epoch: uuid::Uuid::new_v4().to_string(),
+                revision: 0,
+            },
+        }
+    }
 }
 
 impl PmReportsReader {
@@ -68,8 +96,8 @@ impl PmReportsReader {
         &mut self,
         repo: &Path,
         update: Option<&gwt_core::update::UpdateState>,
-        viewer: &str,
-    ) -> Option<PmReportsData> {
+        version: Option<&PmReportsVersion>,
+    ) -> Option<(PmReportsVersion, PmReportsData)> {
         if self.paths.is_none() {
             let home = gwt_core::paths::gwt_home();
             self.paths = Some((
@@ -119,7 +147,7 @@ impl PmReportsReader {
         inputs.push(SourceStamp::Update(
             serde_json::to_value(update).unwrap_or(Value::Null),
         ));
-        self.poll_with(readable.then_some(inputs), viewer, Utc::now(), || {
+        self.poll_with(readable.then_some(inputs), version, Utc::now(), || {
             load(repo, update)
         })
     }
@@ -127,46 +155,41 @@ impl PmReportsReader {
     pub(super) fn poll_with(
         &mut self,
         inputs: Option<Vec<SourceStamp>>,
-        viewer: &str,
+        version: Option<&PmReportsVersion>,
         now: DateTime<Utc>,
         load: impl FnOnce() -> PmReportsData,
-    ) -> Option<PmReportsData> {
+    ) -> Option<(PmReportsVersion, PmReportsData)> {
         let due = self
             .data
             .as_ref()
             .and_then(|data| data.refresh_at)
             .is_some_and(|at| now >= at);
+        let mut changed = false;
         if self.data.is_none() || inputs.is_none() || self.inputs != inputs || due {
-            let next = load();
-            if self
+            let mut next = load();
+            next.refresh_stale(now);
+            changed = self
                 .data
                 .as_ref()
-                .is_none_or(|old| !old.same_content(&next))
-            {
-                self.delivered.clear();
-            }
+                .is_none_or(|old| !old.same_content(&next));
             self.inputs = if next.error.is_none() { inputs } else { None };
             self.data = Some(next);
         }
         let data = self.data.as_mut()?;
         // Advancing the stale label does not require reading any file.
-        if let Some(current) = &mut data.current {
-            let stale = current
-                .status
-                .as_ref()
-                .and_then(|status| status.stale_minutes(now));
-            if current.stale_minutes != stale {
-                current.stale_minutes = stale;
-                self.delivered.clear();
+        changed |= data.refresh_stale(now);
+        if changed {
+            // Keep every revision exactly representable by JavaScript numbers.
+            const MAX_SAFE_REVISION: u64 = (1_u64 << 53) - 1;
+            if self.version.revision >= MAX_SAFE_REVISION {
+                self.version.epoch = uuid::Uuid::new_v4().to_string();
+                self.version.revision = 0;
             }
+            self.version.revision += 1;
         }
-        // Bound disconnected viewer history without retaining any client handles.
-        if self.delivered.len() >= 256 {
-            self.delivered.clear();
-        }
-        self.delivered
-            .insert(viewer.to_owned())
-            .then(|| data.clone())
+        // Enqueueing is not an acknowledgement: a dropped response must be
+        // retried until the client supplies the version it actually applied.
+        (version != Some(&self.version)).then(|| (self.version.clone(), data.clone()))
     }
 }
 
@@ -364,6 +387,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapshots_are_resent_until_the_client_acknowledges_them() {
+        let mut reader = PmReportsReader::default();
+        let now = Utc::now();
+        let (version, _) = reader
+            .poll_with(Some(vec![]), None, now, PmReportsData::default)
+            .unwrap();
+        let (retry_version, _) = reader
+            .poll_with(Some(vec![]), None, now, || {
+                panic!("an unacknowledged retry reuses the cached snapshot")
+            })
+            .expect("sending a snapshot does not acknowledge its application");
+        assert_eq!(retry_version, version);
+        assert!(reader
+            .poll_with(Some(vec![]), Some(&version), now, || panic!(
+                "an acknowledged poll reuses the cached snapshot"
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn a_new_reader_or_revision_limit_starts_a_new_epoch() {
+        let now = Utc::now();
+        let (old, _) = PmReportsReader::default()
+            .poll_with(Some(vec![]), None, now, PmReportsData::default)
+            .unwrap();
+        let mut reader = PmReportsReader::default();
+        let (first, _) = reader
+            .poll_with(Some(vec![]), Some(&old), now, PmReportsData::default)
+            .unwrap();
+        assert_ne!(first.epoch, old.epoch);
+        assert_eq!(first.revision, 1);
+        reader.version.revision = (1_u64 << 53) - 1;
+        let (rotated, _) = reader
+            .poll_with(None, Some(&first), now, || PmReportsData {
+                error: Some("unavailable".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_ne!(rotated.epoch, first.epoch);
+        assert_eq!(rotated.revision, 1);
+    }
+
+    #[test]
     fn preferences_ignore_observation_clocks_but_track_counts_and_decisions() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("prefs.json");
@@ -436,22 +502,24 @@ mod tests {
             ..Default::default()
         };
         let mut reader = PmReportsReader::default();
-        reader
-            .poll_with(Some(vec![]), "a", now, || data.clone())
+        let (version, _) = reader
+            .poll_with(Some(vec![]), None, now, || data.clone())
             .unwrap();
         let later = reader
             .poll_with(
                 Some(vec![]),
-                "a",
+                Some(&version),
                 now + chrono::Duration::minutes(1),
                 || panic!("stale clock uses cached status"),
             )
             .unwrap();
-        assert_eq!(later.current.unwrap().stale_minutes, Some(16));
+        assert_eq!(later.0.epoch, version.epoch);
+        assert_eq!(later.0.revision, version.revision + 1);
+        assert_eq!(later.1.current.unwrap().stale_minutes, Some(16));
         let mut refreshed = false;
         reader.poll_with(
             Some(vec![]),
-            "a",
+            Some(&later.0),
             now + chrono::Duration::minutes(2),
             || {
                 refreshed = true;
@@ -484,11 +552,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        reader
-            .poll_with(fingerprint(), "a", now, || data.clone())
+        let (version, _) = reader
+            .poll_with(fingerprint(), None, now, || data.clone())
             .unwrap();
         assert!(reader
-            .poll_with(fingerprint(), "a", now, || panic!(
+            .poll_with(fingerprint(), Some(&version), now, || panic!(
                 "stable metadata must not decode files"
             ))
             .is_none());
@@ -496,7 +564,7 @@ mod tests {
         fs::write(&path, "not parsed by the fingerprint").unwrap();
         let mut loaded = false;
         assert!(reader
-            .poll_with(fingerprint(), "a", now, || {
+            .poll_with(fingerprint(), Some(&version), now, || {
                 loaded = true;
                 let mut next = data.clone();
                 next.current.as_mut().unwrap().observed_at = now + chrono::Duration::seconds(5);
@@ -506,7 +574,7 @@ mod tests {
         assert!(loaded);
         fs::remove_file(&path).unwrap();
         let mut removed = false;
-        reader.poll_with(fingerprint(), "a", now, || {
+        reader.poll_with(fingerprint(), Some(&version), now, || {
             removed = true;
             data
         });

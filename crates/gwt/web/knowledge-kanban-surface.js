@@ -1,5 +1,6 @@
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { renderUiContent } from "./ui-content.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -16,8 +17,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
-//   app.js (the markdown body renderer is shared with the Board surface).
+// - createNode: shared DOM helper owned by app.js.
 // - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
 // - knowledgeKindForPreset(preset): Issue/SPEC kind mapping.
@@ -779,7 +779,6 @@ export function createKnowledgeKanbanSurface({
   // frame was written; a false result is owned by the retry lifecycle.
   sendKnowledgeSemanticSearchNow = () => false,
   createNode,
-  createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
   isKnowledgeWindowVisible = () => true,
@@ -1655,7 +1654,7 @@ export function createKnowledgeKanbanSurface({
             createNode("div", "kanban-drawer-section-title", section.title),
           );
           card.appendChild(
-            createKnowledgeMarkdownBody(section, "kanban-drawer-section-body"),
+            renderUiContent(document, section.content, "kanban-drawer-section-body"),
           );
           body.appendChild(card);
         }
@@ -4135,7 +4134,7 @@ export function createKnowledgeKanbanSurface({
           const card = createNode("details", "knowledge-section");
           card.open = index === 0;
           card.appendChild(createNode("summary", "knowledge-section-title", section.title));
-          card.appendChild(createKnowledgeMarkdownBody(section));
+          card.appendChild(renderUiContent(document, section.content, "knowledge-section-body"));
           scroll.appendChild(card);
         });
         const relatedWorks = renderKnowledgeRelatedWorks(detail);
@@ -4233,7 +4232,7 @@ export function createKnowledgeKanbanSurface({
           card.appendChild(
             createNode("div", "knowledge-section-title", section.title),
           );
-          card.appendChild(createKnowledgeMarkdownBody(section));
+          card.appendChild(renderUiContent(document, section.content, "knowledge-section-body"));
           scroll.appendChild(card);
         }
         const relatedWorks = renderKnowledgeRelatedWorks(detail);
@@ -5440,7 +5439,9 @@ export function createKnowledgeKanbanSurface({
             const previousNumber = state.selectedNumber;
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
-            state.detail = event.detail;
+            state.detail = event.detail ? { ...event.detail,
+              sections: (event.detail.sections || []).map(section => ({ ...section,
+                content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
             if (matchesLoadRequest) {
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
@@ -5464,7 +5465,7 @@ export function createKnowledgeKanbanSurface({
                 ...kanbanDrawerActiveContext,
                 number: event.detail?.number ?? kanbanDrawerActiveContext.number,
               };
-              renderKanbanDrawerBody();
+              knowledgeBoardViewModel.update(() => ({ windowId: event.id, drawer: true }));
             }
             break;
           }
@@ -5639,7 +5640,11 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
-      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly, drawer }) => {
+        if (drawer) {
+          renderKanbanDrawerBody();
+          return;
+        }
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!element || !state) return;

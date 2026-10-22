@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
   .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`)
-  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "/ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`);
 const { createBoardLogsSurface } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
 );
@@ -71,6 +71,12 @@ test("Board incremental entries preserve history, update IDs, and ignore repeate
   assert.deepEqual(state.entries.map(row => [row.id, row.body]), [
     ["1", "1"], ["2", "edited"], ["3", "3"],
   ]);
+  assert.deepEqual(state.entries.map(row => row.content), [
+    { type: "markdown", body: "1", body_html: "" },
+    { type: "markdown", body: "edited", body_html: "" },
+    { type: "markdown", body: "3", body_html: "" },
+  ], "both history and current entries commit their content type before rendering");
+  assert.ok(state.entries.every(row => Object.isFrozen(row.content)));
   assert.equal(state.oldestEntryId, "1");
   assert.equal(state.hasMoreBefore, true);
   assert.equal(state.forYouUnread, 1);

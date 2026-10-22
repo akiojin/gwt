@@ -54,6 +54,7 @@ fn sample_pr_status() -> PrStatus {
 
 fn sample_issue_snapshot(number: u64, labels: &[&str]) -> gwt_github::client::IssueSnapshot {
     gwt_github::client::IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Issue {number}"),
         body: "Body".to_string(),

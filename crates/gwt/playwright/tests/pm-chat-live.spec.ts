@@ -24,6 +24,10 @@ async function gotoPmReports(page: Page) {
   await page.locator('#op-pm-entry').click();
 }
 
+async function refreshPmReports(page: Page) {
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+}
+
 test.describe('PM reports', () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
@@ -73,7 +77,20 @@ test.describe('PM reports', () => {
           for (const event of events) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
         });
         const snapshot = await dispatch({ kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
-        const report = await dispatch({ ...original, reports: [...original.reports, {
+        // Obtain a real model-issued force token without sending this controlled
+        // request to the backend; its response is injected below.
+        let request: any;
+        const originalSend = socket.send;
+        socket.send = function (data: string) {
+          const payload = JSON.parse(data);
+          if (payload.kind === 'load_pm_reports' && payload.id === id) request = payload;
+          else originalSend.call(this, data);
+        };
+        try { document.dispatchEvent(new Event('visibilitychange')); }
+        finally { socket.send = originalSend; }
+        if (!request) throw new Error('Missing model-issued Reports request');
+        const report = await dispatch({ ...original, request_id: request.request_id, snapshot: true,
+          version: { epoch: original.version.epoch, revision: original.version.revision + 1 }, reports: [...original.reports, {
           id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
           body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
         }] });
@@ -124,6 +141,95 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('lost Reports response and revision gap recover through a full snapshot', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      // Install the loss injector when the socket is constructed, before the
+      // app registers its receive listener. A later listener cannot undo a
+      // frame that an earlier listener has already handed to the dispatcher.
+      await page.addInitScript(() => {
+        const NativeSocket = window.WebSocket;
+        window.WebSocket = new Proxy(NativeSocket, {
+          construct(Target, args) {
+            const socket = new Target(...args as ConstructorParameters<typeof WebSocket>);
+            socket.addEventListener('message', event => {
+              const state = (window as any).__reportsRecovery;
+              if (!state?.armed) return;
+              const payload = JSON.parse(String(event.data));
+              if (payload.kind !== 'pm_reports' || payload.id !== state.id || payload.snapshot
+                || !payload.reports.some((report: any) => report.body === `# ${state.first}`)) return;
+              state.dropped = payload;
+              state.armed = false;
+              event.stopImmediatePropagation();
+            });
+            return socket;
+          },
+        });
+      });
+      await gotoPmReports(page);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+      const id = await pane.getAttribute('data-id');
+      const first = `Lost response ${theme}`;
+      const second = `Recovered gap ${theme}`;
+      await page.evaluate(({ id, first }) => {
+        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+        const requests: any[] = [];
+        (window as any).__reportsRecovery = { requests, dropped: null, armed: true, id, first };
+        const send = socket.send;
+        socket.send = function (data: string) {
+          const request = JSON.parse(data);
+          if (request.kind === 'load_pm_reports' && request.id === id) requests.push(request);
+          return send.call(this, data);
+        };
+      }, { id, first });
+      // The first render can precede a pending force reply. Observe a normal
+      // acknowledged poll before changing the ledger and arming the loss case.
+      await expect.poll(() => page.evaluate(() => (window as any).__reportsRecovery.requests
+        .some((request: any) => request.version !== null)), { timeout: 20_000 }).toBe(true);
+      const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
+      const history = `${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`;
+      const append = (body: string) => appendFileSync(history, `${JSON.stringify({
+        id: randomUUID(), kind: 'progress', body: `# ${body}`, created_at: new Date().toISOString(),
+      })}\n`);
+      append(first);
+      await expect.poll(() => page.evaluate(() => (window as any).__reportsRecovery.dropped?.version.revision),
+        { timeout: 20_000 }).toBeGreaterThan(0);
+      await expect(reports.getByRole('heading', { name: first, exact: true })).toHaveCount(0);
+      append(second);
+      await expect(reports.getByRole('heading', { name: first, exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(reports.getByRole('heading', { name: second, exact: true })).toBeVisible();
+      const recovery = await page.evaluate(id => {
+        const state = (window as any).__reportsRecovery;
+        const received = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
+          .filter((event: any) => event.kind === 'pm_reports' && event.id === id);
+        return { dropped: state.dropped, requests: state.requests, received };
+      }, id);
+      const gap = recovery.received.find((event: any) => !event.snapshot
+        && event.version.revision > recovery.dropped.version.revision);
+      expect(gap, 'ordinary response exposes a missing revision').toBeTruthy();
+      const reset = recovery.received.find((event: any) => event.snapshot && event.request_id > gap.request_id);
+      expect(reset?.version, 'force response supplies the entire latest slice').toEqual(gap.version);
+      expect(recovery.requests.find((request: any) => request.request_id === reset.request_id)?.version).toBeNull();
+      await expect(pane.locator('.pm-chat')).toHaveAttribute('data-state-version',
+        await pane.locator('.pm-conversation-log').getAttribute('data-state-version') as string);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const screenshot = info.outputPath(`reports-recovery-${theme}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('Reports recovery', { path: screenshot, contentType: 'image/png' });
+      await page.reload();
+      await gotoPmReports(page);
+      await expect(reports.getByRole('heading', { name: second, exact: true })).toBeVisible();
+      expect(errors).toEqual([]);
+    });
+  });
+
   test('unchanged polls are silent, changed reports arrive and reconnect hydrates', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
@@ -139,7 +245,11 @@ test.describe('PM reports', () => {
       const id = await pane.getAttribute('data-id');
       expect(id).toBeTruthy();
       const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
-      for (let index = 0; index < 3; index++) await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      const version = await page.evaluate(id => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === 'pm_reports' && entry.payload.id === id).payload.version, id);
+      for (let index = 0; index < 3; index++) await sendLiveGwtEvent(page, {
+        kind: 'load_pm_reports', id, request_id: 0, version,
+      });
       // Observe an entire real frontend polling interval: silence is the contract.
       await page.waitForTimeout(6_000);
       const unchanged = await page.evaluate(({ id, cursor }) => (window as any).__gwtPlaywrightMessages.filter((entry: any) =>
@@ -151,7 +261,7 @@ test.describe('PM reports', () => {
       appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
         id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
       })}\n`);
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
       await page.reload();
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
@@ -212,7 +322,7 @@ test.describe('PM reports', () => {
       const seededStorePath = `${storePath}.${incoming.id}.tmp`;
       writeFileSync(seededStorePath, JSON.stringify(store));
       renameSync(seededStorePath, storePath);
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       const outgoingReport = reports.locator('article').filter({ hasText: `PM peer ${outgoing.message.id} →` });
       const incomingReport = reports.locator('article').filter({ hasText: `PM peer ${incoming.id} ←` });
       const outgoingBody = `PM peer ${outgoing.message.id} → Request ${peer}: ${outgoingText.replace(/\n/g, ' ')} — Waiting for the peer project (PM absent, stopped, or liveness unconfirmed)`;
@@ -222,7 +332,7 @@ test.describe('PM reports', () => {
         await expect(report.locator('.pm-chat__text')).toHaveText(body);
         expect(await report.locator('.pm-chat__text').textContent()).toBe(body);
       }
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
       await page.reload();
@@ -249,7 +359,7 @@ test.describe('PM reports', () => {
         });
         expect(nativeResult.status, nativeResult.stderr).toBe(0);
         expect(JSON.parse(nativeResult.stdout).ok).toBe(true);
-        await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+        await refreshPmReports(page);
         await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
         await expect(reports.locator('article').filter({ hasText: nativeBody })).toHaveCount(1);
         await expect(outgoingReport).toHaveCount(0);
@@ -258,7 +368,7 @@ test.describe('PM reports', () => {
         writeFileSync(seededStorePath, validPeerStore);
         renameSync(seededStorePath, storePath);
       }
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(outgoingReport).toHaveCount(1);
       await expect(incomingReport).toHaveCount(1);
       expect(errors).toEqual([]);
@@ -292,7 +402,7 @@ test.describe('PM reports', () => {
       expect(refused.error).toBeUndefined();
       expect(refused.status).toBe(1);
       expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(reports.locator('article')).toHaveCount(originalRows);
       await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
 
@@ -303,7 +413,7 @@ test.describe('PM reports', () => {
       const answer = `Human answer preserved ${info.project.name}`;
       const human = post({ kind: 'qa', question, body: answer });
       expect(human.status, human.stderr).toBe(0);
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(reports.locator('article').filter({ hasText: action })).toHaveCount(1);
       await expect(reports.locator('article').filter({ hasText: answer })).toHaveCount(1);
       await expect(reports.getByText(question, { exact: true })).toBeVisible();
@@ -367,7 +477,7 @@ test.describe('PM reports', () => {
         updated_at: new Date(Date.now() - 16 * 60_000).toISOString(), monitor_fingerprint: null,
       };
       writeFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-status.jsonl`, `${JSON.stringify(oldStatus)}\n`);
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(currentCard).toContainText('PM has not updated for 16 minutes');
       await expect(currentCard).toContainText('Next: v9.117.2 の公開');
       await expect(currentCard).toContainText('User action: None');
@@ -385,7 +495,7 @@ test.describe('PM reports', () => {
       expect(statusReadback.status_history).toHaveLength(2);
       expect(statusReadback.status_history[0].items[0].text).toBe(oldStatus.items[0].text);
       expect(statusReadback.current_status.items[0].text).toContain('公開結果を確認');
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
       await expect(currentCard).not.toContainText('has not updated for 16 minutes');
       await expect(currentCard).not.toContainText('リリースの公開待ち');
@@ -393,7 +503,7 @@ test.describe('PM reports', () => {
       const saved = pmOperation('pm.report.post', { kind: 'progress', body });
       expect(saved.report.body).toBe(body);
       expect(saved.report.id).toBeTruthy();
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       const report = reports.locator('article').filter({ has: page.getByRole('heading', { name: marker, exact: true }) });
       await expect(report.locator('strong')).toHaveText('Verified');
       await expect(report.locator('li')).toHaveCount(2);
@@ -432,7 +542,7 @@ test.describe('PM reports', () => {
       const listed = pmOperation('pm.report.list');
       expect(listed.reports.find((entry: { id: string }) => entry.id === qaSaved.report.id))
         .toMatchObject({ kind: 'qa', question, body: answerBody });
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       const qaReport = reports.locator('article').filter({ has: page.getByRole('heading', { name: answerMarker, exact: true }) });
       await expect(qaReport.getByRole('heading', { name: 'Q', exact: true })).toBeVisible();
       await expect(qaReport.getByRole('region', { name: 'Question', exact: true }).locator('.pm-chat__question')).toHaveText(question);
@@ -444,7 +554,7 @@ test.describe('PM reports', () => {
       await kindFilter.selectOption('qa');
       await expect(qaReport).toBeVisible();
       await expect(report).not.toBeVisible();
-      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await refreshPmReports(page);
       await expect(kindFilter).toHaveValue('qa');
       await kindFilter.selectOption('progress');
       await expect(report).toBeVisible();
@@ -488,4 +598,156 @@ test.describe('PM reports', () => {
       expect(errors).toEqual([]);
     });
   });
+});
+
+test('typed model content selects the renderer across surfaces', async ({ page }, info) => {
+  test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, 'requires an isolated checkout server');
+  test.setTimeout(60_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  const theme = info.project.name.includes('light') ? 'light' : 'dark';
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+  await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
+  const style = await page.addStyleTag({ content: `
+    body { height: auto !important; overflow: auto !important; }
+    body > :not(#typed-content-host):not(script) { display: none !important; }
+    #typed-content-host { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--color-canvas); color: var(--color-text); }
+    #typed-content-host > section { height: 820px; min-height: 0; border: 1px solid var(--color-border); background: var(--color-surface); overflow: auto; }
+    #typed-content-host > section > h2 { margin: var(--space-2); }
+    #typed-content-host [data-factory-root] { position: relative; contain: layout paint; height: 760px; }
+    #typed-content-host .window-body { position: relative; inset: auto; height: 100%; }
+    #typed-content-host .release-notes-window { position: relative; inset: auto; transform: none; width: 100%; height: 760px; max-width: none; max-height: none; }
+  ` });
+  try {
+    // Controlled factory acceptance against the checkout's hosted modules.
+    // No renderer is injected, and no natural backend traffic or load is claimed.
+    const evidence = await page.evaluate(async () => {
+      const load = (path: string) => import(new URL(path, location.href).href);
+      const [pmModule, boardModule, knowledgeModule, releaseModule] = await Promise.all([
+        load('/pm-chat.js'), load('/board-logs-surface.js'),
+        load('/knowledge-kanban-surface.js'), load('/release-notes-window.js'),
+      ]);
+      const host = document.createElement('main');
+      host.id = 'typed-content-host';
+      document.body.append(host);
+      const cleanup: Array<() => void> = [() => host.remove()];
+      (window as any).__typedContentCleanup = () => cleanup.reverse().forEach(dispose => dispose());
+      const createNode = (tag: string, className = '', text?: string) => {
+        const node = document.createElement(tag);
+        node.className = className;
+        if (text != null) node.textContent = String(text);
+        return node;
+      };
+      const mount = (surface: string, title: string) => {
+        const section = createNode('section');
+        section.dataset.surface = surface;
+        const root = createNode('div');
+        root.dataset.factoryRoot = '';
+        section.append(createNode('h2', '', title), root);
+        host.append(section);
+        return root;
+      };
+      const literal = '<script>window.__typedContentExecuted = true</script>';
+      const markdown = { body: '**Shared Markdown**', body_html: '<p><strong>Shared Markdown</strong></p>' };
+      const fallback = { body: literal };
+      const noop = () => {};
+
+      const reportsRoot = mount('reports', 'Reports');
+      const copied: string[] = [];
+      const pm = pmModule.createPmWindowModel();
+      const reports = pmModule.createPmChat({ document, root: reportsRoot, sessionId: 'typed-session',
+        onLogVisibility: noop, copyText: async (text: string) => { copied.push(text); } });
+      cleanup.push(() => reports.dispose(), () => pm.removePmWindowState('typed-pm'));
+      pm.bindPmWindowState('typed-pm', 'typed-session');
+      cleanup.push(pm.subscribePmWindowState((state: any) => state.windows['typed-pm'], (state: any) => reports.update(state)));
+      const reportRows = [markdown, fallback].map((body, index) => ({ ...body, id: `typed-report-${index}`,
+        kind: 'progress', created_at: '2026-10-21T00:00:00Z' }));
+      const request = pm.requestPmReports('typed-pm');
+      pm.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'typed-pm', session_id: 'typed-session', reports: reportRows,
+        request_id: request.request_id, version: { epoch: 'typed', revision: 1 }, snapshot: true });
+      const pmState = pm.readPmWindowState().windows['typed-pm'];
+      pm.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'typed-pm', session_id: 'stale-session', reports: [] });
+      (reportsRoot.querySelector('[aria-label="Copy report"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+
+      const boardRoot = mount('board', 'Board');
+      const boardBody = createNode('div', 'window-body');
+      boardRoot.append(boardBody);
+      const boardWindow = { id: 'typed-board', preset: 'board' };
+      const board = boardModule.createBoardLogsSurface({ send: noop, createNode,
+        windowMap: new Map([[boardWindow.id, boardRoot]]), focusWindowLocally: noop, sendWindowFocus: noop,
+        pushAlertToast: noop, focusOrSpawnPreset: noop, activeWorkspace: () => ({ windows: [boardWindow] }),
+        activeProjectTab: () => null, projectWindowContextById: () => null,
+        visibleBounds: () => ({ x: 0, y: 0, width: 1400, height: 420 }), getActiveWorkProjection: () => null });
+      cleanup.push(() => { board.boardStateMap.clear(); board.logStateMap.clear(); });
+      board.mountBoardWindow(boardWindow, boardBody);
+      for (const [kind, prefix, date] of [['board_entries', 'current', '21'], ['board_history_page', 'history', '20']]) {
+        board.applyBoardLogsReceiveEvent({ kind, id: boardWindow.id, has_more_before: false,
+          entries: [markdown, fallback].map((body, index) => ({ ...body, id: `${prefix}-${index}`,
+            author_kind: 'user', author: 'Fixture', created_at: `2026-10-${date}T00:00:00Z` })) });
+      }
+
+      const knowledgeRoot = mount('knowledge', 'Knowledge');
+      const knowledgeWindow = { id: 'typed-knowledge', preset: 'issue' };
+      const sent: any[] = [];
+      const knowledge = knowledgeModule.createKnowledgeKanbanSurface({ send: (message: any) => sent.push(message), createNode,
+        windowMap: new Map([[knowledgeWindow.id, knowledgeRoot]]),
+        workspaceWindowById: (id: string) => id === knowledgeWindow.id ? knowledgeWindow : null,
+        getWorkspaceWindows: () => [knowledgeWindow], pendingIndexOpenTargetsByPreset: new Map(),
+        knowledgeKindForPreset: () => 'issue', focusWindowLocally: noop, sendWindowFocus: noop,
+        focusOrSpawnPreset: noop, openIssueLaunchWizard: noop, launchPending: {},
+        visibleBounds: () => ({ x: 0, y: 0, width: 1400, height: 420 }), getActiveWorkProjection: () => null });
+      cleanup.push(() => knowledge.clearKnowledgeBridgeState(knowledgeWindow.id));
+      knowledge.mountKnowledgeWindow(knowledgeWindow, knowledgeRoot);
+      const loadRequest = sent.find(message => message.kind === 'load_knowledge_bridge');
+      knowledge.applyKnowledgeReceiveEvent({ kind: 'knowledge_entries', id: knowledgeWindow.id,
+        knowledge_kind: 'issue', request_id: loadRequest.request_id, selected_number: null, refresh_enabled: true,
+        entries: [{ number: 5016, title: 'Typed model content', state: 'open', labels: [], related_work_refs: [] }] });
+      knowledge.requestKnowledgeDetail(knowledgeWindow.id, 'issue', 5016);
+      const detailRequest = sent.findLast(message => message.kind === 'select_knowledge_bridge_entry');
+      if (!detailRequest) throw new Error('Knowledge did not request the selected detail');
+      knowledge.applyKnowledgeReceiveEvent({ kind: 'knowledge_detail', id: knowledgeWindow.id,
+        knowledge_kind: 'issue', request_id: detailRequest.request_id,
+        detail: { number: 5016, title: 'Typed model content', state: 'open', labels: [], related_works: [],
+          sections: [markdown, fallback].map((body, index) => ({ ...body, title: `Content ${index + 1}` })) } });
+
+      const releaseRoot = mount('release', 'Release Notes');
+      const release = releaseModule.createReleaseNotesWindow({ document, send: noop });
+      cleanup.push(() => release.close());
+      release.handlePayload({ entries: [{ version: '9.0.0', date: '2026-10-21', sections: [
+        { ...markdown, heading: 'Markdown' }, { heading: 'Legacy items', items: [literal] },
+      ] }] });
+      releaseRoot.append(release._state.root);
+      return { literal, copied, sessionFenced: pm.readPmWindowState().windows['typed-pm'] === pmState,
+        types: [pmState.reports.map((row: any) => row.content.type),
+          board.boardStateMap.get(boardWindow.id).entries.map((row: any) => row.content.type),
+          knowledge.knowledgeBridgeStateMap.get(knowledgeWindow.id).detail.sections.map((section: any) => section.content.type)] };
+    });
+    expect(evidence.types).toEqual([['markdown', 'markdown'], Array(4).fill('markdown'), ['markdown', 'markdown']]);
+    expect(evidence.sessionFenced).toBe(true);
+    expect(evidence.copied).toEqual(['**Shared Markdown**']);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    const host = page.locator('#typed-content-host');
+    await host.locator('[data-surface="knowledge"] .knowledge-section').last().locator('summary').click();
+    for (const surface of ['reports', 'board', 'knowledge', 'release']) {
+      const panel = host.locator(`:scope > [data-surface="${surface}"]`);
+      await expect(panel.locator('.knowledge-markdown-body strong')).toHaveCount(surface === 'board' ? 2 : 1);
+      await expect(panel.locator('.knowledge-markdown-body strong').first()).toBeVisible();
+      const plaintext = surface === 'release' ? panel.locator('.release-notes-section li') : panel.locator('.knowledge-markdown-body.is-plaintext');
+      await expect(plaintext).toHaveCount(surface === 'board' ? 2 : 1);
+      for (const body of await plaintext.all()) await expect(body).toHaveText(evidence.literal);
+      await expect(plaintext.first()).toBeVisible();
+      await expect(panel.locator('script')).toHaveCount(0);
+    }
+    expect(await page.evaluate(() => (window as any).__typedContentExecuted)).toBeUndefined();
+    const screenshot = info.outputPath(`typed-content-surfaces-${theme}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true, animations: 'disabled' });
+    await info.attach('Typed content controlled factory acceptance', { path: screenshot, contentType: 'image/png' });
+    expect(errors).toEqual([]);
+  } finally {
+    await page.evaluate(() => { (window as any).__typedContentCleanup?.(); delete (window as any).__typedContentCleanup; });
+    await style.evaluate(node => node.remove());
+  }
 });

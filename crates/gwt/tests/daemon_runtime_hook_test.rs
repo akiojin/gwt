@@ -140,6 +140,7 @@ async fn capture_hook_live(
 
 fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: String::new(),

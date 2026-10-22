@@ -3191,6 +3191,7 @@ pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
     let agent_id = session.agent_id.clone();
+    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
     builder = builder.working_dir(session.worktree_path.clone());
     if !session.branch.is_empty() {
@@ -3202,7 +3203,9 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(level) = session.reasoning_level.clone() {
         builder = builder.reasoning_level(level);
     }
-    if session.skip_permissions {
+    // FR-028 belongs to the PM role, including older Sessions whose saved
+    // skip_permissions field defaults to false.
+    if session.skip_permissions || pm_scratch.is_some() {
         builder = builder.skip_permissions(true);
     }
     if session.fast_mode_enabled() {
@@ -3230,7 +3233,6 @@ pub(super) fn launch_config_from_persisted_session(
     // from the same PM detection that already restores the scratch dir below —
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
-    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     if pm_scratch.is_some()
         && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
     {
@@ -3433,6 +3435,13 @@ impl IssueMonitorSpawnAdmissionInput {
             .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
             .collect::<std::collections::BTreeSet<_>>();
         paths.insert(gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json"));
+        if let Some(cache_root) =
+            gwt::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
+        {
+            let source = cache_root.join(self.issue_number.to_string());
+            paths.insert(source.join("meta.json"));
+            paths.insert(source.join("body.md"));
+        }
         let pending_manifest = gwt_core::update::pending_update_manifest_path();
         paths.insert(pending_manifest.clone());
         // Manifest admission also depends on its payload's existence. Resolve
@@ -3471,7 +3480,7 @@ impl IssueMonitorSpawnAdmissionInput {
         if let Some(hold) = hold {
             return Err(hold);
         }
-        let monitor = prepare_issue_monitor_spawn_capacity(&self.project_root)?;
+        let monitor = prepare_issue_monitor_spawn_capacity(&self.project_root, self.issue_number)?;
         tracing::info!(
             target: "gwt.launch.timing",
             phase = "monitor_shared_capacity",
@@ -3537,11 +3546,23 @@ impl IssueMonitorSpawnAdmissionInput {
 
 fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
+    issue_number: u64,
 ) -> Result<gwt::IssueMonitorState, String> {
     let prefs =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    gwt::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, project_root);
+    if let Some(issue) =
+        gwt::issue_cache::issue_cache_root_for_repo_path(project_root).and_then(|cache_root| {
+            gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                &cache_root,
+                issue_number,
+            )
+        })
+    {
+        monitor.record_candidate(issue);
+    }
     monitor.refresh_agent_capacity(project_root);
     Ok(monitor)
 }
@@ -6906,7 +6927,7 @@ impl AppRuntime {
                     (prepared.monitor, prepared.host_started_at)
                 }
                 None => (
-                    prepare_issue_monitor_spawn_capacity(&project_root_path)?,
+                    prepare_issue_monitor_spawn_capacity(&project_root_path, issue_number)?,
                     gwt::process::host_process_start_time(std::process::id()),
                 ),
             };
@@ -6941,6 +6962,11 @@ impl AppRuntime {
             if !review_dispatch && monitor.has_monitor_pane_for_issue(issue_number) {
                 return Err(format!(
                     "Issue Monitor implementation pane already exists for Issue #{issue_number}"
+                ));
+            }
+            if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
+                return Err(format!(
+                    "Issue Monitor source admission refused Issue #{issue_number}: {reason}"
                 ));
             }
             if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {

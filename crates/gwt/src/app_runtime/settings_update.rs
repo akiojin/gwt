@@ -744,28 +744,56 @@ impl AppRuntime {
         if gwt_core::update::load_pending_update_manifest()
             .is_some_and(|manifest| manifest.version == *latest)
         {
+            gwt_core::update::log_update_event(
+                "auto_apply_skipped",
+                &[("version", latest), ("reason", "already_staged")],
+            );
             return;
         }
-        if self.automatic_updates_enabled() {
+        if let Some(reason) = self.automatic_update_skip_reason() {
+            gwt_core::update::log_update_event(
+                "auto_apply_skipped",
+                &[("version", latest), ("reason", reason)],
+            );
+        } else {
             self.apply_update_start_events(super::UPDATE_AUTO_APPLY_CLIENT_ID);
         }
     }
 
     pub(crate) fn automatic_updates_enabled(&self) -> bool {
+        self.automatic_update_skip_reason().is_none()
+    }
+
+    fn automatic_update_skip_reason(&self) -> Option<&'static str> {
         let enabled = match gwt::update_settings::migrate() {
             Ok(enabled) => enabled,
             Err(error) => {
                 tracing::warn!(target: "gwt::update", %error, "automatic update migration failed; treating as OFF");
-                false
+                return Some("settings_unavailable");
             }
         };
-        enabled
-            && self.project_contexts().iter().any(|context| {
-                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-                    &context.project_root,
-                ))
-                .is_ok_and(|prefs| prefs.autonomous_mode)
-            })
+        if !enabled {
+            return Some("automatic_updates_disabled");
+        }
+        let mut unreadable = false;
+        let autonomous = self.project_contexts().iter().any(|context| {
+            match gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                &context.project_root,
+            )) {
+                Ok(prefs) => prefs.autonomous_mode,
+                Err(_) => {
+                    unreadable = true;
+                    false
+                }
+            }
+        });
+        if autonomous {
+            None
+        } else if unreadable {
+            Some("project_settings_unavailable")
+        } else {
+            Some("no_autonomous_project")
+        }
     }
 
     pub(super) fn update_settings_event(

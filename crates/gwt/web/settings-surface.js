@@ -780,6 +780,7 @@ export function createSettingsSurface({
   getIndexStatus,
   pmSettingsPanel,
   mountIssues,
+  scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -908,11 +909,12 @@ export function createSettingsSurface({
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
+      let renderedCustomAgentsState = null;
       const customAgentsModel = createUiStateStore({
         catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
-      });
+      }, { scheduleFrame });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
       // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
@@ -920,7 +922,7 @@ export function createSettingsSurface({
       const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-      });
+      }, { scheduleFrame });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsModel = createUiStateStore({
@@ -967,7 +969,7 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
-      agentBackendsModel.subscribe(state => state, state => {
+      agentBackendsModel.subscribeFrame(state => state, state => {
         renderAgentBackendsPanelInAllSettingsWindows(state);
       });
       systemSettingsModel.subscribe(state => state, state => {
@@ -975,7 +977,20 @@ export function createSettingsSurface({
       });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
-      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
+      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
+      const renderedUpdateStatuses = new WeakMap();
+      function renderUpdateStatus(body, state) {
+        const panel = body.querySelector('[data-update-settings-status]');
+        if (!panel || !state.loaded) return;
+        const root = body.dataset.settingsProjectRoot || "";
+        const previous = renderedUpdateStatuses.get(panel);
+        if (previous && previous.auto_apply_updates === state.auto_apply_updates
+          && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.drains[root] === state.drains[root]) return;
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderedUpdateStatuses.set(panel, state);
+      }
+      // Preserve synchronous control reconciliation, including same-value save errors.
       globalUpdateModel.subscribe(state => state, state => {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
@@ -984,11 +999,11 @@ export function createSettingsSurface({
             toggle.checked = state.auto_apply_updates_effective;
             toggle.disabled = !state.loaded;
           }
-          const panel = body.querySelector('[data-update-settings-status]');
-          if (panel && state.loaded) renderUpdateSettingsStatus(panel, {
-            ...state, update_drain: state.drains[body.dataset.settingsProjectRoot] || null,
-          });
         }
+      });
+      globalUpdateModel.subscribeFrame(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderUpdateStatus(body, state);
       });
       function applyGlobalUpdateSettings(event) {
         if (!event.status) {
@@ -1143,8 +1158,8 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
-      customAgentsModel.subscribe(state => state, state => {
-        renderSettingsAgentList(state);
+      customAgentsModel.subscribeFrame(state => state, state => {
+        if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
       });
       customAgentsModel.subscribe(state => state.catalog, catalog => {
         // Read recovery must not replace candidate inputs while awaiting a reply.
@@ -1400,6 +1415,7 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+        renderUpdateStatus(body, globalUpdateModel.read());
         body.addEventListener("focusout", () => queueMicrotask(() => {
           if (body.dataset.issuesRenderDeferred === "true") {
             delete body.dataset.issuesRenderDeferred;
@@ -2463,6 +2479,7 @@ export function createSettingsSurface({
                   onSave: (updatedAgent) => {
                     editingCustomAgentId = null;
                     setSettingsStatus("Saving custom agent…", "info");
+                    renderSettingsAgentList();
                     send({ kind: "update_custom_agent", agent: updatedAgent });
                   },
                   onCancel: () => {
@@ -2475,6 +2492,8 @@ export function createSettingsSurface({
             scroll.appendChild(section);
           }
         }
+        // Local edits can render this snapshot before its scheduled frame.
+        renderedCustomAgentsState = state;
       }
 
 

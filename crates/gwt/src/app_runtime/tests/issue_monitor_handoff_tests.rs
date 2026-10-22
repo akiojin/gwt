@@ -1,6 +1,115 @@
 use super::*;
 
 #[test]
+fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case, work_owner) in [
+        ("completed-slice-handoff", Some("SPEC-3165")),
+        ("foreign-slice-handoff", Some("SPEC-9999")),
+        ("missing-slice-handoff", None),
+    ] {
+        let mut fixture = monitor_relaunch_fixture_with_settlement(
+            temp.path(),
+            case,
+            MonitorProviderConversationFixture::Present,
+            MonitorNativeHolderFixture::None,
+            false,
+            LinkedIssueKind::Spec,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        );
+        if let Some(work_owner) = work_owner {
+            let predecessor = ActiveAgentSession {
+                session_id: fixture.source_session_id.clone(),
+                branch_name: "work/issue-3165".into(),
+                worktree_path: fixture.worktree.clone(),
+                agent_project_root: fixture.worktree.display().to_string(),
+                ..sample_active_agent_session("tab-1", "predecessor-window")
+            };
+            save_workspace_launch_projection(
+                &fixture.project_root,
+                &predecessor,
+                Some("origin/develop"),
+                Some(fixture.execution_owner.number),
+                Some(fixture.execution_owner),
+                None,
+                WorkspaceLaunchProjectionKind::StartWork,
+                Some(&HashSet::from([fixture.source_session_id.clone()])),
+            )
+            .unwrap();
+            gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
+                &fixture.project_root,
+                &fixture.worktree,
+                |projection, _, _| {
+                    let mut done = gwt_core::workspace_projection::WorkEvent::new(
+                        gwt_core::workspace_projection::WorkEventKind::Done,
+                        &projection.id,
+                        Utc::now(),
+                    );
+                    done.summary = Some("Delivered queue repair token=private-value".into());
+                    done.next_action =
+                        Some("AC-12: minimal Plan is to verify successor input".into());
+                    Ok(((), vec![done]))
+                },
+            )
+            .unwrap();
+            if work_owner != "SPEC-3165" {
+                let mut works = gwt_core::workspace_projection::load_workspace_work_items(
+                    &fixture.project_root,
+                )
+                .unwrap()
+                .unwrap();
+                for item in &mut works.work_items {
+                    item.owner = Some(work_owner.into());
+                }
+                let project_key =
+                    gwt_core::paths::resolve_project_scope(&fixture.project_root).hash;
+                gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                    &gwt_core::paths::gwt_workspace_work_items_path(&project_key),
+                    &works,
+                )
+                .unwrap();
+            }
+        }
+        prepare_monitor_relaunch(
+            &mut fixture,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+        let result = take_monitor_launch_complete(case, &fixture.recorded_events);
+        let prompt = result.as_ref().unwrap().0.args.join("\n");
+        let expected = work_owner == Some("SPEC-3165");
+        assert_eq!(
+            prompt.contains("Delivered queue repair"),
+            expected,
+            "{case}: {prompt}"
+        );
+        assert_eq!(
+            prompt.contains("AC-12: minimal Plan"),
+            expected,
+            "{case}: {prompt}"
+        );
+        assert!(!prompt.contains("private-value"), "{case}: {prompt}");
+        if expected {
+            assert!(prompt.contains("Re-read the current SPEC"), "{prompt}");
+            assert!(prompt.contains(&fixture.predecessor_execution_binding.generation_id));
+        }
+        assert_monitor_fresh_successor(result, &fixture);
+    }
+}
+
+#[test]
 fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() {
     let _env_lock = env_test_lock()
         .lock()
@@ -125,7 +234,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         // Issue #4783 AC-R4: derive this delivery from a reopened owner,
         // rather than only seeding a fresh delivery over terminal history.
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-        let mut monitor = gwt::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             gwt::IssueMonitorConfig::default(),
             gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
         );
@@ -136,6 +245,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         gwt::scan_issue_monitor_candidates_with_provenance(
             &mut monitor,
             &[gwt::IssueMonitorIssue {
+                author_login: None,
                 number,
                 title: "SPEC: reopened Monitor owner".into(),
                 labels: vec!["gwt-spec".into()],
@@ -1906,8 +2016,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .pending_launch_deliveries
         .iter()
         .any(|delivery| delivery.delivery_id == delivery_id));
-    let restored =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
+    let restored = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), receipted.clone());
     assert_eq!(
         restored.launched_window_issue(&holder_window_id),
         None,
@@ -1930,8 +2039,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .pending_launch_deliveries
         .iter()
         .all(|delivery| delivery.delivery_id != delivery_id));
-    let monitor =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
+    let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), settled.clone());
     assert_eq!(monitor.launched_window_issue(&holder_window_id), Some(3165));
     assert!(!fixture
         .runtime
@@ -4046,10 +4154,9 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
-    let saved_summary =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
-            .status_view()
-            .launch_profile_summary;
+    let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+        .status_view()
+        .launch_profile_summary;
     assert_eq!(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"

@@ -349,7 +349,7 @@ crates/gwt/src/cli/daemon/server.rs|issue_5140_scans_and_admits_another_issue_wh
 crates/gwt/src/cli/daemon/server.rs|issue_monitor_worker_applies_control_during_scan_without_rewinding_mutation|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
 crates/gwt/src/cli/daemon/server.rs|malformed_known_attempting_effect_blocks_real_worker_without_overwriting_journal|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
 crates/gwt/src/cli/daemon/server.rs|materializer_presence_is_acquired_once_per_connection_and_released_on_eof|tokio::time::timeout(HANG_GUARD,async|1
-crates/gwt/src/cli/daemon/server.rs|off_lock_timeout_denies_grant_already_queued_in_blocking_pool|letmutqueued=super::spawn_issue_monitor_effect(scope,effect,true,permit.capture(),Instant::now()+Duration::from_secs(2),None,)|1
+crates/gwt/src/cli/daemon/server.rs|off_lock_timeout_denies_grant_already_queued_in_blocking_pool|letmutqueued=super::spawn_issue_monitor_effect(scope,effect,true,true,permit.capture(),Instant::now()+Duration::from_secs(2),None,)|1
 crates/gwt/src/cli/daemon/server.rs|off_lock_timeout_denies_grant_already_queued_in_blocking_pool|started_rx.recv_timeout(HANG_GUARD).expect()|1
 crates/gwt/src/cli/daemon/server.rs|off_lock_timeout_retries_and_commits_revocation_after_unlock|letcommitted=tokio::time::timeout(HANG_GUARD,async|1
 crates/gwt/src/cli/daemon/server.rs|off_lock_timeout_retries_and_commits_revocation_after_unlock|tokio::time::timeout(HANG_GUARD,off_receipt).await.expect().expect().expect()|1
@@ -366,7 +366,7 @@ crates/gwt/src/cli/daemon/server.rs|pending_off_is_barrier_to_reenable_without_p
 crates/gwt/src/cli/daemon/server.rs|pending_off_is_barrier_to_reenable_without_permit_aba|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
 crates/gwt/src/cli/daemon/server.rs|production_server_shutdown_waits_for_authority_revocation_and_reaps_child|Ok(pid)=>tokio::time::timeout(HANG_GUARD,async|1
 crates/gwt/src/cli/daemon/server.rs|production_server_shutdown_waits_for_authority_revocation_and_reaps_child|letserver_result=matchtokio::time::timeout(Duration::from_secs(3),&mutserver).await|1
-crates/gwt/src/cli/daemon/server.rs|queued_effect_is_cancelled_before_blocking_pool_start|letmutqueued=super::spawn_issue_monitor_effect(scope,effect,true,super::IssueMonitorEffectPermitToken::always_open(),Instant::now()+Duration::from_secs(1),None,)|1
+crates/gwt/src/cli/daemon/server.rs|queued_effect_is_cancelled_before_blocking_pool_start|letmutqueued=super::spawn_issue_monitor_effect(scope,effect,true,true,super::IssueMonitorEffectPermitToken::always_open(),Instant::now()+Duration::from_secs(1),None,)|1
 crates/gwt/src/cli/daemon/server.rs|queued_effect_is_cancelled_before_blocking_pool_start|started_rx.recv_timeout(HANG_GUARD).expect()|1
 crates/gwt/src/cli/daemon/server.rs|recovery_blocked_worker_never_publishes_or_drains_launch_delivery|tokio::time::timeout(HANG_GUARD,worker).await.expect().expect()|1
 crates/gwt/src/cli/daemon/server.rs|recv_issue_monitor_status_matching|tokio::time::timeout(timeout,async|1

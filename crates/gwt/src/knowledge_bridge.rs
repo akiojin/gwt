@@ -1565,6 +1565,7 @@ exit 1\n",
         state: IssueState,
     ) -> IssueSnapshot {
         IssueSnapshot {
+            author_login: None,
             number: IssueNumber(number),
             title: title.to_string(),
             body: body.to_string(),
