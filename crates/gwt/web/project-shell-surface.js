@@ -100,6 +100,7 @@ export function createProjectShellSurface({
   cloneProjectDialog,
   migrationModal,
   migrationDialog,
+  scheduleFrame,
   isModalOpen = () => false,
 }) {
       const projectPicker = document.getElementById("project-picker");
@@ -273,7 +274,8 @@ export function createProjectShellSurface({
         percent: 0,
         message: "",
         recovery: "",
-      });
+      }, { scheduleFrame });
+      let renderedMigrationSnapshot = null;
       // Draft edits are model updates too, but do not rebuild focused inputs.
       const cloneProjectModel = createUiStateStore({
         form: { url: "", parentPath: "", query: "" },
@@ -629,7 +631,7 @@ export function createProjectShellSurface({
       }
 
       // Migration receivers and local actions commit data; this view reads
-      // the same immutable snapshot through its synchronous subscription.
+      // the same immutable snapshot; only running progress waits for a frame.
       function renderMigrationModal() {
         if (!migrationModal || !migrationDialog) return;
         const migrationModalState = migrationModel.read();
@@ -656,6 +658,7 @@ export function createProjectShellSurface({
             }));
           },
         });
+        renderedMigrationSnapshot = migrationModalState;
       }
 
       // SPEC-3064 Phase 3 (E7): receive() bodies for the clone-project /
@@ -867,11 +870,19 @@ export function createProjectShellSurface({
 
       const unsubscribeCatalog = windowCatalogModel.subscribe(state => state.catalog, () => renderWindowList());
       const unsubscribeList = windowCatalogModel.subscribe(state => state.listEntries, () => renderWindowList());
-      const unsubscribeMigration = migrationModel.subscribe(state => state, () => renderMigrationModal());
+      // Keep open/close, actions and stage transitions synchronous. During a
+      // run, progress changes share one frame and pull the latest snapshot.
+      const unsubscribeMigration = migrationModel.subscribe(
+        state => state.open && state.stage === "running" ? null : state,
+        () => renderMigrationModal(),
+      );
+      const unsubscribeMigrationFrame = migrationModel.subscribeFrame(state => state, state => {
+        if (state !== renderedMigrationSnapshot) renderMigrationModal();
+      });
       const unsubscribeClone = cloneProjectModel.subscribe(state => state.modal, () => renderProjectCloneModal());
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeClone(); folderPicker.dispose(); openPathDialog.dispose(); },
+        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); folderPicker.dispose(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,
