@@ -45,10 +45,9 @@ const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 /// ordinary stall into a hard failure (#3510). The budget covers the stall
 /// instead, and the idle case is unaffected because it never waits.
 const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Issue #3629 AC-12: bounded wait for the explicit `pane_close_result` reply
-/// before falling back to the legacy post-close readback for backends that
-/// predate the protocol. Mirrors the correlated self-close acceptance budget.
-const PANE_CLOSE_RESULT_DEADLINE: Duration = Duration::from_secs(2);
+/// Wait for explicit process-exit confirmation; window removal only accepts
+/// teardown and therefore cannot establish a completed peer close.
+const PANE_CLOSE_RESULT_DEADLINE: Duration = BACKEND_RESPONSE_TIMEOUT;
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
 const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
@@ -1118,30 +1117,17 @@ async fn close_pane(
         return Ok(format!("close requested {requested_id}\n{lease_note}"));
     }
 
-    // Issue #3629 AC-12: the backend answers a peer close with an explicit
-    // `pane_close_result`. Prefer it; a backend that predates the protocol
-    // sends nothing here, so fall back to the legacy post-close readback
-    // after the bounded wait.
+    // The backend reports a peer close only after its captured process tree
+    // exits. A workspace snapshot can arrive earlier and is not exit proof.
     if let Some(reply) =
         wait_for_pane_close_result(&mut socket, &resolved_id, PANE_CLOSE_RESULT_DEADLINE).await?
     {
         return pane_close_verdict(requested_id, reply).map(|closed| closed + &lease_note);
     }
-    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
-
-    let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
-    if resolve_window_id(&windows, &resolved_id).is_none() {
-        Ok(format!("closed {requested_id}\n{lease_note}"))
-    } else {
-        // Issue #3629 AC-6: report only the observed facts — the window is
-        // still listed and no close result arrived. Never guess at session
-        // correlation on behalf of the backend.
-        Err(format!(
-            "pane close: backend did not remove {requested_id} and sent no close result; \
-             the backend may predate the close-result protocol, be saturated, or have \
-             refused the request"
-        ))
-    }
+    Err(format!(
+        "pane close: process-tree exit of {requested_id} was not confirmed by the backend; \
+         the close may still be pending"
+    ))
 }
 
 struct PaneCloseReply {
@@ -1151,8 +1137,7 @@ struct PaneCloseReply {
 
 /// Wait up to `deadline_after` for the `pane_close_result` frame that matches
 /// `window_id`, skipping unrelated broadcasts. `Ok(None)` means the deadline
-/// elapsed without a result (a pre-protocol backend); socket failures stay
-/// hard errors.
+/// elapsed without process-exit confirmation; socket failures stay hard errors.
 async fn wait_for_pane_close_result(
     socket: &mut PaneWebSocket,
     window_id: &str,
@@ -2414,6 +2399,7 @@ mod tests {
                 child_started_at: (after.timestamp() + offset) as u64,
                 started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
                 launch_origin: origin,
+                launch_entrypoint: None,
                 restore_source_session_id: Some("source".to_string()),
             }
         })
@@ -4102,23 +4088,28 @@ mod tests {
                             .to_string(),
                     );
                     if let Some(windows) = post_close_windows.as_ref() {
-                        // Issue #3629: the CLI now waits out the bounded
-                        // close-result deadline before the legacy readback,
-                        // so give the follow-up frontend_ready extra room.
-                        received_kinds.push(
-                            tokio::time::timeout(
-                                Duration::from_secs(5),
-                                next_frontend_kind(&mut socket),
-                            )
-                            .await
-                            .expect("post-close frontend_ready timeout"),
-                        );
                         let post_close_state =
                             workspace_state_for_test(project_root, windows.clone());
                         socket
                             .send(Message::Text(post_close_state.to_string().into()))
                             .await
                             .expect("send post-close workspace state");
+                        // A removed window is observable while process teardown is
+                        // still pending; only an explicit result can confirm exit.
+                        // test-hygiene: allow-wall-clock-deadline Keep the mock socket alive until the real CLI confirmation deadline, without asserting elapsed time.
+                        if let Ok(Some(Ok(Message::Text(text)))) = tokio::time::timeout(
+                            PANE_CLOSE_RESULT_DEADLINE + Duration::from_secs(2),
+                            socket.next(),
+                        )
+                        .await
+                        {
+                            let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+                            received_kinds.push(value["kind"].as_str().unwrap().to_string());
+                            socket
+                                .send(Message::Text(post_close_state.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
                     } else {
                         let request_id = close["request_id"]
                             .as_str()
@@ -5050,18 +5041,10 @@ mod tests {
                 // reports only the observed fact instead of guessing at
                 // session correlation. A current backend names the cause in
                 // its `pane_close_result` refusal instead.
-                assert!(
-                    error.contains("did not remove agent-self and sent no close result"),
-                    "{error}"
-                );
+                assert!(error.contains("not confirmed"), "{error}");
                 assert_eq!(
                     received_kinds,
-                    vec![
-                        "list_windows",
-                        "frontend_ready",
-                        "close_window",
-                        "frontend_ready"
-                    ]
+                    vec!["list_windows", "frontend_ready", "close_window"]
                 );
             }
         });
@@ -5140,7 +5123,7 @@ mod tests {
     }
 
     #[test]
-    fn non_self_pane_close_keeps_authoritative_post_close_readback() {
+    fn non_self_pane_close_requires_exit_confirmation_after_window_removal() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5169,16 +5152,12 @@ mod tests {
             let result = close_pane(&ws_url, project_root, "agent-peer").await;
             let received_kinds = server.await.expect("pane mock task");
 
-            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
+            let error = result.expect_err("window removal cannot prove process-tree exit");
+            assert!(error.contains("not confirmed"), "{error}");
             assert_eq!(
                 received_kinds,
-                vec![
-                    "list_windows",
-                    "frontend_ready",
-                    "close_window",
-                    "frontend_ready"
-                ],
-                "non-self close must retain authoritative post-close readback"
+                vec!["list_windows", "frontend_ready", "close_window"],
+                "an unconfirmed close must not use window absence as success"
             );
         });
     }

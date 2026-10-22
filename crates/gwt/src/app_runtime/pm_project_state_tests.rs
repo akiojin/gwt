@@ -54,7 +54,7 @@ fn stale_pm_close_finalizer_cannot_clear_reopened_projects_close_fence() {
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.queue_window_close_finalizer(
-        "tab-a::old-pm", Some(root.clone()), None, true, false, None, None,
+        "tab-a::old-pm", Some(root.clone()), None, true, false, None, None, None,
     );
     runtime.project_tab_incarnations.get_mut("tab-a").unwrap().generation += 1;
     runtime.refresh_project_state("tab-a");

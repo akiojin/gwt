@@ -158,8 +158,12 @@ pub trait CliEnv {
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>>;
     fn fetch_pr_review_threads(&mut self, number: u64) -> io::Result<Vec<PrReviewThread>>;
-    fn reply_and_resolve_pr_review_threads(&mut self, number: u64, body: &str)
-        -> io::Result<usize>;
+    fn reply_and_resolve_pr_review_threads(
+        &mut self,
+        number: u64,
+        body: &str,
+        thread_id: Option<&str>,
+    ) -> io::Result<usize>;
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;

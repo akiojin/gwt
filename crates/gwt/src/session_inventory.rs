@@ -118,6 +118,9 @@ pub struct SessionObservation {
     pub child_started_at: u64,
     pub started_at: String,
     pub launch_origin: SessionLaunchOrigin,
+    /// Known skill token only; launch arguments and prompt bodies stay private.
+    #[serde(default)]
+    pub launch_entrypoint: Option<String>,
     pub restore_source_session_id: Option<String>,
 }
 
@@ -1209,6 +1212,10 @@ fn observe_candidates(
             if !seen.insert((child_pid, child_started_at)) {
                 continue;
             }
+            let entrypoint = gwt_agent::permission_mode::entrypoint_from_launch_args(
+                &session.launch_args,
+                false,
+            );
             inventory.sessions.push(SessionObservation {
                 session_id: session.id.clone(),
                 issue_number: session.linked_issue_number,
@@ -1222,6 +1229,7 @@ fn observe_candidates(
                 child_started_at,
                 started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 launch_origin: session.launch_origin,
+                launch_entrypoint: (entrypoint != "launch").then_some(entrypoint),
                 restore_source_session_id: session.restore_source_session_id.clone(),
             });
         }
@@ -1235,6 +1243,7 @@ fn observe_candidates(
             // The ledger describes only the latest use of a Session id; it
             // cannot attribute one origin to multiple distinct live PTYs.
             row.launch_origin = SessionLaunchOrigin::Unknown;
+            row.launch_entrypoint = None;
             row.restore_source_session_id = None;
         }
     }
@@ -2001,8 +2010,13 @@ mod tests {
         ] {
             save_runtime(&sessions, &project, worktree, id, Some(child));
         }
+        let mut launched = Session::load(&sessions.join("first.toml")).unwrap();
+        launched.launch_args =
+            vec!["$gwt-execute #4305\nPrivate launch instructions must not be exposed".to_string()];
+        launched.save(&sessions).unwrap();
         let mut unlinked = Session::load(&sessions.join("second.toml")).unwrap();
         unlinked.linked_issue_number = None;
+        unlinked.launch_args = vec!["--model".to_string(), "unknown-prompt-kind".to_string()];
         unlinked.save(&sessions).unwrap();
         let mut bound = Session::load(&sessions.join("missing.toml")).unwrap();
         bound.execution_binding = Some(gwt_agent::SessionExecutionBinding {
@@ -2056,7 +2070,19 @@ mod tests {
                 serde_json::json!(row["session_id"] == "first"),
                 "only the linked unbound Session lacks producing authority: {row}"
             );
+            assert_eq!(
+                row["launch_entrypoint"],
+                if row["session_id"] == "first" {
+                    serde_json::json!("gwt-execute")
+                } else {
+                    serde_json::Value::Null
+                },
+                "active_sessions exposes only the known launch entrypoint: {row}"
+            );
         }
+        assert!(!status_sessions
+            .to_string()
+            .contains("Private launch instructions"));
         let first = observed
             .sessions
             .iter()
@@ -2349,6 +2375,9 @@ mod tests {
             "reused-session",
             Some((201, 20)),
         );
+        let mut session = Session::load(&sessions.join("reused-session.toml")).unwrap();
+        session.launch_args = vec!["$gwt-execute #4305".to_string()];
+        session.save(&sessions).unwrap();
         let mut successor = SessionRuntimeState::new(AgentStatus::Running);
         successor.child_pid = Some(202);
         successor.child_started_at = Some(21);
@@ -2373,5 +2402,11 @@ mod tests {
             .iter()
             .all(|row| row.launch_origin == SessionLaunchOrigin::Unknown
                 && row.restore_source_session_id.is_none()));
+        let rows = serde_json::to_value(&observed.sessions).unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["launch_entrypoint"].is_null()));
     }
 }
