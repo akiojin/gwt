@@ -5573,6 +5573,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo_with_initial_commit(&repo);
+        let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
         let sessions_dir = temp.path().join("sessions");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
@@ -6227,6 +6228,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)

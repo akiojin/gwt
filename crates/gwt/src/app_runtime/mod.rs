@@ -3897,6 +3897,42 @@ type LocalIssueMonitorFallbackProjection = (
     Option<(String, String)>,
 );
 
+#[cfg(test)]
+thread_local! {
+    static LOCAL_FALLBACK_PROJECTION_FIXTURE: std::cell::RefCell<
+        Option<(PathBuf, LocalIssueMonitorFallbackProjection)>
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Own read-only inputs when a fixture tests delivery rather than Git deadlines.
+#[cfg(test)]
+struct ScopedLocalIssueMonitorFallbackProjection {
+    previous: Option<(PathBuf, LocalIssueMonitorFallbackProjection)>,
+}
+
+#[cfg(test)]
+impl ScopedLocalIssueMonitorFallbackProjection {
+    fn set(project_root: &Path) -> Self {
+        let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+        let issues = gwt::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
+            .expect("fixture issue cache");
+        let repository = gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root)
+            .expect("fixture source repository");
+        let projection = (issues, None, String::new(), Some(repository));
+        Self {
+            previous: LOCAL_FALLBACK_PROJECTION_FIXTURE
+                .with(|fixture| fixture.replace(Some((project_root.to_path_buf(), projection)))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedLocalIssueMonitorFallbackProjection {
+    fn drop(&mut self) {
+        LOCAL_FALLBACK_PROJECTION_FIXTURE.with(|fixture| fixture.replace(self.previous.take()));
+    }
+}
+
 /// Issue #3528 (SPEC #3200 FR-057..FR-059): observe merged-PR completion for
 /// the claim frontier of one GUI-local scan. Shared by the scheduled fallback
 /// and the non-Unix compatibility scan so both probe the same candidates and
@@ -9186,6 +9222,17 @@ impl AppRuntime {
     fn load_local_issue_monitor_fallback_projection(
         project_root: &Path,
     ) -> LocalIssueMonitorFallbackProjection {
+        #[cfg(test)]
+        if let Some(mut projection) = LOCAL_FALLBACK_PROJECTION_FIXTURE.with(|fixture| {
+            fixture
+                .borrow()
+                .as_ref()
+                .filter(|(root, _)| root == project_root)
+                .map(|(_, projection)| projection.clone())
+        }) {
+            projection.2 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            return projection;
+        }
         let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
         );
