@@ -524,12 +524,17 @@ settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
 Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Existing saved limits remain Manual. Values above
+follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+by all projects on this machine. Manual is a total worker limit; each project receives
+the remaining capacity after other projects' workers, while PM windows stay separate.
+Settings shows this project's allocation and other projects' worker consumption.
+See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
-`max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
+and the shared `agent_capacity` measurement.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -590,7 +595,14 @@ matches only an empty saved order; `null` is rejected. Omitting the parameter ke
 the existing behavior. The comparison protects the current order value, without
 tracking intervening history or other configuration changes. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. The registered PM for the repository
+mode, or set a positive `max_active` limit. For a conditional settings change,
+read `saved_config` and `config_token` from `issue.monitor.status`, then pass that
+token as `expected_config_token` to `config.set`. A mismatch leaves preferences
+unchanged and requests no scan; read status again and reconsider the change.
+Read back a successful change. The token compares saved configuration values;
+it excludes runtime observations and does not track intervening history. Omitting
+it keeps existing behavior; `null` is rejected. An older daemon refuses guarded
+changes rather than applying them without the guard. The registered PM for the repository
 can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
 to enable them. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
@@ -1082,7 +1094,7 @@ entrypoints are:
 For a gwt bug or workflow problem, PM and implementation agents can use
 `gwt-feedback` to collect the affected operation, original refusal,
 reproduction steps, and workaround. The `feedback.create` JSON operation always
-targets `akiojin/gwt` and adds source-project and environment information.
+targets `akiojin/gwt` and collects local diagnostic context.
 It saves a local receipt. Outside the actual gwt repository, intake returns
 immediately so project work can continue; sending requires the user's **Send
 feedback** action in a native dialog. Cancellation or an unavailable desktop
@@ -1090,8 +1102,12 @@ keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
 The local receipt keeps the complete original. Public reports automatically mask
-known credentials, environment assignment values, paths (including URLs), and
-Markdown code fragments; the native preview and submission use the same content.
+known credentials, environment assignment values, source identifiers, paths
+(including URLs), and source code. Public metadata includes only gwt/gwtd
+versions and OS/architecture; source-project metadata and arbitrary context are
+omitted. The scrollable native preview keeps both actions visible and shows
+removed categories, the masked proportion, and a warning when most text is masked.
+The preview and submission use the same content.
 Unmasked refusal text is preserved without truncation. Masks are conservative
 and cannot detect every arbitrary secret; do not publish the raw receipt.
 
@@ -1550,6 +1566,7 @@ an entry removes its copied policy on the next refresh.
 
 - Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
 - Open **PM** from its separate rail entry; PM uses a single pane.
+- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
 - Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
 - Use **Close split** to keep the active surface in one pane.
 - In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.

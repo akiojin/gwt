@@ -965,6 +965,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?)
         }
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let expected_config_token = lookup(params, "expected_config_token")
+                .map(|_| required_string(params, "expected_config_token"))
+                .transpose()?;
             if lookup(params, "auto_apply_updates").is_some() {
                 return Err(CliParseError::InvalidJson(
                     "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
@@ -1020,6 +1023,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ));
             }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
                 project_root: optional_path(params, "project_root")?,
                 allowed_labels,
                 enabled,
@@ -5047,6 +5051,7 @@ mod tests {
                 json!({"enabled": true, "max_active": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
@@ -5061,6 +5066,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5078,6 +5084,7 @@ mod tests {
                 json!({"auto_close_merged_issues": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5090,6 +5097,30 @@ mod tests {
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_guard_is_presence_aware() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            ok(operation, json!({"max_active": 3}));
+            let CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
+                ..
+            }) = ok(
+                operation,
+                json!({"max_active": 3, "expected_config_token": "observed-config"}),
+            )
+            else {
+                panic!("expected config command")
+            };
+            assert_eq!(expected_config_token.as_deref(), Some("observed-config"));
+            for invalid in [json!(null), json!(false), json!(2), json!([]), json!("")] {
+                err(
+                    operation,
+                    json!({"max_active": 3, "expected_config_token": invalid}),
+                );
+            }
+        }
     }
 
     #[test]
@@ -5177,6 +5208,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5191,6 +5223,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": false})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5216,6 +5249,7 @@ mod tests {
                 json!({"launch_agent": "claude"})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5745,6 +5779,7 @@ mod tests {
                 json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(false),

@@ -492,11 +492,14 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
 **Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
-既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+Auto / Manual と手動の要求上限は、このマシンの全プロジェクトで共通です。Manual は
+実装・レビュー窓の合計上限で、他プロジェクトの消費を引いた残りを各プロジェクトへ配分します。
+PM 窓の会計は別に表示し、Settings には自プロジェクトの割当と他プロジェクトの消費を併記します。
+共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
-`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
+`max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
@@ -550,7 +553,13 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
 他の設定変更は検出しません。
 `issue.monitor.config.set` は処理停止、Autonomous
-モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
+モード無効化、正の `max_active` 上限設定に対応します。条件付きで設定を変更する場合は、
+`issue.monitor.status` の `saved_config` と `config_token` を読み、同じトークンを
+`config.set` の `expected_config_token` として渡します。不一致なら設定を保存せず、
+scan も要求しません。status を再読して変更を再判断し、成功後も読み戻して確認します。
+比較対象は保存設定の値で、runtime の観測値や途中の変更履歴は対象外です。
+省略時は従来互換、`null` は拒否します。旧 daemon はガードを外して適用せず、
+ガード付き変更を拒否します。リポジトリの登録済み PM は
 `enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
@@ -982,7 +991,7 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
 `gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
 報告できます。JSON operation `feedback.create` の宛先は常に
-`akiojin/gwt` で、報告元プロジェクトと環境情報は自動で加わります。
+`akiojin/gwt` で、診断コンテキストをローカルで自動収集します。
 ローカル receipt に保存します。実際の gwt リポジトリ以外では受付後に
 即座に返るため、本来のプロジェクト作業を続けられます。送信には native
 dialog でユーザーが **Send feedback** を選ぶ必要があります。取消や desktop
@@ -990,8 +999,11 @@ dialog でユーザーが **Send feedback** を選ぶ必要があります。取
 Issue 番号と URL を返します。
 
 ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
-環境変数の代入値、URL を含むパス形式、Markdown のコード片を自動で伏せ、
-native preview と送信に同じ内容を使います。伏せ字以外の拒否文は切り詰めません。
+環境変数の代入値、プロジェクト識別情報、URL を含むパス、ソースコードを自動で伏せます。
+公開する環境情報は gwt/gwtd 版数と OS・アーキテクチャのみとし、報告元のメタデータと
+任意の追加本文は含めません。スクロールできる承認画面は両方の選択肢を常に表示し、
+除去項目とマスク率、過半数が伏せ字の場合の警告を示します。
+preview と送信に同じ内容を使い、伏せ字以外の拒否文は切り詰めません。
 判定は保守的ですが任意の秘密をすべて検出する保証はなく、原文 receipt は公開しないでください。
 
 返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
@@ -1424,6 +1436,7 @@ project 固有の規約を明示的に渡すには、
 
 - レールから **Issues**、**Agents**、**Board**、**Settings** を選ぶと、コンテンツ領域全体に表示します。
 - **PM** は独立したレール入口から開き、単一ペインで表示します。
+- 各面に窓のクローズ・最小化・移動・リサイズ操作はありません。Agent タブを閉じても表示だけが閉じられ、セッションは動作を続けます。
 - プロジェクトバーの **Split view** で左右のペインを表示し、それぞれのサーフェスを選びます。
 - **Close split** でアクティブなサーフェスを単一ペインに戻します。
 - **Agents** では同じライブターミナルを維持して、**All agents** と個別タブを切り替えます。

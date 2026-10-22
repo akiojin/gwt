@@ -2608,6 +2608,12 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let fake_gh = write_fake_gh_issue_list(temp.path());
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -2642,6 +2648,11 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
         WindowProcessStatus::Running,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-42".to_string();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist completed launch Session");
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_launch_feedback_contexts.insert(
         window_id.clone(),
@@ -2828,6 +2839,12 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
@@ -2859,6 +2876,11 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     );
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-42".to_string();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist completed launch Session");
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_launch_feedback_contexts.insert(
         window_id.clone(),

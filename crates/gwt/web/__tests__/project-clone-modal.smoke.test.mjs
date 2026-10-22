@@ -207,3 +207,82 @@ test("progress and error states render inside the modal", () => {
   assert.match(dialogEl.textContent, /target already exists/);
   assert.equal(dialogEl.querySelector("#clone-project-start").disabled, true);
 });
+
+
+test("clone progress batches frames while drafts and modal actions stay synchronous", async t => {
+  const { modalEl, dialogEl, createNode } = mount();
+  const document = modalEl.ownerDocument;
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const source = readFileSync(resolve(here, '../project-shell-surface.js'), 'utf8')
+    .replace(/from "\/(.*?)"/g, (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
+  const { createProjectShellSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const sent = [];
+  let renders = 0;
+  const createElement = document.createElement.bind(document);
+  document.createElement = (...args) => { if (args[0] === 'h2') renders += 1; return createElement(...args); };
+  const controller = createProjectShellSurface({
+    send: message => {
+      if (message.kind === 'clone_project_start') {
+        assert.equal(dialogEl.querySelector('#clone-project-start').disabled, true, 'disable before send');
+        assert.equal(dialogEl.getAttribute('aria-busy'), 'true');
+      }
+      sent.push(message);
+    },
+    createNode, windowCatalogModel: { subscribe: () => () => {} },
+    cloneProjectModal: modalEl, cloneProjectDialog: dialogEl,
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
+  t.after(() => controller.dispose());
+  // The existing shell installer also registers a global hotkey listener.
+  const previousWindow = globalThis.window;
+  globalThis.window = document.defaultView;
+  t.after(() => { globalThis.window = previousWindow; });
+  controller.installProjectShellChrome();
+  document.getElementById('picker-clone-project').click();
+  const input = dialogEl.querySelector('#clone-project-url-input');
+  input.value = 'https://example.test/repo.git';
+  input.dispatchEvent(new document.defaultView.Event('input'));
+  flush();
+  assert.equal(dialogEl.querySelector('#clone-project-url-input'), input, 'drafts never rebuild inputs');
+  controller.applyCloneProjectReceiveEvent({ kind: 'clone_project_parent_selected', path: '/destination' });
+  dialogEl.querySelector('#clone-project-start').click();
+  assert.deepEqual(sent, [{ kind: 'clone_project_start', url: input.value, parent_path: '/destination' }]);
+  const initialRenders = renders;
+  flush();
+  assert.equal(renders, initialRenders, 'do not repeat synchronous action rendering');
+  const before = dialogEl.innerHTML;
+  const progress = message => ({ kind: 'clone_project_progress', message });
+  for (let n = 1; n <= 50; n += 1) controller.applyCloneProjectReceiveEvent(progress(`Receiving ${n}%`));
+  assert.equal(dialogEl.innerHTML, before, 'progress waits for the frame');
+  assert.equal(frames.size, 1);
+  flush();
+  assert.equal(renders, initialRenders + 1);
+  assert.match(dialogEl.textContent, /Receiving 50%/);
+  controller.applyCloneProjectReceiveEvent(progress('Pending'));
+  controller.applyCloneProjectReceiveEvent({ kind: 'clone_project_parent_selected', path: '/new-destination' });
+  assert.equal(dialogEl.querySelector('#clone-project-parent-input').value, '/new-destination', 'picker results stay synchronous during progress');
+  const pickerRenders = renders;
+  flush();
+  assert.equal(renders, pickerRenders);
+  controller.applyCloneProjectReceiveEvent(progress('Pending error'));
+  controller.applyCloneProjectReceiveEvent({ kind: 'clone_project_error', message: 'Failure' });
+  assert.match(dialogEl.textContent, /Failure/);
+  const errorRenders = renders;
+  flush();
+  assert.equal(renders, errorRenders);
+  dialogEl.querySelector('#clone-project-start').click();
+  controller.applyCloneProjectReceiveEvent(progress('Pending done'));
+  controller.applyCloneProjectReceiveEvent({ kind: 'clone_project_done' });
+  assert.equal(modalEl.classList.contains('open'), false);
+  flush();
+  assert.equal(modalEl.classList.contains('open'), false);
+  document.getElementById('picker-clone-project').click();
+  dialogEl.querySelector('#clone-project-start').click();
+  controller.applyCloneProjectReceiveEvent(progress('Dispose pending'));
+  controller.dispose();
+  assert.equal(frames.size, 0, 'dispose cancels pending presentation');
+});

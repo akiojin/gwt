@@ -450,6 +450,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_question_answer(env, project_root.as_deref(), &handoff_id, &answer, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
+            expected_config_token,
             allowed_labels,
             enabled,
             autonomous_mode,
@@ -461,6 +462,7 @@ pub(super) fn run<E: CliEnv>(
         } => run_monitor_config_set(
             env,
             project_root.as_deref(),
+            expected_config_token.as_deref(),
             allowed_labels.as_deref(),
             enabled,
             autonomous_mode,
@@ -863,6 +865,8 @@ fn run_monitor_status<E: CliEnv>(
     ))
     .map_err(io_as_api_error)?;
     output["priority_order"] = serde_json::json!(prefs.priority_order);
+    output["config_token"] = serde_json::json!(prefs.config_token());
+    output["saved_config"] = prefs.config_observation();
     attach_monitor_admission_diagnostics(&mut output, &status, &prefs);
     // Keep released, unsettled launches observable without reading every queued
     // owner's ledger or changing Monitor/ECR state during a status read.
@@ -3811,11 +3815,55 @@ fn run_monitor_release_stranded_launch(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
+        if let Some(windows) = &live_windows {
+            let mut tabs = windows
+                .iter()
+                .filter_map(|window| window.id.split_once("::").map(|(tab, _)| tab.to_string()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let bound = monitor.launched_window_id(number).or_else(|| {
+                projection.and_then(|status| {
+                    status
+                        .inbox
+                        .iter()
+                        .find(|row| row.issue_number == number)
+                        .and_then(|row| row.launched_window_id.clone())
+                })
+            });
+            if let Some((tab, raw)) = bound.as_deref().and_then(|bound| bound.split_once("::")) {
+                if !tab.is_empty() && !raw.is_empty() {
+                    tabs.insert(tab.to_string());
+                }
+            }
+            monitor.record_window_snapshot_for_tabs(
+                crate::IssueMonitorWindowSnapshot {
+                    project_tab_id: tabs.first().cloned().unwrap_or_default(),
+                    observed_at: now.to_string(),
+                    windows: windows
+                        .iter()
+                        .map(|window| crate::IssueMonitorWindowObservation {
+                            monitor_owned: true,
+                            window_id: window.id.clone(),
+                            issue_number: window.linked_issue_number,
+                            status: window.status,
+                            review_dispatch: false,
+                            hold_reason: None,
+                            last_output_at: None,
+                            session_id: window.session_id.clone(),
+                        })
+                        .collect(),
+                },
+                tabs,
+            );
+        }
+        let exited = observations.get(&number).is_some_and(|observation| {
+            monitor.retire_exited_completed_holder(number, observation, now)
+        });
         // The driver may still count a slot its durable prefs no longer hold.
         // That shape caused stop=unknown_issue plus requeue=not_held. Require
         // current positive canvas evidence before releasing its projected slot.
         if projection.is_some_and(|status| status.active_launches.contains(&number))
             && monitor.launched_window_id(number).is_none()
+            && !exited
         {
             let bound = projection.and_then(|status| {
                 status
@@ -3844,30 +3892,6 @@ fn run_monitor_release_stranded_launch(
                 .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
                 .collect(),
         );
-        if let (Some(bound), Some(windows)) = (monitor.launched_window_id(number), &live_windows) {
-            if let Some((tab, _)) = bound
-                .split_once("::")
-                .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
-            {
-                monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
-                    project_tab_id: tab.to_string(),
-                    observed_at: now.to_string(),
-                    windows: windows
-                        .iter()
-                        .map(|window| crate::IssueMonitorWindowObservation {
-                            monitor_owned: false,
-                            window_id: window.id.clone(),
-                            issue_number: window.linked_issue_number,
-                            status: window.status,
-                            review_dispatch: false,
-                            hold_reason: None,
-                            last_output_at: None,
-                            session_id: window.session_id.clone(),
-                        })
-                        .collect(),
-                });
-            }
-        }
         let outcome = monitor.release_stranded_launch(number, reason, now);
         if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
             monitor.terminal_queue_push(&[number], "operator", now);
@@ -4205,6 +4229,7 @@ fn validate_monitor_config_set(
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_config_token: Option<&str>,
     allowed_labels: Option<&[String]>,
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
@@ -4247,36 +4272,43 @@ fn run_monitor_config_set<E: CliEnv>(
         }
     }
 
-    let payload = crate::runtime_daemon_events::issue_monitor_payload(
-        "control",
-        serde_json::json!({
-            "config_set": {
-                "allowed_labels": allowed_labels,
-                "enabled": enabled,
-                "autonomous_mode": autonomous_mode,
-                "max_active_agents": max_active,
-                "max_active_mode": max_active_auto.then_some("auto"),
-                "auto_close_merged_issues": auto_close_merged_issues,
-                "launch_agent": launch_agent,
-                "update_drain": update_drain,
-                // SPEC #4778 AC-1: the daemon re-checks this against the PM
-                // registry, so the handler's verdict is carried, not trusted.
-                "resident_pm_session": caller_is_resident_pm
-                    .then(super::pm::ambient_session_id)
-                    .flatten(),
-            }
-        }),
-        std::process::id(),
-    );
+    let mut config = serde_json::json!({
+        "allowed_labels": allowed_labels,
+        "enabled": enabled,
+        "autonomous_mode": autonomous_mode,
+        "max_active_agents": max_active,
+        "max_active_mode": max_active_auto.then_some("auto"),
+        "auto_close_merged_issues": auto_close_merged_issues,
+        "launch_agent": launch_agent,
+        "update_drain": update_drain,
+        // SPEC #4778 AC-1: the daemon re-checks this against the PM
+        // registry, so the handler's verdict is carried, not trusted.
+        "resident_pm_session": caller_is_resident_pm
+            .then(super::pm::ambient_session_id)
+            .flatten(),
+    });
+    // A legacy daemon ignores unknown config fields. A distinct control kind
+    // makes an unsupported guarded write fail closed instead of losing its guard.
+    let control = if let Some(expected) = expected_config_token {
+        config["expected_config_token"] = serde_json::json!(expected);
+        serde_json::json!({"config_set_if_matches": config})
+    } else {
+        serde_json::json!({"config_set": config})
+    };
+    let payload =
+        crate::runtime_daemon_events::issue_monitor_payload("control", control, std::process::id());
     let publication = publish_monitor_config_set(&project_root, payload);
     if let Err(error) = publication {
         if !error.allows_local_fallback() {
             return Err(io_as_api_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let control_id = uuid::Uuid::new_v4().to_string();
+        let mut shared_write_started = false;
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            let mut candidate = prefs.clone();
             apply_monitor_config_set(
-                prefs,
+                &mut candidate,
                 allowed_labels,
                 enabled,
                 autonomous_mode,
@@ -4286,9 +4318,26 @@ fn run_monitor_config_set<E: CliEnv>(
                 launch_agent,
                 update_drain.clone(),
                 caller_is_resident_pm,
-            )
+            )?;
+            let requested = candidate.max_active_last_change.as_ref()
+                .filter(|_| max_active.is_some() || max_active_auto);
+            shared_write_started = requested.is_some();
+            let policy = crate::machine_agent_settings::checked_update(
+                prefs, expected_config_token, requested, &control_id,
+            )?;
+            crate::issue_monitor::apply_machine_policy_to_prefs(&mut candidate, &policy);
+            *prefs = candidate;
+            Ok(())
         })
-        .map_err(io_as_api_error)?;
+        .map_err(|error| {
+            if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
+                io_as_api_error(io::Error::other(format!(
+                    "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
+                )))
+            } else {
+                io_as_api_error(error)
+            }
+        })?;
     }
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
@@ -4299,6 +4348,8 @@ fn run_monitor_config_set<E: CliEnv>(
     monitor.refresh_agent_capacity(&project_root);
     out.push_str(
         &serde_json::json!({
+            "config_token": prefs.config_token(),
+            "saved_config": prefs.config_observation(),
             "allowed_labels": prefs.allowed_labels,
             "enabled": prefs.enabled,
             "autonomous_mode": prefs.autonomous_mode,
@@ -7298,6 +7349,57 @@ mod tests {
             before,
             "a refused release must be zero-mutation"
         );
+    }
+
+    #[test]
+    fn issue_5876_requeue_recovers_an_exited_completed_projection_without_a_launch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        crate::issue_monitor_worker::tests::completed_child_exit_fixture(&repo);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        assert!(matches!(
+            monitor.launch_identity(42),
+            crate::IssueMonitorLaunchIdentity {
+                active: false,
+                window_id: None,
+                ..
+            }
+        ));
+        let mut projection = monitor.agent_status_at("2026-09-07T04:00:01Z");
+        projection.active_launches = vec![42];
+        let mut out = String::new();
+        let code = run_monitor_release_stranded_launch(
+            &prefs_path,
+            &repo,
+            42,
+            "completed child recovery",
+            "2026-09-07T04:00:01Z",
+            Some(&projection),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            code, 0,
+            "stop has no launch to revoke, so exact exited runtime must permit requeue: {out}"
+        );
+        let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(response["status"], "requeued");
+        assert_eq!(response["released_hold"], "stranded_launch");
     }
 
     /// Issue #3992 AC-5 / AC-7: and the row nothing owns is published as a
@@ -10890,6 +10992,7 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -10950,6 +11053,7 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -11098,6 +11202,7 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                max_active_agents_scope: "machine".to_string(),
                 agent_capacity: Default::default(),
                 max_active_agents_override: Some(1),
                 max_active_last_change: None,
@@ -11220,6 +11325,7 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -11367,6 +11473,12 @@ mod tests {
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -11436,6 +11548,22 @@ mod tests {
             Some(serde_json::json!([2, 1, 777, 2])),
             "the CAS token must include the full saved order, not just the queue"
         );
+        assert!(
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("config_token")
+                .is_some_and(|token| token.as_str().is_some_and(|token| !token.is_empty())),
+            "status must expose the saved config observation token"
+        );
+        let saved_config = status
+            .as_object_mut()
+            .unwrap()
+            .remove("saved_config")
+            .unwrap();
+        assert_eq!(saved_config["enabled"], true);
+        assert_eq!(saved_config["max_active_agents_override"], 3);
+        assert_eq!(saved_config["allowed_labels"], serde_json::json!([]));
         // Issue #3928 AC-4: the GitHub budget block is read from the live
         // ledger at call time and has its own test; the queue projection is
         // compared without it. Issue #4087 AC-1: the same goes for the Issue
@@ -11578,6 +11706,12 @@ mod tests {
                     "active_row_without_session": [],
                 },
                 "max_active": 3,
+                "max_active_agents_scope": "machine",
+                "max_active_last_change": {
+                    "changed_at": "2026-10-22T00:00:00Z",
+                    "source": "json_operation",
+                    "max_active_agents_override": 3,
+                },
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
@@ -11873,6 +12007,12 @@ mod tests {
     fn issue_monitor_status_prefers_live_daemon_queue_over_cached_candidates() {
         let tmp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-19T00:01:00Z",
+        )
+        .expect("seed machine Manual capacity and provenance");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -11915,10 +12055,6 @@ mod tests {
             "source": "json_operation",
             "max_active_agents_override": 3,
         });
-        let mut durable: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&prefs_path).expect("read prefs")).unwrap();
-        durable["max_active_last_change"] = current_change.clone();
-        std::fs::write(&prefs_path, serde_json::to_vec(&durable).unwrap()).expect("stamp prefs");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
@@ -12645,6 +12781,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
@@ -12677,6 +12814,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,
@@ -12696,6 +12834,101 @@ mod tests {
         assert_eq!(ledgers(&cleared), ledgers(&before));
         let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
         assert!(reply["update_drain"].is_null());
+    }
+
+    #[test]
+    fn issue_monitor_config_set_guard_rejects_stale_fallback_without_saving() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.config.set",
+                &serde_json::json!({
+                    "max_active": 3, "allowed_labels": ["backend"],
+                    "expected_config_token": "unobserved-config"
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("expected Issue command")
+        };
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let error = run(&mut env, command, &mut out).expect_err("stale config must be refused");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let observed = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.config-set",
+                &serde_json::json!({
+                    "max_active": 3, "allowed_labels": ["backend"],
+                    "expected_config_token": observed
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("expected Issue command")
+        };
+        assert_eq!(run(&mut env, command, &mut out).unwrap(), 0);
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(saved.max_active_agents, 3);
+        assert_eq!(saved.allowed_labels, ["backend"]);
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], observed);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_reports_partial_shared_policy_save() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let _fault = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &path,
+        );
+        std::fs::write(path.with_extension("parent-sync-fail-once"), "fail").unwrap();
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.config.set",
+                &serde_json::json!({"max_active": 4, "allowed_labels": ["backend"]}),
+            )
+            .unwrap()
+        else {
+            panic!("expected Issue command")
+        };
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let error = run(&mut env, command, &mut out).unwrap_err().to_string();
+        assert!(error.contains("outcome is uncertain"), "{error}");
+        assert!(error.contains("Re-read issue.monitor.status"), "{error}");
+        assert!(out.is_empty());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(4)
+        );
     }
 
     #[test]
@@ -12720,6 +12953,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: Some(repo),
                 enabled: Some(false),
@@ -12752,6 +12986,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
@@ -12784,11 +13019,18 @@ mod tests {
             },
         )
         .expect("manual preferences");
+        crate::machine_agent_settings::set(
+            Some(7),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("shared Manual preference");
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 project_root: None,
                 allowed_labels: None,
                 enabled: None,
@@ -13226,6 +13468,7 @@ command = "my-agent-cli"
             run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    expected_config_token: None,
                     allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
@@ -13273,6 +13516,12 @@ command = "my-agent-cli"
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
@@ -13312,6 +13561,7 @@ command = "my-agent-cli"
             let result = run(
                 &mut env,
                 IssueCommand::MonitorConfigSet {
+                    expected_config_token: None,
                     allowed_labels: None,
                     project_root: Some(repo.clone()),
                     enabled,
@@ -14816,6 +15066,7 @@ command = "my-agent-cli"
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -16450,6 +16701,7 @@ command = "my-agent-cli"
         assert!(run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: Some(repo.clone()),
                 enabled: None,
@@ -16492,6 +16744,7 @@ command = "my-agent-cli"
         let code = run(
             &mut env,
             IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: Some(repo),
                 enabled: None,

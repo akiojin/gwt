@@ -1680,6 +1680,7 @@ pub(crate) struct PendingIssueMonitorMaxActive {
     client_id: ClientId,
     max_active_agents: Option<usize>,
     changed_at: String,
+    control_id: String,
 }
 
 #[derive(Default)]
@@ -2177,10 +2178,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
-    /// Issue #4378 AC-2: Issue Monitor launch deliveries held while the
-    /// startup generation reaper runs on the blocking worker. `Some` until the
-    /// reaper reports back; the held deliveries then replay in arrival order.
+    /// Issue #4378 / Issue #4804: hold deliveries until the generation reaper
+    /// finishes and canvas-ready registers the startup restore inventory.
     pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
+    pub(crate) startup_generation_reaper_pending: bool,
     /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
     /// until the startup index status probe takes the active project's one.
     pub(crate) startup_worktree_inventories:
@@ -5184,6 +5185,7 @@ impl AppRuntime {
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
+            startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
             update_resume_tab_ids: HashSet::new(),
             update_drain_released_projects: Vec::new(),
@@ -5518,10 +5520,19 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #4378 AC-2: the startup generation reaper finished on the
-    /// blocking worker. Replay the Issue Monitor launch deliveries that arrived
-    /// while it ran, in arrival order.
+    /// Issue #4378 AC-2: the startup generation reaper finished on the worker.
     pub(crate) fn handle_startup_generation_reaper_completed(&mut self) -> Vec<OutboundEvent> {
+        self.startup_generation_reaper_pending = false;
+        self.drain_startup_issue_monitor_launches()
+    }
+
+    /// Issue #4804 AC-7: either startup event may arrive first. A current
+    /// canvas census is complete only after pending restores are registered
+    /// (or refused); waiting for their PTYs is unnecessary.
+    fn drain_startup_issue_monitor_launches(&mut self) -> Vec<OutboundEvent> {
+        if self.startup_generation_reaper_pending || self.pending_startup_restore_log.is_some() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         for launch in self
             .deferred_issue_monitor_launches
@@ -8817,6 +8828,7 @@ impl AppRuntime {
             client_id,
             max_active_agents,
             changed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            control_id: uuid::Uuid::new_v4().to_string(),
         });
         if lane.requests.len() > 1 {
             return Vec::new();
@@ -8847,13 +8859,17 @@ impl AppRuntime {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match Self::publish_issue_monitor_control_owned(
                     &worker_context.project_root,
-                    serde_json::json!({ "max_active_agents": request.max_active_agents }),
+                    serde_json::json!({
+                        "max_active_agents": request.max_active_agents,
+                        "control_id": request.control_id,
+                        "changed_at": request.changed_at,
+                    }),
                 ) {
                     Ok(()) => Ok(None),
                     Err(error) if error.allows_local_fallback() => {
                         // A durable user save belongs on the blocking lane, not
                         // inside the synchronous GUI thread's 250ms budget.
-                        Self::commit_local_issue_monitor_control_with_timeout(
+                        Self::try_commit_local_issue_monitor_control_with_timeout(
                             &worker_context.project_root,
                             ISSUE_MONITOR_COMMIT_BUDGET,
                             |monitor| {
@@ -8861,10 +8877,13 @@ impl AppRuntime {
                                     request.max_active_agents,
                                     gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
                                     &request.changed_at,
-                                )
+                                );
+                                monitor.persist_machine_max_active_change(&request.control_id)
                             },
                         )
                         .map(|(monitor, ())| Some(Box::new(monitor)))
+                        .map_err(|error| gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            format!("Max active save outcome is uncertain: {error}; reread the current machine setting before retrying")))
                     }
                     Err(error) => Err(error),
                 }
@@ -9122,6 +9141,21 @@ impl AppRuntime {
         (gwt::IssueMonitorState, T),
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
+        Self::try_commit_local_issue_monitor_control_with_timeout(
+            project_root,
+            fallback_timeout,
+            |monitor| Ok(mutation(monitor)),
+        )
+    }
+
+    fn try_commit_local_issue_monitor_control_with_timeout<T>(
+        project_root: &Path,
+        fallback_timeout: std::time::Duration,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> std::io::Result<T>,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now, source_repository) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
@@ -9139,7 +9173,7 @@ impl AppRuntime {
                     .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
             );
             monitor.refresh_agent_capacity(project_root);
-            let result = mutation(&mut monitor);
+            let result = mutation(&mut monitor)?;
             Self::apply_local_issue_monitor_fallback_projection(
                 &mut monitor,
                 &cached_issues,
@@ -10139,6 +10173,14 @@ impl AppRuntime {
                             let (session_issue, monitor_owned) = window
                                 .session_id
                                 .as_deref()
+                                // Issue #4804: a restored pane has no new Session
+                                // until launch preparation applies, but its source
+                                // carries the Issue and autonomous launch route.
+                                .or_else(|| {
+                                    self.restore_launch_windows
+                                        .get(&window_id)
+                                        .and_then(Option::as_deref)
+                                })
                                 .map(session_metadata)
                                 .unwrap_or_default();
                             let issue_number = pending

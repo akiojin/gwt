@@ -2,6 +2,51 @@ use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
 #[test]
+fn app_runtime_fallible_control_fallback_error_preserves_project_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            max_active_agents: 7,
+            ..Default::default()
+        },
+    )
+    .expect("seed Auto continuity");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+
+    let result = AppRuntime::try_commit_local_issue_monitor_control_with_timeout(
+        &repo,
+        Duration::from_secs(5),
+        |monitor| {
+            monitor.set_max_active_agents_override_with_source(
+                Some(3),
+                gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                "2026-10-22T00:00:00Z",
+            );
+            Err::<(), _>(std::io::Error::other("machine policy save failed"))
+        },
+    );
+
+    assert_eq!(
+        fs::read(&prefs_path).expect("read prefs after rejected mutation"),
+        before,
+        "a failed mutation must preserve project bytes and Auto continuity"
+    );
+    assert!(
+        result.is_err(),
+        "the failed mutation must reject the transaction"
+    );
+}
+
+#[test]
 fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
     let _env_lock = env_test_lock()
         .lock()
@@ -215,6 +260,12 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(6),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
@@ -2930,6 +2981,12 @@ fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        gwt::machine_agent_settings::set(
+            Some(2),
+            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo_with_initial_commit(&repo);

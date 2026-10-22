@@ -176,6 +176,47 @@ try {
         + "|Issue #5395:|Issue auto refresh reads only|an unfocused Issue window"] : []),
     "--output", join(evidence, "playwright"), "--trace=on", "--workers=1", "--retries=0", ...forwarded];
   if (!testArgs.includes("--headed")) testArgs.push("--headed");
+  // Probe before restart without the canonical reporter: only the complete
+  // post-restart matrix writes GWT_HEADED_E2E_REPORT, exactly once.
+  const beforeArgs = [];
+  for (let index = 0; index < testArgs.length; index += 1) {
+    if (["--grep", "--output", "--reporter"].includes(testArgs[index])) { index += 1; continue; }
+    if (/^--(?:grep|output|reporter)=/.test(testArgs[index])) continue;
+    beforeArgs.push(testArgs[index]);
+  }
+  beforeArgs.push("--grep", "fixed .*has no destructive canvas chrome", "--output", join(evidence, "before-restart-playwright"));
+  const beforeEnv = { ...testEnv };
+  delete beforeEnv.GWT_HEADED_E2E_REPORT;
+  await finish(start(process.execPath, beforeArgs, beforeEnv, root, "", true), 180_000);
+  // Issue #4777 AC15: no old chrome may return after a real GUI restart.
+  const previousPid = gui.child.pid;
+  hub.close();
+  gui.child.kill("SIGTERM");
+  await Promise.race([gui.closed, delay(10_000).then(() => {
+    throw new Error(`Owned GUI PID ${previousPid} did not stop before restart`);
+  })]);
+  await writeFile(join(evidence, "gwt-before-restart.stdout.log"), gui.stdout);
+  await writeFile(join(evidence, "gwt-before-restart.stderr.log"), gui.stderr);
+  await writeFile(env.GWT_BROWSER_URL_FILE, "");
+  gui = start(gwt, ["--no-tray", "--no-open"], env, project);
+  console.log(`Restarted fresh gwt PID: ${gui.child.pid}; previous PID: ${previousPid}`);
+  await waitFor(async () => {
+    try { url = (await readFile(env.GWT_BROWSER_URL_FILE, "utf8")).trim(); return ["http:", "https:"].includes(new URL(url).protocol); }
+    catch { return false; }
+  }, gui, 90_000, "Restarted gwt did not publish its URL");
+  await finish(start("curl", ["-fsS", "-I", url]), 15_000);
+  await audit(false);
+  if (/another tray-resident gwt instance is already running/i.test(gui.stdout + gui.stderr)) throw new Error("Restarted instance isolation failed");
+  hub = new WebSocket(new URL("/ws", url).toString().replace(/^http/, "ws"));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Restarted Hub keepalive timed out")), 10_000);
+    hub.addEventListener("open", () => { clearTimeout(timer); hub.send(JSON.stringify({ kind: "frontend_ready" })); resolve(); }, { once: true });
+    hub.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Restarted Hub keepalive failed")); }, { once: true });
+  });
+  testEnv.GWT_PLAYWRIGHT_BASE_URL = url;
+  await writeFile(join(evidence, "restart.json"), JSON.stringify({ previous_pid: previousPid,
+    previous_finished: owned.find(record => record.child.pid === previousPid).finished,
+    gui_pid: gui.child.pid, home, url, gwt }, null, 2));
   await finish(start(process.execPath, testArgs, testEnv, root, "", true), 1_800_000);
 } catch (error) {
   console.error(error);

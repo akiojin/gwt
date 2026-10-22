@@ -11,11 +11,17 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
   // Record external actions locally; never search GitHub or clone a repository.
   await page.addInitScript(() => {
     (window as any).__cloneActions = [];
+    (window as any).__cloneStartBusy = [];
     const originalSend = WebSocket.prototype.send;
     WebSocket.prototype.send = function (data) {
       if (typeof data === "string") {
         const message = JSON.parse(data);
         if (["github_repository_search", "clone_project_start"].includes(message.kind)) {
+          if (message.kind === "clone_project_start") {
+            const dialog = document.querySelector('#clone-project-modal .modal-shell')!;
+            (window as any).__cloneStartBusy.push(dialog.getAttribute('aria-busy') === 'true'
+              && (dialog.querySelector('#clone-project-start') as HTMLButtonElement).disabled);
+          }
           (window as any).__cloneActions.push(message);
           return;
         }
@@ -70,6 +76,51 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
   await expect(modal).toHaveClass(/open/);
   await inject({ kind: "clone_project_progress", message: "Receiving fixture objects 42%" });
   await expect(dialog).toContainText("Receiving fixture objects 42%");
+  await dialog.hover();
+  await dialog.focus();
+  const burst = (last: number, suspendRaf: boolean) => page.evaluate(async ({ last, suspendRaf }) => {
+    const dialog = document.querySelector('#clone-project-modal .modal-shell')!;
+    const before = dialog.innerHTML;
+    const focused = document.activeElement;
+    const originalRaf = window.requestAnimationFrame;
+    if (suspendRaf) window.requestAnimationFrame = () => 0;
+    let renders = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    let observer: MutationObserver | undefined;
+    const started = performance.now();
+    try {
+      const rendered = new Promise<void>((resolve, reject) => {
+        observer = new MutationObserver(records => {
+          renders += records.reduce((count, record) => count + [...record.addedNodes]
+            .filter(node => node instanceof Element && node.classList.contains('clone-project-header')).length, 0);
+          if (dialog.querySelector('.clone-project-progress')?.textContent === `Receiving fixture objects ${last}%`) resolve();
+        });
+        observer.observe(dialog, { childList: true });
+        timer = setTimeout(() => reject(new Error('clone frame did not render within one second')), 1000);
+      });
+      for (let n = last - 49; n <= last; n += 1) {
+        window.dispatchEvent(new CustomEvent('__gwt_test_inject', { detail: {
+          kind: 'clone_project_progress', message: `Receiving fixture objects ${n}%`,
+        } }));
+      }
+      const unchangedBeforeFrame = dialog.innerHTML === before;
+      await rendered;
+      return { unchangedBeforeFrame, renders, elapsed: performance.now() - started,
+        focused: document.activeElement === focused, hovered: dialog.matches(':hover') };
+    } finally {
+      clearTimeout(timer!);
+      observer?.disconnect();
+      window.requestAnimationFrame = originalRaf;
+    }
+  }, { last, suspendRaf });
+  for (const suspendRaf of [false, true]) {
+    const result = await burst(suspendRaf ? 75 : 50, suspendRaf);
+    expect(result).toMatchObject({ unchangedBeforeFrame: true, renders: 1, focused: true, hovered: true });
+    expect(result.elapsed).toBeLessThan(1000);
+    await testInfo.attach(suspendRaf ? 'clone-fallback' : 'clone-frame', {
+      body: JSON.stringify(result), contentType: 'application/json',
+    });
+  }
   await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`clone-running-${theme}.png`) });
   await inject({ kind: "clone_project_error", message: "Fixture clone failure" });
   await expect(dialog).toHaveAttribute("aria-busy", "false");
@@ -88,5 +139,6 @@ test("shared clone state preserves drafts, query fences and clone actions", asyn
     { kind: "clone_project_start", url: repository.url, parent_path: "/fixture/manual" },
     { kind: "clone_project_start", url: repository.url, parent_path: "/fixture/manual" },
   ]);
+  expect(await page.evaluate(() => (window as any).__cloneStartBusy)).toEqual([true, true]);
   expect(errors).toEqual([]);
 });

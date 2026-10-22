@@ -77,25 +77,55 @@ impl FeedbackRecord {
 
     /// Derive the immutable public preview/send payload. The stored receipt
     /// remains the complete original, including evidence hidden by these masks.
-    pub fn public_snapshot(&self) -> Self {
-        let mut public = self.clone();
-        let root = self.context.project_root.to_string_lossy();
+    pub fn public_snapshot(&self) -> PublicFeedback {
+        let mut input = self.input.clone();
+        let mut privacy = PrivacyMasks::new(self);
         for text in [
-            &mut public.input.title,
-            &mut public.input.operation,
-            &mut public.input.refusal,
-            &mut public.input.reproduction,
-            &mut public.input.body,
+            &mut input.title,
+            &mut input.operation,
+            &mut input.refusal,
+            &mut input.reproduction,
         ]
         .into_iter()
-        .chain(public.input.workaround.iter_mut())
-        .chain(public.input.error_record_id.iter_mut())
-        .chain(public.input.labels.iter_mut())
+        .chain(input.workaround.iter_mut())
         {
-            *text = public_text(text, &root);
+            *text = privacy.text(text);
         }
-        public.context.project_root = PathBuf::from("[REDACTED PATH]");
-        public
+        // These local fields have no role in the upstream diagnostic contract.
+        // Never serialize the raw context, arbitrary body, labels or ledger id.
+        input.body.clear();
+        input.labels.clear();
+        input.error_record_id = None;
+        PublicFeedback {
+            id: self.id.clone(),
+            input,
+            gwt_version: self.context.gwt_version.clone(),
+            gwtd_version: self.context.gwtd_version.clone(),
+            os: self.context.os.clone(),
+            removed: privacy.removed.into_iter().collect(),
+        }
+    }
+
+    pub fn render_issue(&self) -> String {
+        self.public_snapshot().render_issue()
+    }
+}
+
+/// The only payload accepted by the public sender. Source context cannot be
+/// serialized accidentally because it is absent from this transport type.
+#[derive(Debug, Clone)]
+pub struct PublicFeedback {
+    pub id: String,
+    pub input: FeedbackInput,
+    pub gwt_version: String,
+    pub gwtd_version: String,
+    pub os: String,
+    pub removed: Vec<&'static str>,
+}
+
+impl PublicFeedback {
+    pub fn marker(&self) -> String {
+        format!("<!-- gwt-feedback:{} -->", self.id)
     }
 
     pub fn render_issue(&self) -> String {
@@ -104,8 +134,6 @@ impl FeedbackRecord {
             FeedbackKind::Request => "request",
             FeedbackKind::Friction => "friction",
         };
-        // A longer fence prevents refusal text containing Markdown fences from
-        // swallowing the structured context. Evidence itself is never trimmed.
         let fence = "`".repeat(
             self.input
                 .refusal
@@ -118,83 +146,288 @@ impl FeedbackRecord {
         );
         let details = serde_json::to_string_pretty(&serde_json::json!({
             "kind": self.input.kind, "operation": self.input.operation,
-            "environment": self.context, "reproduction": self.input.reproduction,
-            "workaround": self.input.workaround, "error_record_id": self.input.error_record_id,
-            "requested_labels": self.input.labels,
+            "environment": {
+                "gwt_version": self.gwt_version,
+                "gwtd_version": self.gwtd_version,
+                "os": self.os,
+            },
+            "reproduction": self.input.reproduction,
+            "workaround": self.input.workaround,
         }))
-        .expect("feedback metadata serializes");
-        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n{}\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim except privacy masks)\n\n{}text\n{}\n{}\n",
-            self.marker(), self.input.body, details, fence, self.input.refusal, fence)
+        .expect("public feedback metadata serializes");
+        format!("{}\n<!-- gwt-feedback-kind:{kind} -->\n\n## Structured report\n\n```json\n{}\n```\n\n## Observed refusal (verbatim except privacy masks)\n\n{}text\n{}\n{}\n",
+            self.marker(), details, fence, self.input.refusal, fence)
+    }
+
+    pub fn privacy_summary(&self) -> String {
+        let text = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            self.input.title,
+            self.input.operation,
+            self.input.refusal,
+            self.input.reproduction,
+            self.input.workaround.as_deref().unwrap_or("")
+        );
+        let masks = regex::Regex::new(r"\[REDACTED(?: [A-Z]+)?\]|\*\*\*redacted\*\*\*")
+            .expect("privacy masks");
+        let masked: usize = masks
+            .find_iter(&text)
+            .map(|m| m.as_str().chars().count())
+            .sum();
+        let total = text.chars().count().max(1);
+        let percent = masked * 100 / total;
+        format!("Removed items: local metadata and unstructured context{}\nPrivacy masks: {percent}% of diagnostic text.{}\nUnknown project-specific names may remain; review the complete report before sending.",
+            if self.removed.is_empty() { String::new() } else { format!(", {}", self.removed.join(", ")) },
+            if masked * 2 > total { " The report may be unreadable because more than half is masked." } else { "" })
     }
 }
 
-fn public_text(text: &str, project_root: &str) -> String {
-    use pulldown_cmark::{Event, Parser, Tag};
-    use regex::Regex;
+struct PrivacyMasks {
+    identifiers: Vec<String>,
+    root: String,
+    removed: std::collections::BTreeSet<&'static str>,
+}
 
-    // Offset ranges retain the authored bytes; event text normalizes Markdown.
-    let mut masked = String::new();
-    let mut copied = 0;
-    for (event, range) in Parser::new(text).into_offset_iter() {
-        if matches!(event, Event::Start(Tag::CodeBlock(_)) | Event::Code(_))
-            && range.start >= copied
-        {
-            masked.push_str(&text[copied..range.start]);
-            masked.push_str("[REDACTED CODE]");
-            masked.extend(
-                text[range.clone()]
-                    .chars()
-                    .filter(|c| matches!(c, '\r' | '\n')),
-            );
-            copied = range.end;
+impl PrivacyMasks {
+    fn new(record: &FeedbackRecord) -> Self {
+        let root = &record.context.project_root;
+        let mut identifiers = vec![record.context.project_hash.clone()];
+        if let Some(name) = root.file_name().and_then(|s| s.to_str()) {
+            identifiers.push(name.into());
+        }
+        if let Some(origin) = crate::repo_hash::repository_local_origin(root) {
+            let parts: Vec<_> = origin
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .rsplit(['/', ':'])
+                .take(2)
+                .collect();
+            identifiers.extend(parts.into_iter().map(str::to_owned));
+        }
+        let dot_git = root.join(".git");
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else {
+            fs::read_to_string(&dot_git)
+                .ok()
+                .and_then(|s| {
+                    s.trim()
+                        .strip_prefix("gitdir:")
+                        .map(str::trim)
+                        .map(PathBuf::from)
+                })
+                .map(|p| if p.is_absolute() { p } else { root.join(p) })
+                .unwrap_or_default()
+        };
+        if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
+            if let Some(branch) = head.trim().strip_prefix("ref: refs/heads/") {
+                identifiers.push(branch.into());
+            }
+        }
+        identifiers
+            .retain(|s| !s.is_empty() && !matches!(s.as_str(), "gwt" | "akiojin" | "github.com"));
+        identifiers.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        identifiers.dedup();
+        Self {
+            identifiers,
+            root: root.to_string_lossy().into_owned(),
+            removed: Default::default(),
         }
     }
-    masked.push_str(&text[copied..]);
-    if !project_root.is_empty() {
-        masked = masked.replace(project_root, "[REDACTED PATH]");
-    }
 
+    fn text(&mut self, text: &str) -> String {
+        use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+        use regex::Regex;
+        let mut masked = String::new();
+        let mut copied = 0;
+        for (event, range) in Parser::new(text).into_offset_iter() {
+            // Preserve diagnostic literals such as `workspace.update`, status
+            // codes and CLI flags. Only source-shaped spans are code masks.
+            let source = match &event {
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language)))
+                    if !language.is_empty()
+                        && !matches!(
+                            language.as_ref(),
+                            "text" | "log" | "console" | "json" | "sh" | "bash" | "shell"
+                        ) =>
+                {
+                    true
+                }
+                Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => {
+                    looks_like_source(&text[range.clone()])
+                }
+                _ => false,
+            };
+            if source && range.start >= copied {
+                masked.push_str(&text[copied..range.start]);
+                masked.push_str("[REDACTED CODE]");
+                masked.extend(
+                    text[range.clone()]
+                        .chars()
+                        .filter(|c| matches!(c, '\r' | '\n')),
+                );
+                copied = range.end;
+                self.removed.insert("source code");
+            }
+        }
+        masked.push_str(&text[copied..]);
+        if !self.root.is_empty() && masked.contains(&self.root) {
+            masked = masked.replace(&self.root, "[REDACTED PATH]");
+            self.removed.insert("file paths");
+        }
+        for identifier in &self.identifiers {
+            let boundary = |c: Option<char>| {
+                if c.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    r"\b"
+                } else {
+                    ""
+                }
+            };
+            let pattern = Regex::new(&format!(
+                "(?i){}{}{}",
+                boundary(identifier.chars().next()),
+                regex::escape(identifier),
+                boundary(identifier.chars().last())
+            ))
+            .expect("source identifier");
+            if pattern.is_match(&masked) {
+                masked = pattern
+                    .replace_all(&masked, "[REDACTED PROJECT]")
+                    .into_owned();
+                self.removed.insert("project and repository identifiers");
+            }
+        }
+        static REFS: OnceLock<Regex> = OnceLock::new();
+        let refs = REFS.get_or_init(|| Regex::new(r"(?i)\b(?:commit|sha|head(?: stayed at)?)[ \t:=]+[0-9a-f]{7,64}\b|\b[0-9a-f]{40,64}\b|(?:\b(?:issue|pr)[ \t]*|#)#?[0-9]+\b|\b(?:branch|ref)[ \t:=]+[^\s,;`]+" ).expect("source references"));
+        if refs.is_match(&masked) {
+            masked = refs
+                .replace_all(&masked, |c: &regex::Captures<'_>| {
+                    if c[0].chars().all(|c| c.is_ascii_digit()) {
+                        c[0].to_owned()
+                    } else {
+                        "[REDACTED REFERENCE]".into()
+                    }
+                })
+                .into_owned();
+            self.removed
+                .insert("commit hashes, branches and issue references");
+        }
+        let masked = mask_environment(&masked, &mut self.removed);
+        static BEARER: OnceLock<Regex> = OnceLock::new();
+        let bearer =
+            BEARER.get_or_init(|| Regex::new(r"(?i)\bBearer[ \t]+[^\s]+").expect("bearer values"));
+        static PATHS: OnceLock<Regex> = OnceLock::new();
+        let paths = PATHS.get_or_init(|| {
+            Regex::new(r#"(?x)["'](?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^"'\r\n]*["']|[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'`]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^\s<>"'`]*"#).expect("private paths")
+        });
+        let mut public = String::new();
+        for line in masked.split_inclusive(['\r', '\n']) {
+            let content_len = line.trim_end_matches(['\r', '\n']).len();
+            let (content, ending) = line.split_at(content_len);
+            let content = bearer.replace_all(content, "[REDACTED]");
+            let hidden = crate::error_ledger::redact_credentials(&content);
+            if hidden != content {
+                self.removed.insert("credentials");
+            }
+            if paths.is_match(&hidden) {
+                self.removed.insert("file paths and branch paths");
+            }
+            public.push_str(&paths.replace_all(&hidden, "[REDACTED PATH]"));
+            public.push_str(ending);
+        }
+        public
+    }
+}
+
+fn mask_environment(text: &str, removed: &mut std::collections::BTreeSet<&'static str>) -> String {
+    use regex::Regex;
     static ENVIRONMENT: OnceLock<Regex> = OnceLock::new();
     let environment = ENVIRONMENT.get_or_init(|| {
-        Regex::new(r#"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*|["'][A-Z_][A-Z0-9_]*["'][ \t]*:\s*)(?P<value>(?:"(?:\\[\s\S]|[^"\\])*"?|'[^']*'?|(?:\\(?:\r\n|[\s\S])?|[^"'\\\r\n])+)+)"#)
-            .expect("feedback environment value pattern")
-    });
-    // Quoted assignments can span physical lines. Mask their complete source
-    // value before the line-scoped credential pass, retaining all line endings.
-    // Treat the rest of an assignment line, including unquoted continuations,
-    // conservatively as part of its value.
-    let masked = environment.replace_all(&masked, |captures: &regex::Captures<'_>| {
-        let mut value = format!("{}[REDACTED]", &captures["key"]);
-        value.extend(
-            captures["value"]
-                .chars()
-                .filter(|c| matches!(c, '\r' | '\n')),
-        );
-        value
-    });
-    static BEARER: OnceLock<Regex> = OnceLock::new();
-    let bearer = BEARER.get_or_init(|| {
-        Regex::new(r"(?i)\bBearer[ \t]+[^\s]+").expect("feedback bearer value pattern")
-    });
-    static PATHS: OnceLock<Regex> = OnceLock::new();
-    let paths = PATHS.get_or_init(|| {
-        // Conservatively hide path-shaped strings, including URLs, because
-        // their public/private visibility cannot be established locally.
-        Regex::new(r#"(?x)["'](?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^"'\r\n]*["']|[A-Za-z][A-Za-z0-9+.-]*://[^\s<>"'`]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\.{0,2}/|[\p{L}\p{N}_.-]+[\\/])[^\s<>"'`]*"#)
-            .expect("feedback private path pattern")
-    });
+            Regex::new(r#"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*|["'][A-Z_][A-Z0-9_]*["'][ \t]*:\s*)(?P<value>(?:"(?:\\[\s\S]|[^"\\])*"?|'[^']*'?|(?:\\(?:\r\n|[\s\S])?|[^"'\\\r\n])+)+)"#).expect("environment values")
+        });
     let mut public = String::new();
-    // Credential patterns can consume whitespace: never let them cross the
-    // original physical line boundaries, including bare CR and CRLF.
-    for line in masked.split_inclusive(['\r', '\n']) {
-        let content_len = line.trim_end_matches(['\r', '\n']).len();
-        let (content, ending) = line.split_at(content_len);
-        let content = bearer.replace_all(content, "[REDACTED]");
-        let content = crate::error_ledger::redact_credentials(&content);
-        public.push_str(&paths.replace_all(&content, "[REDACTED PATH]"));
-        public.push_str(ending);
+    let mut rest = text;
+    while let Some(c) = environment.captures(rest) {
+        let span = c.get(0).expect("whole assignment");
+        public.push_str(&rest[..span.start()]);
+        let key = c["key"].trim().trim_end_matches('=').trim();
+        let value = c.name("value").expect("assignment value");
+        let token_len = value
+            .as_str()
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ':')))
+            .unwrap_or(value.as_str().len());
+        if diagnostic_key(key) && token_len > 0 {
+            public.push_str(&rest[span.start()..value.start() + token_len]);
+            rest = &rest[value.start() + token_len..];
+            continue;
+        }
+        removed.insert("environment values");
+        if matches!(key, "project_hash" | "project_root" | "active_agents") {
+            public.push_str("[REDACTED PROJECT]");
+        } else {
+            public.push_str(&c["key"]);
+            public.push_str("[REDACTED]");
+        }
+        public.extend(value.as_str().chars().filter(|c| matches!(c, '\r' | '\n')));
+        rest = &rest[span.end()..];
     }
+    public.push_str(rest);
     public
+}
+
+fn diagnostic_key(key: &str) -> bool {
+    matches!(
+        key,
+        "http_status"
+            | "exit_code"
+            | "code"
+            | "reason"
+            | "status"
+            | "state"
+            | "operation"
+            | "launch_route"
+            | "binding_state"
+            | "diagnostic_reason"
+            | "bridge_reason"
+            | "schema_version"
+            | "execution_id"
+            | "generation_id"
+            | "request_id"
+            | "timeout_ns"
+            | "timeout_ms"
+            | "retry_after_ms"
+            | "timestamp"
+    )
+}
+
+fn looks_like_source(text: &str) -> bool {
+    let assignment = text.lines().any(|line| {
+        line.split_once('=').is_some_and(|(key, _)| {
+            let key = key.trim().trim_start_matches('`').trim();
+            !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !diagnostic_key(key)
+        })
+    });
+    assignment
+        || text.contains("()")
+        || text.contains("=>")
+        || text.contains("{\n")
+        || text.contains("{\r\n")
+        || text.lines().any(|line| {
+            [
+                "fn ",
+                "pub fn ",
+                "function ",
+                "const ",
+                "let ",
+                "class ",
+                "def ",
+                "import ",
+            ]
+            .iter()
+            .any(|prefix| line.trim_start().starts_with(prefix))
+        })
 }
 
 /// Unknown identities also require approval. Global/user configuration never

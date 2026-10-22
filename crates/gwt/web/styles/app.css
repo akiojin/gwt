@@ -620,10 +620,6 @@ body {
   bottom: 0;
 }
 
-.workspace-window.tabbed .window-body {
-  top: 70px;
-}
-
 /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
    continuous with the xterm Dark Operator background (#0a0d12). If
    Light theme leaks var(--color-canvas) here, the xterm region picks

@@ -3286,6 +3286,7 @@ mod tests {
         assert_eq!(wire["notification_transition"], "needs_human");
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -4758,6 +4759,7 @@ mod tests {
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
+            startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_restore_log: None,
