@@ -6132,8 +6132,11 @@ where
         let (generation, snapshot) = match Cache::new(env.cache_root())
             .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
         {
-            ValidatedCacheEntry::Fresh(entry) => return Ok(entry.entry),
-            ValidatedCacheEntry::Stale(entry) => (entry.generation, Some(entry.entry.snapshot)),
+            // A concurrent reader may publish a pre-mutation snapshot with a
+            // fresh receipt. Authoritative refresh callers still need a fetch.
+            ValidatedCacheEntry::Fresh(entry) | ValidatedCacheEntry::Stale(entry) => {
+                (entry.generation, Some(entry.entry.snapshot))
+            }
             ValidatedCacheEntry::Unvalidated(entry) => (entry.generation, None),
             ValidatedCacheEntry::Missing { generation } => (generation, None),
         };
@@ -6257,14 +6260,17 @@ fn load_fresh_validated_entry(
     number: IssueNumber,
     expected_generation: Option<&CacheGeneration>,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let generation =
-        match cache.load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)? {
-            ValidatedCacheEntry::Fresh(entry) => return Ok(entry.entry),
-            ValidatedCacheEntry::Stale(entry) | ValidatedCacheEntry::Unvalidated(entry) => {
-                entry.generation
-            }
-            ValidatedCacheEntry::Missing { generation } => generation,
-        };
+    let generation = match cache
+        .load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)?
+    {
+        ValidatedCacheEntry::Fresh(entry) if entry.generation.as_ref() == expected_generation => {
+            return Ok(entry.entry);
+        }
+        ValidatedCacheEntry::Fresh(entry)
+        | ValidatedCacheEntry::Stale(entry)
+        | ValidatedCacheEntry::Unvalidated(entry) => entry.generation,
+        ValidatedCacheEntry::Missing { generation } => generation,
+    };
     if generation.as_ref() != expected_generation {
         return Err(SpecOpsError::CacheConflict(number));
     }
@@ -16675,6 +16681,56 @@ command = "my-agent-cli"
             rows[0].message
         );
         assert_eq!(rows[0].target.issue, Some(42));
+    }
+
+    #[test]
+    fn final_validated_read_rejects_a_different_fresh_generation() {
+        let temp = TempDir::new().unwrap();
+        let cache = Cache::new(temp.path().to_path_buf());
+        let snapshot = sample_issue_snapshot();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+        let generation = cache.current_generation(snapshot.number).unwrap();
+        assert!(cache
+            .write_snapshot_with_receipt(&snapshot)
+            .unwrap()
+            .renewed());
+
+        let error = load_fresh_validated_entry(&cache, snapshot.number, generation.as_ref())
+            .expect_err("a new validated generation must be revalidated by this reader");
+
+        assert!(matches!(error, SpecOpsError::CacheConflict(_)), "{error}");
+    }
+
+    #[test]
+    fn authoritative_refresh_revalidates_a_concurrent_fresh_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let old = sample_issue_snapshot();
+        let mut remote = old.clone();
+        remote.state = IssueState::Closed;
+        remote.updated_at = UpdatedAt::new("2026-10-22T00:00:00Z");
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        env.client.after_next_fetch(move || {
+            // Another targeted reader fetched before the mutation, but only
+            // publishes its snapshot and fresh receipt during our readback.
+            let cache = Cache::new(cache_root);
+            cache.write_snapshot(&old).unwrap();
+            assert!(cache
+                .renew_validation_receipt_if_current(&old)
+                .unwrap()
+                .renewed());
+        });
+
+        let entry = refresh_issue_cache_with_index_rebuild(&mut env, remote.number, |_| Ok(()))
+            .expect("authoritative retry must fetch the post-mutation state");
+
+        assert_eq!(entry.snapshot.state, IssueState::Closed);
+        assert_eq!(entry.snapshot.updated_at, remote.updated_at);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42", "fetch:#42"]);
     }
 
     #[test]
