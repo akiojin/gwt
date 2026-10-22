@@ -10055,12 +10055,41 @@ impl IssueMonitorState {
         if self.config.enabled == enabled {
             return Some(self.effect_authority_epoch);
         }
+        let pending_claims = self.pending_claim_issue_numbers();
         let next_epoch =
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
 
         self.config.enabled = enabled;
         self.launch_auth_required = false;
         if !enabled {
+            // OFF cancels pre-spawn work, including candidates whose eligibility
+            // was recorded before a claim. Preserve work already handed over.
+            let cancelled = pending_claims
+                .into_iter()
+                .chain(self.stored_local_terminal_queue_numbers())
+                .chain(self.queue.iter().copied())
+                .chain(
+                    self.pending_launches
+                        .iter()
+                        .map(|launch| launch.issue_number),
+                )
+                .chain(
+                    self.pending_launch_deliveries
+                        .iter()
+                        .map(|delivery| delivery.issue_number),
+                )
+                .filter(|number| {
+                    !self.launched_windows.contains_key(number)
+                        && !self.pending_launch_deliveries.iter().any(|delivery| {
+                            delivery.issue_number == *number
+                                && (delivery.materializer_id.is_some()
+                                    || delivery.materialized_window_id.is_some())
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            for number in cancelled {
+                self.clear_provisional_implementation(number);
+            }
             for delivery in &self.pending_launch_deliveries {
                 let already_pending = self.pending_effects.iter().any(|effect| {
                     matches!(
@@ -11469,6 +11498,35 @@ impl IssueMonitorState {
                 observation.windows.clone(),
                 observation.observed_at.clone(),
             );
+        }
+        // A newer control can revoke eligibility before this scan commits.
+        // Its durable Idle also wins if OFF/ON happened between two scans.
+        if disk.effect_authority_epoch > self.effect_authority_epoch {
+            let cancelled = disk
+                .autonomous_records
+                .iter()
+                .filter(|record| record.phase == AutonomousPhase::Idle)
+                .map(|record| record.issue_number)
+                .filter(|number| {
+                    !self.launched_windows.contains_key(number)
+                        && !disk
+                            .launched_issues
+                            .iter()
+                            .any(|launch| launch.issue_number == *number)
+                        && !self
+                            .pending_launch_deliveries
+                            .iter()
+                            .chain(&disk.pending_launch_deliveries)
+                            .any(|delivery| {
+                                delivery.issue_number == *number
+                                    && (delivery.materializer_id.is_some()
+                                        || delivery.materialized_window_id.is_some())
+                            })
+                })
+                .collect::<Vec<_>>();
+            for number in cancelled {
+                self.clear_provisional_implementation(number);
+            }
         }
         // An exact failover committed elsewhere revokes the old launch. An
         // epoch alone is global; require the issue's explicit fresh-session
@@ -36064,6 +36122,7 @@ mod tests {
                 ..IssueMonitorPrefs::default()
             },
         );
+        enabled.set_autonomous_phase(42, AutonomousPhase::Implementing);
         let enabled_before = enabled.prefs();
 
         assert_eq!(
@@ -36071,6 +36130,8 @@ mod tests {
             Some(u64::MAX)
         );
         assert_eq!(enabled.prefs(), enabled_before);
+        assert_eq!(enabled.set_enabled_with_effect_revocation(false), None);
+        assert_eq!(enabled.prefs(), enabled_before, "OFF overflow is atomic");
     }
 
     #[test]
@@ -38000,8 +38061,21 @@ mod tests {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
-        monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
-        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_mode(true);
+        let now = "2026-08-01T00:00:00Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        for number in [42, 43] {
+            let candidate = auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+            monitor.record_candidate(candidate.clone());
+            monitor.record_attempt(number);
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(&candidate, &protection, now),
+                EligibilityDecision::Eligible
+            );
+        }
         assert!(monitor.apply_confirmed_claim(
             42,
             "claim-42",
@@ -38010,7 +38084,25 @@ mod tests {
             "2026-07-28T00:00:00Z",
         ));
 
+        let mut stale = monitor.clone();
+        let mut rapid_toggle_observer = monitor.clone();
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(cold.set_enabled_with_effect_revocation(false), Some(1));
+        assert_eq!(
+            cold.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle,
+            "cold OFF must cancel the durable queue's pre-claim eligibility"
+        );
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        for number in [42, 43] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Idle,
+                "OFF must clear the cancelled pre-spawn phase for Issue #{number}"
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+        }
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert!(monitor.prefs().pending_launch_deliveries.is_empty());
         assert!(monitor.pending_effects().iter().any(|effect| matches!(
             &effect.payload,
@@ -38020,6 +38112,83 @@ mod tests {
                 owner,
             } if claim_id == "claim-42" && owner == "host/session"
         )));
+
+        stale.rebase_daemon_driver_prefs(&monitor.prefs());
+        assert!(
+            stale.autonomous_in_flight_issues().is_empty(),
+            "an older scan must not resurrect the phases cancelled by OFF"
+        );
+
+        let prefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(restored.set_enabled_with_effect_revocation(true), Some(2));
+        assert!(restored.autonomous_in_flight_issues().is_empty());
+        rapid_toggle_observer.rebase_daemon_driver_prefs(&restored.prefs());
+        assert!(rapid_toggle_observer
+            .autonomous_in_flight_issues()
+            .is_empty());
+        let candidate = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&candidate), now);
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &protection, now),
+            EligibilityDecision::Eligible
+        );
+        assert_eq!(restored.attempt_count(42), 1);
+        restored.rebase_daemon_driver_prefs(&monitor.prefs());
+        assert_eq!(
+            restored.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Implementing,
+            "an older OFF snapshot cannot revoke fresh eligibility"
+        );
+    }
+
+    #[test]
+    fn disabling_monitor_preserves_started_work_and_unobserved_records() {
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_max_active_agents(6);
+        monitor.terminal_queue_push(&[42, 43, 44, 45], "test", "2026-08-01T00:00:00Z");
+        for number in [42, 43, 44, 45] {
+            monitor.record_candidate(issue(number));
+        }
+        for number in [42, 43, 44, 45, 46] {
+            monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        }
+        monitor.complete_active_launch(42, "tab::agent-42");
+        assert!(monitor.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-08-01T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            43,
+            "launch:effect-43",
+            "materializer-43",
+            43,
+            "tab::agent-43",
+            |_| false,
+        ));
+        monitor.process_held_issues.insert(44);
+        monitor.autonomous_record_mut(45).reviewed_sha = Some("reviewed-head".into());
+
+        let mut stale = monitor.clone();
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        stale.rebase_daemon_driver_prefs(&monitor.prefs());
+        for number in [42, 43, 44, 45, 46] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+            assert_eq!(
+                stale.autonomous_record(number).unwrap().phase,
+                AutonomousPhase::Implementing
+            );
+        }
     }
 
     #[test]
@@ -38154,7 +38323,23 @@ mod tests {
             },
         );
 
+        monitor.set_autonomous_mode(true);
+        for number in [42, 43] {
+            let candidate = auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(
+                    &candidate,
+                    &gwt_git::branch_protection::BranchProtectionStatus::Verified {
+                        required_checks: vec!["ci".into()],
+                    },
+                    "2026-07-27T00:00:00Z",
+                ),
+                EligibilityDecision::Eligible
+            );
+        }
+
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(4));
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert!(!monitor.config.enabled);
         assert!(monitor.pending_effects().contains(&attempting));
         assert!(!monitor
