@@ -17112,7 +17112,7 @@ impl IssueMonitorState {
         }
         self.reconcile_terminal_queue();
         let position = self.queue.iter().position(|issue| {
-            !self.has_observed_monitor_runtime(*issue)
+            !self.has_monitor_pane_for_issue(*issue)
                 && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
@@ -17234,6 +17234,18 @@ impl IssueMonitorState {
         }
         if self.has_observed_monitor_runtime(issue_number) {
             reasons.push("runtime_already_present".to_string());
+        } else if self.has_monitor_pane_for_issue(issue_number) {
+            let windows = self
+                .monitor_canvas_windows()
+                .filter(|window| {
+                    !window.review_dispatch && window.issue_number == Some(issue_number)
+                })
+                .map(|window| window.window_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            reasons.push(format!(
+                "retained_implementation_pane: {windows}; close the stopped/error pane with pane.close before retry"
+            ));
         }
         if let Some(hold) = self
             .open_pr_observations
@@ -17465,7 +17477,7 @@ impl IssueMonitorState {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
                     && !self.cancelled_claim_awaits_runtime(*issue_number)
-                    && !self.has_observed_monitor_runtime(*issue_number)
+                    && !self.has_monitor_pane_for_issue(*issue_number)
                     && !self.open_pr_launch_held(*issue_number)
                     && self.launch_source_exclusion(*issue_number).is_none()
                     && self.retry_ready_for_saved_profile(*issue_number, now)
@@ -17999,7 +18011,7 @@ impl IssueMonitorState {
                     && !self.launch_admission_is_held_at(now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
-                    && !self.has_observed_monitor_runtime(issue_number)
+                    && !self.has_monitor_pane_for_issue(issue_number)
                     && !self.open_pr_launch_held(issue_number)
                     && self.occupied_slot_count() < self.effective_max_active_agents()
             })
@@ -37636,6 +37648,128 @@ mod tests {
             monitor.active_count(),
             1,
             "a host census releases only its own pane"
+        );
+    }
+
+    #[test]
+    fn retained_implementation_pane_is_excluded_before_launch_claim() {
+        for state in [WindowState::Stopped, WindowState::Error] {
+            let now = "2026-10-22T00:00:00Z";
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 4,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_queued_candidates(&mut monitor, &[issue(42)], now);
+            monitor.record_window_snapshot(pane_snapshot(
+                now,
+                vec![live_pane_observation("tab-1::old", 42, state)],
+            ));
+            assert!(monitor.claim_probe_plan(4).0 > 0, "spare capacity");
+            assert!(monitor.claim_probe_plan(4).1.is_empty());
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe("owner", now, 4, |_| false),
+                0
+            );
+            assert!(monitor.clone().next_launch_request(now).is_none());
+            let probes = std::cell::Cell::new(0);
+            monitor.clone().claim_next_launch_requests_with_probe(
+                &gwt_github::FakeIssueClient::new(),
+                "owner",
+                now,
+                4,
+                |_| {
+                    probes.set(probes.get() + 1);
+                    false
+                },
+            );
+            assert_eq!(probes.get(), 0, "synchronous admission also excludes it");
+            let status = monitor.agent_status_at("2026-10-22T00:03:00Z");
+            let row = &status.inbox[0];
+            let reason = row.exclusion_reason.as_deref().unwrap();
+            assert!(reason.contains("retained_implementation_pane"), "{reason}");
+            assert!(reason.contains("tab-1::old") && reason.contains("pane.close"));
+            assert_eq!(row.state, MonitorInboxState::Queued);
+            assert!(row.error_message.is_none(), "no windowless timeout");
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert!(monitor.pending_effects().is_empty());
+            assert!(monitor.terminal_queue_contains(42));
+            assert_eq!(monitor.attempt_count(42), 0);
+
+            // A fresh canvas after pane.close clears the exclusion. Reviews
+            // and another Issue's pane must not be mistaken for this producer.
+            monitor.record_window_snapshot(pane_snapshot(
+                "2026-10-22T00:03:01Z",
+                vec![
+                    IssueMonitorWindowObservation {
+                        review_dispatch: true,
+                        ..live_pane_observation("tab-1::review", 42, state)
+                    },
+                    live_pane_observation("tab-1::other", 43, state),
+                ],
+            ));
+            assert_eq!(monitor.claim_probe_plan(4).1, vec![42]);
+            assert_eq!(
+                monitor.prepare_claim_effects_with_probe(
+                    "owner",
+                    "2026-10-22T00:03:01Z",
+                    4,
+                    |_| false,
+                ),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn retained_implementation_pane_compensates_an_inflight_claim() {
+        let now = "2026-10-22T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 4,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 4, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("claim effect");
+        };
+        monitor.record_window_snapshot(pane_snapshot(
+            now,
+            vec![live_pane_observation(
+                "tab-1::old",
+                42,
+                WindowState::Stopped,
+            )],
+        ));
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert!(!monitor.active_launches.contains(&42));
+        assert!(monitor.terminal_queue_contains(42));
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(
+            monitor
+                .pending_effects()
+                .iter()
+                .filter(|pending| matches!(
+                    &pending.payload,
+                    IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number: 42, claim_id: released, owner: released_owner,
+                    } if released == claim_id && released_owner == owner
+                ))
+                .count(),
+            1
         );
     }
 
