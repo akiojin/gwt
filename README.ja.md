@@ -315,9 +315,12 @@ JSONレポートで返します。対応が取れない行、worktreeの重複�
 選んだ行の `id`、`session_id`、paneの `child_pid` / `child_started_at` を指定します。
 プロセスのみの対象には代わりに `pid` / `started_at` が必要です。
 配信状態がunknownの集合は `allow_unknown:true` を明示しない限り拒否されます。
-現在のclaim/execution保持者と未配信の作業は保護されます。
+現在のclaim保持者、稼働中executionの保持者、未配信の作業は保護されます。
 `fleet.orphan.terminate` はプロセス対象のみ受け付けます。対象ごとにreceiptを返し、
 世代変更、未対応backend、プロセス終端未確認を報告します。通常closeへはfallbackしません。
+orphan終端には固定OS process handle（LinuxのpidfdまたはWindowsのprocess handle）が必要です。
+他のOS、handle取得不可、lifecycle権限が不確かな場合はプロセスを保持します。
+`allow_unknown` で上書きできるのは配信状態の不確かさだけです。
 
 `pane.health` は既存の workspace と runtime sidecar の状態から、GUI event loop に
 依存せずプロジェクトの pane health を読み取ります。応答の `output` 文字列を JSON として
@@ -669,6 +672,12 @@ backoffに使う総試行回数には数えます。
 `issue.monitor.tier.set` の `number` と `tier` でIssueの段の下限を引き上げ、
 次回起動にも保持できます。`issue.monitor.tiers` は設定・Issue履歴・最下段での
 着地率を返します（着地の観測がなければ `null`）。判定不能な終了の累計も確認できます。
+条件付きで `tiers.set` を実行する場合は、`issue.monitor.status` または
+`issue.monitor.tiers` の fresh な `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。不一致なら設定ファイル全体を
+変更せず拒否するため、status を再読して変更を再判断し、成功後も読み戻して確認します。
+token は保存された `launch_auto` と `launch_tiers` を含みます。guard の省略は従来互換を保ち、
+null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴や個別の `tier.set` は保護しません。
 `issue.monitor.status` の各行には `launch_tier` と `landing_tier` に加え、総試行回数の
 `attempts`、段に数えなかった `non_agent_attempts`、差分の `tier_input` が表示されます。
 着地は、担当Issueとセッションが一致するWorkの `done` 更新成功を指します。

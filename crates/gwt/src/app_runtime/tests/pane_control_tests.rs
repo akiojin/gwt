@@ -473,11 +473,24 @@ fn fleet_pane_inventory_scopes_actual_runtime_generations() {
     );
 }
 
+fn fleet_target_session(project: &Path, runtime: &mut AppRuntime) -> gwt_agent::Session {
+    let mut session = gwt_agent::Session::new(project, "work/target", gwt_agent::AgentId::Codex);
+    session.id = "other-session".into();
+    session.save(&runtime.sessions_dir).unwrap();
+    runtime
+        .active_agent_sessions
+        .get_mut("tab-1::other-window")
+        .unwrap()
+        .worktree_path = project.into();
+    session
+}
+
 #[test]
 fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
     let window_id = "tab-1::other-window";
     insert_test_pane_runtime(&mut runtime, window_id);
     let pid = runtime.runtimes[window_id].pty.process_id().unwrap();
@@ -566,10 +579,166 @@ fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
 }
 
 #[test]
+fn fleet_pane_close_protects_authority_acquired_after_inventory() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    let window_id = "tab-1::other-window";
+    let session = fleet_target_session(&project, &mut runtime);
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let selected = runtime
+        .agent_fleet_pane_inventory(&principal)
+        .into_iter()
+        .find(|pane| pane.window_id == window_id)
+        .unwrap();
+    gwt::cli::execution_state::materialize_at_launch(
+        &project,
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        4179,
+        &session.id,
+        "gwt-execute",
+        false,
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: selected.session_id.unwrap(),
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+        ok: false, reason: Some(reason), ..
+    } if reason.contains("execution holder")),
+        "{events:?}"
+    );
+    assert!(runtime.window_lookup.contains_key(window_id));
+    gwt::cli::execution_state::settle(
+        &project,
+        &session.id,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: session.id,
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(
+            &events[0].event,
+            BackendEvent::FleetPaneCloseResult { ok: true, .. }
+        ),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_protects_claim_acquired_after_inventory() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    let window_id = "tab-1::other-window";
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let selected = runtime
+        .agent_fleet_pane_inventory(&principal)
+        .into_iter()
+        .find(|pane| pane.window_id == window_id)
+        .unwrap();
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        |prefs| {
+            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+                issue_number: 4179,
+                window_id: window_id.into(),
+            });
+        },
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: selected.session_id.unwrap(),
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+        ok: false, reason: Some(reason), ..
+    } if reason.contains("claim holder")),
+        "{events:?}"
+    );
+    assert!(runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_refuses_busy_lifecycle_fence_and_recovers() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    let window_id = "tab-1::other-window";
+    let request = || AgentFrontendRequest::CloseFleetPane {
+        request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+        id: window_id.into(),
+        session_id: "other-session".into(),
+        child_pid: None,
+        child_started_at: None,
+    };
+    gwt::cli::trusted_store::with_write_lease(&project, || {
+        let events = runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+            request(),
+        );
+        assert!(
+            matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+            ok: false, reason: Some(reason), ..
+        } if reason.contains("lease") && reason.contains("retry")),
+            "{events:?}"
+        );
+        assert!(runtime.window_lookup.contains_key(window_id));
+        Ok(())
+    })
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+        request(),
+    );
+    assert!(
+        matches!(
+            &events[0].event,
+            BackendEvent::FleetPaneCloseResult { ok: true, .. }
+        ),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
 fn fleet_pane_close_matches_absent_runtime_without_wildcards() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
     runtime
         .tab_mut("tab-1")
         .unwrap()

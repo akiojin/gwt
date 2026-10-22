@@ -15,6 +15,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         client::IntoClientRequest,
+        error::ProtocolError,
         http::{header::AUTHORIZATION, HeaderValue},
         protocol::{frame::coding::CloseCode, CloseFrame},
         Error as WebSocketError, Message,
@@ -73,7 +74,9 @@ impl PaneRequestError {
                 | WebSocketError::Tls(_)
                 | WebSocketError::ConnectionClosed
                 | WebSocketError::AlreadyClosed
-        ) {
+                | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+        ) || matches!(error, WebSocketError::Http(response) if response.status().is_server_error())
+        {
             Self::Network(message)
         } else {
             Self::Operation(message)
@@ -819,7 +822,7 @@ async fn request_window_list(
 
 /// Fleet requests have one short absolute budget and never fall back to a
 /// legacy listing or close, whose runtime identity is not strong enough.
-pub(super) fn fleet_windows(_project_root: &str) -> Result<Vec<Value>, String> {
+pub(super) fn fleet_windows(project_root: &str) -> Result<Vec<Value>, String> {
     let ws_url = pane_websocket_url_from_env()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -832,6 +835,17 @@ pub(super) fn fleet_windows(_project_root: &str) -> Result<Vec<Value>, String> {
             loop {
                 let value = next_backend_json_unbounded(&mut socket).await?;
                 if value["kind"] == "fleet_pane_list" {
+                    let observed_root = value["project_root"]
+                        .as_str()
+                        .filter(|root| !root.is_empty())
+                        .ok_or_else(|| {
+                            "fleet pane snapshot omitted its project scope".to_string()
+                        })?;
+                    let expected_root =
+                        gwt_core::paths::resolve_main_worktree_root(Path::new(project_root));
+                    if !same_pane_scope_path(Path::new(observed_root), &expected_root) {
+                        return Err("fleet pane snapshot belongs to a different project".into());
+                    }
                     return value["panes"]
                         .as_array()
                         .cloned()
@@ -1467,9 +1481,18 @@ async fn next_backend_json_unbounded_typed(
         Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
             PaneRequestError::Operation(format!("pane backend returned invalid JSON: {err}"))
         }),
-        Message::Close(frame) => Err(PaneRequestError::Operation(pane_socket_closed_error(
-            frame.as_ref(),
-        ))),
+        Message::Close(frame) => {
+            let message = pane_socket_closed_error(frame.as_ref());
+            Err(
+                if frame.as_ref().is_some_and(|frame| {
+                    frame.code == CloseCode::Policy && !frame.reason.is_empty()
+                }) {
+                    PaneRequestError::Operation(message)
+                } else {
+                    PaneRequestError::Network(message)
+                },
+            )
+        }
         other => Err(PaneRequestError::Operation(format!(
             "pane backend returned unsupported websocket message: {other:?}"
         ))),
@@ -2838,6 +2861,28 @@ mod tests {
         );
         assert!(unreachable.contains("connect failed"), "{unreachable}");
         assert!(!unreachable.contains("settled"), "{unreachable}");
+
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(settled, &http_409),
+            PaneRequestError::Operation(_)
+        ));
+        let http_503 = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(503)
+                .body(None)
+                .expect("HTTP response"),
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error("Host unavailable".into(), &http_503),
+            PaneRequestError::Network(_)
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(
+                "Host disconnected".into(),
+                &WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+            ),
+            PaneRequestError::Network(_)
+        ));
     }
 
     /// Issue #3667 AC-3: the mutation refusal for a settled session must reach
@@ -4429,6 +4474,12 @@ mod tests {
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                 next_frontend_json(&mut socket).await;
                 socket.send(Message::Text("invalid JSON".into())).await.unwrap();
+                for frame in [None, Some(CloseFrame { code: CloseCode::Away, reason: "shutting down".into() }), Some(CloseFrame { code: CloseCode::Policy, reason: "execution binding is no longer current".into() })] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    next_frontend_json(&mut socket).await;
+                    socket.send(Message::Close(frame)).await.unwrap();
+                }
             });
             let url = format!("ws://{address}/internal/pane-ws");
             let refusal = close_work_async(&url, "work-1", "discarded").await.unwrap();
@@ -4442,6 +4493,15 @@ mod tests {
             let invalid_json = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
             assert!(invalid_json.contains("invalid JSON"), "{invalid_json}");
             assert!(!invalid_json.starts_with("network error:"), "{invalid_json}");
+            for expected in ["without a reason", "shutting down"] {
+                let lost_result = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+                assert!(lost_result.starts_with("network error:"), "{lost_result}");
+                assert!(lost_result.contains(expected), "{lost_result}");
+            }
+            let policy = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(!policy.starts_with("network error:"), "{policy}");
+            assert!(policy.contains("execution binding is no longer current"), "{policy}");
+            assert!(policy.contains("observation"), "{policy}");
             server.await.unwrap();
             let transport = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
             assert!(transport.starts_with("network error:"), "{transport}");
@@ -4463,6 +4523,68 @@ mod tests {
         assert!(fleet_close_reply(&success, "request-a", "pane-a")
             .unwrap()
             .is_ok());
+    }
+
+    #[test]
+    fn fleet_windows_rejects_foreign_empty_snapshot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            persist_runtime_evidence(home.path()),
+        );
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "fleet-scope-capability",
+        );
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let snapshots = [
+            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
+            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                for snapshot in snapshots {
+                    let (stream, _) =
+                    // test-hygiene: allow-wall-clock-deadline Bound fixture startup if the real WebSocket client never connects; scope assertions depend only on the received snapshot.
+                        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert_eq!(next_frontend_kind(&mut socket).await, "list_fleet_panes");
+                    socket
+                        .send(Message::Text(snapshot.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let wrong_project = fleet_windows(&project.path().to_string_lossy());
+        let own_project = fleet_windows(&project.path().to_string_lossy());
+        server.join().unwrap();
+        assert!(
+            wrong_project.is_err(),
+            "an unrelated empty inventory is not a complete pane observation"
+        );
+        assert!(own_project.unwrap().is_empty());
     }
 
     #[test]

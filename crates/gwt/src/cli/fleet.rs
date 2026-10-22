@@ -132,11 +132,20 @@ fn same_pane(left: &str, right: &str) -> bool {
 
 fn monitor_rows(monitor: &Value) -> Vec<Value> {
     let mut rows = BTreeMap::new();
+    for inbox in monitor["inbox"].as_array().into_iter().flatten() {
+        let Some(owner) = inbox["issue_number"].as_u64() else {
+            continue;
+        };
+        let window = inbox["launched_window_id"].as_str().unwrap_or_default();
+        let mut row = inbox.clone();
+        row["window_id"] = inbox["launched_window_id"].clone();
+        row["source"] = monitor["inbox_source"].clone();
+        rows.insert((owner, window.to_string()), row);
+    }
     for (window, owner) in monitor["launch_bindings"].as_object().into_iter().flatten() {
         if let Some(owner) = owner.as_u64() {
-            rows.insert(
-                (owner, window.clone()),
-                json!({"issue_number":owner,"window_id":window,"source":"persisted_monitor"}),
+            rows.entry((owner, window.clone())).or_insert_with(
+                || json!({"issue_number":owner,"window_id":window,"source":"persisted_monitor"}),
             );
         }
     }
@@ -169,7 +178,9 @@ fn monitor_rows(monitor: &Value) -> Vec<Value> {
         .filter(|(_, window)| !window.is_empty())
         .map(|(owner, _)| *owner)
         .collect();
-    rows.retain(|(owner, window), _| !window.is_empty() || !with_window.contains(owner));
+    rows.retain(|(owner, window), row| {
+        !window.is_empty() || row["source"] != "persisted_monitor" || !with_window.contains(owner)
+    });
     rows.into_values().collect()
 }
 
@@ -395,6 +406,9 @@ fn classify_delivery(proof: &Value) -> &'static str {
     {
         return "undelivered";
     }
+    if proof["pr_state"] == "OPEN" && proof["pr_number"].as_u64().is_some() {
+        return "undelivered";
+    }
     if proof["merged_pr"].as_u64().is_some()
         && proof["merge_sha"]
             .as_str()
@@ -417,9 +431,7 @@ fn classify_delivery(proof: &Value) -> &'static str {
             "undelivered"
         };
     }
-    if proof["execution_status"] == "blocked"
-        || (proof["pr_state"] == "OPEN" && proof["pr_number"].as_u64().is_some())
-    {
+    if proof["execution_status"] == "blocked" {
         return "undelivered";
     }
     "unknown"
@@ -508,23 +520,84 @@ pub(super) fn collect(project_root: &Path) -> FleetReport {
         }
     }
     let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&project_root);
-    let monitor = match crate::issue_monitor::load_issue_monitor_prefs(&prefs_path) {
-        Ok(prefs) => {
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(&prefs_path);
+    let mut monitor = prefs
+        .as_ref()
+        .ok()
+        .and_then(|prefs| serde_json::to_value(prefs).ok())
+        .unwrap_or_else(|| json!({}));
+    let published_inbox = crate::daemon_publisher::read_issue_monitor_status(&project_root)
+        .map_err(|error| error.to_string())
+        .and_then(|status| status.ok_or_else(|| "no live Monitor daemon".to_string()))
+        .and_then(|status| {
+            status["inbox"]
+                .as_array()
+                .cloned()
+                .ok_or_else(|| "daemon Monitor snapshot omitted its inbox".to_string())
+        });
+    match published_inbox {
+        Ok(inbox) => {
+            monitor["inbox"] = json!(inbox);
+            monitor["inbox_source"] = json!("daemon");
             sources.push(source(
                 "monitor",
-                "ok",
-                Some(format!(
-                    "persisted canonical store; last_scan_at={}",
-                    prefs.last_scan_at.as_deref().unwrap_or("unknown")
-                )),
+                if prefs.is_ok() { "ok" } else { "partial" },
+                Some(match &prefs {
+                    Ok(_) => "daemon atomic inbox and persisted canonical launch bindings".into(),
+                    Err(error) => {
+                        format!("daemon atomic inbox; launch bindings unavailable: {error}")
+                    }
+                }),
             ));
-            serde_json::to_value(prefs).unwrap_or_default()
         }
-        Err(error) => {
-            sources.push(source("monitor", "unavailable", Some(error.to_string())));
-            Value::Null
+        Err(daemon_error) => {
+            // Match issue.monitor.status's cache projection without refreshing
+            // machine capacity or writing a machine-policy migration.
+            let cached_inbox = (|| -> Result<Value, String> {
+                let prefs = prefs.as_ref().map_err(ToString::to_string)?;
+                let cache_root =
+                    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+                let candidates =
+                    crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)?;
+                let mut state = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    prefs.clone(),
+                );
+                crate::issue_monitor_worker::bind_issue_monitor_source_repository(
+                    &mut state,
+                    &project_root,
+                );
+                let now = chrono::Utc::now().to_rfc3339();
+                crate::scan_issue_monitor_candidates(&mut state, &candidates, &now);
+                serde_json::to_value(state.agent_status_at(&now).inbox)
+                    .map_err(|error| error.to_string())
+            })();
+            match cached_inbox {
+                Ok(inbox) => {
+                    monitor["inbox"] = inbox;
+                    monitor["inbox_source"] = json!("degraded_cache");
+                    sources.push(source(
+                        "monitor",
+                        "partial",
+                        Some(format!(
+                            "degraded_cache inbox and persisted launch bindings; {daemon_error}"
+                        )),
+                    ));
+                }
+                Err(cache_error) => sources.push(source(
+                    "monitor",
+                    if prefs.is_ok() {
+                        "partial"
+                    } else {
+                        "unavailable"
+                    },
+                    Some(format!(
+                        "inbox unavailable: {daemon_error}; cache: {cache_error}"
+                    )),
+                )),
+            }
         }
-    };
+    }
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -707,6 +780,14 @@ fn enrich_delivery(project_root: &Path, monitor: &Value, entries: &mut [FleetEnt
                 OwnerLifecycle::Unknown => "unknown",
             }
         );
+        let open_pr = &monitor["open_pr_observations"][number.to_string()];
+        if let Some(pr_number) = open_pr["hold"]["pr_number"].as_u64() {
+            proof["pr_number"] = json!(pr_number);
+            proof["pr_state"] = json!("OPEN");
+            proof["pr_observed_at"] = open_pr["observed_at"].clone();
+            proof["pr_lifecycle"] = open_pr["hold"]["lifecycle"].clone();
+            proof["pr_evidence_source"] = json!("persisted_monitor_open_pr_observation");
+        }
         if let Some((base_ref, base_sha)) = &base {
             proof["base_ref"] = json!(base_ref);
             proof["base_sha"] = json!(base_sha);
@@ -813,7 +894,8 @@ fn enrich_delivery(project_root: &Path, monitor: &Value, entries: &mut [FleetEnt
             .unwrap_or_else(|| json!({"reason":"owner_unknown"}));
         proof["entry_session_id"] = json!(row.session_id);
         proof["entry_is_execution_holder"] = json!(
-            row.session_id.is_some()
+            proof["execution_status"] == "active"
+                && row.session_id.is_some()
                 && row.session_id.as_deref() == proof["holder_session_id"].as_str()
         );
         if proof["owner_state"] == "closed" || proof["merged_pr"].as_u64().is_some() {
@@ -987,6 +1069,177 @@ mod tests {
     }
 
     #[test]
+    fn fleet_monitor_inbox_preserves_queued_rows_and_live_state() {
+        let report = correlate_inventory(
+            vec![],
+            vec![json!({"window_id":"live-pane","session_id":"live","linked_issue_number":7})],
+            vec![],
+            &json!({
+                "inbox_source":"daemon",
+                "inbox":[
+                    {"issue_number":7,"state":"launched","claim_id":"live-claim","launched_window_id":"live-pane"},
+                    {"issue_number":8,"state":"queued","claim_id":null,"launched_window_id":null}
+                ],
+                "launch_bindings":{"live-pane":7,"stale-pane":8}
+            }),
+        );
+        let queued = report
+            .iter()
+            .find(|row| row["owner_number"] == 8)
+            .expect("an ordinary queued Monitor inbox row remains visible");
+        assert_eq!(queued["correlation"], "monitor_only");
+        assert_eq!(queued["monitor"]["state"], "queued");
+        let live = report.iter().find(|row| row["owner_number"] == 7).unwrap();
+        assert_eq!(live["monitor"]["state"], "launched");
+        assert_eq!(live["monitor"]["claim_id"], "live-claim");
+        assert_eq!(live["monitor"]["source"], "daemon");
+        assert!(report
+            .iter()
+            .any(|row| row["monitor"]["window_id"] == "stale-pane"));
+    }
+
+    #[test]
+    fn fleet_collect_keeps_independent_sources_when_bridge_withholds_reply() {
+        use futures_util::StreamExt;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        super::super::trusted_store::init_git_repo_with_origin(project.path());
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.launch_bindings.insert("unobserved-pane".into(), 42);
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let runtime_path = gwt_core::paths::gwt_sessions_dir().join("runtime/123/session.json");
+        std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_path, "{}").unwrap();
+        let _runtime = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path,
+        );
+        let _token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "fleet-stalled-capability",
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (release, hold) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) =
+                // test-hygiene: allow-wall-clock-deadline Bound fixture startup if the real WebSocket client never connects; assertions use the reply-release channel.
+                    tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request = socket.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                assert_eq!(request["kind"], "list_fleet_panes");
+                hold.recv().unwrap();
+                // No snapshot is sent while collect is waiting for this peer.
+                drop(socket);
+            });
+        });
+        let _url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let report = collect(project.path());
+        release.send(()).unwrap();
+        server.join().unwrap();
+        let pane_source = report
+            .sources
+            .iter()
+            .find(|source| source.name == "panes")
+            .unwrap();
+        assert_eq!(pane_source.status, "unavailable");
+        assert!(pane_source.detail.as_deref().unwrap().contains("timed out"));
+        assert!(report
+            .sources
+            .iter()
+            .any(|source| source.name == "processes"));
+        assert!(report
+            .entries
+            .iter()
+            .any(|entry| entry.correlation == "monitor_only" && entry.owner_number == Some(42)));
+        assert!(report
+            .sources
+            .iter()
+            .any(|source| source.name == "monitor" && source.status == "partial"));
+    }
+
+    #[test]
+    fn fleet_terminal_execution_is_evidence_without_active_holder_protection() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        super::super::trusted_store::init_git_repo_with_origin(project.path());
+        let record: execution_state::ExecutionControlRecord = serde_json::from_value(json!({
+            "owner_kind":"spec","owner_number":42,"primary_session_id":"delivered-session",
+            "entrypoint":"gwt-execute","status":"completed","launched_at":"2026-10-01T00:00:00Z",
+            "settled_at":"2026-10-02T00:00:00Z"
+        }))
+        .unwrap();
+        execution_state::save(project.path(), &record).unwrap();
+        execution_state::ensure_generation_ledger(
+            project.path(),
+            execution_state::ExecutionOwnerKey {
+                kind: execution_state::ExecutionOwnerKind::Spec,
+                number: 42,
+            },
+            execution_state::LegacyActiveDisposition::Unknown,
+        )
+        .unwrap();
+        let mut entries = vec![entry(
+            None,
+            Some(
+                json!({"id":"delivered-pane","session_id":"delivered-session","linked_issue_number":42}),
+            ),
+            None,
+        )];
+        enrich_delivery(project.path(), &json!({}), &mut entries);
+        assert_eq!(
+            entries[0].delivery_evidence["execution_status"],
+            "completed"
+        );
+        assert_eq!(
+            entries[0].delivery_evidence["holder_session_id"],
+            "delivered-session"
+        );
+        assert_eq!(
+            entries[0].delivery_evidence["entry_is_execution_holder"], false,
+            "a terminal execution holder has no active lifecycle authority to preserve"
+        );
+        assert_eq!(
+            entries[0].delivery_state, "unknown",
+            "terminal status alone does not prove delivery"
+        );
+        enrich_delivery(
+            project.path(),
+            &json!({"open_pr_observations":{"42":{
+                "observed_at":"2026-10-03T00:00:00Z",
+                "hold":{"pr_number":7,"lifecycle":"ready"}
+            }}}),
+            &mut entries,
+        );
+        assert_eq!(
+            entries[0].delivery_state, "undelivered",
+            "a known open PR keeps its delivery obligation"
+        );
+        assert_eq!(entries[0].delivery_evidence["pr_number"], 7);
+        assert_eq!(entries[0].delivery_evidence["pr_state"], "OPEN");
+    }
+
+    #[test]
     fn fleet_live_pane_generation_overrides_a_stale_matching_session() {
         let report = correlate_inventory(
             vec![process(10, 100, "/repo/work/one")],
@@ -1060,6 +1313,12 @@ mod tests {
         );
         assert_eq!(
             classify_delivery(&json!({"pr_state":"OPEN","pr_number":7})),
+            "undelivered"
+        );
+        assert_eq!(
+            classify_delivery(
+                &json!({"pr_state":"OPEN","pr_number":7,"owner_state":"closed","source_surface":"zero"})
+            ),
             "undelivered"
         );
         assert_eq!(

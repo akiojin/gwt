@@ -2075,6 +2075,7 @@ pub enum BackendEvent {
         windows: Vec<PersistedWindowState>,
     },
     FleetPaneList {
+        project_root: String,
         panes: Vec<FleetPaneView>,
     },
     RecoveryCenterState {

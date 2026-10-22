@@ -13839,6 +13839,7 @@ impl AppRuntime {
             AgentFrontendRequest::ListFleetPanes => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::FleetPaneList {
+                    project_root: principal.canonical_project_root().display().to_string(),
                     panes: self.agent_fleet_pane_inventory(&principal),
                 },
             )],
@@ -13996,9 +13997,64 @@ impl AppRuntime {
                 if let Some(reason) = self.agent_close_board_check(&principal, &id) {
                     return refusal(&reason);
                 }
-                // The event loop cannot replace the Session or runtime between
-                // this exact match and the finalizer capturing their ownership.
-                let outcome = self.close_window_outcome(&id);
+                let worktree = self
+                    .active_agent_sessions
+                    .get(&id)
+                    .filter(|active| active.session_id == session_id)
+                    .map(|active| active.worktree_path.clone())
+                    .or_else(|| {
+                        gwt_agent::Session::load(
+                            &self.sessions_dir.join(format!("{session_id}.toml")),
+                        )
+                        .ok()
+                        .map(|session| session.worktree_path)
+                    })
+                    .unwrap_or_else(|| principal.canonical_project_root().to_path_buf());
+                let sessions_dir = self.sessions_dir.clone();
+                let prefs_path =
+                    gwt::issue_monitor_prefs_path_for_repo_path(principal.canonical_project_root());
+                // Session/runtime replacement is serialized by this event loop.
+                // External lifecycle and claim writers share these disk fences.
+                let outcome = gwt::cli::execution_state::with_fleet_cleanup_lease(
+                    &worktree,
+                    &sessions_dir,
+                    Some(&session_id),
+                    || {
+                        let _claim_fence =
+                            gwt_core::operation_deadline::NamedFileLock::try_acquire(
+                                &prefs_path.with_extension("lock"),
+                                "fleet.close",
+                            )?;
+                        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)?;
+                        let same_window = |candidate: &str| {
+                            candidate == id
+                                || (!candidate.contains("::")
+                                    && id.split_once("::").is_some_and(|(_, raw)| raw == candidate))
+                        };
+                        if prefs
+                            .launched_issues
+                            .iter()
+                            .any(|row| same_window(&row.window_id))
+                            || prefs
+                                .launch_confirmations
+                                .iter()
+                                .any(|(owner, confirmation)| {
+                                    same_window(&confirmation.window_id)
+                                        && confirmation.claim_id.as_ref().is_some_and(|claim| {
+                                            prefs.launched_claims.get(owner) == Some(claim)
+                                        })
+                                })
+                        {
+                            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                                "current claim holder is protected; use its owner lifecycle operation"));
+                        }
+                        Ok(self.close_window_outcome(&id))
+                    },
+                );
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => return refusal(&format!("fleet close retained target: {error}; refresh fleet inventory before retry")),
+                };
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::FleetPaneCloseResult {

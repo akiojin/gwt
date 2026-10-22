@@ -3400,7 +3400,7 @@ mod tests {
         let inventory = scope
             .filter_outbound(
                 serde_json::json!({
-                    "kind":"fleet_pane_list", "panes":[
+                    "kind":"fleet_pane_list", "project_root":project.path(), "panes":[
                         {"window_id":"owned-window", "session_id":"owned-session", "project_root":project.path()},
                         {"window_id":"foreign-window", "session_id":"foreign-session", "project_root":foreign.path()},
                         {"window_id":"unscoped-window", "session_id":"unscoped-session"}
@@ -3422,7 +3422,7 @@ mod tests {
         scope
             .filter_outbound(
                 serde_json::json!({
-                    "kind":"fleet_pane_list", "panes":[
+                    "kind":"fleet_pane_list", "project_root":project.path(), "panes":[
                         {"window_id":"new-owned-window", "project_root":project.path()}
                     ]
                 })
