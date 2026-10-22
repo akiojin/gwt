@@ -315,11 +315,8 @@ test.describe("Issue preview placement", () => {
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
 
-    await page.locator('.workspace-window[data-id="tab-issue::agent-preview-2"] [data-action="close"]').dispatchEvent("click");
-    await page.locator("#window-close-confirm-modal").getByRole("button", { name: "Close window", exact: true }).click();
-    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
-      .filter(message => message.kind === "close_window").map(message => message.id)))
-      .toEqual(["tab-issue::agent-preview-2"]);
+    // Model a backend session removal; fixed surfaces no longer close runtimes.
+    await page.evaluate(() => window.__removeFixtureWindow("tab-issue::agent-preview-2"));
     await expect(cardAction).toHaveAttribute("aria-label", "Undock agent window");
     await cardAction.evaluate(button => { button.click(); button.click(); });
     await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview"] .xterm')).toBeVisible();
@@ -383,11 +380,8 @@ test.describe("Issue preview placement", () => {
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
 
-    await page.locator('.workspace-window[data-id="tab-issue::agent-preview-2"] [data-action="close"]').dispatchEvent("click");
-    await page.locator("#window-close-confirm-modal").getByRole("button", { name: "Close window", exact: true }).click();
-    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
-      .filter(message => message.kind === "close_window").map(message => message.id)))
-      .toEqual(["tab-issue::agent-preview-2"]);
+    // Model a backend session removal; fixed surfaces no longer close runtimes.
+    await page.evaluate(() => window.__removeFixtureWindow("tab-issue::agent-preview-2"));
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
     await page.locator('[data-issue-view="list"]').click();
@@ -1064,6 +1058,10 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
       };
       // Issue #4082 (SPEC #3885 T-020): let a spec change one window's wire fields
       // the way a backend broadcast would.
+      window.__removeFixtureWindow = (id) => {
+        windows = windows.filter(entry => entry.id !== id);
+        window.__fixtureSocket?.emit(workspaceState());
+      };
       window.__patchWindow = (id, patch) => {
         windows = windows.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
         window.__fixtureSocket?.emit(workspaceState());

@@ -45,7 +45,7 @@ test.describe("Agent window navigation without tabs", () => {
       .toHaveAttribute("title", "Birch");
   });
 
-  test("Windows focuses a legacy grouped agent for input and preserves Close Guard", async ({ page }) => {
+  test("Windows focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
     const active = page.locator(".agent-tile[data-agent-id='agent-1']");
     const target = page.locator(".agent-tile[data-agent-id='agent-2']");
     const source = page.locator(".workspace-window[data-id='agent-2']");
@@ -66,16 +66,15 @@ test.describe("Agent window navigation without tabs", () => {
       .map(message => message.data).join(""))).toBe("hello");
     const closedIds = () => page.evaluate(() => window.__tabbedAgentsFixture.sent
       .filter(message => message.kind === "close_window").map(message => message.id));
-    const modal = page.locator("#window-close-confirm-modal");
-    await source.locator('[data-action="close"]').dispatchEvent("click");
-    await expect(modal).toBeVisible();
+    await expect(source.locator('[data-action="close"]')).toHaveCount(0);
+    await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
     expect(await closedIds()).toEqual([]);
-    await modal.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(modal).toBeHidden();
+    // Agent tabs close only the view; the terminal remains owned by its session.
+    await page.getByRole("button", { name: "Close Birch tab", exact: true }).click();
     expect(await closedIds()).toEqual([]);
-    await source.locator('[data-action="close"]').dispatchEvent("click");
-    await modal.getByRole("button", { name: "Close window", exact: true }).click();
-    await expect.poll(closedIds).toEqual(["agent-2"]);
+    await page.locator("#window-list-button").click();
+    await rowFor(page, "Birch").click();
+    await expect(target).toBeVisible();
   });
 
   test("Windows list updates inactive agent telemetry without activating it", async ({ page }) => {

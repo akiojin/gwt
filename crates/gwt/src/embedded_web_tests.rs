@@ -1289,7 +1289,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
 }
 
 #[test]
-fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
+fn embedded_web_window_state_visualization_uses_runtime_state_without_canvas_geometry() {
     let js = app_js();
     // SPEC-3015: the pure runtime-state helpers moved to the extracted
     // window-runtime-state.js root module; app.js keeps the call sites.
@@ -1300,22 +1300,22 @@ fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separate
         "expected the extracted module to expose a runtime-state normalization helper",
     );
     assert!(
-        js.contains("function windowGeometryLabel(windowData)"),
-        "expected embedded js to expose a dedicated geometry label helper",
+        !js.contains("function windowGeometryLabel(windowData)"),
+        "fixed rail surfaces must not expose a saved canvas geometry label helper",
     );
     assert!(
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved to the
-    // project shell surface; the geometry/runtime label separation is pinned
-    // against the extracted module while windowGeometryLabel stays in app.js.
+    // The Window List preserves runtime labels while ignoring saved canvas
+    // geometry, including legacy states loaded after a restart or update.
     let shell_js = project_shell_surface_js();
     assert!(
-            shell_js.contains("const geometryLabel = windowGeometryLabel(entry);")
+            !shell_js.contains("windowGeometryLabel")
+                && !shell_js.contains("window-list-geometry")
                 && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
                 && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
-            "expected window list rendering to derive geometry and runtime labels through separate helpers",
+            "expected fixed surface window list rendering to display runtime labels without canvas geometry",
         );
     assert!(
         !js.contains("function windowStateLabel(windowData)")

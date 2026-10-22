@@ -1561,6 +1561,7 @@ an entry removes its copied policy on the next refresh.
 
 - Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
 - Open **PM** from its separate rail entry; PM uses a single pane.
+- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
 - Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
 - Use **Close split** to keep the active surface in one pane.
 - In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.

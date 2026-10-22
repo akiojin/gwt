@@ -667,11 +667,6 @@ const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
 
 const ISSUE_WINDOW_HEADER_ACTIONS = Object.freeze([
   Object.freeze({
-    action: "return-to-list",
-    label: "Return to list",
-    aria: (number) => `Return the agent for Issue #${number} to the Issue list`,
-  }),
-  Object.freeze({
     action: "open-issue",
     label: "Open Issue",
     aria: (number) => `Open Issue #${number} in the Issue window`,
@@ -685,6 +680,7 @@ export function issueWindowHeaderModel({
   attention = null,
 } = {}) {
   // FR-013: a session with no Issue behind it stays a bare terminal window.
+  if (windowData?.is_pm || windowData?.preset === "shell") return null;
   const issueNumber = Number(windowData?.linked_issue_number);
   if (!Number.isFinite(issueNumber) || issueNumber <= 0) return null;
   // The header is the canvas face only; in the list the same agent is the row's

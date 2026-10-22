@@ -253,14 +253,7 @@ test("FR-019: 死んだ server-driven center 契約は残さない", () => {
   );
 });
 
-test("FR-022: 閉じる確認は PM の停止が自動復帰しないことを明示する", () => {
-  const modal = readFileSync(resolve(here, "../window-close-confirm-modal.js"), "utf8");
-  assert.match(modal, /state\.isPm/, "PM かどうかで文言を分岐する");
-  assert.match(
-    modal,
-    /will not restart on its own/,
-    "クラッシュ時の自動復帰と区別できる文言にする",
-  );
-  // 実際に PM フラグが確認ダイアログへ渡っていること。
-  assert.match(appJs, /isPm:\s*Boolean\(windowData\.is_pm\)/);
+test("PM fixed surface cannot close or restart its resident session (Issue #4777 AC13)", () => {
+  assert.doesNotMatch(appJs, /requestCloseWindow|kind:\s*"close_window"/);
+  assert.match(appJs, /!isAgentWindow \|\| windowData\.is_pm \|\| windowData\.preset === "shell"/);
 });
