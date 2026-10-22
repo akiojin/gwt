@@ -2083,6 +2083,9 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
     seed_resumed_autonomous_handoff(&fixture, "Retry this answer");
+    // Own static claim inputs so this fixture reaches the ambiguous PTY write.
+    let _projection =
+        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let holder_window_id = fixture
         .holder_window_id
         .clone()
