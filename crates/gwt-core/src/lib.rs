@@ -26,6 +26,7 @@ pub mod migration;
 #[cfg(windows)]
 pub mod named_pipe;
 pub mod operation_deadline;
+pub mod pane_health;
 pub mod paths;
 pub mod pm_authorization;
 pub mod pm_peer;

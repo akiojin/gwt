@@ -321,6 +321,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`pane.health` reads project pane health from existing workspace and runtime
+sidecar state without depending on the GUI event loop. Decode the response's
+`output` string as JSON; its `panes` array contains each pane's `classification`,
+`reason_code`, and `recommended_action`.
+Omit `params.id` for all panes, or pass an ID from `pane.list` (a raw pane ID
+also works) to select one. Recommendations are advisory: this operation never
+closes, relaunches, stops, or requeues a pane.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
 is disabled by default. Allow individual workflow filenames for a repository
 in `~/.gwt/config.toml`:

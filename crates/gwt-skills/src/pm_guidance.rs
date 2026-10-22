@@ -1022,6 +1022,12 @@ drive them.
   to list only the blocked entries whose escalation is still open; each
   blocked entry carries `escalation.resolved`.
 - `pane.list` enumerates the live agent panes in this project.
+- `pane.health` returns a read-only project health snapshot; read `panes` in
+  the JSON decoded from the response's `output` string.
+  Omit `params.id` for all panes, or select one using the same ID as `pane.list`
+  or its raw pane ID. It reads existing project workspace/runtime sidecar state
+  without depending on the GUI event loop. The health operation does not execute
+  mutations; its recommendations do not grant authority to act.
 - `pane.read` with `params.id` and `params.lines` returns that pane's
   recent scrollback. Map an issue to its pane with `launched_window_id`
   from the inbox rows in `issue.monitor.status`.
@@ -1310,14 +1316,19 @@ you whether it is still going anywhere, and the user reads an idle
 window as your neglect. Steering is a cycle duty, not a discretionary
 act.
 
-- For every active launch in `issue.monitor.status`, and every idle or
-  waiting project Agent pane in `pane.list`, read `last_activity_at`
-  and the agent's latest Board posts and decide whether it needs a
-  directive. Three findings require one:
-  - **stalled** — no activity for more than twice the monitor scan
-    interval (`last_activity_at` more than two scan intervals behind
-    `last_scan_at`) with no lease wait, quota hold, or human prompt
-    explaining it;
+- Read `pane.health` once per resident cycle for all project Agent panes.
+  Use `classification`, `reason_code` and `recommended_action` as the primary
+  disposition evidence for every active launch and idle or waiting pane.
+  Read the agent's latest Board posts alongside that snapshot.
+  `healthy` with `recommended_action: none` is not stalled, even when terminal
+  output or `last_activity_at` has not changed; a running build or verification
+  may be quiet. Do not manufacture a directive from silence alone.
+- Read bounded `pane.read` only when the health snapshot and Board evidence do
+  not explain the disposition; never scan all panes' scrollback each cycle.
+  Keep at most one bounded diagnostic read per candidate, subject to the
+  waiting-episode rule above. Three findings require a directive:
+  - **stalled** — the health classification and reason support intervention,
+    without a lease wait, quota hold, or human prompt explaining it;
   - **scope drift** — its Board posts or Work focus have left the owner
     Issue's acceptance criteria, or it is changing surfaces the Issue
     never named;
@@ -1325,8 +1336,8 @@ act.
     the routine "ready for the next instruction" notice, or its pane
     sits idle at the prompt with an open obligation and nobody has told
     it what to do.
-- Classify an idle launch before you act, with at most one bounded
-  `pane.read`, and take the default action of its class:
+- Classify an idle launch from the health snapshot before you act, and take
+  the default action of its class:
   - **finished and settled** — the execution record is settled and the
     PR is handed off: confirm the Issue's delivery. The runtime closes
     that window itself after the configured close grace (Issue #3927,
@@ -1337,8 +1348,14 @@ act.
     escalation or a mention for a handoff;
   - **waiting for the user** — present the window title and the exact
     action required in the digest, every cycle until it is resolved;
-  - **stopped for no visible reason** — read the pane, then send one
-    line through `pm.message.send` saying what to resume and why.
+  - **stopped for no visible reason** — use the bounded diagnostic fallback
+    if needed, then send one line through `pm.message.send` saying what to
+    resume and why.
+- Route `waiting_for_human` / `report_to_human` through the existing digest
+  and human-input path; the observation does not create a Monitor NeedsHuman row.
+  For `close_or_relaunch` and `stop_and_requeue`, preserve the existing authority,
+  canonical settlement checks, the configured close grace, and the Issue Monitor's
+  launch path. A recommendation never authorizes an immediate close or relaunch.
 - The directive goes through the ruling channels only: `board.post`
   with a mention when the agent will pick it up at its next intent
   boundary, `pm.message.send` when the pane is idle and must move now.
@@ -1351,7 +1368,8 @@ act.
   keep the rules above; do not steer them into a wrong answer.
 - The steering judgment precedes the no-change judgment. No cycle is a
   no-change cycle until every running launch has passed it, and a
-  launch left idle without a directive is never a no-change cycle.
+  launch requiring intervention left idle without a directive is never a
+  no-change cycle.
   Record each directive in your session notes so the same launch is
   not re-sent the same line every cycle.
 
@@ -1583,12 +1601,12 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   A previous cycle's fetch is not current evidence. The advisory is warning-only;
   a failed fetch or provider payload without an explicit successful exit status
   leaves freshness unknown.
-- Every cycle, also check the agents that are running. Read the Board
-  for what they reported themselves, and use `pane.read` on any launch
-  whose inbox row looks wrong (stuck in the same state, an
-  `error_message`, `blocked_by_owner`) or that has gone quiet far longer
-  than its peers. Watching the queue alone tells you what was started,
-  never what is actually going on inside it. Then steer them (see
+- Every cycle, also check the agents that are running with the single
+  `pane.health` snapshot described in *Steering the running agents*.
+  Read the Board for what they reported themselves; bounded `pane.read` is
+  a fallback only when that evidence does not explain the disposition.
+  Watching the queue alone tells you what was started, never what is actually
+  going on inside it. Then steer them (see
   *Steering the running agents*): a stalled, drifting, or
   next-action-waiting launch gets its directive in the same cycle,
   before you decide the cycle changed nothing.
@@ -3254,6 +3272,32 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    /// Issue #3834 AC-9: both generated providers supervise from one health
+    /// snapshot, while keeping disposition behind the existing authority gates.
+    #[test]
+    fn generated_health_supervision_contract_is_shared_by_both_providers() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let contract = unwrapped(
+                &read_contract(dir.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap(),
+            );
+            for required in [
+                "Read `pane.health` once per resident cycle",
+                "Use `classification`, `reason_code` and `recommended_action` as the primary disposition evidence",
+                "`healthy` with `recommended_action: none` is not stalled",
+                "Read bounded `pane.read` only when the health snapshot and Board evidence do not explain the disposition",
+                "`waiting_for_human` / `report_to_human`",
+                "`close_or_relaunch` and `stop_and_requeue`",
+                "The health operation does not execute mutations",
+                "the configured close grace",
+                "Issue Monitor's launch path",
+            ] {
+                assert!(contract.contains(required), "{provider}: missing {required}");
+            }
+        }
+    }
+
     /// Bounded body of one `## heading` section, whitespace-collapsed.
     fn section(heading: &str) -> String {
         let text = SKILL_BODY_EN
@@ -3274,7 +3318,7 @@ mod tests {
         for phrase in [
             "`last_activity_at`",
             "latest Board posts",
-            "more than twice the monitor scan interval",
+            "Use `classification`, `reason_code` and `recommended_action` as the primary disposition evidence",
             "scope drift",
             "waiting for its next action",
             "finished and settled",
@@ -3286,7 +3330,7 @@ mod tests {
             "Never spawn, relaunch, or inject launch or bootstrap instructions past the Issue Monitor's launch path",
             "never `pane.send`",
             "The steering judgment precedes the no-change judgment",
-            "a launch left idle without a directive is never a no-change cycle",
+            "a launch requiring intervention left idle without a directive is never a no-change cycle",
         ] {
             assert!(
                 steering.contains(phrase),
