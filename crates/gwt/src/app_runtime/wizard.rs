@@ -6063,6 +6063,13 @@ impl AppRuntime {
     }
 
     fn issue_monitor_window_is_live(&self, window_id: &str) -> bool {
+        // In-place restart retains the prior runtime until the new Pane is
+        // installed. Its exit receipt cannot release the current launch's writer.
+        if self.initial_launch_workers.contains_key(window_id)
+            || self.pending_launch_completions.contains_key(window_id)
+        {
+            return true;
+        }
         // Display overlays can keep an exited quota/recovery pane Waiting or
         // Running. Preserve that pane, but not its native writer reservation.
         // Error alone may be a reader failure: only a local exit receipt proves
