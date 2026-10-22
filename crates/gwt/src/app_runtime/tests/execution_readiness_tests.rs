@@ -914,6 +914,16 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
         .expect("seed the durable launch delivery");
 
+    // Issue #3642: a pre-send endpoint failure must still allow the durable ACK.
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        &fixture.repo,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .expect("runtime scope");
+    let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+    fs::create_dir_all(endpoint_path.parent().expect("endpoint parent")).unwrap();
+    fs::write(endpoint_path, b"{\"pid\":").expect("inject malformed endpoint");
+
     let pending = fixture
         .runtime
         .pending_fresh_execution_launches
@@ -940,10 +950,19 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     let events = commit_pending_fresh_execution(&mut fixture.runtime);
 
     assert!(
-        !events.is_empty(),
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "an authenticated SessionStart must complete the fresh launch"
     );
-    fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
+    let ack_events = fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
+    assert!(
+        !ack_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error"
+        )),
+        "error events cannot prove delivery ACK success: {ack_events:?}"
+    );
     let projection = gwt_core::workspace_projection::load_workspace_projection(&fixture.repo)
         .expect("load fresh current projection")
         .expect("fresh current projection");
