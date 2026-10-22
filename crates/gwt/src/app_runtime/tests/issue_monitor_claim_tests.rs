@@ -5858,6 +5858,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     assert_eq!(
         runtime.issue_monitor_fallback_commit_timeout,
         super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -5937,6 +5938,8 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
         MonitorNativeHolderFixture::None,
         true,
     );
+    let _projection =
+        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery");
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
         &fixture.runtime.test_context(),
