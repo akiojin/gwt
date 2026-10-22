@@ -29,8 +29,6 @@ crates/gwt-core/src/coordination.rs|prompt_board_tail_bounds_reads_with_twelve_t
 crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter|granted_rx.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt-core/src/index_coordinator.rs|spent_search_burst_does_not_wait_for_an_absent_reserved_claimant|assert!(Instant::now()<deadline,)|1
-crates/gwt-core/src/index_coordinator.rs|spent_search_burst_does_not_wait_for_an_absent_reserved_claimant|letdeadline=Instant::now()+Duration::from_secs(2)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt-core/src/operation_deadline.rs|contended_file_lock_notifies_the_call_scoped_observer|let_deadline=ScopedOperationDeadline::enter(Instant::now()+Duration::from_millis(40))|1

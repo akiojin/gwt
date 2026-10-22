@@ -36,7 +36,6 @@ short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_deferred_claimant_ke
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes_the_expiry_out
-short-wall-clock|crates/gwt-core/src/index_coordinator.rs|spent_search_burst_does_not_wait_for_an_absent_reserved_claimant
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|wait_until
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_notifies_the_call_scoped_observer
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline
