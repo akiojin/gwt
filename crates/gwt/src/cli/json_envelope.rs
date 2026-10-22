@@ -249,6 +249,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "exit_code": 1,
                 "error": message,
             });
+            if matches!(failure.error, gwt_github::SpecOpsError::CacheConflict(_)) {
+                payload["error_code"] = "ISSUE_CACHE_CONFLICT".into();
+            }
             if operation == "verify.run" {
                 attach_verification_error(&mut payload, &message);
             }
@@ -3880,6 +3883,45 @@ mod tests {
                     .contains("verify.run"));
             }
         }
+    }
+
+    #[test]
+    fn issue_cache_conflict_has_a_machine_readable_error_code() {
+        fn replace_after_fetch(
+            client: gwt_github::client::fake::FakeIssueClient,
+            root: std::path::PathBuf,
+            snapshot: gwt_github::IssueSnapshot,
+            remaining: usize,
+        ) {
+            if remaining == 0 {
+                return;
+            }
+            let next = client.clone();
+            client.after_next_fetch(move || {
+                gwt_github::Cache::new(root.clone())
+                    .write_snapshot(&snapshot)
+                    .unwrap();
+                replace_after_fetch(next, root, snapshot, remaining - 1);
+            });
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        // The fake's create supplies a complete, ordinary Issue fixture.
+        let snapshot =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        replace_after_fetch(
+            env.client.clone(),
+            env.cache_root.clone(),
+            snapshot.clone(),
+            3,
+        );
+        env.stdin = envelope("issue.view", json!({"number": snapshot.number.0}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["error_code"], "ISSUE_CACHE_CONFLICT", "{payload}");
+        assert!(!payload["error"].as_str().unwrap().contains("network error"));
     }
 
     #[test]
