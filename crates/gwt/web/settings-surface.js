@@ -913,7 +913,7 @@ export function createSettingsSurface({
         catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
-      });
+      }, { scheduleFrame });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
       // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
@@ -1157,7 +1157,7 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
-      customAgentsModel.subscribe(state => state, state => {
+      customAgentsModel.subscribeFrame(state => state, state => {
         renderSettingsAgentList(state);
       });
       customAgentsModel.subscribe(state => state.catalog, catalog => {
@@ -2478,6 +2478,7 @@ export function createSettingsSurface({
                   onSave: (updatedAgent) => {
                     editingCustomAgentId = null;
                     setSettingsStatus("Saving custom agent…", "info");
+                    renderSettingsAgentList();
                     send({ kind: "update_custom_agent", agent: updatedAgent });
                   },
                   onCancel: () => {

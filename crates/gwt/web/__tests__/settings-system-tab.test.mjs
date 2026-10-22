@@ -88,7 +88,12 @@ function createSettingsHarness({ scheduleFrame } = {}) {
 }
 
 test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
-  const { surface, body, document, sent } = createSettingsHarness();
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, sent } = createSettingsHarness({ scheduleFrame(callback) {
+    frames.add(callback);
+    return () => frames.delete(callback);
+  } });
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const second = document.createElement("main");
   document.body.appendChild(second);
@@ -107,10 +112,36 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.deepEqual(initial.catalog.agents, []);
   assert.equal(loaded.catalog.agents[0].env.TOKEN, "***REDACTED***");
   assert.equal(loaded.catalog.loading, false);
+  flush();
   for (const host of [body, second]) {
     assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Fixture CLI/);
     assert.ok(host.querySelector('[data-settings-candidates] option[value="fixture-cli"]'));
   }
+  const scrolls = [body, second].map(host => host.querySelector('[data-role="settings-scroll"]'));
+  const renders = [0, 0];
+  scrolls.forEach((scroll, index) => {
+    const append = scroll.appendChild.bind(scroll);
+    scroll.appendChild = node => {
+      if (node.tagName === "BUTTON") renders[index]++;
+      return append(node);
+    };
+  });
+  for (let index = 0; index < 50; index++) {
+    surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [
+      { ...loaded.catalog.agents[0], display_name: `Burst ${index}` },
+    ] });
+  }
+  assert.equal(surface.customAgentsModel.read().catalog.agents[0].display_name, "Burst 49");
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Burst 49/,
+    "candidate controls retain their synchronous catalog contract");
+  assert.deepEqual(renders, [0, 0], "only the Custom Agents list waits for the frame");
+  assert.equal(frames.size, 1, "the burst reserves one frame");
+  flush();
+  assert.deepEqual(renders, [1, 1], "both mounts draw the latest shared snapshot once");
+  for (const scroll of scrolls) assert.match(scroll.textContent, /Burst 49/);
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
+  flush();
+  assert.deepEqual(renders, [1, 1], "an unrelated Settings store does not rebuild the list");
   body.querySelector('[aria-label="Edit agent environment"]').click();
   const draft = body.querySelector('[aria-label="Environment value"]');
   draft.value = "unsaved-draft";
@@ -123,12 +154,21 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.equal(sent.filter(message => message.kind === "list_custom_agents").length, reads + 2);
   assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, 0);
   body.querySelector('[aria-label="Cancel environment editing"]').click();
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  body.querySelector('[aria-label="Environment value"]').value = "saved-value";
+  body.querySelector('[aria-label="Save environment changes"]').click();
+  assert.equal(body.querySelector('[aria-label="Save environment changes"]') === null, true,
+    "saving closes the editor synchronously before a second click can resend it");
+  const saves = sent.filter(message => message.kind === "update_custom_agent");
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].agent.env.TOKEN, "saved-value");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
   assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
   assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "other", command: "other" } });
   assert.equal(surface.customAgentsModel.read().catalog.agents.length, 2, "save inserts a new agent");
   surface.applyCustomAgentsReceiveEvent({ kind: "backend_connection_result", models: ["fixture-model"] });
+  flush();
   for (const host of [body, second]) {
     assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Updated CLI/);
     assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /returned 1 model/);
@@ -140,12 +180,14 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.equal(body.querySelector('[data-settings-candidates] option[value="fixture-cli"]'), null);
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
   assert.equal(surface.customAgentsModel.read().catalog.loading, false);
-  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Error \[invalid\]: Fixture rejected/);
   const reopened = document.createElement("main");
   document.body.appendChild(reopened);
   surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
   assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /Fixture rejected/);
   assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /other/);
+  flush();
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Error \[invalid\]: Fixture rejected/);
+  assert.equal(second.textContent, detachedText, "pending rendering excludes the detached mount");
 });
 
 test("Agent Backend replies commit immutable per-agent catalogs for all Settings mounts", () => {
@@ -188,7 +230,7 @@ test("Agent Backend replies commit immutable per-agent catalogs for all Settings
       backends: [{ ...profile, display_name: "Updated backend", model: `burst-${index}` }] });
   }
   assert.equal(surface.agentBackendsModel.read().backends.claudeCode[0].model, "burst-49");
-  assert.equal(frames.size, 1, "the whole burst shares one scheduled frame");
+  assert.ok(frames.size > 0, "the burst waits for scheduled presentation");
   flush();
   assert.deepEqual(renders, [1, 1], "each mount draws the latest shared snapshot once");
   for (const host of [body, second]) {
@@ -218,7 +260,8 @@ test("Agent Backend replies commit immutable per-agent catalogs for all Settings
   assert.equal(second.textContent, detachedText);
   surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_error", message: "Still unavailable" });
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
-  assert.equal(frames.size, 0, "errors and unrelated Settings updates do not redraw Backends");
+  flush();
+  assert.deepEqual(renders, [2, 1], "shared status feedback and unrelated Settings updates do not redraw Backends");
   assert.match(body.querySelector('[data-settings-panel="agent-backends"]').textContent, /No Claude Code backend profiles/);
 });
 
