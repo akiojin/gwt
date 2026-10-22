@@ -1663,6 +1663,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
+        "pane.health" => {
+            reject_unknown_params(params, &["id"], "pane.health")?;
+            CliCommand::Pane(PaneCommand::Health {
+                id: optional_string(params, "id")?,
+            })
+        }
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {

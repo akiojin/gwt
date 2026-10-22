@@ -75,8 +75,7 @@ const RESUME_WRITER_CONFLICT_OUTER_PREFIX: &str = "Failed to resume session from
 const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI bootstrap:";
 const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
 const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
-const CODEX_DIRECTORY_TRUST_PROMPT_REASON: &str =
-    "Codex requires directory trust confirmation for the managed worktree";
+use gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON;
 
 fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
     match source_event {
