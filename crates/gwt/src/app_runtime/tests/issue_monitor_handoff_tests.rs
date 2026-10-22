@@ -4786,10 +4786,8 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
             &mut fixture,
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-        assert_monitor_exact_resume(
-            take_monitor_launch_complete(case, &fixture.recorded_events),
-            &fixture,
-        );
+        let mut completion = take_monitor_launch_complete(case, &fixture.recorded_events);
+        assert_monitor_exact_resume(completion.clone(), &fixture);
         assert!(fixture.runtime.window_lookup.contains_key(&window_id));
         assert!(fixture
             .runtime
@@ -4799,6 +4797,80 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         assert!(!events.iter().any(|event| matches!(&event.event,
             BackendEvent::IssueMonitorToast { message, .. } if message.contains("held by window")
         )));
+
+        // An in-place restart reuses this ID before replacing the exited Pane.
+        // Its current launch, rather than the old exit receipt, owns the writer.
+        fixture
+            .runtime
+            .initial_launch_workers
+            .insert(window_id.clone(), None);
+        fixture
+            .runtime
+            .pending_auto_resume_sources
+            .insert(window_id.clone(), fixture.source_session_id.clone());
+        fixture.runtime.inflight_launches.insert(
+            "restart-reservation".into(),
+            (window_id.clone(), Instant::now()),
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
+            Some(window_id.clone()),
+        );
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        // Fail before spawning a replacement child, so the test can also prove
+        // the failed attempt releases its reservation without closing the pane.
+        completion.as_mut().unwrap().0.command = temp
+            .path()
+            .join("missing-restart-agent")
+            .display()
+            .to_string();
+        fixture
+            .runtime
+            .handle_launch_complete(window_id.clone(), completion);
+        assert!(!fixture
+            .runtime
+            .initial_launch_workers
+            .contains_key(&window_id));
+        assert!(!fixture
+            .runtime
+            .pending_auto_resume_sources
+            .contains_key(&window_id));
+        assert!(fixture
+            .runtime
+            .pending_launch_completions
+            .contains_key(&window_id));
+        assert_eq!(
+            fixture
+                .runtime
+                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+            Some(window_id.clone()),
+            "the completion worker must retain the writer after consuming the pending source",
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
+            Some(window_id.clone()),
+        );
+        drain_queued_blocking_tasks(&tasks);
+        let prepared = take_prepared_agent_launch(&fixture.recorded_events);
+        fixture.runtime.handle_agent_launch_prepared(prepared);
+        assert!(!fixture
+            .runtime
+            .pending_launch_completions
+            .contains_key(&window_id));
+        assert_eq!(
+            fixture
+                .runtime
+                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+            None,
+            "a failed restart must release the writer reservation",
+        );
+        assert!(fixture.runtime.window_lookup.contains_key(&window_id));
+        assert_eq!(fs::read_to_string(&unfinished).unwrap(), "uncommitted work");
     }
 }
 
