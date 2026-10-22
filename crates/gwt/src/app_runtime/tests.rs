@@ -3210,6 +3210,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        gwt::machine_agent_settings::set(
+            Some(3),
+            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         init_repo_with_initial_commit(&repo);

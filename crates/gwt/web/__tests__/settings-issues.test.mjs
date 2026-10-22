@@ -165,25 +165,34 @@ test("Issues disclosure reuses authoritative launch controls and returns them to
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
-test("Auto capacity is read-only until Manual is selected", () => {
+test("Auto capacity is read-only and Manual starts with the machine worker limit", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
-    status: { max_active_agents: 4, max_active_agents_override: null }, send: m => sent.push(m) });
+    status: { max_active_agents: 3, max_active_agents_override: null,
+      agent_capacity: { machine_budget: 7, own_pm_agents: 1, other_live_agents: 3, other_pm_agents: 1 } },
+    send: m => sent.push(m) });
   const max = panel.querySelector('[aria-label="Max active"]');
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(max.disabled, true);
   assert.equal(mode.value, "auto");
-  assert.equal(max.value, "4");
+  assert.equal(max.value, "3");
   max.value = "9";
   max.dispatchEvent(new Event("input"));
   max.dispatchEvent(new Event("change"));
   panel.querySelector('[aria-label="Apply Max active"]').click();
   assert.deepEqual(sent, [], "Auto never sends a numeric override");
-  max.value = "4";
+  max.value = "3";
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+  assert.equal(max.value, "5", "the project allocation of three must not become the shared Manual request");
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 5 }]);
+  panel.updateMaxActiveStatus({ max_active_agents: 3, max_active_agents_override: null,
+    agent_capacity: { machine_budget: null, other_live_agents: 3, other_pm_agents: 1, own_untracked_workers: 1 } });
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.equal(max.value, "6", "unknown machine capacity reconstructs the full current worker allowance");
+  assert.equal(sent.at(-1).max_active_agents, 6);
 });
 
 test("Max active stepper edits commit once on Apply and survive status redraw", () => {
@@ -237,6 +246,38 @@ test("authoritative Auto status disables a focused Manual draft before deferred 
   assert.equal(mode.value, "manual");
   assert.equal(max.value, "5", "returning to Manual does not resurrect the old draft");
   assert.equal(apply.disabled, true);
+});
+
+test("machine Max active updates shared controls and project allocation in the existing panel", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" }, status: {
+    max_active_agents_scope: "machine", max_active_agents: 3, max_active_agents_override: 8,
+    agent_capacity: { measurement_complete: true, other_live_agents: 5, other_pm_agents: 2 },
+  }, send: message => sent.push(message) });
+  const capacity = panel.querySelector(".settings-issues-capacity");
+  const max = capacity.querySelector('[aria-label="Max active"]');
+  const mode = capacity.querySelector('[aria-label="Max active mode"]');
+  assert.match(capacity.textContent, /All projects on this machine/);
+  assert.match(capacity.textContent, /This project allocation: 3.*Other project workers: 3/);
+  assert.equal(max.value, "8", "Manual edits the shared request, not the project's allocation");
+  assert.equal(mode.value, "manual");
+  panel.updateMaxActiveStatus({ max_active_agents_scope: "machine", max_active_agents: 2,
+    max_active_agents_override: null,
+    agent_capacity: { measurement_complete: true, other_live_agents: 7, other_pm_agents: 3 } });
+  assert.equal(panel.querySelector('[aria-label="Max active"]'), max, "status updates reuse the mounted controls");
+  assert.equal(mode.value, "auto");
+  assert.equal(max.disabled, true);
+  assert.equal(max.value, "2");
+  assert.match(capacity.textContent, /This project allocation: 2.*Other project workers: 4/);
+  panel.updateMaxActiveStatus({ max_active_agents_scope: "machine", max_active_agents: 1,
+    max_active_agents_override: 6,
+    agent_capacity: { measurement_complete: true, other_live_agents: 8, other_pm_agents: 2 } });
+  assert.equal(mode.value, "manual");
+  assert.equal(max.disabled, false);
+  assert.equal(max.value, "6");
+  assert.match(capacity.textContent, /This project allocation: 1.*Other project workers: 6/);
+  assert.deepEqual(sent, [], "machine status updates do not save settings");
 });
 
 test("Auto shows measuring state beside its effective limit until capacity is ready", () => {
@@ -316,6 +357,7 @@ test("Manual starts at one when Auto has no available capacity", () => {
   mode.dispatchEvent(new Event("change"));
   assert.equal(max.disabled, false);
   assert.equal(max.value, "1");
+  assert.match(panel.textContent, /This project allocation: 0/, "a Manual request does not replace the authoritative allocation");
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 }]);
 });
 

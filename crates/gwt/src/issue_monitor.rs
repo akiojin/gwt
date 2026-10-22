@@ -985,6 +985,7 @@ pub struct IssueMonitorOpenPrObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
+    #[serde(default = "default_max_active_agents")]
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_mode: IssueMonitorMaxActiveMode,
@@ -3542,8 +3543,14 @@ fn provider_quota_hold_is_released(
     }
 }
 
+fn machine_max_active_scope() -> String {
+    "machine".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default = "machine_max_active_scope")]
+    pub max_active_agents_scope: String,
     #[serde(default)]
     pub allowed_labels: Vec<String>,
     #[serde(default)]
@@ -3741,6 +3748,8 @@ pub enum IssueMonitorStatusSource {
 /// percentage, and float equality is not reflexive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
+    #[serde(default = "machine_max_active_scope")]
+    pub max_active_agents_scope: String,
     #[serde(default)]
     pub allowed_labels: Vec<String>,
     #[serde(default)]
@@ -6127,6 +6136,62 @@ fn issue_monitor_prefs_cache(
 }
 
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    let mut prefs = load_issue_monitor_prefs_raw(path)?;
+    if machine_managed_monitor_prefs(path) {
+        // Cache only project bytes. The machine policy may change without any
+        // project-file stamp change, including on a cache hit.
+        if let Some(policy) = crate::machine_agent_settings::load()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
+        {
+            apply_machine_policy_to_prefs(&mut prefs, &policy);
+        }
+    }
+    Ok(prefs)
+}
+
+fn default_max_active_agents() -> usize {
+    1
+}
+
+pub(crate) fn machine_managed_monitor_prefs(path: &Path) -> bool {
+    path.strip_prefix(gwt_core::paths::gwt_projects_dir())
+        .is_ok_and(|relative| {
+            relative.components().count() == 3
+                && relative.ends_with("project-state/issue-monitor.json")
+        })
+}
+
+pub(crate) fn apply_machine_policy_to_prefs(
+    prefs: &mut IssueMonitorPrefs,
+    policy: &crate::machine_agent_settings::Policy,
+) {
+    prefs.max_active_agents_mode = policy.mode;
+    if let Some(limit) = policy.manual_limit {
+        prefs.max_active_agents = limit;
+    }
+    prefs.max_active_last_change = policy.last_change.clone();
+}
+
+/// Receipt equality concerns only fields owned by the project snapshot.
+pub(crate) fn monitor_project_prefs_equal(
+    path: &Path,
+    left: &IssueMonitorPrefs,
+    right: &IssueMonitorPrefs,
+) -> bool {
+    if !machine_managed_monitor_prefs(path) {
+        return left == right;
+    }
+    let mut left = left.clone();
+    let mut right = right.clone();
+    for prefs in [&mut left, &mut right] {
+        prefs.max_active_agents = 1;
+        prefs.max_active_agents_mode = IssueMonitorMaxActiveMode::Auto;
+        prefs.max_active_last_change = None;
+    }
+    left == right
+}
+
+fn load_issue_monitor_prefs_raw(path: &Path) -> io::Result<IssueMonitorPrefs> {
     let key = std::path::absolute(path)?;
     // Serialize misses as well as hits so concurrent readers parse a generation once.
     // The cross-process sibling writer lock still owns every mutation transaction.
@@ -6249,7 +6314,7 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -6290,7 +6355,27 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
-    let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
+    crate::machine_agent_settings::migration_before_project_save(path)?;
+    let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
+    if machine_managed_monitor_prefs(path) {
+        let fields = value.as_object_mut().expect("Monitor preferences object");
+        // Older readers require this key. It is a fixed safe compatibility
+        // mirror, never this project's or the machine's requested policy.
+        fields.insert("max_active_agents".to_string(), serde_json::json!(1));
+        fields.remove("max_active_agents_mode");
+        fields.remove("max_active_last_change");
+        fields.insert(
+            "last_auto_max_active_agents".to_string(),
+            serde_json::json!(
+                if prefs.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto {
+                    prefs.max_active_agents
+                } else {
+                    1
+                }
+            ),
+        );
+    }
+    let content = serde_json::to_string_pretty(&value).map_err(io::Error::other)?;
     crate::update_settings::migrate_before_project_save(path, false)?;
     let committed = durable_atomic_write(path, content.as_bytes());
     // Invalidate even if parent sync failed after the rename became visible.
@@ -6328,7 +6413,13 @@ fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
 fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
     let sidecar = committed_prefs_generation_path(path);
     let content = fs::read_to_string(&sidecar).ok()?;
-    crate::update_settings::decode_project_prefs(&content).ok()
+    let mut prefs = crate::update_settings::decode_project_prefs(&content).ok()?;
+    if machine_managed_monitor_prefs(path) {
+        if let Some(policy) = crate::machine_agent_settings::load().ok()? {
+            apply_machine_policy_to_prefs(&mut prefs, &policy);
+        }
+    }
+    Some(prefs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6750,6 +6841,9 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
 /// Recheck under the prefs writer lock so a concurrently staged newer drain survives.
 /// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
 pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    if machine_managed_monitor_prefs(path) {
+        crate::machine_agent_settings::ensure_migrated()?;
+    }
     fn applied(prefs: &IssueMonitorPrefs) -> bool {
         prefs.update_drain.as_ref().is_some_and(|drain| {
             semver::Version::parse(drain.version.trim().trim_start_matches('v'))
@@ -7701,7 +7795,9 @@ impl IssueMonitorState {
         IssueMonitorPrefs {
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
-            max_active_agents: self.effective_max_active_agents(),
+            max_active_agents: self
+                .max_active_agents_override()
+                .unwrap_or_else(|| self.effective_max_active_agents()),
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
@@ -10254,7 +10350,16 @@ impl IssueMonitorState {
 
     pub fn effective_max_active_agents(&self) -> usize {
         match self.max_active_agents_mode {
-            IssueMonitorMaxActiveMode::Manual => self.config.max_active.max(1),
+            IssueMonitorMaxActiveMode::Manual => self
+                .config
+                .max_active
+                .max(1)
+                .saturating_sub(
+                    self.agent_capacity
+                        .other_live_agents
+                        .saturating_sub(self.agent_capacity.other_pm_agents),
+                )
+                .saturating_sub(self.agent_capacity.own_untracked_workers),
             IssueMonitorMaxActiveMode::Auto
                 if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
             {
@@ -10265,7 +10370,9 @@ impl IssueMonitorState {
     }
 
     fn apply_agent_capacity_limit(&mut self) {
-        self.config.max_active = self.effective_max_active_agents();
+        if self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto {
+            self.config.max_active = self.effective_max_active_agents();
+        }
     }
 
     pub fn set_agent_capacity(&mut self, capacity: AgentCapacity) {
@@ -10282,12 +10389,42 @@ impl IssueMonitorState {
     }
 
     pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
+        match crate::machine_agent_settings::ensure_migrated() {
+            Ok(policy) => self.apply_machine_policy(&policy),
+            Err(error) => tracing::warn!(%error, "machine agent policy refresh failed"),
+        }
         let capacity = crate::agent_capacity::project_capacity(
             project_root,
             &BTreeSet::new(),
             self.review_windows.len(),
         );
         self.set_agent_capacity_for_project(project_root, capacity);
+    }
+
+    pub fn apply_machine_policy(&mut self, policy: &crate::machine_agent_settings::Policy) {
+        let previous_limit = self.effective_max_active_agents();
+        self.max_active_agents_mode = policy.mode;
+        self.config.max_active = policy.manual_limit.unwrap_or(previous_limit);
+        self.max_active_last_change = policy.last_change.clone();
+        self.apply_agent_capacity_limit();
+    }
+
+    /// Persist only an explicit accepted change, preserving its replay identity.
+    pub fn persist_machine_max_active_change(&mut self, control_id: &str) -> io::Result<()> {
+        let change = self.max_active_last_change.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Max active change provenance is missing",
+            )
+        })?;
+        let policy = crate::machine_agent_settings::set_with_control_id(
+            change.max_active_agents_override,
+            change.source,
+            &change.changed_at,
+            control_id,
+        )?;
+        self.apply_machine_policy(&policy);
+        Ok(())
     }
 
     /// Apply a project observation and report a measured reduction once.
@@ -13111,6 +13248,7 @@ impl IssueMonitorState {
             .launch_auto
             .then(|| self.prefs().effective_launch_tiers().len());
         IssueMonitorStatusView {
+            max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
             label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
@@ -13432,6 +13570,7 @@ impl IssueMonitorState {
         let launch_failures = self.launch_failures_at(now);
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
+            max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
             label_excluded_issues: self.label_excluded_issues.iter().copied().collect(),
@@ -23531,6 +23670,121 @@ mod tests {
     }
 
     #[test]
+    fn machine_policy_recovery_preserves_accepted_auto_continuity() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let path = gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        crate::machine_agent_settings::set(
+            None,
+            IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
+        save_issue_monitor_prefs(
+            &path,
+            &IssueMonitorPrefs {
+                max_active_agents: 7,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::write(&path, "{invalid").unwrap();
+        mutate_issue_monitor_prefs_recovering(&path, &IssueMonitorPrefs::default(), |prefs| {
+            let monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
+            *prefs = monitor.prefs();
+        })
+        .unwrap();
+        let recovered = load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(
+            recovered.max_active_agents_mode,
+            IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(recovered.max_active_agents, 7);
+    }
+
+    #[test]
+    fn machine_policy_propagates_between_projects_and_ignores_stale_project_saves() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let a = gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        let b = gwt_core::paths::gwt_projects_dir().join("b/project-state/issue-monitor.json");
+        for path in [&a, &b] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, r#"{"enabled":false,"max_active_agents":5,"max_active_agents_mode":"manual","priority_order":[]}"#).unwrap();
+        }
+        crate::machine_agent_settings::ensure_migrated().unwrap();
+        let stale_a = load_issue_monitor_prefs(&a).unwrap();
+        crate::machine_agent_settings::set(
+            None,
+            IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
+        let latest_b = load_issue_monitor_prefs(&b).unwrap();
+        assert_eq!(
+            latest_b.max_active_agents_mode,
+            IssueMonitorMaxActiveMode::Auto
+        );
+        save_issue_monitor_prefs(&a, &stale_a).unwrap();
+        let latest_a = load_issue_monitor_prefs(&a).unwrap();
+        assert_eq!(
+            latest_a.max_active_agents_mode,
+            IssueMonitorMaxActiveMode::Auto
+        );
+        assert_eq!(
+            latest_a.max_active_last_change,
+            latest_b.max_active_last_change
+        );
+        let stored: serde_json::Value = serde_json::from_slice(&fs::read(&a).unwrap()).unwrap();
+        for key in ["max_active_agents_mode", "max_active_last_change"] {
+            assert!(
+                stored.get(key).is_none(),
+                "{key} must be owned by machine settings"
+            );
+        }
+        assert_eq!(stored["max_active_agents"], 1);
+        assert!(stored.get("last_auto_max_active_agents").is_some());
+    }
+
+    #[test]
+    fn machine_manual_limit_allocates_remaining_workers_across_projects() {
+        let mut project_a =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
+        project_a.set_max_active_agents(5);
+        project_a.set_agent_capacity(AgentCapacity {
+            other_live_agents: 4,
+            other_pm_agents: 1,
+            other_implementation_agents: 2,
+            other_review_agents: 1,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(project_a.effective_max_active_agents(), 2);
+        assert_eq!(project_a.max_active_agents_override(), Some(5));
+        assert_eq!(project_a.prefs().max_active_agents, 5);
+        let status = serde_json::to_value(project_a.agent_status()).unwrap();
+        assert_eq!(status["max_active_agents_scope"], "machine");
+        assert_eq!(status["gui_status"]["max_active_agents_scope"], "machine");
+
+        let mut project_b =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), project_a.prefs());
+        project_b.set_agent_capacity(AgentCapacity {
+            other_live_agents: 6,
+            other_pm_agents: 1,
+            ..AgentCapacity::default()
+        });
+        assert_eq!(project_b.effective_max_active_agents(), 0);
+        assert_eq!(project_b.max_active_agents_override(), Some(5));
+        project_a.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(project_a.effective_max_active_agents(), 5);
+    }
+
+    #[test]
     fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
         let mut monitor =
             test_monitor_with_prefs(IssueMonitorConfig::default(), IssueMonitorPrefs::default());
@@ -24425,6 +24679,7 @@ mod tests {
         assert_eq!(
             monitor.agent_status_without_scan_at("2026-08-03T00:00:00Z"),
             IssueMonitorAgentStatus {
+                max_active_agents_scope: machine_max_active_scope(),
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,
                 label_excluded_issues: Vec::new(),

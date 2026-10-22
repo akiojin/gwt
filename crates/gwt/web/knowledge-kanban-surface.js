@@ -1182,13 +1182,14 @@ export function createKnowledgeKanbanSurface({
         if (!capacity) return null;
         const override = status.max_active_agents_override;
         const manual = Number.isInteger(override) && override > 0;
-        const manualEffective = manual && status.max_active_agents === override;
         const autoRetained = !manual && Number.isInteger(status.max_active_agents) && status.max_active_agents > 0;
-        const excess = manual ? override - capacity.recommended_worker_limit : 0;
+        const machineWorkerLimit = Math.max(0, (capacity.machine_budget ?? 0)
+          - (capacity.other_pm_agents ?? 0) - Math.max(capacity.own_pm_agents ?? 0, 1));
+        const excess = manual ? override - machineWorkerLimit : 0;
         const incomplete = !capacity.measurement_complete;
         const attention = incomplete || excess > 0;
         const message = incomplete
-          ? manualEffective
+          ? manual
             ? `Capacity pending. Manual limit ${override}; no action needed.`
             : autoRetained
               ? `Capacity pending. Auto limit ${status.max_active_agents} retained while measurements refresh.`
@@ -1218,7 +1219,7 @@ export function createKnowledgeKanbanSurface({
         if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         return {
           key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issue Monitor capacity",
-          level: manualEffective || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
+          level: manual || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
           details: lines.filter(Boolean).join("\n"), attention,
           badge: incomplete ? "Capacity pending · Details"
             : excess > 0 ? "Over recommended · Details" : `Capacity ${capacity.recommended_worker_limit} · Details`,

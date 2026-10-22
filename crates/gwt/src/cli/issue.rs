@@ -4283,13 +4283,12 @@ fn run_monitor_config_set<E: CliEnv>(
             return Err(io_as_api_error(io::Error::other(error.to_string())));
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let control_id = uuid::Uuid::new_v4().to_string();
+        let mut shared_write_started = false;
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            crate::issue_monitor::check_expected_issue_monitor_config_token(
-                prefs,
-                expected_config_token,
-            )?;
+            let mut candidate = prefs.clone();
             apply_monitor_config_set(
-                prefs,
+                &mut candidate,
                 allowed_labels,
                 enabled,
                 autonomous_mode,
@@ -4299,9 +4298,26 @@ fn run_monitor_config_set<E: CliEnv>(
                 launch_agent,
                 update_drain.clone(),
                 caller_is_resident_pm,
-            )
+            )?;
+            let requested = candidate.max_active_last_change.as_ref()
+                .filter(|_| max_active.is_some() || max_active_auto);
+            shared_write_started = requested.is_some();
+            let policy = crate::machine_agent_settings::checked_update(
+                prefs, expected_config_token, requested, &control_id,
+            )?;
+            crate::issue_monitor::apply_machine_policy_to_prefs(&mut candidate, &policy);
+            *prefs = candidate;
+            Ok(())
         })
-        .map_err(io_as_api_error)?;
+        .map_err(|error| {
+            if shared_write_started && error.to_string() != crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR {
+                io_as_api_error(io::Error::other(format!(
+                    "shared Max active save outcome is uncertain (control {control_id}); machine policy may be committed while project configuration is not. Re-read issue.monitor.status before retrying: {error}"
+                )))
+            } else {
+                io_as_api_error(error)
+            }
+        })?;
     }
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         &project_root,
@@ -10905,6 +10921,7 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -10965,6 +10982,7 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -11113,6 +11131,7 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                max_active_agents_scope: "machine".to_string(),
                 agent_capacity: Default::default(),
                 max_active_agents_override: Some(1),
                 max_active_last_change: None,
@@ -11235,6 +11254,7 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -11382,6 +11402,12 @@ mod tests {
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -11609,6 +11635,12 @@ mod tests {
                     "active_row_without_session": [],
                 },
                 "max_active": 3,
+                "max_active_agents_scope": "machine",
+                "max_active_last_change": {
+                    "changed_at": "2026-10-22T00:00:00Z",
+                    "source": "json_operation",
+                    "max_active_agents_override": 3,
+                },
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
@@ -11904,6 +11936,12 @@ mod tests {
     fn issue_monitor_status_prefers_live_daemon_queue_over_cached_candidates() {
         let tmp = gwt_core::test_support::socket_tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-19T00:01:00Z",
+        )
+        .expect("seed machine Manual capacity and provenance");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
@@ -11946,10 +11984,6 @@ mod tests {
             "source": "json_operation",
             "max_active_agents_override": 3,
         });
-        let mut durable: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&prefs_path).expect("read prefs")).unwrap();
-        durable["max_active_last_change"] = current_change.clone();
-        std::fs::write(&prefs_path, serde_json::to_vec(&durable).unwrap()).expect("stamp prefs");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
@@ -12787,6 +12821,46 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_config_set_reports_partial_shared_policy_save() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let _fault = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            &path,
+        );
+        std::fs::write(path.with_extension("parent-sync-fail-once"), "fail").unwrap();
+        let super::super::CliCommand::Issue(command) =
+            super::super::json_envelope::parse_operation(
+                "issue.monitor.config.set",
+                &serde_json::json!({"max_active": 4, "allowed_labels": ["backend"]}),
+            )
+            .unwrap()
+        else {
+            panic!("expected Issue command")
+        };
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let error = run(&mut env, command, &mut out).unwrap_err().to_string();
+        assert!(error.contains("outcome is uncertain"), "{error}");
+        assert!(error.contains("Re-read issue.monitor.status"), "{error}");
+        assert!(out.is_empty());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(4)
+        );
+    }
+
+    #[test]
     fn issue_monitor_config_set_falls_back_safely_when_daemon_is_absent() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -12874,6 +12948,12 @@ mod tests {
             },
         )
         .expect("manual preferences");
+        crate::machine_agent_settings::set(
+            Some(7),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("shared Manual preference");
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         run(
@@ -13365,6 +13445,12 @@ command = "my-agent-cli"
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
@@ -14909,6 +14995,7 @@ command = "my-agent-cli"
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,

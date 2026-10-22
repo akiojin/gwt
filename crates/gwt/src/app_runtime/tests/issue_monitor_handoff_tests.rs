@@ -3291,6 +3291,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::ensure_migrated().expect("initialize machine settings");
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -3520,6 +3521,12 @@ fn issue_monitor_profile_reasoning_edit(request_id: u64, reasoning: &str) -> Fro
 fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    gwt::machine_agent_settings::set(
+        Some(7),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
