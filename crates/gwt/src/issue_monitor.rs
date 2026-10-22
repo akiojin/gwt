@@ -2173,6 +2173,56 @@ impl IssueMonitorLaunchProfilePatch {
     }
 }
 
+/// Issue #4148: the complete read set of a sparse profile update. Writers
+/// compare and resolve it under the prefs lock; older daemons must reject the
+/// separate `profiles_patch` control rather than ignore this precondition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProfilesSetRequest {
+    pub patches: Vec<IssueMonitorLaunchProfilePatch>,
+    pub expected_pool: Vec<IssueMonitorLaunchProfile>,
+    pub expected_head: Option<IssueMonitorLaunchProfile>,
+}
+
+impl IssueMonitorProfilesSetRequest {
+    pub fn capture(
+        prefs: &IssueMonitorPrefs,
+        patches: Vec<IssueMonitorLaunchProfilePatch>,
+    ) -> io::Result<Self> {
+        // Reject invalid caller-supplied values before transport or fallback
+        // projection work. Omitted fields are resolved only under the lock.
+        let supplied: Vec<_> = patches.iter().map(|patch| patch.profile.clone()).collect();
+        crate::cli::issue::validate_monitor_profiles_set(&supplied, None)?;
+        Ok(Self {
+            patches,
+            expected_pool: prefs.launch_profile_pool(),
+            expected_head: prefs.launch_profile.clone(),
+        })
+    }
+
+    pub fn resolve(
+        &self,
+        prefs: &IssueMonitorPrefs,
+    ) -> io::Result<(
+        Vec<IssueMonitorLaunchProfile>,
+        Vec<IssueMonitorProfilesSetChange>,
+    )> {
+        let pool = prefs.launch_profile_pool();
+        if pool != self.expected_pool || prefs.launch_profile != self.expected_head {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Issue Monitor profiles changed concurrently; reload profiles and retry",
+            ));
+        }
+        let result = merge_issue_monitor_profiles_set(
+            &pool,
+            prefs.launch_profile.as_ref().or(pool.first()),
+            &self.patches,
+        );
+        crate::cli::issue::validate_monitor_profiles_set(&result.0, None)?;
+        Ok(result)
+    }
+}
+
 impl Serialize for IssueMonitorLaunchProfilePatch {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut object = launch_profile_object(&self.profile);

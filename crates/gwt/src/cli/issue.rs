@@ -4659,40 +4659,58 @@ fn run_monitor_profiles_set<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-    // Issue #4079 AC-3/AC-4: resolve the sparse elements against the pool that
-    // is saved right now, so a reorder cannot reset the settings it reorders.
-    // The wire payload stays a fully-resolved pool, so no daemon change is
-    // needed and the reported `changes` describe exactly what is committed.
+    set_monitor_profiles(
+        &project_root,
+        profiles,
+        usage_threshold_percent,
+        out,
+        publish_monitor_config_set,
+    )
+}
+
+fn set_monitor_profiles(
+    project_root: &std::path::Path,
+    profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+    usage_threshold_percent: Option<u8>,
+    out: &mut String,
+    publish: impl FnOnce(
+        &std::path::Path,
+        serde_json::Value,
+    )
+        -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError>,
+) -> Result<i32, SpecOpsError> {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let saved = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let saved_pool = saved.launch_profile_pool();
-    let (profiles, changes) = crate::merge_issue_monitor_profiles_set(
-        &saved_pool,
-        saved.launch_profile.as_ref().or(saved_pool.first()),
-        &profiles,
-    );
-    validate_monitor_profiles_set(&profiles, usage_threshold_percent).map_err(io_as_api_error)?;
+    let request = crate::issue_monitor::IssueMonitorProfilesSetRequest::capture(&saved, profiles)
+        .map_err(io_as_api_error)?;
 
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
-        serde_json::json!({
-            "profiles_set": {
-                "profiles": profiles,
-            }
-        }),
+        serde_json::json!({"profiles_patch": request}),
         std::process::id(),
     );
-    let publication = publish_monitor_config_set(&project_root, payload);
-    if let Err(error) = publication {
-        if !error.allows_local_fallback() {
+    let (prefs, changes) = match publish(project_root, payload) {
+        Ok(()) => {
+            // The ACK proves this read set was checked and merged inside the
+            // daemon transaction. Reconstruct that exact committed pool for
+            // the response; a later disk read could mix two different writes.
+            let (profiles, changes) = request.resolve(&saved).map_err(io_as_api_error)?;
+            let mut committed = saved;
+            committed.set_launch_profile_pool(profiles);
+            (committed, changes)
+        }
+        Err(error) if error.allows_local_fallback() => {
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+                let (profiles, changes) = request.resolve(prefs)?;
+                apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)?;
+                Ok(changes)
+            })
+            .map_err(io_as_api_error)?
+        }
+        Err(error) => {
             return Err(io_as_api_error(io::Error::other(error.to_string())));
         }
-        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_profiles_set(prefs, &profiles, usage_threshold_percent)
-        })
-        .map_err(io_as_api_error)?;
-    }
-    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    };
     let mut projection = monitor_profiles_projection(&prefs);
     if let Some(object) = projection.as_object_mut() {
         // Issue #4079 AC-5: say which omitted fields were carried over and
@@ -13547,6 +13565,107 @@ command = "my-agent-cli"
     }
 
     #[test]
+    fn issue_monitor_profiles_set_rejects_a_competing_fallback_write() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let result = set_monitor_profiles(&repo, patches, None, &mut String::new(), |_, _| {
+            // A second writer commits after the first request captured its base,
+            // before the transport fails and the first enters local fallback.
+            let path = path.clone();
+            std::thread::spawn(move || {
+                crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                    let mut pool = prefs.launch_profile_pool();
+                    pool[0].model = Some("competing-model".into());
+                    apply_monitor_profiles_set(prefs, &pool, None)
+                })
+                .unwrap();
+            })
+            .join()
+            .unwrap();
+            Err(
+                crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                    "offline".into(),
+                ),
+            )
+        });
+        assert!(
+            result.is_err(),
+            "stale fallback must explicitly refuse the competing write"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .launch_profile_pool()[0]
+                .model
+                .as_deref(),
+            Some("competing-model")
+        );
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_changes_describe_its_acknowledged_commit() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        let mut profile = pool_profile("codex", &[]);
+        profile.model = Some("acknowledged-model".into());
+        initial.set_launch_profile_pool(vec![profile]);
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let mut out = String::new();
+        set_monitor_profiles(&repo, patches, None, &mut out, |_, _| {
+            // Emulate the durable ACK, followed by a later independent commit
+            // before the original caller resumes to render its response.
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                let pool = prefs.launch_profile_pool();
+                apply_monitor_profiles_set(prefs, &pool, None)
+            })
+            .unwrap();
+            crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                let mut pool = prefs.launch_profile_pool();
+                pool[0].model = Some("later-model".into());
+                apply_monitor_profiles_set(prefs, &pool, None)
+            })
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let model_change = response["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["field"] == "model")
+            .unwrap();
+        assert_eq!(
+            response["launch_profiles"][0]["model"],
+            "acknowledged-model"
+        );
+        assert_eq!(
+            model_change["value"],
+            response["launch_profiles"][0]["model"]
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&path)
+                .unwrap()
+                .launch_profile_pool()[0]
+                .model
+                .as_deref(),
+            Some("later-model")
+        );
+    }
+
+    #[test]
     fn issue_monitor_profiles_set_rejects_invalid_pools_without_writing() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -13562,7 +13681,6 @@ command = "my-agent-cli"
         )
         .expect("save prefs");
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
-        let mut env = crate::cli::TestEnv::new(repo.clone());
 
         let rejected: Vec<(&str, Vec<crate::IssueMonitorLaunchProfilePatch>, Option<u8>)> = vec![
             ("empty pool", Vec::new(), None),
@@ -13591,14 +13709,12 @@ command = "my-agent-cli"
         ];
         for (case, profiles, usage_threshold_percent) in rejected {
             let mut out = String::new();
-            let result = run(
-                &mut env,
-                IssueCommand::MonitorProfilesSet {
-                    project_root: Some(repo.clone()),
-                    profiles,
-                    usage_threshold_percent,
-                },
+            let result = set_monitor_profiles(
+                &repo,
+                profiles,
+                usage_threshold_percent,
                 &mut out,
+                |_, _| panic!("{case} must be rejected before publication"),
             );
             assert!(result.is_err(), "{case} must be rejected");
             assert_eq!(
