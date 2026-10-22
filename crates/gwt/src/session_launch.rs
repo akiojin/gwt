@@ -2,6 +2,170 @@
 
 use std::path::Path;
 
+/// Why a restored Session cannot be handed to the agent CLI as `--resume`
+/// (SPEC-3966 AC-4).
+///
+/// `None` means the Session does carry a usable handle. Every other answer is
+/// the reason the restore falls back to a brand-new conversation, so the
+/// fallback is never silent.
+pub fn resume_handle_unavailable_reason(session: &gwt_agent::Session) -> Option<&'static str> {
+    if session.exact_resume_session_id().is_some() {
+        return None;
+    }
+    match session.agent_session_id.as_deref().map(str::trim) {
+        None => Some(
+            "no agent_session_id was ever persisted for this Session \
+             (the SessionStart managed hook never reached persist_agent_session_id)",
+        ),
+        Some("") => Some("the persisted agent_session_id is empty"),
+        Some(_) => Some(
+            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
+        ),
+    }
+}
+
+/// Carry a restored launch's conversation identity onto the successor Session
+/// record (SPEC-3966 AC-5).
+///
+/// Without this the successor is written with no `agent_session_id`, so the
+/// *next* restore has nothing to resume from either and every restart leaves
+/// one more handle-less Session behind.
+pub fn launch_config_from_persisted_session(
+    session: &gwt_agent::Session,
+) -> gwt_agent::LaunchConfig {
+    let agent_id = session.agent_id.clone();
+    let pm_scratch = crate::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
+    let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+    builder = builder.working_dir(session.worktree_path.clone());
+    if !session.branch.is_empty() {
+        builder = builder.branch(session.branch.clone());
+    }
+    if let Some(model) = session.model.clone() {
+        builder = builder.model(model);
+    }
+    if let Some(level) = session.reasoning_level.clone() {
+        builder = builder.reasoning_level(level);
+    }
+    // FR-028 belongs to the PM role, including older Sessions whose saved
+    // skip_permissions field defaults to false.
+    if session.skip_permissions || pm_scratch.is_some() {
+        builder = builder.skip_permissions(true);
+    }
+    if session.fast_mode_enabled() {
+        builder = builder.fast_mode(true);
+    }
+    builder = builder.runtime_target(session.runtime_target);
+    if let Some(service) = session.docker_service.clone() {
+        builder = builder.docker_service(service);
+    }
+    builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
+    if let Some(shell) = session.windows_shell {
+        builder = builder.windows_shell(shell);
+    }
+    if let Some(linked) = session.linked_issue_number {
+        builder = builder.linked_issue_number(linked);
+    }
+    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
+    // originally stamped, so a restored or resumed monitor launch does not
+    // quietly become a human-driven one.
+    builder = builder.launch_route(session.launch_route);
+
+    // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
+    // any structured `Session` field, so rebuilding a config here used to drop
+    // it and restore the PM as a plain agent under no PM contract. Re-apply it
+    // from the same PM detection that already restores the scratch dir below —
+    // unconditionally, because a persisted `launch_args` that still records the
+    // prompt is not consulted by the builder and would otherwise lose it too.
+    if pm_scratch.is_some()
+        && crate::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
+    {
+        builder = builder.extra_arg(crate::pm_registry::PM_BOOTSTRAP_PROMPT);
+    }
+
+    if let Some(resume_id) = session.exact_resume_session_id() {
+        builder = builder
+            .session_mode(gwt_agent::SessionMode::Resume)
+            .resume_session_id(resume_id.to_string())
+            .predecessor_session_id(session.id.clone());
+    } else {
+        // SPEC-3966 AC-4: restoring without a resume handle silently started a
+        // brand-new conversation, which is how the resident PM lost its whole
+        // decision history on every gwt restart without anyone noticing. Say so
+        // instead, with the reason, so the next reader does not have to
+        // reverse-engineer it from an empty Session TOML.
+        tracing::warn!(
+            session_id = %session.id,
+            worktree = %session.worktree_path.display(),
+            agent = ?session.agent_id,
+            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
+            "restored Session has no resume handle; launching a new conversation instead of --resume"
+        );
+        builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+    }
+
+    let mut config = builder.build();
+    if !session.display_name.is_empty() {
+        config.display_name = session.display_name.clone();
+    }
+    if let Some(scratch) = pm_scratch {
+        config.env_vars.insert(
+            crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
+            scratch.to_string_lossy().into_owned(),
+        );
+        config.suppress_execution_control = true;
+    }
+    if session.review_dispatch {
+        // Restore the observation role without rematerializing its existing
+        // detached checkout or arming producing execution control.
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        config.suppress_execution_control = true;
+        config.is_ephemeral = true;
+        // The persisted branch can be the detached checkout's display fallback.
+        // Matching it would join a different review that shares that label.
+        config.branch = None;
+    }
+    config
+}
+
+#[cfg(test)]
+mod persisted_review_launch_tests {
+    use super::*;
+
+    #[test]
+    fn restored_review_retains_observation_contract_and_isolated_worktree() {
+        let mut session = gwt_agent::Session::new(
+            "/tmp/isolated-review-checkout",
+            "work",
+            gwt_agent::AgentId::Codex,
+        );
+        session.review_dispatch = true;
+        session.linked_issue_number = Some(5478);
+        session.agent_session_id = Some("review-provider-conversation".to_string());
+        let config = launch_config_from_persisted_session(&session);
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .map(String::as_str),
+            Some("1"),
+            "a restored reviewer must retain its read-only hook identity"
+        );
+        assert!(config.suppress_execution_control);
+        assert!(config.is_ephemeral);
+        assert!(
+            config.branch.is_none(),
+            "a detached review must not join another review via the shared fallback branch"
+        );
+        assert_eq!(config.working_dir.as_ref(), Some(&session.worktree_path));
+        assert!(config.ephemeral_base_ref.is_none());
+        assert_eq!(config.linked_issue_number, Some(5478));
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum NamedIssueActivity {
     PrCreated { number: u64 },
