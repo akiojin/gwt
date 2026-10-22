@@ -1071,6 +1071,9 @@ drive them.
   instruction was delivered, lost, or acted on. Read the pane and recover
   with the same `params.operation_id`, the same exact `params.id`, and the
   same `params.text`; never start a fresh operation for that instruction.
+  Include the same `operation_id` in the inner `params` when using
+  `pm.operation.execute`. Applicable scoped authority is still required;
+  consumed one-off authority is never reused.
   The runtime retries only the submit key when it can prove the complete
   body still belongs to that unchanged target input; it never writes the
   body again. Older receipts, partial writes, restart, or any intervening
@@ -2617,6 +2620,8 @@ mod tests {
             "**unconfirmed**",
             "**lost**",
             "same `params.operation_id`",
+            "same `operation_id` in the inner `params`",
+            "consumed one-off authority is never reused",
             "never writes the body again",
             "readback-only",
             "Board handoff",

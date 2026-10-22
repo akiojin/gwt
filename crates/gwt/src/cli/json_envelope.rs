@@ -5777,6 +5777,18 @@ mod tests {
             ),
             "same-operation recovery must preserve the caller's operation identity"
         );
+        ok(
+            "pm.operation.execute",
+            json!({
+                "operation": "pm.message.send",
+                "params": {
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                },
+                "approval_id": "scoped-authority"
+            }),
+        );
         for operation_id in [
             json!(""),
             json!("not-a-uuid"),
@@ -5794,6 +5806,15 @@ mod tests {
                     ..
                 }
             ));
+            assert!(parse(&envelope(
+                "pm.operation.execute",
+                json!({
+                    "operation": "pm.message.send",
+                    "params": {"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id},
+                    "approval_id": "scoped-authority"
+                })
+            ))
+            .is_err());
         }
         assert!(matches!(
             err("pm.message.send", json!({"text": "hello"})),
