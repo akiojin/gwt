@@ -821,6 +821,13 @@ pub fn compute_plan(
     } else if is_resident_pm {
         plan.output = replace_with_pm_reminder(plan.output);
     }
+    if intent_event == IntentBoundaryEvent::Stop
+        && emit_work_state_reminders
+        && crate::cli::execution_state::session_launch_route_from_session(session)
+            == gwt_agent::LaunchRoute::Autonomous
+    {
+        plan.output = replace_base_reminders(plan.output, texts::AUTONOMOUS_STOP_REMINDER);
+    }
     if intent_event == IntentBoundaryEvent::SessionStart && !is_resident_pm {
         issue_context::append(&mut plan.output, session, &audience_scope);
     }

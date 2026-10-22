@@ -1,5 +1,232 @@
 use super::*;
 
+/// Issue #4359 AC-3/AC-4: a persisted decision wakes only its explicitly
+/// mentioned idle Session, through the same durable acknowledgement log as PM
+/// delivery. The notification carries a Board pointer, never the post's body.
+#[test]
+fn issue_4359_board_decision_notifies_mentioned_idle_session_once_with_shared_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for agent_id in ["codex", "opencode"] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+        let (queued, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = queued;
+        let target = "tab-1::other-window";
+        // Fixed Board pointers are available to every live Agent provider; PM's
+        // privileged message route keeps its own Claude/Codex restrictions.
+        runtime
+            .active_agent_sessions
+            .get_mut(target)
+            .unwrap()
+            .agent_id = agent_id.to_string();
+        let pane = if cfg!(windows) {
+            // The generic Windows fixture runs ping without reading stdin. Use
+            // the existing PM fixture's console reader and echo the submitted line
+            // so the assertion observes delivery rather than ConPTY echo settings.
+            Pane::new(
+            target.to_string(),
+            "powershell".to_string(),
+            [
+                "-NoProfile",
+                "-Command",
+                "while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            512,
+            24,
+            HashMap::new(),
+            test_pane_cwd(),
+        )
+        .expect("notification console reader")
+        } else {
+            long_running_test_pane(target)
+        };
+        let pty = pane.shared_pty();
+        pty.resize(512, 24)
+            .expect("keep notification on one PTY row");
+        let mut reader = pane.reader().expect("notification PTY reader");
+        let (output_tx, output_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut bytes = [0u8; 4096];
+            while let Ok(count) = std::io::Read::read(&mut reader, &mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                let _ = output_tx.send(bytes[..count].to_vec());
+            }
+        });
+        #[cfg(windows)]
+        pty.write_input(b"\x1b[1;1R").expect("ConPTY cursor reply");
+        let _pane_guard = TestPaneGuard {
+            pty,
+            reader: Some(reader),
+        };
+        insert_test_pane_runtime_with_pane(&mut runtime, target, pane);
+        runtime.register_pty_writer(target, None);
+        runtime.set_window_status("tab-1", "other-window", WindowProcessStatus::Idle);
+
+        let mut env = gwt::cli::TestEnv::new(repo.clone());
+        assert_eq!(
+            gwt::cli::dispatch_json_input(
+                &mut env,
+                "gwtd",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "board.post",
+                    "params": {
+                        "kind": "decision",
+                        "body": "untrusted decision body must stay on the Board",
+                        "mentions": ["session:other-session"],
+                        "broadcast": true,
+                    },
+                })
+                .to_string(),
+            ),
+            0,
+            "board.post must persist the decision before its notification",
+        );
+        let decision = gwt::board_provider::load_snapshot(&repo)
+            .expect("load posted decision")
+            .board
+            .entries
+            .into_iter()
+            .find(|entry| entry.kind == BoardEntryKind::Decision)
+            .expect("board.post saved its decision");
+        let (refreshed, views) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            Default::default(),
+        );
+        runtime.apply_board_projection_refresh(refreshed);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+
+        // test-hygiene: allow-wall-clock-deadline Bound the real OS PTY read; only observed notification bytes prove delivery.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let (prompt, operation_id, body_sha256) = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            output.extend(
+                output_rx
+                    // test-hygiene: allow-wall-clock-deadline Real PTY output arrives asynchronously; timeout only bounds failure, not success.
+                    .recv_timeout(remaining)
+                    .expect("a mentioned idle Session must receive its Board notification"),
+            );
+            let plain = gwt_core::process_console::strip_ansi(&String::from_utf8_lossy(&output));
+            if let Some((prompt, (operation_id, body_sha256))) = plain.lines().find_map(|line| {
+                gwt::pm_registry::parse_protected_pm_delivery_prompt(line)
+                    .map(|identity| (line.to_string(), identity))
+            }) {
+                break (prompt, operation_id, body_sha256);
+            }
+        };
+        assert!(prompt.contains("board.show"), "{prompt}");
+        assert!(prompt.contains(&decision.id[..8]), "{prompt}");
+        assert!(!prompt.contains(&decision.body), "{prompt}");
+        assert!(!prompt.contains(['\r', '\n']), "{prompt}");
+        let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        let prepared =
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .expect("read shared receipt log")
+                .expect("notification must prepare its receipt before writing");
+        assert_eq!(prepared.target_window_id, target);
+        assert_eq!(prepared.target_session_id, "other-session");
+        assert_eq!(prepared.body_sha256, body_sha256);
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "other-session");
+            gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                &repo,
+                &serde_json::json!({"prompt": prompt}).to_string(),
+            );
+        }
+        assert_eq!(
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        );
+        let receipt_count = gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .unwrap()
+            .len();
+        let (duplicate, _) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        runtime.apply_board_projection_refresh(duplicate);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+        assert_eq!(
+            gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+                .unwrap()
+                .len(),
+            receipt_count,
+            "a repeated watcher event must not create another delivery",
+        );
+    }
+}
+
+#[test]
+fn issue_4359_board_notification_excludes_unmentioned_posts_status_and_busy_sessions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let target = "tab-1::other-window";
+    let _pane_guard = attach_live_pm_pane(&mut runtime, target);
+    runtime.register_pty_writer(target, None);
+    let mut views = Default::default();
+    for (kind, mentioned, status) in [
+        (BoardEntryKind::Decision, false, WindowProcessStatus::Idle),
+        (BoardEntryKind::Status, true, WindowProcessStatus::Idle),
+        (BoardEntryKind::Decision, true, WindowProcessStatus::Running),
+    ] {
+        runtime.set_window_status("tab-1", "other-window", status);
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            kind,
+            "ordinary Board post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        if mentioned {
+            entry.mentions = vec![BoardMention::new(
+                BoardMentionTargetKind::Session,
+                "other-session",
+            )];
+        }
+        post_entry(&repo, entry).expect("persist excluded post");
+        let (refreshed, retained) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        views = retained;
+        runtime.apply_board_projection_refresh(refreshed);
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("notification fixture must queue its workers");
+        };
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+    }
+    assert!(gwt::pm_registry::load_pm_delivery_receipts(
+        &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+    )
+    .unwrap()
+    .is_empty());
+}
+
 #[test]
 fn board_refresh_sends_only_changed_entries_and_suppresses_duplicate_notifications() {
     let temp = tempdir().unwrap();

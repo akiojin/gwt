@@ -1077,6 +1077,10 @@ JSON operation `board.show` に `params:{"all":true}` を渡して本文を読�
 自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
 宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
 
+Board の decision が idle の agent session（`session:<id>`）を mention すると、
+gwt は裁定を読んで続行するよう対象 agent に 1 行の通知を送ります。
+Board が再更新されても同じ通知は繰り返しません。
+
 JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
 コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。
 検査する skill/command directory を明示的に選ぶ場合は、`.gwt/external-skill-roots.json` に
