@@ -184,12 +184,12 @@ test.describe("Project open entry surfaces", () => {
     await expect(modal).toBeHidden();
     await expect(trigger).toBeFocused();
     // Controlled inbound state checks the legacy picker render after errors.
-    await page.evaluate(() => {
-      const reply = (window as any).__gwtProjectOpenFixture.reply;
-      reply({ kind: 'hub_state', hub: { app_version: 'e2e', projects: [], recent_projects: [] } });
-      reply({ kind: 'workspace_state', workspace: { app_version: 'e2e', tabs: [], active_tab_id: null, recent_projects: [] } });
-    });
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'hub_state', hub: { app_version: 'e2e', projects: [], recent_projects: [] } }));
+    await expect(page.locator('#project-picker')).toBeVisible();
+    await expect(trigger).toBeDisabled();
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'workspace_state', workspace: { app_version: 'e2e', tabs: [], active_tab_id: null, recent_projects: [] } }));
     await expect(pickerError).toBeHidden();
+    await expect(pickerError).toHaveJSProperty('hidden', true);
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_open_error', message: 'Another folder failed' }));
     await expect(page.locator('#project-picker')).toBeVisible();
     await expect(pickerError).toBeVisible();
@@ -274,6 +274,7 @@ async function installProjectOpenBackend(
   await page.addInitScript((fixtureTabs: FixtureTab[]) => {
     const recordedSends: string[] = [];
     let hubSocket: ProjectOpenFixtureWebSocket | undefined;
+    let projectSocket: ProjectOpenFixtureWebSocket | undefined;
     const workspaceState = {
       kind: "workspace_state",
       workspace: {
@@ -294,7 +295,8 @@ async function installProjectOpenBackend(
 
       constructor(public readonly url: string) {
         super();
-        if (!new URL(url).searchParams.get('repo_hash')) hubSocket = this;
+        if (new URL(url).searchParams.get('repo_hash')) projectSocket = this;
+        else hubSocket = this;
         setTimeout(() => {
           this.readyState = ProjectOpenFixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
@@ -332,7 +334,14 @@ async function installProjectOpenBackend(
     });
     Object.defineProperty(window, "__gwtProjectOpenFixture", {
       configurable: true,
-      value: { recordedSends, reply: (event: unknown) => hubSocket?.emit(event) },
+      value: {
+        recordedSends,
+        reply: (event: { kind: string }) => {
+          // Project snapshots must pass the Project connection's guard.
+          const socket = event.kind === 'workspace_state' ? projectSocket : hubSocket;
+          socket?.emit(event);
+        },
+      },
     });
   }, tabs);
 }

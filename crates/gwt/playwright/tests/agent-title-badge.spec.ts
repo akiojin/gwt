@@ -49,7 +49,8 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("Grok Build");
 
-    await agentWindow.screenshot({
+    // list_windows may replace rows while screenshot prepares the capture.
+    await page.locator("#window-list-panel").screenshot({
       path:
         process.env.GWT_AGENT_BADGE_SCREENSHOT_PATH ||
         testInfo.outputPath("agent-title-badge.png"),
