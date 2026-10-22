@@ -996,6 +996,10 @@ pub struct IssueMonitorPrefs {
     pub allowed_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    /// Exact completed holders retired after a full runtime absence observation.
+    /// Fresh canvas snapshots must not turn their retained diagnostic panes into slots.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_completed_sessions: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
     #[serde(default)]
@@ -1283,6 +1287,7 @@ impl Default for IssueMonitorPrefs {
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            retired_completed_sessions: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
             terminal_queue_auto_refill: false,
@@ -2780,6 +2785,8 @@ pub struct IssueMonitorExecutionObservation {
     pub dead_holder_hosts: BTreeSet<(u32, u64)>,
     /// Current ECR holder identity while its exact runtime is live or uncertain.
     pub held_holder_session_id: Option<String>,
+    /// Exact predecessor whose child exited while its GUI host may still live.
+    pub exited_holder_session_id: Option<String>,
 }
 
 /// Issue #4084 AC-1: one idle window and its classification.
@@ -4711,6 +4718,7 @@ pub struct IssueMonitorState {
     active_launches: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
@@ -7374,6 +7382,7 @@ impl IssueMonitorState {
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            retired_completed_sessions: BTreeSet::new(),
             process_held_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
@@ -7468,6 +7477,7 @@ impl IssueMonitorState {
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
+        state.retired_completed_sessions = prefs.retired_completed_sessions;
         state.terminal_queues = prefs.terminal_queues;
         state.urgent_queue = prefs.urgent_queue;
         state.terminal_queue_auto_refill = prefs.terminal_queue_auto_refill;
@@ -7636,6 +7646,7 @@ impl IssueMonitorState {
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
+            retired_completed_sessions: self.retired_completed_sessions.clone(),
             terminal_queues: self.terminal_queues.clone(),
             urgent_queue: self.urgent_queue.clone(),
             terminal_queue_auto_refill: self.terminal_queue_auto_refill,
@@ -11501,6 +11512,20 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        self.retired_completed_sessions
+            .extend(disk.retired_completed_sessions.iter().cloned());
+        if let Some(snapshot) = &mut self.window_snapshot {
+            for pane in &mut snapshot.windows {
+                if !pane.review_dispatch
+                    && pane
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session| self.retired_completed_sessions.contains(session))
+                {
+                    pane.monitor_owned = false;
+                }
+            }
+        }
         for (issue_number, observation) in &disk.open_pr_observations {
             self.merge_open_pr_observation(*issue_number, observation.clone());
         }
@@ -21475,10 +21500,20 @@ impl IssueMonitorState {
 
     fn record_window_snapshot_with_origin(
         &mut self,
-        snapshot: IssueMonitorWindowSnapshot,
+        mut snapshot: IssueMonitorWindowSnapshot,
         host: Option<(u32, u64)>,
         mut project_tabs: BTreeSet<String>,
     ) {
+        for pane in &mut snapshot.windows {
+            if !pane.review_dispatch
+                && pane
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|session| self.retired_completed_sessions.contains(session))
+            {
+                pane.monitor_owned = false;
+            }
+        }
         if self.window_snapshot.as_ref().is_some_and(|previous| {
             previous.project_tab_id == snapshot.project_tab_id
                 && self.window_snapshot_host == host
@@ -21994,6 +22029,112 @@ impl IssueMonitorState {
         classified
     }
 
+    /// Retire an exact completed child without declaring its entire GUI host dead.
+    /// The caller decides whether remaining owner work warrants another slice.
+    pub(crate) fn retire_exited_completed_holder(
+        &mut self,
+        number: u64,
+        observation: &IssueMonitorExecutionObservation,
+        now: &str,
+    ) -> bool {
+        let Some(holder) = observation.exited_holder_session_id.as_deref() else {
+            return false;
+        };
+        let bound = self.launched_windows.get(&number).cloned();
+        // Even an expired canvas sample must not authorize retiring a later ACK.
+        let observed_at = self.window_snapshot.as_ref().map_or(now, |snapshot| {
+            match (
+                parse_rfc3339_utc(&snapshot.observed_at),
+                parse_rfc3339_utc(now),
+            ) {
+                (Some(sample), Some(current)) if sample > current => now,
+                _ => snapshot.observed_at.as_str(),
+            }
+        });
+        if observation.settlement != IssueMonitorExecutionSettlement::Completed
+            || observation.process_held
+            || self
+                .pending_launches
+                .iter()
+                .any(|launch| launch.issue_number == number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == number)
+            || bound.as_deref().is_some_and(|window| {
+                !self.window_observation_covers_launch(number, window, observed_at)
+            })
+            || self
+                .window_snapshot
+                .iter()
+                .flat_map(|snapshot| &snapshot.windows)
+                .any(|pane| {
+                    !pane.review_dispatch
+                        && pane.issue_number == Some(number)
+                        && pane.session_id.as_deref() != Some(holder)
+                        && (idle_window_is_alive(pane.status)
+                            || bound.as_deref().is_some_and(|window| {
+                                issue_monitor_window_ids_match(window, &pane.window_id)
+                            }))
+                })
+        {
+            return false;
+        }
+        self.retired_completed_sessions.insert(holder.to_string());
+        let mut windows = bound.into_iter().collect::<BTreeSet<_>>();
+        let mut census_windows = BTreeSet::new();
+        if let Some(snapshot) = &mut self.window_snapshot {
+            for pane in &mut snapshot.windows {
+                if !pane.review_dispatch
+                    && pane.issue_number == Some(number)
+                    && pane.session_id.as_deref() == Some(holder)
+                {
+                    windows.insert(pane.window_id.clone());
+                    census_windows.insert(pane.window_id.clone());
+                    pane.monitor_owned = false;
+                }
+            }
+        }
+        self.clear_active_tracking(number);
+        self.launch_bindings
+            .retain(|window, owner| *owner != number || !windows.contains(window));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == number)
+        {
+            item.launched_window_id = None;
+        }
+        for census in self.monitor_runtime_counts.values_mut() {
+            if self.window_snapshot_host != Some((census.host_pid, census.host_started_at)) {
+                continue;
+            }
+            let before = census.windows.len();
+            census
+                .windows
+                .retain(|window, owner| *owner != number || !census_windows.contains(window));
+            let removed = before - census.windows.len();
+            if removed == 0 {
+                continue;
+            }
+            if let Some(count) = census.counts.get_mut(&number) {
+                *count = count.saturating_sub(removed);
+                if *count == 0 {
+                    census.counts.remove(&number);
+                }
+            }
+            // Counts may include another incarnation of a reused window ID.
+            // Retain residual/count-only evidence and fence only this correction.
+            if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
+                let next = previous + chrono::Duration::nanoseconds(1);
+                census.observed_at = parse_rfc3339_utc(now)
+                    .map_or(next, |now| now.max(next))
+                    .to_rfc3339();
+            }
+        }
+        true
+    }
+
     /// Retire only exact dead terminal holders before verified binding repair.
     /// Normal pane closes, review rebinds and missing-pane grace run afterwards.
     pub fn reconcile_dead_terminal_launches(
@@ -22001,6 +22142,33 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> IssueMonitorIdleReconciliation {
+        let mut child_exits = IssueMonitorIdleReconciliation::default();
+        let completed = settlements
+            .iter()
+            .filter_map(|(&number, observation)| {
+                self.inbox_item(number)
+                    .filter(|item| {
+                        item.state == MonitorInboxState::Launched
+                            || self.active_launches.contains(&number)
+                            || self.monitor_canvas_windows().any(|pane| {
+                                !pane.review_dispatch
+                                    && pane.issue_number == Some(number)
+                                    && observation.exited_holder_session_id.as_ref().is_some_and(
+                                        |holder| pane.session_id.as_ref() == Some(holder),
+                                    )
+                            })
+                    })
+                    .map(|_| (number, observation))
+            })
+            .collect::<Vec<_>>();
+        for (number, observation) in completed {
+            if self.retire_exited_completed_holder(number, observation, now) {
+                child_exits.released.push(number);
+                if self.finish_terminal_launch_release(number, observation.settlement, now) {
+                    child_exits.requeued.push(number);
+                }
+            }
+        }
         let idle_windows = self
             .classify_idle_windows(settlements, now)
             .into_iter()
@@ -22026,6 +22194,8 @@ impl IssueMonitorState {
             IdleReleaseScope::FinishedImplementations,
         );
         self.prune_dead_terminal_launches(&mut outcome, settlements, now);
+        outcome.released.extend(child_exits.released);
+        outcome.requeued.extend(child_exits.requeued);
         outcome
     }
 
@@ -22055,57 +22225,8 @@ impl IssueMonitorState {
             }) else {
                 continue;
             };
-            // Completed ends a slice, not an unfinished SPEC. Preserve its
-            // admission and publish the existing rebase fence before queuing a
-            // fresh successor. Other terminal owners retain the retirement rule.
-            let next_slice = settlements[&number].settlement
-                == IssueMonitorExecutionSettlement::Completed
-                && self.terminal_queue_contains(number)
-                && !self.issue_is_closed(number)
-                && !self.merged_issues.contains(&number)
-                && !self.failed_issues.contains_key(&number)
-                && self.inbox_item(number).is_some_and(|item| {
-                    let issue = &item.issue;
-                    issue.state == IssueMonitorIssueState::Open
-                        && has_gwt_spec_label(&issue.labels)
-                        && Self::issue_completion_decision(issue)
-                            == IssueCompletionDecision::Incomplete
-                        && self.allows_issue_labels(issue)
-                        && issue_monitor_candidate_exclusion(issue, self.source_repository)
-                            .is_none()
-                        && {
-                            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
-                                issue.body.as_deref().unwrap_or(""),
-                            );
-                            criteria.machine_checkable && !criteria.unchecked.is_empty()
-                        }
-                });
-            if next_slice {
-                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
-                self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
+            if self.finish_terminal_launch_release(number, settlements[&number].settlement, now) {
                 outcome.requeued.push(number);
-            } else if settlements[&number].settlement == IssueMonitorExecutionSettlement::Completed
-                && self.terminal_queue_contains(number)
-                && !self.issue_is_closed(number)
-                && !self.merged_issues.contains(&number)
-                && !self.failed_issues.contains_key(&number)
-                && self.inbox_item(number).is_some_and(|item| {
-                    item.issue.state == IssueMonitorIssueState::Open
-                        && has_gwt_spec_label(&item.issue.labels)
-                        && item.issue.readiness == IssueMonitorReadiness::NotReady
-                })
-            {
-                // A failed SPEC read is unknown, not evidence that this owner
-                // finished. Keep its selection while the existing gate waits
-                // for readback, and fence the released launch across rebase.
-                self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
-                self.fence_automatic_relaunch(
-                    number,
-                    "completed SPEC slice; refresh required",
-                    now,
-                );
-            } else {
-                self.terminal_queue_remove(&[number], now);
             }
             if let Some(snapshot) = &mut self.window_snapshot {
                 for observed in &mut snapshot.windows {
@@ -22142,6 +22263,59 @@ impl IssueMonitorState {
                 }
             }
         }
+    }
+
+    fn finish_terminal_launch_release(
+        &mut self,
+        number: u64,
+        settlement: IssueMonitorExecutionSettlement,
+        now: &str,
+    ) -> bool {
+        // Completed ends a slice, not an unfinished SPEC. Preserve its
+        // admission and publish the existing rebase fence before queuing a
+        // fresh successor. Other terminal owners retain the retirement rule.
+        let next_slice = settlement == IssueMonitorExecutionSettlement::Completed
+            && self.terminal_queue_contains(number)
+            && !self.issue_is_closed(number)
+            && !self.merged_issues.contains(&number)
+            && !self.failed_issues.contains_key(&number)
+            && self.inbox_item(number).is_some_and(|item| {
+                let issue = &item.issue;
+                issue.state == IssueMonitorIssueState::Open
+                    && has_gwt_spec_label(&issue.labels)
+                    && Self::issue_completion_decision(issue) == IssueCompletionDecision::Incomplete
+                    && self.allows_issue_labels(issue)
+                    && issue_monitor_candidate_exclusion(issue, self.source_repository).is_none()
+                    && {
+                        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                            issue.body.as_deref().unwrap_or(""),
+                        );
+                        criteria.machine_checkable && !criteria.unchecked.is_empty()
+                    }
+            });
+        if next_slice {
+            self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+            self.fence_automatic_relaunch(number, "completed SPEC slice; remaining work", now);
+        } else if settlement == IssueMonitorExecutionSettlement::Completed
+            && self.terminal_queue_contains(number)
+            && !self.issue_is_closed(number)
+            && !self.merged_issues.contains(&number)
+            && !self.failed_issues.contains_key(&number)
+            && self.inbox_item(number).is_some_and(|item| {
+                item.issue.state == IssueMonitorIssueState::Open
+                    && has_gwt_spec_label(&item.issue.labels)
+                    && item.issue.readiness == IssueMonitorReadiness::NotReady
+            })
+        {
+            // A failed SPEC read is unknown, not evidence that this owner
+            // finished. Keep its selection while the existing gate waits
+            // for readback, and fence the released launch across rebase.
+            self.requeue_issue_for_relaunch(number, QueuePosition::Tail);
+            self.fence_automatic_relaunch(number, "completed SPEC slice; refresh required", now);
+        } else {
+            self.terminal_queue_remove(&[number], now);
+        }
+        next_slice
     }
 
     /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
@@ -45341,6 +45515,101 @@ mod tests {
     }
 
     #[test]
+    fn issue_5876_completed_child_retirement_preserves_uncertain_and_successor_work() {
+        let base = launched_cohort(&[(42, "tab-1::finished")]);
+        let mut proof =
+            settlements(&[(42, IssueMonitorExecutionSettlement::Completed)])[&42].clone();
+        proof.exited_holder_session_id = Some("finished-session".into());
+        for scenario in [
+            "live",
+            "unknown",
+            "active",
+            "successor",
+            "unknown-pane",
+            "new-ack",
+            "stale-canvas",
+            "delivery",
+        ] {
+            let mut monitor = base.clone();
+            let mut observed = proof.clone();
+            match scenario {
+                "live" => observed.process_held = true,
+                "unknown" => observed.exited_holder_session_id = None,
+                "active" => observed.settlement = IssueMonitorExecutionSettlement::Active,
+                "successor" | "unknown-pane" => {
+                    let mut snapshot = idle_snapshot(IDLE_NOW, vec![idle_observation("tab-1::successor", Some(42), WindowState::Starting, false)]);
+                    snapshot.windows[0].monitor_owned = scenario != "successor";
+                    snapshot.windows[0].session_id = (scenario == "successor").then(|| "new-session".into());
+                    monitor.record_window_snapshot(snapshot);
+                }
+                "new-ack" => monitor.launch_confirmations.get_mut(&42).unwrap().confirmed_at = "2026-09-07T04:00:01Z".into(),
+                "stale-canvas" => {
+                    monitor.launch_confirmations.get_mut(&42).unwrap().confirmed_at = "2026-09-07T03:59:59Z".into();
+                    monitor.record_window_snapshot(idle_snapshot("2026-09-07T03:00:00Z", Vec::new()));
+                }
+                "delivery" => monitor.pending_launch_deliveries.push_back(serde_json::from_value(serde_json::json!({
+                    "delivery_id": "new-delivery", "issue_number": 42, "branch_name": "work/issue-42",
+                    "linked_issue_kind": "issue", "claim_id": "new-claim", "created_at": IDLE_NOW
+                })).unwrap()),
+                _ => unreachable!(),
+            }
+            let before = monitor.prefs();
+            assert!(
+                !monitor.retire_exited_completed_holder(42, &observed, IDLE_NOW),
+                "{scenario}"
+            );
+            assert_eq!(
+                monitor.prefs(),
+                before,
+                "{scenario}: refusal must not mutate durable state"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_5876_completed_child_retirement_preserves_other_host_census() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::finished")]);
+        let mut proof =
+            settlements(&[(42, IssueMonitorExecutionSettlement::Completed)])[&42].clone();
+        proof.exited_holder_session_id = Some("finished-session".into());
+        let mut pane = idle_observation("tab-1::finished", Some(42), WindowState::Stopped, false);
+        pane.monitor_owned = true;
+        pane.session_id = Some("finished-session".into());
+        monitor.record_window_snapshot_from_host(
+            idle_snapshot(IDLE_NOW, vec![pane]),
+            101,
+            1001,
+            Default::default(),
+        );
+        monitor.record_monitor_runtime_windows(
+            101,
+            1001,
+            BTreeMap::from([(42, 2), (43, 1)]),
+            BTreeMap::from([("tab-1::finished".into(), 42), ("tab-1::other".into(), 43)]),
+            IDLE_NOW,
+        );
+        monitor.record_monitor_runtime_windows(
+            102,
+            1002,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("tab-1::finished".into(), 42)]),
+            IDLE_NOW,
+        );
+        assert!(monitor.retire_exited_completed_holder(42, &proof, IDLE_NOW));
+        assert_eq!(
+            monitor.prefs().monitor_runtime_counts["102:1002"].counts,
+            BTreeMap::from([(42, 1)]),
+            "a same-ID pane on another host has no exact retirement proof"
+        );
+        let census = &monitor.prefs().monitor_runtime_counts["101:1001"];
+        assert_eq!(census.counts, BTreeMap::from([(42, 1), (43, 1)]));
+        assert_eq!(
+            census.windows,
+            BTreeMap::from([("tab-1::other".into(), 43)])
+        );
+    }
+
+    #[test]
     fn issue_5876_completed_spec_slice_survives_dead_holder_cleanup_and_restart() {
         let mut candidate = spec_issue(
             42,
@@ -45549,6 +45818,7 @@ mod tests {
                     holder_host_dead,
                     dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
+                    exited_holder_session_id: None,
                 },
             )]);
             for now in [IDLE_NOW, "2026-09-07T04:01:00Z"] {
@@ -45613,6 +45883,7 @@ mod tests {
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
+                        exited_holder_session_id: None,
                     },
                 )
             })
@@ -45731,6 +46002,7 @@ mod tests {
                 holder_host_dead: false,
                 dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,
+                exited_holder_session_id: None,
             },
         )]);
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
