@@ -322,7 +322,7 @@ mod tests {
                             % 2,
                         ..Default::default()
                     });
-                }) as Arc<dyn Fn(&mut IssueMonitorState) + Send + Sync>
+                }) as Arc<super::super::IssueMonitorCapacityOverride>
             }),
             hold_effects: true,
             ..Default::default()

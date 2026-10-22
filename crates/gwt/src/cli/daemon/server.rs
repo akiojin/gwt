@@ -635,7 +635,7 @@ struct IssueMonitorWorkerTestHooks {
     #[cfg(test)]
     effect_override: Option<Arc<IssueMonitorEffectOverride>>,
     #[cfg(test)]
-    capacity_override: Option<Arc<dyn Fn(&mut crate::IssueMonitorState) + Send + Sync>>,
+    capacity_override: Option<Arc<IssueMonitorCapacityOverride>>,
     #[cfg(test)]
     hold_effects: bool,
     #[cfg(all(test, unix))]
@@ -659,6 +659,9 @@ type IssueMonitorScanOverride = dyn Fn(
 #[cfg(test)]
 type IssueMonitorEffectOverride =
     dyn Fn(&crate::PendingIssueMonitorEffect, &str) -> IssueMonitorEffectOutcome + Send + Sync;
+
+#[cfg(test)]
+type IssueMonitorCapacityOverride = dyn Fn(&mut crate::IssueMonitorState) + Send + Sync;
 
 #[cfg(all(test, unix))]
 #[derive(Default)]
