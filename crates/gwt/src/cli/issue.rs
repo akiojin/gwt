@@ -6508,43 +6508,67 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh(
     repo: &str,
     numbers: &[u64],
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
-    fetch_linked_prs_bulk_via_gh_with(numbers, |query| {
-        let hub = gwt_core::process_console::global();
-        let output = gwt_core::process_console::spawn_logged_blocking(
-            &hub,
-            gwt_core::process_console::ProcessKind::Gh,
-            "gh",
-            &[
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={query}"),
-                "-f",
-                &format!("owner={owner}"),
-                "-f",
-                &format!("repo={repo}"),
-            ],
-            gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
-        )?;
-        if !output.success() {
-            return Err(io::Error::other(format!(
-                "gh api graphql failed: {}",
-                output.stderr.trim()
-            )));
-        }
-        Ok(output.stdout)
-    })
+    fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, |_, _| {})
+}
+
+/// Publish only completed Issues, so a later page failure does not erase their
+/// evidence. The return value retains the strict all-pages error contract.
+pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    observe: impl FnMut(u64, &[LinkedPrSummary]),
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_via_gh_with_observer(
+        numbers,
+        |query| {
+            let hub = gwt_core::process_console::global();
+            let output = gwt_core::process_console::spawn_logged_blocking(
+                &hub,
+                gwt_core::process_console::ProcessKind::Gh,
+                "gh",
+                &[
+                    "api",
+                    "graphql",
+                    "-f",
+                    &format!("query={query}"),
+                    "-f",
+                    &format!("owner={owner}"),
+                    "-f",
+                    &format!("repo={repo}"),
+                ],
+                gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
+            )?;
+            if !output.success() {
+                return Err(io::Error::other(format!(
+                    "gh api graphql failed: {}",
+                    output.stderr.trim()
+                )));
+            }
+            Ok(output.stdout)
+        },
+        observe,
+    )
 }
 
 /// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
 /// bulk query and answers its JSON body.
+#[cfg(test)]
 pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(
     numbers: &[u64],
-    mut run: F,
+    run: F,
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>>
 where
     F: FnMut(&str) -> io::Result<String>,
 {
+    fetch_linked_prs_bulk_via_gh_with_observer(numbers, run, |_, _| {})
+}
+
+fn fetch_linked_prs_bulk_via_gh_with_observer(
+    numbers: &[u64],
+    mut run: impl FnMut(&str) -> io::Result<String>,
+    mut observe: impl FnMut(u64, &[LinkedPrSummary]),
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
     for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
         let mut pending = chunk.to_vec();
@@ -6621,7 +6645,9 @@ where
                 let complete = serde_json::json!({"timelineItems": {
                     "nodes": nodes_by_issue.remove(number).unwrap_or_default()
                 }});
-                linked.insert(*number, parse_linked_pr_timeline(&complete, *number));
+                let prs = parse_linked_pr_timeline(&complete, *number);
+                observe(*number, &prs);
+                linked.insert(*number, prs);
             }
             pending = next;
         }
