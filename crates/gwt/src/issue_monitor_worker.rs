@@ -1149,6 +1149,7 @@ fn spec_cache_entry_has_no_sections(entry: &CacheEntry) -> bool {
     entry.spec_parse_error.is_none() || body_declares_an_empty_section_index(&entry.snapshot.body)
 }
 
+#[cfg(test)]
 fn issue_monitor_candidates_with_readiness<F>(
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
@@ -1158,6 +1159,7 @@ where
     F: FnMut(IssueNumber) -> Result<(), String>,
 {
     issue_monitor_candidates_with_readiness_and_refresh_limit(
+        None,
         issues,
         cache_root,
         ISSUE_MONITOR_TARGETED_REFRESH_LIMIT,
@@ -1166,6 +1168,7 @@ where
 }
 
 fn issue_monitor_candidates_with_readiness_and_refresh_limit<F>(
+    project_root: Option<&Path>,
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
     refresh_limit: usize,
@@ -1260,6 +1263,14 @@ where
                     }
                 }
                 Err(error) => {
+                    if let Some(project_root) = project_root {
+                        record_scan_failure_ledger(
+                            project_root,
+                            error.stage.as_str(),
+                            &error.to_string(),
+                            Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                        );
+                    }
                     fail(format!("targeted refresh failed: {error}"));
                     None
                 }
@@ -1582,21 +1593,19 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 );
             }
             let (mut issues, readiness_failures) =
-                issue_monitor_candidates_with_readiness(listing.issues, &cache_root, |number| {
-                    crate::issue_cache::refresh_issue_cache_entry_from_remote(
-                        repo_path,
-                        &cache_root,
-                        number,
-                    )
-                });
-            for failure in &readiness_failures {
-                record_scan_failure_ledger(
-                    repo_path,
-                    IssueMonitorScanStage::CandidateLoad.as_str(),
-                    &format!("issue #{}: {}", failure.number, failure.reason),
-                    Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                issue_monitor_candidates_with_readiness_and_refresh_limit(
+                    Some(repo_path),
+                    listing.issues,
+                    &cache_root,
+                    ISSUE_MONITOR_TARGETED_REFRESH_LIMIT,
+                    |number| {
+                        crate::issue_cache::refresh_issue_cache_entry_from_remote(
+                            repo_path,
+                            &cache_root,
+                            number,
+                        )
+                    },
                 );
-            }
             if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
                 backfill_missing_issue_authors((owner, repo), &mut issues, |issue| {
                     try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue).inspect_err(
@@ -3474,6 +3483,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn issue_3924_readiness_limits_do_not_emit_scan_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (_, failures) = issue_monitor_candidates_with_readiness_and_refresh_limit(
+            Some(temp.path()),
+            vec![
+                live_issue(42, &["gwt-spec"], Some("2026-10-22T00:00:00Z")),
+                live_issue(43, &["gwt-spec"], Some("2026-10-22T00:00:00Z")),
+            ],
+            temp.path(),
+            1,
+            |_| Err("original readiness read failure".into()),
+        );
+        assert_eq!(failures.len(), 2);
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1, "the refresh limit is not a stage failure");
+        assert_eq!(rows[0].context["stage"], "candidate-load");
+        assert!(rows[0].message.contains("original readiness read failure"));
+    }
+
+    #[test]
     fn issue_3924_prune_failures_are_recorded_but_safety_skips_are_not() {
         use gwt_git::merged_branch_prune::{
             PruneFailure, PruneReport, PruneSkipReason, PruneSkipped,
@@ -4334,6 +4364,7 @@ pub(crate) mod tests {
         let mut refreshed_numbers = Vec::new();
 
         let (issues, errors) = issue_monitor_candidates_with_readiness_and_refresh_limit(
+            None,
             vec![
                 live_issue(42, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),
                 live_issue(43, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),
