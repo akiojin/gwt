@@ -29,6 +29,9 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
+- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
+  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+  Claude アカウント枠は Settings → Usage & Limits で有効化してください。
 
 ## インストール
 

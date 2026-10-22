@@ -35,6 +35,7 @@ export function createProviderUsageSurface({
         weekly: "Weekly",
         opus_weekly: "Opus weekly",
         sonnet_weekly: "Sonnet weekly",
+        fable_weekly: "Fable weekly",
         code_review_weekly: "Code review weekly",
       };
 
@@ -197,6 +198,31 @@ export function createProviderUsageSurface({
         row.appendChild(bar);
         row.appendChild(pct);
         row.appendChild(reset);
+        return row;
+      }
+
+      function buildUsageCreditsRow(extra) {
+        const row = document.createElement("div");
+        row.className = "op-usage-win";
+        row.dataset.usageCredits = "true";
+        const label = document.createElement("span");
+        label.className = "op-usage-win__lbl";
+        label.textContent = "Usage credits";
+        const hasUtilization = Number.isFinite(extra.utilization);
+        const bar = hasUtilization
+          ? buildUsageBar(extra.utilization)
+          : document.createElement("span");
+        bar.classList.add("op-usage-win__bar");
+        const percent = document.createElement("span");
+        percent.className = "op-usage-win__pct";
+        percent.textContent = hasUtilization ? `${Math.round(extra.utilization)}%` : "—";
+        const amount = document.createElement("span");
+        amount.className = "op-usage-win__reset";
+        const values = [extra.used_credits, extra.monthly_limit]
+          .map(value => Number.isFinite(value) ? String(value) : "—")
+          .join(" / ");
+        amount.textContent = extra.currency ? `${values} ${extra.currency}` : values;
+        row.append(label, bar, percent, amount);
         return row;
       }
 
@@ -437,6 +463,10 @@ export function createProviderUsageSurface({
             }
             card.appendChild(r);
           }
+        }
+
+        if (account.provider === "claude_code" && account.extra_usage?.is_enabled === true) {
+          card.appendChild(buildUsageCreditsRow(account.extra_usage));
         }
 
         const pc = usageConsumptionFor(account.provider);

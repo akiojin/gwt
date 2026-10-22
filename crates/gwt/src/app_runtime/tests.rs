@@ -9202,6 +9202,7 @@ fn codex_usage_account(
         account_id: None,
         account_label: None,
         plan: None,
+        extra_usage: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,
