@@ -1848,6 +1848,16 @@ pub(crate) struct PtyWriterEntry {
     pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
     pub(crate) handle: Arc<PtyHandle>,
     pub(crate) monitor_runtime: Option<gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration>,
+    // Only the latest fully written PM prompt in this exact PTY generation
+    // may receive one bounded submit-only recovery. Never restore from disk.
+    pub(crate) pm_delivery_replay: Mutex<Option<PmDeliveryReplayGuard>>,
+}
+
+pub(crate) struct PmDeliveryReplayGuard {
+    operation_id: String,
+    target_session_id: String,
+    ordinary_revision: u64,
+    transaction_revision: u64,
 }
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;

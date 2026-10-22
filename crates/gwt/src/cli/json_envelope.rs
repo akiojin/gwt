@@ -1701,11 +1701,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
-        "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
-            project_root: optional_string(params, "project_root")?,
-            id: required_string(params, "id")?,
-            text: required_string(params, "text")?,
-        }),
+        "pm.message.send" | "pm.pane.send" => {
+            // An explicitly supplied identity must never become a fresh delivery.
+            let operation_id = match lookup(params, "operation_id") {
+                None => None,
+                Some(Value::String(value))
+                    if uuid::Uuid::parse_str(value)
+                        .is_ok_and(|id| id.hyphenated().to_string() == value.as_str()) =>
+                {
+                    Some(value.clone())
+                }
+                Some(_) => return Err(CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    reason:
+                        "must be a canonical hyphenated UUID exactly as reported by pm.message.send",
+                }),
+            };
+            CliCommand::Pane(PaneCommand::PmSend {
+                project_root: optional_string(params, "project_root")?,
+                id: required_string(params, "id")?,
+                text: required_string(params, "text")?,
+                operation_id,
+            })
+        }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.plan.status" => {
             reject_unknown_params(params, &[], "pm.plan.status")?;
@@ -5785,8 +5803,63 @@ mod tests {
                 project_root: None,
                 id: "tab-1::agent-1".to_string(),
                 text: "please report status".to_string(),
+                operation_id: None,
             })
         );
+        assert_ne!(
+            ok(
+                "pm.message.send",
+                json!({
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                })
+            ),
+            ok(
+                "pm.message.send",
+                json!({"id": "tab-1::agent-1", "text": "please report status"})
+            ),
+            "same-operation recovery must preserve the caller's operation identity"
+        );
+        ok(
+            "pm.operation.execute",
+            json!({
+                "operation": "pm.message.send",
+                "params": {
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                },
+                "approval_id": "scoped-authority"
+            }),
+        );
+        for operation_id in [
+            json!(""),
+            json!("not-a-uuid"),
+            json!("72FC3CD4-AD49-43E3-BF3D-D791357643C2"),
+            json!("72fc3cd4ad4943e3bf3dd791357643c2"),
+            Value::Null,
+        ] {
+            assert!(matches!(
+                err(
+                    "pm.message.send",
+                    json!({"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id})
+                ),
+                CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    ..
+                }
+            ));
+            assert!(parse(&envelope(
+                "pm.operation.execute",
+                json!({
+                    "operation": "pm.message.send",
+                    "params": {"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id},
+                    "approval_id": "scoped-authority"
+                })
+            ))
+            .is_err());
+        }
         assert!(matches!(
             err("pm.message.send", json!({"text": "hello"})),
             CliParseError::MissingFlag("id")
