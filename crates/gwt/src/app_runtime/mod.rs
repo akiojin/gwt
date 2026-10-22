@@ -1680,6 +1680,7 @@ pub(crate) struct PendingIssueMonitorMaxActive {
     client_id: ClientId,
     max_active_agents: Option<usize>,
     changed_at: String,
+    control_id: String,
 }
 
 #[derive(Default)]
@@ -8781,6 +8782,7 @@ impl AppRuntime {
             client_id,
             max_active_agents,
             changed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            control_id: uuid::Uuid::new_v4().to_string(),
         });
         if lane.requests.len() > 1 {
             return Vec::new();
@@ -8825,10 +8827,13 @@ impl AppRuntime {
                                     request.max_active_agents,
                                     gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
                                     &request.changed_at,
-                                )
+                                );
+                                monitor.persist_machine_max_active_change(&request.control_id)
                             },
                         )
-                        .map(|(monitor, ())| Some(Box::new(monitor)))
+                        .and_then(|(monitor, saved)| saved
+                            .map(|()| Some(Box::new(monitor)))
+                            .map_err(|error| gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(error.to_string())))
                     }
                     Err(error) => Err(error),
                 }

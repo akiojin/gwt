@@ -524,12 +524,18 @@ settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
 Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Existing saved limits remain Manual. Values above
+follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+by all projects on this machine. Manual is a total worker limit; each project receives
+the remaining capacity after other projects' workers, while PM windows stay separate.
+Settings shows this project's allocation and other projects' worker consumption.
+On first migration, any existing Auto project selects Auto; otherwise the most recently
+changed Manual limit is adopted. Later project snapshots cannot change this shared policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
-`max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
+and the shared `agent_capacity` measurement.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 

@@ -492,11 +492,15 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
 **Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
-既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
+Auto / Manual と手動の要求上限は、このマシンの全プロジェクトで共通です。Manual は
+実装・レビュー窓の合計上限で、他プロジェクトの消費を引いた残りを各プロジェクトへ配分します。
+PM 窓の会計は別に表示し、Settings には自プロジェクトの割当と他プロジェクトの消費を併記します。
+初回移行は、既存のいずれかが Auto なら Auto、全て Manual なら最後に変更された手動値を採用します。
+移行後のプロジェクト別スナップショットは、この共通設定を変更しません。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
-`max_active_agents_override`、共有実測値の `agent_capacity` を返します。
+`max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 

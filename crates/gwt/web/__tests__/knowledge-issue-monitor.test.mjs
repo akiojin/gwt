@@ -486,6 +486,16 @@ test("Issue #3620: capacity badges follow confirmed manual and automatic limits"
   assert.equal(badge.dataset.tone, "info");
   assert.match(notices.at(-1).message, /Lower Max active if slow/);
   assert.match(notices.at(-1).details, /Verification may not finish/);
+  const sharedManual = capacityStatus({ max_active_agents: 3, max_active_agents_override: 5 });
+  const noticeCount = notices.length;
+  surface.applyIssueMonitorStatus(sharedManual);
+  assert.equal(badge.textContent, "Capacity 3 · Details", "other-project consumption does not make the shared request excessive");
+  assert.equal(notices.length, noticeCount, "the request fits the machine worker recommendation of five");
+  surface.applyIssueMonitorStatus({ ...sharedManual,
+    agent_capacity: { ...sharedManual.agent_capacity, measurement_complete: false } });
+  assert.equal(badge.dataset.tone, "info", "Manual remains configured when the project receives fewer workers");
+  assert.equal(notices.at(-1).level, "info");
+  assert.match(notices.at(-1).message, /Capacity pending.*Manual limit 5.*no action needed/);
   surface.applyIssueMonitorStatus(capacityStatus());
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/3");
   surface.applyIssueMonitorStatus({ max_active_agents: 3, max_active_agents_override: null });

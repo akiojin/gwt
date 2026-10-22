@@ -285,7 +285,7 @@ function renderIssuesSettingsPanel(panel, options) {
   const max = field(launch, "Max active", "number", committedMax == null
     ? status?.max_active_agents ?? 0
     : panel.dataset.maxActiveDraft ?? committedMax);
-  const capacityExplanation = "Maximum number of issue agents the monitor may run at once. Auto uses the current recommended capacity; Manual sets a fixed maximum.";
+  const capacityExplanation = "Maximum number of issue agents across all projects on this machine. Auto uses the current recommended capacity; Manual requests a shared maximum. Each project's effective allocation may be lower.";
   setControlExplanation(max, capacityExplanation, "settings-max-active");
   launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
   max.min = "1";
@@ -293,7 +293,7 @@ function renderIssuesSettingsPanel(panel, options) {
   const mode = document.createElement("select");
   mode.className = "settings-select";
   mode.setAttribute("aria-label", "Max active mode");
-  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to set a fixed maximum.", "settings-max-active-mode");
+  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to request a shared maximum for all projects on this machine.", "settings-max-active-mode");
   for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
     const option = document.createElement("option");
     option.value = value;
@@ -318,6 +318,13 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   updateApply();
   capacity.append(mode, max, apply);
+  const scope = document.createElement("span");
+  scope.className = "settings-help";
+  scope.textContent = "All projects on this machine. Manual sets the shared requested maximum.";
+  const allocation = document.createElement("span");
+  allocation.className = "settings-help";
+  allocation.setAttribute("role", "status");
+  capacity.append(scope, allocation);
   const message = document.createElement("span");
   message.className = "settings-help";
   message.setAttribute("role", "status");
@@ -334,6 +341,9 @@ function renderIssuesSettingsPanel(panel, options) {
       max.value = String(committedMax ?? nextStatus?.max_active_agents ?? 0);
     }
     updateApply();
+    const otherWorkers = Math.max(0, (nextStatus?.agent_capacity?.other_live_agents ?? 0)
+      - (nextStatus?.agent_capacity?.other_pm_agents ?? 0));
+    allocation.textContent = `This project allocation: ${nextStatus?.max_active_agents ?? 0} · Other project workers: ${otherWorkers}`;
     message.textContent = max.disabled && !nextStatus?.agent_capacity?.measurement_complete
       ? "Measuring capacity…"
       : Number(nextStatus?.active_count) > Number(nextStatus?.max_active_agents)
@@ -348,8 +358,7 @@ function renderIssuesSettingsPanel(panel, options) {
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
     committedMax = max.disabled ? null : Number(max.value);
     updateApply();
-    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax,
-      max_active_agents: committedMax ?? latestStatus?.max_active_agents });
+    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax });
     send({ kind: "set_issue_monitor_max_active_agents",
       max_active_agents: committedMax });
   });

@@ -64,13 +64,16 @@ fn decode_stored_project_prefs(
 ) -> Result<(IssueMonitorPrefs, Option<bool>), serde_json::Error> {
     // A serde flatten buffer loses JSON's numeric map-key conversion, which
     // monitor launch maps require. Keep JSON's own value deserializer instead.
-    let value: serde_json::Value = serde_json::from_str(content)?;
+    let mut value: serde_json::Value = serde_json::from_str(content)?;
     let legacy_override = value
         .get("auto_apply_updates")
         .cloned()
         .map(serde_json::from_value::<Option<bool>>)
         .transpose()?
         .flatten();
+    if let Some(continuity) = value.get("last_auto_max_active_agents").cloned() {
+        value["max_active_agents"] = continuity;
+    }
     let mut prefs: IssueMonitorPrefs = serde_json::from_value(value)?;
     if let Some(drain) = prefs.update_drain.as_mut().filter(|drain| {
         drain.reason == IssueMonitorUpdateDrainReason::Auto && drain.automatic.is_none()

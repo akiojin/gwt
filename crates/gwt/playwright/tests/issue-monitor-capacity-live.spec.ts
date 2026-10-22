@@ -52,6 +52,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
   test("displays machine usage, allows manual excess and restores Auto after reload", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
       const preferences = await isolatedPreferences();
+      const machinePreferences = join(CHECK_HOME, ".gwt/machine-state/agent-settings.json");
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -76,7 +77,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const issues = settings.locator('[data-settings-panel="issues"]');
       const input = issues.getByLabel("Max active", { exact: true });
       const mode = issues.getByLabel("Max active mode", { exact: true });
-      const showIssues = () => page.locator('[data-surface="issues"]').click();
+      const showIssues = () => page.getByRole("button", { name: "Issues", exact: true }).click();
       const openIssuesSettings = async () => {
         await showIssues();
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
@@ -97,6 +98,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const before = await latestStatus(page);
       try {
         await openIssuesSettings();
+        await expect(issues).toContainText("All projects on this machine.");
+        await expect.poll(() => latestStatus(page)).toMatchObject({ max_active_agents_scope: "machine" });
         if (before.max_active_agents_override !== null) {
           await mode.selectOption("auto");
           await expectOverride(page, null);
@@ -106,6 +109,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         const automatic = await latestStatus(page);
         const capacity = automatic.agent_capacity;
         await expect(input).toHaveValue(String(automatic.max_active_agents));
+        await expect(issues).toContainText(`This project allocation: ${automatic.max_active_agents}`);
+        await expect(issues).toContainText(`Other project workers: ${Math.max(0, capacity.other_live_agents - capacity.other_pm_agents)}`);
         await showIssues();
         await warning.click();
         await budget.locator("summary").click();
@@ -148,8 +153,13 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expectOverride(page, manual);
         await expect(mode).toHaveValue("manual");
         await expect(input).toHaveValue(String(manual));
-        await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
-          .toMatchObject({ max_active_agents_mode: "manual", max_active_agents: manual });
+        await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
+          .toMatchObject({ mode: "manual", manual_limit: manual });
+        await expect.poll(async () => Object.keys(JSON.parse(await readFile(preferences, "utf8"))))
+          .not.toContain("max_active_agents_mode");
+        await testInfo.attach(`shared-agent-settings-${testInfo.project.name}`, {
+          body: await issues.screenshot(), contentType: "image/png",
+        });
         await showIssues();
         await expect(warning).toBeVisible();
         await expect.poll(() => page.evaluate(({ id, value }) => {
@@ -157,7 +167,9 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
             .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
           const current = status?.agent_capacity;
           const text = document.querySelector('.notification-center__item[data-error-key="issue-monitor:capacity"] .notification-center__message')?.textContent ?? "";
-          return !!current && text.includes(`${value - current.recommended_worker_limit} over recommended`);
+          const machineWorkers = current && Math.max(0, current.machine_budget
+            - current.other_pm_agents - Math.max(current.own_pm_agents, 1));
+          return !!current && text.includes(`${value - machineWorkers} over recommended`);
         }, { id: windowId, value: manual })).toBe(true);
         await expect(notice).toContainText("Lower Max active if slow.");
         await expect(warning).toHaveAttribute("data-tone", "info");
@@ -184,8 +196,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           // diagnostic fixture through the real backend before projecting it.
           await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 9 });
           await expectOverride(page, 9);
-          await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
-            .toMatchObject({ max_active_agents_mode: "manual", max_active_agents: 9 });
+          await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
+            .toMatchObject({ mode: "manual", manual_limit: 9 });
           await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
@@ -245,8 +257,8 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expect(input).toHaveValue(String(restored.max_active_agents));
         await showIssues();
         await expect(warning).toHaveText(/Capacity \d+ · Details/);
-        await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
-          .toMatchObject({ max_active_agents_mode: "auto", max_active_agents: restored.max_active_agents });
+        await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
+          .toMatchObject({ mode: "auto", manual_limit: null });
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
@@ -379,7 +391,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await expect(pill).toHaveText("Waiting · Empty");
       await expect(currentError).toHaveAttribute("data-resolved", "true");
       await apply({ ...status, agent_capacity: { ...status.agent_capacity,
-        measurement_complete: true, recommended_worker_limit: 1, limiting_constraint: "cpu,ram,disk" } });
+        measurement_complete: true, machine_budget: 2, recommended_worker_limit: 1, limiting_constraint: "cpu,ram,disk" } });
       await expect(summary).toHaveText("Over recommended · Details");
       await expect(notice.locator(".notification-center__message")).toHaveText("4 over recommended. Lower Max active if slow.");
       await assertSingleLine();
