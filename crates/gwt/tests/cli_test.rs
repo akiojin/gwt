@@ -1728,7 +1728,7 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
     assert_eq!(code, 0);
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
-        vec![(42, "Fixed in latest commit.".to_string())]
+        vec![(42, "Fixed in latest commit.".to_string(), None)]
     );
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
