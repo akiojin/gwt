@@ -312,6 +312,15 @@ fn the_archive_cache_falls_back_to_a_prefix_when_the_hash_changes() {
             })
             .trim()
             .to_string();
+        // Issue #6080: a complete offline package set is tied to its exact
+        // runner image. Prefix fallback would mix different dpkg baselines.
+        if key.starts_with("gwt-apt-offline-gtk-") {
+            assert!(key.contains("runner.arch"));
+            assert!(key.contains("steps.apt-image.outputs.version"));
+            assert!(!cache_body.contains("restore-keys:"));
+            assert!(workflow_text.contains("GWT_APT_OFFLINE_CACHE=1"));
+            continue;
+        }
         // The stable half of the key: everything before the content hash.
         let prefix = key.split("${{ hashFiles").next().unwrap_or("").to_string();
         assert!(
