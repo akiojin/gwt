@@ -423,7 +423,7 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
             gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
         );
         let result = take_monitor_launch_complete(case, &fixture.recorded_events);
-        let prompt = result.as_ref().unwrap().0.args.join("\n");
+        let prompt = launch_payload_fragments(&result.as_ref().unwrap().0).join("\n");
         let expected = work_owner == Some("SPEC-3165");
         assert_eq!(
             prompt.contains("Delivered queue repair"),
@@ -2070,7 +2070,7 @@ fn assert_monitor_resume_if_safe_provider_conversation(
     drain_queued_blocking_tasks(&queued);
     fixture.runtime.blocking_tasks = previous_spawner;
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    fixture
+    let events = fixture
         .runtime
         .handle_issue_monitor_launch_prepared(prepared);
     // Provider ownership is determined by the completed launch result, not
@@ -2080,6 +2080,32 @@ fn assert_monitor_resume_if_safe_provider_conversation(
         assert_monitor_exact_resume(result, &fixture);
     } else {
         assert_monitor_fresh_successor(result, &fixture);
+    }
+    let fresh_reason = events.iter().find_map(|event| match &event.event {
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.starts_with("Issue Monitor started a fresh session because ") =>
+        {
+            Some(message.as_str())
+        }
+        _ => None,
+    });
+    let expected = match availability {
+        MonitorProviderConversationFixture::Present => None,
+        MonitorProviderConversationFixture::Missing => Some("native conversation is missing"),
+        MonitorProviderConversationFixture::Foreign
+        | MonitorProviderConversationFixture::Corrupt => {
+            Some("native conversation ownership does not match this worktree")
+        }
+        MonitorProviderConversationFixture::Unknown => {
+            Some("native conversation could not be verified")
+        }
+    };
+    if let Some(expected) = expected {
+        let reason = fresh_reason.expect("fresh fallback must report its resume failure reason");
+        assert!(reason.contains(expected), "{case_name}: {reason}");
+        assert!(!reason.contains("held by window"), "{case_name}: {reason}");
+    } else {
+        assert!(fresh_reason.is_none());
     }
 }
 
@@ -4647,4 +4673,197 @@ fn app_runtime_monitor_plain_issue_resume_receives_delivery_prompt() {
         });
     assert!(prompt.contains("against origin/develop"), "{prompt}");
     assert!(!prompt.contains("close Issue #3165 and finish"), "{prompt}");
+}
+
+/// Issue #4222: retain the quota pane and its work, but release its native
+/// writer after the real child exits, including an Error hidden by Waiting.
+#[test]
+fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+
+    for (case, exit_code, status) in [
+        ("quota-clean-exit", 0, WindowProcessStatus::Stopped),
+        ("quota-error-exit", 1, WindowProcessStatus::Error),
+    ] {
+        let mut fixture = monitor_relaunch_fixture(
+            temp.path(),
+            case,
+            MonitorProviderConversationFixture::Present,
+            MonitorNativeHolderFixture::ActiveSameConversation,
+            false,
+        );
+        let window_id = fixture.holder_window_id.clone().unwrap();
+        fixture
+            .runtime
+            .active_agent_sessions
+            .get_mut(&window_id)
+            .unwrap()
+            .session_id = fixture.source_session_id.clone();
+        fixture.runtime.tabs[0]
+            .workspace
+            .set_session_id("agent-holder", Some(fixture.source_session_id.clone()));
+        let unfinished = fixture.worktree.join("unfinished.txt");
+        fs::write(&unfinished, "uncommitted work").unwrap();
+        insert_exited_test_pane_runtime(&mut fixture.runtime, &window_id, exit_code);
+        fixture
+            .runtime
+            .handle_runtime_status_with_exit_confirmation(
+                window_id.clone(),
+                status,
+                Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+                true,
+            );
+        assert_eq!(
+            fixture.runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Waiting)
+        );
+        assert!(fixture
+            .runtime
+            .active_agent_sessions
+            .contains_key(&window_id));
+        let gwt::IssueMonitorFailure::ProviderUsageLimit {
+            provider,
+            resets_at,
+            evidence,
+            ..
+        } = fixture.runtime.provider_quota_holds[&window_id].clone()
+        else {
+            panic!("quota exit must form a typed hold")
+        };
+
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+        let mut monitor = test_monitor_with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        monitor.complete_active_launch(3165, &window_id);
+        let now = Utc::now().to_rfc3339();
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                3165,
+                &window_id,
+                &provider,
+                "provider usage limit",
+                resets_at.as_deref(),
+                evidence.map(|evidence| *evidence),
+                &now,
+            ),
+            gwt::IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert!(!monitor.prefs().provider_quota_holds.is_empty());
+        monitor.clear_provider_quota_hold("codex", "quota reset", &now);
+        assert!(monitor.prefs().provider_quota_holds.is_empty());
+        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+
+        // Monitor admission is released independently of the retained screen.
+        assert_eq!(
+            fixture.runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Waiting)
+        );
+        let candidate = fixture
+            .runtime
+            .issue_monitor_session_by_id(&fixture.source_session_id)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .runtime
+                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+            None
+        );
+        let events = prepare_monitor_relaunch(
+            &mut fixture,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+        assert_monitor_exact_resume(
+            take_monitor_launch_complete(case, &fixture.recorded_events),
+            &fixture,
+        );
+        assert!(fixture.runtime.window_lookup.contains_key(&window_id));
+        assert!(fixture
+            .runtime
+            .active_agent_sessions
+            .contains_key(&window_id));
+        assert_eq!(fs::read_to_string(&unfinished).unwrap(), "uncommitted work");
+        assert!(!events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { message, .. } if message.contains("held by window")
+        )));
+    }
+}
+
+/// Waiting and Idle can still own a native writer. In particular a read
+/// failure is not a confirmed child exit, even when the hook remains live.
+#[test]
+fn app_runtime_monitor_live_native_writer_survives_waits_and_read_errors() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "live-statuses",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        false,
+    );
+    let window_id = fixture.holder_window_id.clone().unwrap();
+    let candidate = fixture
+        .runtime
+        .issue_monitor_session_by_id(&fixture.source_session_id)
+        .unwrap();
+    for status in [
+        WindowProcessStatus::Running,
+        WindowProcessStatus::Starting,
+        WindowProcessStatus::Idle,
+        WindowProcessStatus::Waiting,
+        WindowProcessStatus::Interrupted,
+    ] {
+        fixture
+            .runtime
+            .window_hook_states
+            .insert(window_id.clone(), status);
+        assert_eq!(
+            fixture
+                .runtime
+                .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+            Some(window_id.clone()),
+            "{status:?}"
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
+            Some(window_id.clone()),
+            "{status:?}"
+        );
+    }
+    fixture
+        .runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Waiting);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Error);
+    assert_eq!(
+        fixture
+            .runtime
+            .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+        Some(window_id.clone())
+    );
 }
