@@ -47,6 +47,7 @@ class AptCacheTests(unittest.TestCase):
     def test_complete_cache_restores_without_update_or_download(self):
         cold = self.install()
         self.assertEqual(cold.returncode, 0, cold.stdout + cold.stderr)
+        (self.root / "archives/unmanifested_1_amd64.deb").write_text("extra archive")
         (self.root / "trace").unlink()
         warm = self.install(GWT_MOCK_OFFLINE="1")
         self.assertEqual(warm.returncode, 0, warm.stdout + warm.stderr)
@@ -55,6 +56,7 @@ class AptCacheTests(unittest.TestCase):
         self.assertIn("--no-download", calls)
         self.assertIn("--no-remove", calls)
         self.assertIn("mock_1_amd64.deb", calls)
+        self.assertNotIn("unmanifested_1_amd64.deb", calls)
         self.assertIn("cache_state=offline", warm.stdout)
 
     def test_incomplete_or_failed_cache_is_not_published_as_complete(self):

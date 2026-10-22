@@ -384,10 +384,10 @@ prepare_offline_cache() {
     rm -f "${CACHE_DIR}/.gwt-complete"
     return 0
   fi
-  local archive
-  for archive in "${CACHE_DIR}/"*.deb; do
-    [[ -f "${archive}" ]] && OFFLINE_ARCHIVES+=("${archive}")
-  done
+  local checksum archive
+  while read -r checksum archive; do
+    [[ "${archive}" == *.deb ]] && OFFLINE_ARCHIVES+=("${CACHE_DIR}/${archive}")
+  done <"${CACHE_DIR}/.gwt-complete"
   CACHE_STATE=offline
   log "cache=${CACHE_DIR} cache_state=offline archives=${#OFFLINE_ARCHIVES[@]}"
 }
