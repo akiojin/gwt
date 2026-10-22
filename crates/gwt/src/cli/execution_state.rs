@@ -10118,8 +10118,7 @@ pub fn activate_successor_with_session_rebind(
     {
         return Ok(None);
     }
-    let expected_session_toml = toml::to_string(&expected_session)
-        .map_err(|error| invalid_generation_data(format!("serialize expected Session: {error}")))?;
+    let expected_session_toml = canonical_recovery_session_snapshot(&expected_session)?;
     with_generation_activation_leases(worktree, owner, |context| {
         let expected_repo_hash = expected_session
             .repo_hash
@@ -10134,9 +10133,7 @@ pub fn activate_successor_with_session_rebind(
             sessions_dir,
             &expected_session.id,
             |session| {
-                let durable_session_toml = toml::to_string(session).map_err(|error| {
-                    invalid_generation_data(format!("serialize durable Session: {error}"))
-                })?;
+                let durable_session_toml = canonical_recovery_session_snapshot(session)?;
                 if durable_session_toml != expected_session_toml
                     || session.repo_hash.as_deref() != Some(expected_repo_hash.as_str())
                     || dunce::canonicalize(&session.worktree_path).ok().as_ref()
@@ -10683,7 +10680,16 @@ fn persist_generation_lifecycle_transition_if_owned(
 }
 
 fn canonical_recovery_session_snapshot(session: &gwt_agent::Session) -> io::Result<String> {
-    toml::to_string(session).map_err(|error| {
+    // SPEC #3590: ordinary hooks may advance observations during recovery.
+    // Keep every other field exact, including incarnation, status, Stop/exit,
+    // permissions and execution binding. Do not migrate here: legacy migration
+    // can change status and interruption counts, which must still compare exact.
+    let mut snapshot = session.clone();
+    snapshot.updated_at = snapshot.created_at;
+    snapshot.last_activity_at = snapshot.created_at;
+    snapshot.last_hook_event = None;
+    snapshot.last_hook_event_at = None;
+    toml::to_string(&snapshot).map_err(|error| {
         invalid_generation_data(format!("serialize recovery Session snapshot: {error}"))
     })
 }
@@ -10715,9 +10721,11 @@ fn update_exact_recovery_session_with_publisher<T>(
     mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
     publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<T> {
-    match gwt_agent::update_session_if_unchanged_with(
+    let expected = canonical_recovery_session_snapshot(expected_session)?;
+    match gwt_agent::update_session_if_matches_with(
         &gwt_core::paths::gwt_sessions_dir(),
         expected_session,
+        |session, _| Ok(canonical_recovery_session_snapshot(session)? == expected),
         |session| {
             if let Some(publisher) = publisher.as_mut() {
                 publisher.acquire()?;
@@ -10742,19 +10750,13 @@ fn update_exact_recovery_session_with_publisher<T>(
             }
             Ok(value)
         }
-        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
-            ),
-        )),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(
+            recovery_session_changed_error("durable Session changed after recovery preflight"),
+        ),
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotUnreadable(error)) => {
-            Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
-                ),
-            ))
+            Err(recovery_session_changed_error(format!(
+                "durable Session became unreadable after recovery preflight: {error}"
+            )))
         }
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::MutationFailed(error)) => Err(error),
         Err(error) => Err(error),
@@ -15292,29 +15294,27 @@ fn repair_session_binding_if_unchanged(
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)
         .ok_or_else(|| invalid_generation_data("execution repair repository hash is unavailable"))?
         .to_string();
-    let mut updated = expected_session.clone();
-    let capability_generation = updated
-        .execution_binding
-        .as_ref()
-        .map_or(1, |binding| binding.capability_generation.saturating_add(1));
-    updated
-        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: expected_session.id.clone(),
-            repo_hash,
-            owner_kind: owner.kind.as_str().to_string(),
-            owner_number: owner.number,
-            identity,
-            capability_generation,
-        }))
-        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
-    if updated.save_if_unchanged(&gwt_core::paths::gwt_sessions_dir(), expected_session)? {
-        Ok(())
-    } else {
-        Err(recovery_session_changed_error(
-            "durable Session changed before repair binding CAS",
-        ))
-    }
+    update_exact_recovery_session_with_publisher(
+        expected_session,
+        |session| {
+            let capability_generation = session
+                .execution_binding
+                .as_ref()
+                .map_or(1, |binding| binding.capability_generation.saturating_add(1));
+            session
+                .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                    schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: expected_session.id.clone(),
+                    repo_hash,
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity,
+                    capability_generation,
+                }))
+                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))
+        },
+        &mut None,
+    )
 }
 
 fn restore_quarantined_execution_authority(
@@ -18130,6 +18130,152 @@ mod tests {
             kind: ExecutionOwnerKind::Spec,
             number: 2359,
         }
+    }
+
+    fn with_new_hook_observations(session: &gwt_agent::Session) -> gwt_agent::Session {
+        let mut current = session.clone();
+        let observed_at = session.updated_at + chrono::Duration::seconds(1);
+        current.updated_at = observed_at;
+        current.last_activity_at = observed_at;
+        current.last_hook_event = Some("PreToolUse".to_string());
+        current.last_hook_event_at = Some(observed_at);
+        current
+    }
+
+    fn assert_hook_observations_preserved(
+        current: &gwt_agent::Session,
+        observed: &gwt_agent::Session,
+    ) {
+        assert_eq!(current.last_activity_at, observed.last_activity_at);
+        assert_eq!(current.last_hook_event, observed.last_hook_event);
+        assert_eq!(current.last_hook_event_at, observed.last_hook_event_at);
+    }
+
+    #[test]
+    fn recovery_session_lease_contention_remains_retryable() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let session = gwt_agent::Session::new(home.path(), "work", gwt_agent::AgentId::Codex);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let path = sessions.join(format!("{}.toml", session.id));
+        let before = fs::read(&path).unwrap();
+        gwt_agent::with_session_path_lease(&sessions, &session.id, |_| {
+            let error = update_exact_recovery_session_with_publisher::<()>(
+                &session,
+                |_| panic!("contended recovery must not mutate"),
+                &mut None,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WouldBlock);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn recovery_snapshot_keeps_legacy_status_and_interruption_changes_exact() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut expected = gwt_agent::Session::new(repo.path(), "work", gwt_agent::AgentId::Codex);
+        expected.schema_version = 2;
+        expected.status = gwt_agent::AgentStatus::Running;
+        expected.consecutive_interruptions = 1;
+        let mut changed = expected.clone();
+        changed.status = gwt_agent::AgentStatus::Idle;
+        assert_ne!(
+            canonical_recovery_session_snapshot(&expected).unwrap(),
+            canonical_recovery_session_snapshot(&changed).unwrap()
+        );
+        changed = expected.clone();
+        changed.consecutive_interruptions = 2;
+        assert_ne!(
+            canonical_recovery_session_snapshot(&expected).unwrap(),
+            canonical_recovery_session_snapshot(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn continuation_rebind_preserves_hook_observations_after_preflight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(repo.path(), &active).unwrap();
+        ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(repo.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(repo.path(), owner, "session-original", binding.clone());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let path = sessions.join("session-original.toml");
+        let expected = gwt_agent::Session::load(&path).unwrap();
+        let observed = with_new_hook_observations(&expected);
+        observed.save(&sessions).unwrap();
+        let mut request = successor_request("hook-activity", "host", "execution-continue");
+        request.initial_session_id = expected.id.clone();
+
+        let (_, rebound) = activate_successor_with_session_rebind(
+            repo.path(),
+            owner,
+            &request,
+            SuccessorPredecessorStatus::Active,
+            &binding,
+            &sessions,
+            &expected,
+        )
+        .unwrap()
+        .expect("hook activity must not fence continuation");
+
+        let current = gwt_agent::Session::load(&path).unwrap();
+        assert_hook_observations_preserved(&current, &observed);
+        assert_eq!(current.execution_binding, Some(rebound));
+    }
+
+    #[test]
+    fn repair_binding_preserves_hook_observations_after_preflight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(repo.path(), &active).unwrap();
+        ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(repo.path(), owner)
+            .unwrap()
+            .unwrap();
+        let expected = persist_recovery_session_snapshot(repo.path(), owner, "session-original");
+        let observed = with_new_hook_observations(&expected);
+        observed.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+
+        repair_session_binding_if_unchanged(repo.path(), &expected, owner, binding.clone())
+            .expect("hook activity must not fence repair binding");
+
+        let current = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join("session-original.toml"),
+        )
+        .unwrap();
+        assert_hook_observations_preserved(&current, &observed);
+        assert_eq!(current.execution_binding.unwrap().identity, binding);
     }
 
     fn successor_request(operation_id: &str, principal_id: &str, source: &str) -> SuccessorRequest {
@@ -28399,7 +28545,7 @@ exit 1
                 .into_bytes();
             set_repair_binding_session_race(RecoverySessionRace::Replace(Box::new(replacement)));
 
-            let (code, out) = run_cmd(
+            let result = run_governed_cmd(
                 repo.path(),
                 ExecutionCommand::Repair {
                     reason: "recover corrupt authority".to_string(),
@@ -28407,8 +28553,18 @@ exit 1
             )
             .expect("binding CAS loss must return a typed refusal");
 
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+            assert_eq!(result.exit_code, 2, "{}", result.output);
+            assert!(
+                result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                "{}",
+                result.output
+            );
+            let refusal = result.refusal.expect("binding CAS authority refusal");
+            assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+            assert_eq!(
+                refusal.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+            );
             assert_eq!(
                 fs::read(gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")))
                     .unwrap(),
@@ -30610,6 +30766,11 @@ exit 1
             seed_build_abort_work_authority(dir.path(), "sess-reopen", owner);
             let verification_record_id = save_covering_evidence(dir.path(), "sess-reopen", true);
 
+            let session_path = gwt_core::paths::gwt_sessions_dir().join("sess-reopen.toml");
+            let observed =
+                with_new_hook_observations(&gwt_agent::Session::load(&session_path).unwrap());
+            set_recovery_session_race(RecoverySessionRace::Replace(Box::new(observed.clone())));
+
             let (code, out) = run_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
@@ -30620,6 +30781,10 @@ exit 1
             .unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("reopened"), "{out}");
+            assert_hook_observations_preserved(
+                &gwt_agent::Session::load(&session_path).unwrap(),
+                &observed,
+            );
             assert!(
                 out.contains(r#""outcome":"deferred""#) && out.contains("obligation_state_missing"),
                 "{out}"
@@ -34117,6 +34282,8 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
             let dir = tempfile::tempdir().unwrap();
             crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             let owner = ExecutionOwnerKey {
@@ -34131,6 +34298,8 @@ exit 1
             persist_generation_session_binding(dir.path(), owner, "sess-old", original_binding);
             let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
             assert!(recovery_session.execution_binding.is_none());
+            let observed = with_new_hook_observations(&recovery_session);
+            set_recovery_session_race(RecoverySessionRace::Replace(Box::new(observed.clone())));
 
             let (code, out) = run_cmd(
                 dir.path(),
@@ -34148,6 +34317,7 @@ exit 1
                 &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
             )
             .unwrap();
+            assert_hook_observations_preserved(&durable, &observed);
             let binding = durable
                 .execution_binding
                 .expect("adopting Session must receive the transferred execution binding");
