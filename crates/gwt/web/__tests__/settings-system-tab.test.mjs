@@ -162,6 +162,13 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   const saves = sent.filter(message => message.kind === "update_custom_agent");
   assert.equal(saves.length, 1);
   assert.equal(saves[0].agent.env.TOKEN, "saved-value");
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  const nextDraft = body.querySelector('[aria-label="Environment value"]');
+  nextDraft.value = "fresh-unsaved-draft";
+  flush();
+  assert.equal(nextDraft.isConnected, true, "an already rendered save snapshot cannot replace a reopened editor");
+  assert.equal(nextDraft.value, "fresh-unsaved-draft");
+  body.querySelector('[aria-label="Cancel environment editing"]').click();
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
   assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
   assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");

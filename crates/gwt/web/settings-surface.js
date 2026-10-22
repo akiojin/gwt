@@ -909,6 +909,7 @@ export function createSettingsSurface({
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
+      let renderedCustomAgentsState = null;
       const customAgentsModel = createUiStateStore({
         catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
@@ -1158,7 +1159,7 @@ export function createSettingsSurface({
       });
 
       customAgentsModel.subscribeFrame(state => state, state => {
-        renderSettingsAgentList(state);
+        if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
       });
       customAgentsModel.subscribe(state => state.catalog, catalog => {
         // Read recovery must not replace candidate inputs while awaiting a reply.
@@ -2491,6 +2492,8 @@ export function createSettingsSurface({
             scroll.appendChild(section);
           }
         }
+        // Local edits can render this snapshot before its scheduled frame.
+        renderedCustomAgentsState = state;
       }
 
 

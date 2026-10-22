@@ -295,11 +295,19 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await panel.getByLabel("Edit agent environment", { exact: true }).click();
       await expect(panel.getByLabel("Environment value", { exact: true })).toHaveValue("***REDACTED***");
       await panel.getByLabel("Environment value", { exact: true }).fill("fixture-updated-value");
-      const editorClosed = await panel.getByLabel("Save environment changes", { exact: true }).evaluate(button => {
+      const savedEditor = await panel.getByLabel("Save environment changes", { exact: true }).evaluate(async button => {
+        const panel = button.closest('[data-settings-panel="custom-agents"]')!;
         button.click();
-        return !button.isConnected;
+        const closed = !button.isConnected;
+        (panel.querySelector('[aria-label="Edit agent environment"]') as HTMLButtonElement).click();
+        const draft = panel.querySelector('[aria-label="Environment value"]') as HTMLInputElement;
+        draft.value = "fresh-unsaved-draft";
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { closed, draftPreserved: draft.isConnected && draft.value === "fresh-unsaved-draft" };
       });
-      expect(editorClosed, "save closes the editor synchronously before another click").toBe(true);
+      expect(savedEditor, "save closes synchronously and its pending frame preserves a reopened draft")
+        .toEqual({ closed: true, draftPreserved: true });
+      await panel.getByLabel("Cancel environment editing", { exact: true }).click();
       await expect(panel).toContainText("Saving custom agent…");
       await expect.poll(() => requests.filter(request => request.kind === "update_custom_agent").length).toBe(1);
       expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...agent,
