@@ -3833,7 +3833,7 @@ fn pending_workspace_state_transaction_can_be_recovered_without_a_followup_mutat
     assert_eq!(
         fs::read(gwt_repo_local_work_event_shard_path(&repo, &event.id))
             .expect("recovered v4 shard"),
-        canonical_workspace_work_event_bytes(&event).expect("canonical recovered event")
+        canonical_workspace_work_event_bytes(&event, &repo).expect("canonical recovered event")
     );
     assert_eq!(
         fs::read(&legacy_events).expect("read frozen legacy history"),
@@ -8001,8 +8001,8 @@ fn issue_4783_session_bound_done_survives_full_rebuild_and_transaction_recovery(
         gwt_repo_local_work_event_shard_path(&fixture.target.work_event_root, &done.id);
     let done_content = fs::read_to_string(&done_shard).unwrap();
     assert_eq!(
-        serde_json::from_str::<WorkEvent>(done_content.trim()).unwrap(),
-        done
+        done_content.as_bytes(),
+        canonical_workspace_work_event_bytes(&done, &fixture.target.work_event_root).unwrap()
     );
 
     let successor_id = successor_work_id(&base_id);
@@ -12115,6 +12115,134 @@ fn session_bound_update_validates_event_store_before_pre_persist_and_transaction
 }
 
 #[test]
+fn work_event_shards_resolve_portable_containers_and_preserve_legacy_absolute_paths() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_, project_root) = init_test_workspace_home_with_linked_worktree(workspace.path());
+    let now = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+    let mut portable = start_event("work-portable-container", now);
+    portable.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3412".to_string()),
+        worktree_path: Some(project_root.clone()),
+        pr_number: Some(3744),
+        pr_url: None,
+        pr_state: None,
+    });
+    let events_dir = gwt_repo_local_work_events_dir(&project_root);
+    write_workspace_work_event_shards_to_dir(&events_dir, std::slice::from_ref(&portable))
+        .expect("write portable shard");
+    let portable_bytes = fs::read(gwt_work_event_shard_path(&events_dir, &portable.id))
+        .expect("read portable source");
+    let wire: serde_json::Value = serde_json::from_slice(&portable_bytes).expect("wire event");
+    assert_eq!(
+        wire["execution_container"]["worktree_path"], ".",
+        "tracked shards must identify their owning root without a host path"
+    );
+
+    let mut legacy = portable.clone();
+    legacy.id = "legacy-absolute-container".to_string();
+    legacy.work_item_id = "work-legacy-container".to_string();
+    legacy.execution_container.as_mut().unwrap().worktree_path =
+        Some(PathBuf::from("/other-host/repository/work/issue-3412"));
+    let legacy_path = gwt_work_event_shard_path(&events_dir, &legacy.id);
+    fs::create_dir_all(legacy_path.parent().unwrap()).expect("legacy bucket");
+    let mut legacy_bytes = serde_json::to_vec(&legacy).expect("legacy source");
+    legacy_bytes.push(b'\n');
+    fs::write(&legacy_path, &legacy_bytes).expect("write legacy source");
+    write_workspace_work_event_shards_to_dir(&events_dir, std::slice::from_ref(&legacy))
+        .expect("replaying an existing absolute shard must remain idempotent");
+    assert!(workspace_work_event_shard_matches(&project_root, &portable).unwrap());
+    assert!(workspace_work_event_shard_matches(&project_root, &legacy).unwrap());
+
+    let mut copied = portable.clone();
+    copied.id = "portable-copy-from-another-branch".into();
+    copied.work_item_id = "work-copied-container".into();
+    copied.execution_container.as_mut().unwrap().branch = Some("work/another-branch".into());
+    write_workspace_work_event_shards_to_dir(&events_dir, &[copied]).unwrap();
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&project_root).expect("rebuild portable history"),
+        WorkItemsRebuildOutcome::Applied
+    );
+    let rebuilt = load_workspace_work_items(&project_root)
+        .expect("load projection")
+        .expect("rebuilt projection");
+    let expected_root = dunce::canonicalize(&project_root).expect("canonical root");
+    for (work_id, expected_path) in [
+        ("work-portable-container", expected_root.as_path()),
+        (
+            "work-legacy-container",
+            legacy
+                .execution_container
+                .as_ref()
+                .unwrap()
+                .worktree_path
+                .as_deref()
+                .unwrap(),
+        ),
+    ] {
+        let container = &rebuilt
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .expect("rebuilt Work")
+            .execution_containers[0];
+        assert_eq!(container.worktree_path.as_deref(), Some(expected_path));
+        assert_eq!(container.pr_number, Some(3744));
+    }
+    assert!(
+        rebuilt
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-copied-container")
+            .unwrap()
+            .execution_containers[0]
+            .worktree_path
+            .is_none(),
+        "manual rebuild must not assign a copied branch's event to the reader's root"
+    );
+    assert_eq!(fs::read(legacy_path).unwrap(), legacy_bytes);
+    assert_eq!(
+        fs::read(gwt_work_event_shard_path(&events_dir, &portable.id)).unwrap(),
+        portable_bytes,
+        "resolution must never rewrite immutable sources"
+    );
+}
+
+#[test]
+fn work_event_shards_refuse_foreign_and_traversing_paths_before_batch_publication() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    let foreign = workspace.path().join("foreign-worktree");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&foreign).unwrap();
+    let events_dir = gwt_repo_local_work_events_dir(&repo);
+    let now = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+    let mut valid = start_event("work-valid-container", now);
+    valid.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/target".into()),
+        worktree_path: Some(repo),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    for path in [foreign, PathBuf::from("../escape")] {
+        let mut invalid = valid.clone();
+        invalid.id = "event-foreign-container".into();
+        invalid.execution_container.as_mut().unwrap().worktree_path = Some(path);
+        write_workspace_work_event_shards_to_dir(&events_dir, &[valid.clone(), invalid.clone()])
+            .expect_err("a foreign or traversing path must refuse the entire batch");
+        for event in [&valid, &invalid] {
+            assert!(!gwt_work_event_shard_path(&events_dir, &event.id).exists());
+        }
+    }
+}
+
+#[test]
 fn production_work_event_writer_creates_one_immutable_shard() {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -15540,7 +15668,7 @@ fn issue_3777_runtime_hook_shared_cache_hit_does_not_deep_clone() {
 fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
     let tmp = tempfile::tempdir().unwrap();
     let works = tmp.path().join("works.json");
-    let events = tmp.path().join("events");
+    let events = gwt_repo_local_work_events_dir(tmp.path());
     let now = Utc::now();
     let mut projection = WorkItemsProjection::empty(now);
     let container = WorkspaceExecutionContainerRef {
@@ -15607,7 +15735,7 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
 fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
     let tmp = tempfile::tempdir().unwrap();
     let works = tmp.path().join("works.json");
-    let events = tmp.path().join("events");
+    let events = gwt_repo_local_work_events_dir(tmp.path());
     let now = Utc::now();
     let mut projection = WorkItemsProjection::empty(now);
     let container = WorkspaceExecutionContainerRef {
@@ -15678,7 +15806,7 @@ fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container
 fn execution_pr_metadata_ignores_a_stale_work_of_another_owner_and_session() {
     let tmp = tempfile::tempdir().unwrap();
     let works = tmp.path().join("works.json");
-    let events = tmp.path().join("events");
+    let events = gwt_repo_local_work_events_dir(tmp.path());
     let now = Utc::now();
     let mut projection = WorkItemsProjection::empty(now);
     let container = WorkspaceExecutionContainerRef {

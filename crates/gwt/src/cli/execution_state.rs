@@ -5048,12 +5048,20 @@ enum CurrentExecutionBindingAuthority {
     /// identity gate, or the verification its recovery requires is
     /// unreachable.
     ProjectionUpdate,
+    /// Record exact child-exit evidence without granting producing mutations.
+    TerminalRuntimeCleanup,
 }
 
 impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::TerminalRuntimeCleanup => matches!(
+                status,
+                ExecutionControlStatus::Active
+                    | ExecutionControlStatus::Completed
+                    | ExecutionControlStatus::Blocked
+            ),
             Self::ProjectionUpdate => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
@@ -5383,6 +5391,21 @@ pub fn with_current_active_session_execution_identity_lease<T>(
         sessions_dir,
         expected,
         CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Record terminal runtime evidence for the same current generation, including
+/// Completed and Blocked, while preserving owner-before-Session lease order.
+pub(crate) fn with_current_terminal_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::TerminalRuntimeCleanup,
         operation,
     )
 }
@@ -6119,7 +6142,8 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                 }
                 CurrentExecutionBindingAuthority::PrMutation
                 | CurrentExecutionBindingAuthority::CiPrCreation
-                | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
+                | CurrentExecutionBindingAuthority::ProjectionUpdate
+                | CurrentExecutionBindingAuthority::TerminalRuntimeCleanup => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
                 .ok()
@@ -6212,7 +6236,8 @@ fn with_current_session_execution_identity_global_lease<T>(
                         }
                         CurrentExecutionBindingAuthority::PrMutation
                         | CurrentExecutionBindingAuthority::CiPrCreation
-                        | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
+                        | CurrentExecutionBindingAuthority::ProjectionUpdate
+                        | CurrentExecutionBindingAuthority::TerminalRuntimeCleanup => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
                         .ok()
@@ -20024,6 +20049,291 @@ mod tests {
             .find(|candidate| candidate.owner == owner)
             .expect("startup Active candidate");
         (candidate, identity)
+    }
+
+    struct Issue3744ChildCleanup(std::sync::Arc<gwt_terminal::PtyHandle>);
+
+    impl Drop for Issue3744ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn issue_3744_runtime(
+        worktree: &Path,
+        session_id: &str,
+        incarnation: u64,
+    ) -> (
+        gwt_agent::SessionExecutionIdentity,
+        std::sync::Arc<gwt_terminal::PtyHandle>,
+    ) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        let (_, identity) = startup_reaper_active_fixture_with_status(
+            worktree,
+            generation_owner(),
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        assert_eq!(
+            with_current_active_session_execution_identity_lease(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &identity,
+                || (),
+            )
+            .unwrap(),
+            Some(()),
+            "the finalizer fixture must have exact active owner and Session authority"
+        );
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/D", "/S", "/C", "ping -n 121 127.0.0.1 >NUL"])
+        } else {
+            ("/bin/sh", vec!["-c", "sleep 120"])
+        };
+        let pane = gwt_terminal::Pane::new(
+            "issue-3744".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            std::collections::HashMap::new(),
+            Some(worktree.to_owned()),
+        )
+        .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            incarnation,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            session_id,
+        ))
+        .unwrap();
+        (identity, pane.shared_pty())
+    }
+
+    fn issue_3744_wait_until(mut condition: impl FnMut() -> bool) {
+        // test-hygiene: allow-wall-clock-deadline Observe detached finalizer files; no completion event is exposed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !condition() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Bound observation of the real detached finalizer's durable output.
+                std::time::Instant::now() < deadline,
+                "finalizer did not converge"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn issue_3744_failure_path(sessions: &Path, session: &str, incarnation: u64) -> PathBuf {
+        sessions
+            .join("teardown-failures")
+            .join(session)
+            .join(format!("{}-{incarnation}.json", std::process::id()))
+    }
+
+    fn issue_3744_stopped(
+        sessions: &Path,
+        identity: &gwt_agent::SessionExecutionIdentity,
+        incarnation: u64,
+    ) -> bool {
+        gwt_agent::Session::load(&sessions.join(format!("{}.toml", identity.session_id)))
+            .is_ok_and(|session| session.status == gwt_agent::AgentStatus::Stopped)
+            && gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+                sessions,
+                &identity.session_id,
+            ))
+            .is_ok_and(|runtime| {
+                runtime.status == gwt_agent::AgentStatus::Stopped
+                    && runtime.execution_identity.as_ref() == Some(identity)
+                    && runtime.runtime_incarnation == Some(incarnation)
+            })
+    }
+
+    #[test]
+    fn issue_3744_late_exit_is_persisted_after_diagnostic_deadline() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        // Detached finalizers must share this home; ScopedGwtHome is thread-local.
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "late-exit-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(!crate::session_finalizer::persist_terminal_after_exit(
+            pty.clone(),
+            sessions.clone(),
+            identity.clone(),
+            3744,
+            "late-exit".into(),
+        ));
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        issue_3744_wait_until(|| marker.is_file());
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(failure["exit_confirmed"], false);
+        assert_eq!(
+            gwt_agent::Session::load(&sessions.join("late-exit-3744.toml"))
+                .unwrap()
+                .status,
+            gwt_agent::AgentStatus::Running,
+            "a diagnostic timeout must not fabricate child exit proof"
+        );
+        assert!(crate::session_finalizer::kill_and_reap(&pty, "late-exit").unwrap());
+        issue_3744_wait_until(|| issue_3744_stopped(&sessions, &identity, 3744));
+        assert!(
+            marker.is_file(),
+            "the diagnostic must remain durable after recovery"
+        );
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_reacquires_owner_lease_and_recovers_after_timeout() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "leased-stop-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        let context =
+            GenerationTransactionContext::resolve(worktree.path(), generation_owner()).unwrap();
+        with_resolved_generation_owner_lease(&context, |_| {
+            let sessions = sessions.clone();
+            let identity = identity.clone();
+            let child = pty.clone();
+            let worker = std::thread::spawn(move || {
+                crate::session_finalizer::persist_terminal_after_exit(
+                    child,
+                    sessions,
+                    identity,
+                    3744,
+                    "leased-stop".into(),
+                )
+            });
+            assert!(
+                !worker.join().unwrap(),
+                "live PTY must take the deferred path"
+            );
+            assert!(crate::session_finalizer::kill_and_reap(&pty, "leased-stop").unwrap());
+            issue_3744_wait_until(|| marker.is_file());
+            assert!(
+                marker.is_file(),
+                "owner lease failure must leave a durable marker"
+            );
+            let failure: serde_json::Value =
+                serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+            assert_eq!(failure["exit_confirmed"], true);
+            Ok(())
+        })
+        .unwrap();
+        issue_3744_wait_until(|| issue_3744_stopped(&sessions, &identity, 3744));
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_rejection_records_failure_and_preserves_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "replaced-stop-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(crate::session_finalizer::kill_and_reap(&pty, "replaced-stop").unwrap());
+        let sidecar = gwt_agent::runtime_state_path(&sessions, &identity.session_id);
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            3745,
+        )
+        .save(&sidecar)
+        .unwrap();
+        let session_path = sessions.join("replaced-stop-3744.toml");
+        let session_before = fs::read(&session_path).unwrap();
+        let runtime_before = fs::read(&sidecar).unwrap();
+        assert!(!crate::session_finalizer::persist_terminal_after_exit(
+            pty,
+            sessions.clone(),
+            identity.clone(),
+            3744,
+            "replaced-stop".into(),
+        ));
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        issue_3744_wait_until(|| marker.is_file());
+        assert!(marker.is_file(), "a false persist result must be recorded");
+        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(sidecar).unwrap(), runtime_before);
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_cleans_up_completed_and_blocked_current_generations() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = unset_live_session_env();
+        for (session_id, settlement) in [
+            ("completed-cleanup-3744", ExecutionSettlement::Completed),
+            (
+                "blocked-cleanup-3744",
+                ExecutionSettlement::Blocked {
+                    reason: "current generation cleanup".into(),
+                    missing_verification: None,
+                },
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let worktree = tempfile::tempdir().unwrap();
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let (identity, pty) = issue_3744_runtime(worktree.path(), session_id, 3744);
+            let _cleanup = Issue3744ChildCleanup(pty.clone());
+            assert!(matches!(
+                settle(worktree.path(), session_id, settlement).unwrap(),
+                SettleResult::Settled(_)
+            ));
+            assert_eq!(
+                with_current_active_session_execution_identity_lease(&sessions, &identity, || ())
+                    .unwrap(),
+                None,
+                "terminal cleanup must not grant Active mutation authority"
+            );
+            assert!(crate::session_finalizer::kill_and_reap(&pty, session_id).unwrap());
+            let authority_before = generation_authority_bytes(worktree.path(), generation_owner());
+            assert!(!crate::session_finalizer::persist_terminal_after_exit(
+                pty,
+                sessions.clone(),
+                identity.clone(),
+                3744,
+                session_id.into(),
+            ));
+            let marker = issue_3744_failure_path(&sessions, session_id, 3744);
+            issue_3744_wait_until(|| {
+                marker.is_file() || issue_3744_stopped(&sessions, &identity, 3744)
+            });
+            assert!(
+                issue_3744_stopped(&sessions, &identity, 3744),
+                "terminal cleanup must persist for the same Completed or Blocked generation"
+            );
+            assert_eq!(
+                generation_authority_bytes(worktree.path(), generation_owner()),
+                authority_before,
+                "runtime cleanup must preserve owner lifecycle authority"
+            );
+        }
     }
 
     /// SPEC-2359 W-37 / Issue #3735: startup cost is bounded by repository

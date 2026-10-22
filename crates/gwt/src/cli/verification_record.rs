@@ -2703,8 +2703,9 @@ pub(crate) fn certify_pr_delivery_event(
         return Err(io::Error::other("delivery certificate requires a PR event"));
     }
     let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id);
-    let mut bytes = serde_json::to_vec(event)?;
-    bytes.push(b'\n');
+    let bytes =
+        gwt_core::workspace_projection::canonical_workspace_work_event_bytes(event, worktree)
+            .map_err(io::Error::other)?;
     if fs::read(&path)? != bytes {
         return Err(io::Error::other(
             "PR delivery event changed before certification",
