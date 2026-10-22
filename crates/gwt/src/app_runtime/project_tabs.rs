@@ -1240,6 +1240,7 @@ impl AppRuntime {
                 Some(closing_project_root.clone()),
                 true,
                 None,
+                None,
             );
             self.window_lookup.remove(window_id);
         }

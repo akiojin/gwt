@@ -542,6 +542,17 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 所属を維持します。起動失敗には原因の分類と次の回復操作を表示し、同じ原因の失敗が
 続いた場合は設定済みの試行上限後に自動再試行を止めます。
 
+live な launch の停止では、pane が消えていても、その host に対象の agent と子孫
+プロセスの終了を要求します。`runtime_stop: requested` は要求の受付を示すため、
+終了は `issue.monitor.status` で確認してください。`active_sessions` は pane の有無に
+関係なく生存 PID・worktree・既知の `launch_entrypoint` を返します。
+停止した runtime は検証を開始できません。既存の作業を続けるには、Session を明示的に
+再開して新しい runtime を起動します。対象を安全に特定できない場合は、停止を拒否します。
+別の pane に対する `pane.close` は、プロセスツリーの終了後に `closed` を返します。
+タイムアウト時や、復元した Session の PTY を捕捉できない場合は終了未確認のエラーと
+なります。自分の pane を閉じる場合は、呼び出した agent が終了する前に
+`close requested` を返します。
+
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
 先頭群へ入り、保存済みの通常順序と `max_active` は変わりません。

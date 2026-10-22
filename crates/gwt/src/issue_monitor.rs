@@ -991,6 +991,10 @@ pub struct IssueMonitorPrefs {
     pub allowed_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    /// Exact runtime revocations remain as fences after the captured child exits.
+    /// Resuming the Session produces a new incarnation, which is not revoked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     /// Exact completed holders retired after a full runtime absence observation.
     /// Fresh canvas snapshots must not turn their retained diagnostic panes into slots.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1249,6 +1253,38 @@ pub struct IssueMonitorRuntimeCounts {
     pub observed_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorRuntimeStopRequest {
+    pub issue_number: u64,
+    pub window_id: String,
+    pub session_id: String,
+    pub execution_identity: gwt_agent::SessionExecutionIdentity,
+    pub host_pid: u32,
+    pub host_started_at: u64,
+    pub runtime_incarnation: u64,
+    pub child_pid: u32,
+    pub child_started_at: u64,
+    pub requested_at: String,
+}
+
+impl IssueMonitorRuntimeStopRequest {
+    pub fn matches_runtime(
+        &self,
+        session_id: &str,
+        host_pid: u32,
+        runtime: &gwt_agent::SessionRuntimeState,
+    ) -> bool {
+        self.session_id == session_id
+            && self.execution_identity.session_id == session_id
+            && self.host_pid == host_pid
+            && runtime.execution_identity.as_ref() == Some(&self.execution_identity)
+            && runtime.host_started_at == Some(self.host_started_at)
+            && runtime.runtime_incarnation == Some(self.runtime_incarnation)
+            && runtime.child_pid == Some(self.child_pid)
+            && runtime.child_started_at == Some(self.child_started_at)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorTerminalQueueEntry {
     pub number: u64,
@@ -1284,6 +1320,7 @@ impl Default for IssueMonitorPrefs {
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
             urgent_queue: IssueMonitorUrgentQueue::default(),
@@ -4873,6 +4910,8 @@ pub struct IssueMonitorState {
     active_launches: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     monitor_runtime_counts: BTreeMap<String, IssueMonitorRuntimeCounts>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -7674,6 +7713,7 @@ impl IssueMonitorState {
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
+            monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
             process_held_issues: BTreeSet::new(),
             terminal_queues: BTreeMap::new(),
@@ -7769,6 +7809,7 @@ impl IssueMonitorState {
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
+        state.monitor_runtime_stop_requests = prefs.monitor_runtime_stop_requests;
         state.retired_completed_sessions = prefs.retired_completed_sessions;
         state.terminal_queues = prefs.terminal_queues;
         state.urgent_queue = prefs.urgent_queue;
@@ -7941,6 +7982,7 @@ impl IssueMonitorState {
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
+            monitor_runtime_stop_requests: self.monitor_runtime_stop_requests.clone(),
             retired_completed_sessions: self.retired_completed_sessions.clone(),
             terminal_queues: self.terminal_queues.clone(),
             urgent_queue: self.urgent_queue.clone(),
@@ -12002,6 +12044,11 @@ impl IssueMonitorState {
             .collect::<Vec<_>>();
         self.retired_completed_sessions
             .extend(disk.retired_completed_sessions.iter().cloned());
+        for request in &disk.monitor_runtime_stop_requests {
+            if !self.monitor_runtime_stop_requests.contains(request) {
+                self.monitor_runtime_stop_requests.push(request.clone());
+            }
+        }
         if let Some(snapshot) = &mut self.window_snapshot {
             for pane in &mut snapshot.windows {
                 if !pane.review_dispatch
@@ -42042,6 +42089,7 @@ mod tests {
                 child_started_at: 1,
                 started_at: "2026-06-29T00:00:00Z".to_string(),
                 launch_origin: gwt_agent::SessionLaunchOrigin::Launch,
+                launch_entrypoint: None,
                 restore_source_session_id: None,
             }],
             ..Default::default()
