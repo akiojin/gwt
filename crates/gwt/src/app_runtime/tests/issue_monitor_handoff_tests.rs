@@ -88,7 +88,7 @@ fn app_runtime_monitor_fresh_completed_slice_handoff_stays_with_its_owner() {
             gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
         );
         let result = take_monitor_launch_complete(case, &fixture.recorded_events);
-        let prompt = result.as_ref().unwrap().0.args.join("\n");
+        let prompt = launch_payload_fragments(&result.as_ref().unwrap().0).join("\n");
         let expected = work_owner == Some("SPEC-3165");
         assert_eq!(
             prompt.contains("Delivered queue repair"),

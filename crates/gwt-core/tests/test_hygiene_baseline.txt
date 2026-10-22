@@ -45,7 +45,6 @@ short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|cleanup_future_is_
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|expired_deadline_does_not_spawn_child
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|stalled_tree_termination_uses_cleanup_grace
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit
-short-wall-clock|crates/gwt-core/src/runtime.rs|runtime_probe_lock_obeys_ambient_operation_deadline
 short-wall-clock|crates/gwt-core/src/test_support.rs|write_executable_script_is_immediately_executable_under_concurrent_forks
 short-wall-clock|crates/gwt-core/src/update.rs|wait_for_pid_exit_times_out_while_process_runs
 short-wall-clock|crates/gwt-core/src/usage/claude.rs|transcripts_modified_since_orders_newest_first_and_caps
