@@ -289,7 +289,9 @@ export function createProjectShellSurface({
           progress: "",
           error: "",
         },
-      });
+      }, { scheduleFrame });
+      let observedCloneState = null;
+      let renderedCloneSnapshot = null;
 
       function sendOpenProjectDialog() {
         openPathDialog.open();
@@ -402,6 +404,7 @@ export function createProjectShellSurface({
             send({ kind: "clone_project_start", url, parent_path: parentPath });
           },
         });
+        renderedCloneSnapshot = modal;
       }
 
       function updateActionAvailability(activeTab = activeProjectTab()) {
@@ -879,10 +882,25 @@ export function createProjectShellSurface({
       const unsubscribeMigrationFrame = migrationModel.subscribeFrame(state => state, state => {
         if (state !== renderedMigrationSnapshot) renderMigrationModal();
       });
-      const unsubscribeClone = cloneProjectModel.subscribe(state => state.modal, () => renderProjectCloneModal());
+      // Only progress-only updates wait for a frame. Picker results and
+      // actions stay synchronous, while draft-only changes never rebuild inputs.
+      const unsubscribeClone = cloneProjectModel.subscribe(state => state, state => {
+        const previous = observedCloneState;
+        observedCloneState = state;
+        if (previous && (state.modal === previous.modal || (
+          state.form === previous.form && state.modal.open && previous.modal.open
+          && state.modal.cloning && previous.modal.cloning
+          && Object.keys(state.modal).every(key => key === "progress"
+            || Object.is(state.modal[key], previous.modal[key]))
+        ))) return;
+        renderProjectCloneModal();
+      });
+      const unsubscribeCloneFrame = cloneProjectModel.subscribeFrame(state => state.modal, modal => {
+        if (modal !== renderedCloneSnapshot) renderProjectCloneModal();
+      });
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); folderPicker.dispose(); openPathDialog.dispose(); },
+        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeMigrationFrame(); unsubscribeClone(); unsubscribeCloneFrame(); folderPicker.dispose(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,
