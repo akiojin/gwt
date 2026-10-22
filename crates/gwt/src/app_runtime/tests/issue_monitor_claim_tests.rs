@@ -3772,6 +3772,11 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let _gh_lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert migration and admission outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3885,7 +3890,11 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
             super::super::IssueMonitorScanPolicy::Scan,
             |_| {},
         );
-        assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+        assert_eq!(
+            probed.lock().expect("probe log").as_slice(),
+            &[43],
+            "Auto admission did not reach the completion probe: {_events:?}"
+        );
     }
 }
 

@@ -9542,7 +9542,7 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let source_repository = {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
             );
             gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
         };
