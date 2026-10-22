@@ -1204,6 +1204,7 @@ pub(crate) fn load_monitor_agent_status(
     // (this used to report the literal string `gwtd-status`) told every reader
     // the monitor had just run, which is exactly how a permanently stopped
     // monitor kept looking healthy.
+    monitor.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
     monitor.restore_persisted_scan_diagnostics(&prefs);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
@@ -11837,6 +11838,8 @@ mod tests {
             .remove("max_active_agents_override");
         assert_eq!(status["released"], serde_json::json!([]));
         status.as_object_mut().unwrap().remove("released");
+        assert_eq!(status["scan_aborted"], false);
+        status.as_object_mut().unwrap().remove("scan_aborted");
         for pointer in ["/inbox", "/urgent_queue/entries"] {
             for row in status.pointer_mut(pointer).unwrap().as_array_mut().unwrap() {
                 assert_eq!(row["kind"], "issue");
@@ -11863,7 +11866,7 @@ mod tests {
                 "label_excluded_count": 0,
                 "label_excluded_issues": [],
                 "stall_reason": "unknown",
-                "project_root": std::fs::canonicalize(&repo).expect("canonical project"),
+                "project_root": dunce::canonicalize(&repo).expect("canonical project"),
                 "active_launches_incomplete": true,
                 "queue": [2, 1],
                 "urgent_queue": {

@@ -10555,7 +10555,7 @@ impl IssueMonitorState {
         self.last_scan_at = last_scan_at;
     }
 
-    /// A cache-only rebuild is not a successful scan and must retain its fault.
+    /// Restore durable diagnostics without replacing a local scan's timestamp.
     pub(crate) fn restore_persisted_scan_diagnostics(&mut self, prefs: &IssueMonitorPrefs) {
         if self
             .last_scan_error
@@ -10564,7 +10564,6 @@ impl IssueMonitorState {
         {
             self.last_error = None;
         }
-        self.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
         self.last_scan_error = prefs.last_scan_error.clone();
     }
 
@@ -32278,7 +32277,18 @@ mod tests {
         let failed = driver.prefs();
         observer.rebase_gui_observer_prefs(&failed);
         assert_eq!(observer.prefs().last_scan_error, failed.last_scan_error);
-        assert_eq!(observer.prefs().last_scan_at, failed.last_scan_at);
+        assert!(observer.prefs().last_scan_at.is_none());
+
+        observer.record_scan_error("2026-10-22T00:00:01Z", "read phase deadline");
+        observer.rebase_gui_observer_prefs(&IssueMonitorPrefs::default());
+        assert_eq!(
+            observer.prefs().last_scan_at.as_deref(),
+            Some("2026-10-22T00:00:01Z")
+        );
+        assert_eq!(
+            observer.status_view().last_error.as_deref(),
+            Some("read phase deadline")
+        );
 
         observer.record_scan_failure("2026-10-22T00:00:00Z", "candidate-load", "old fault");
         scan_queued_candidates(&mut driver, &[], "2026-10-22T00:00:01Z");
