@@ -12980,15 +12980,17 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(
-            &prefs_path,
-            &crate::IssueMonitorPrefs {
+        let mut seed = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
-        )
-        .expect("save prefs");
+        );
+        seed.terminal_queue_push(&[42], "test", "2026-10-22T00:00:00Z");
+        seed.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        crate::save_issue_monitor_prefs(&prefs_path, &seed.prefs()).expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
@@ -13016,6 +13018,15 @@ mod tests {
         assert!(!prefs.autonomous_mode);
         assert_eq!(prefs.max_active_agents, 3);
         assert_eq!(prefs.effect_authority_epoch, 2);
+        let record = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .unwrap();
+        assert_eq!(record.phase, crate::AutonomousPhase::Implementing);
+        assert!(record
+            .cancelled_claim_phase
+            .is_some_and(|phase| !phase.reconciled));
         let change =
             serde_json::to_value(&prefs).expect("prefs json")["max_active_last_change"].clone();
         assert_eq!(change["source"], "json_operation");
