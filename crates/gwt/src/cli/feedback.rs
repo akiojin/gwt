@@ -1,5 +1,6 @@
 use gwt_core::feedback::{
     FeedbackContext, FeedbackInput, FeedbackKind, FeedbackRecord, FeedbackState, FeedbackStore,
+    PublicFeedback,
 };
 use gwt_github::client::{
     CreateRepositoryIssue, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
@@ -22,6 +23,9 @@ pub enum FeedbackCommand {
     Process { id: String },
 }
 
+#[path = "feedback_consent.rs"]
+mod consent;
+
 pub fn run<E: super::CliEnv>(
     env: &mut E,
     command: FeedbackCommand,
@@ -33,19 +37,11 @@ pub fn run<E: super::CliEnv>(
     let result = (|| -> io::Result<FeedbackRecord> {
         match command {
             FeedbackCommand::Status { id } => store.read(&id),
-            FeedbackCommand::Process { id } => process_with(
-                &store,
-                &id,
-                &root,
-                |prompt| {
-                    crate::provider_reset::native::confirm_with(
-                        "GWT — Send feedback to akiojin/gwt",
-                        "Send feedback",
-                        prompt,
-                    )
-                },
-                |record| env.deliver_feedback(record),
-            ),
+            FeedbackCommand::Process { id } => {
+                process_with(&store, &id, &root, consent::confirm, |record| {
+                    env.deliver_feedback(record)
+                })
+            }
             FeedbackCommand::Create(mut input) => {
                 attach_error_record(&mut input, &root);
                 let context = context(&root);
@@ -191,7 +187,7 @@ fn process_with(
     id: &str,
     root: &Path,
     consent: impl FnOnce(&str) -> Result<bool, String>,
-    mut send: impl FnMut(&FeedbackRecord) -> Result<u64, OwnerMutationError>,
+    mut send: impl FnMut(&PublicFeedback) -> Result<u64, OwnerMutationError>,
 ) -> io::Result<FeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
@@ -217,7 +213,7 @@ fn process_with(
     }
     let public = record.public_snapshot();
     if gwt_core::feedback::requires_approval(root) {
-        let prompt = format!("Send this report to the public GitHub repository akiojin/gwt?\nPrivacy masks are applied below; the complete original stays local.\nCancel leaves it saved locally and your project work can continue.\n\nTitle: {}\n\n{}", public.input.title, public.render_issue());
+        let prompt = format!("Send this report to the public GitHub repository akiojin/gwt?\nPrivacy masks are applied below; the complete original stays local.\nDeclining leaves it saved locally and your project work can continue.\n\n{}\n\nTitle: {}\n\n{}", public.privacy_summary(), public.input.title, public.render_issue());
         match consent(&prompt) {
             Ok(true) => {}
             Ok(false) => {
@@ -260,7 +256,7 @@ fn process_with(
 
 pub(super) fn send_to_upstream(
     client: &impl OwnerRepositoryClient,
-    record: &FeedbackRecord,
+    record: &PublicFeedback,
 ) -> Result<u64, OwnerMutationError> {
     send_to_upstream_with_deadline(
         client,
@@ -307,7 +303,7 @@ fn acquire_upstream_lock(
 
 pub(super) fn send_to_upstream_with_deadline(
     client: &impl OwnerRepositoryClient,
-    record: &FeedbackRecord,
+    record: &PublicFeedback,
     deadline: &ResolutionDeadline,
 ) -> Result<u64, OwnerMutationError> {
     // Consent is already complete. Serialize lookup and mutation across every
@@ -628,7 +624,7 @@ mod tests {
         record.input.refusal = "PRIVATE_SETTING=exempt-secret".into();
         store.save(&record).unwrap();
         let client = FakeIssueClient::new();
-        let mut send = |r: &FeedbackRecord| send_to_upstream(&client, r);
+        let mut send = |r: &PublicFeedback| send_to_upstream(&client, r);
         let sent = process_with(
             &store,
             &record.id,
@@ -741,7 +737,10 @@ mod tests {
         );
         assert!(!comments.items()[0].body.contains("duplicate-secret"));
         // The immutable request marker also reconciles a retry after an interrupted local save.
-        assert_eq!(send_to_upstream(&client, &record).unwrap(), 4918);
+        assert_eq!(
+            send_to_upstream(&client, &record.public_snapshot()).unwrap(),
+            4918
+        );
         assert_eq!(client.owner_mutation_count(), 1);
         assert_eq!(
             client.owner_mutation_call_log()[0].operation,
@@ -788,7 +787,10 @@ mod tests {
         let retained = store.read(&additional.id).unwrap();
         assert_eq!(retained.input, additional.input);
         assert_eq!(retained.context, environment);
-        assert_eq!(send_to_upstream(&client, &additional).unwrap(), 4918);
+        assert_eq!(
+            send_to_upstream(&client, &additional.public_snapshot()).unwrap(),
+            4918
+        );
         assert_eq!(client.owner_mutation_count(), 2);
         assert!(client
             .owner_mutation_call_log()
@@ -811,7 +813,10 @@ mod tests {
             kind: RepositoryIssueKind::Plain,
             updated_at: UpdatedAt("2026-10-01T00:00:00Z".into()),
         });
-        assert_eq!(send_to_upstream(&client, &record).unwrap(), 4918);
+        assert_eq!(
+            send_to_upstream(&client, &record.public_snapshot()).unwrap(),
+            4918
+        );
         assert_eq!(client.owner_mutation_count(), 1);
         assert_eq!(
             client.owner_mutation_call_log()[0].operation,
@@ -826,11 +831,12 @@ mod tests {
     }
 
     #[test]
-    fn new_feedback_needs_no_label_permission_and_preserves_requested_labels() {
-        let (_dir, _store, mut record) = report("https://github.com/akiojin/gwt.git");
+    fn new_feedback_needs_no_label_permission_and_keeps_requested_labels_local() {
+        let (_dir, store, mut record) = report("https://github.com/akiojin/gwt.git");
         record.input.labels = vec!["documentation".into()];
+        store.save(&record).unwrap();
         let client = FakeIssueClient::new();
-        let number = send_to_upstream(&client, &record).unwrap();
+        let number = send_to_upstream(&client, &record.public_snapshot()).unwrap();
         let issue = client
             .fetch_issue(
                 &RepositoryIdentity::gwt_upstream(),
@@ -839,8 +845,12 @@ mod tests {
             )
             .unwrap();
         assert!(issue.labels.is_empty());
-        assert!(issue.body.contains("\"requested_labels\""));
-        assert!(issue.body.contains("documentation"));
+        assert!(!issue.body.contains("\"requested_labels\""));
+        assert!(!issue.body.contains("documentation"));
+        assert_eq!(
+            store.read(&record.id).unwrap().input.labels,
+            record.input.labels
+        );
     }
 
     #[test]
@@ -893,7 +903,7 @@ mod tests {
         let client = FakeIssueClient::new();
         let result = send_to_upstream_with_deadline(
             &client,
-            &first,
+            &first.public_snapshot(),
             &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_millis(100)),
         );
         assert!(
@@ -906,8 +916,11 @@ mod tests {
         assert!(client.owner_call_log().is_empty());
         drop(lock);
 
-        let number = send_to_upstream(&client, &first).unwrap();
-        assert_eq!(send_to_upstream(&client, &second).unwrap(), number);
+        let number = send_to_upstream(&client, &first.public_snapshot()).unwrap();
+        assert_eq!(
+            send_to_upstream(&client, &second.public_snapshot()).unwrap(),
+            number
+        );
         assert_eq!(
             client
                 .owner_mutation_call_log()

@@ -1082,7 +1082,7 @@ entrypoints are:
 For a gwt bug or workflow problem, PM and implementation agents can use
 `gwt-feedback` to collect the affected operation, original refusal,
 reproduction steps, and workaround. The `feedback.create` JSON operation always
-targets `akiojin/gwt` and adds source-project and environment information.
+targets `akiojin/gwt` and collects local diagnostic context.
 It saves a local receipt. Outside the actual gwt repository, intake returns
 immediately so project work can continue; sending requires the user's **Send
 feedback** action in a native dialog. Cancellation or an unavailable desktop
@@ -1090,8 +1090,12 @@ keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
 The local receipt keeps the complete original. Public reports automatically mask
-known credentials, environment assignment values, paths (including URLs), and
-Markdown code fragments; the native preview and submission use the same content.
+known credentials, environment assignment values, source identifiers, paths
+(including URLs), and source code. Public metadata includes only gwt/gwtd
+versions and OS/architecture; source-project metadata and arbitrary context are
+omitted. The scrollable native preview keeps both actions visible and shows
+removed categories, the masked proportion, and a warning when most text is masked.
+The preview and submission use the same content.
 Unmasked refusal text is preserved without truncation. Masks are conservative
 and cannot detect every arbitrary secret; do not publish the raw receipt.
 

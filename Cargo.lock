@@ -1305,6 +1305,7 @@ dependencies = [
  "notify-debouncer-mini",
  "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "objc2-service-management",
  "pulldown-cmark",
  "quick-xml 0.42.0",

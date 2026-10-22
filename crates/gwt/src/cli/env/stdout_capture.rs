@@ -64,7 +64,7 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     }
     fn deliver_feedback(
         &mut self,
-        record: &gwt_core::feedback::FeedbackRecord,
+        record: &gwt_core::feedback::PublicFeedback,
     ) -> Result<u64, gwt_github::client::OwnerMutationError> {
         self.inner.deliver_feedback(record)
     }
