@@ -304,9 +304,17 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::MonitorQueueAutoRefill {
             project_root,
+            expected_config_token,
             enabled,
             limit,
-        } => run_monitor_queue_auto_refill(env, project_root.as_deref(), enabled, limit, out)?,
+        } => run_monitor_queue_auto_refill(
+            env,
+            project_root.as_deref(),
+            expected_config_token.as_deref(),
+            enabled,
+            limit,
+            out,
+        )?,
         IssueCommand::MonitorQueueUrgentLimit {
             project_root,
             limit,
@@ -2055,6 +2063,7 @@ fn run_monitor_queue_move<E: CliEnv>(
 fn run_monitor_queue_auto_refill<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_config_token: Option<&str>,
     enabled: bool,
     limit: usize,
     out: &mut String,
@@ -2062,6 +2071,10 @@ fn run_monitor_queue_auto_refill<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            prefs,
+            expected_config_token,
+        )?;
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -2077,6 +2090,8 @@ fn run_monitor_queue_auto_refill<E: CliEnv>(
         &serde_json::json!({
             "enabled": prefs.terminal_queue_auto_refill,
             "limit": prefs.terminal_queue_auto_refill_limit,
+            "saved_config": prefs.config_observation(),
+            "config_token": prefs.config_token(),
         })
         .to_string(),
     );

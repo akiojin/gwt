@@ -1385,6 +1385,8 @@ impl IssueMonitorPrefs {
             "launch_profiles": self.launch_profile_pool(),
             "launch_auto": self.launch_auto,
             "launch_tiers": self.launch_tiers,
+            "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
+            "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
                 "since": drain.since,
@@ -40026,6 +40028,21 @@ mod tests {
         let manual_token = prefs.config_token();
         prefs.max_active_agents += 1;
         assert_ne!(prefs.config_token(), manual_token);
+
+        let token = prefs.config_token();
+        prefs.terminal_queue_auto_refill = !prefs.terminal_queue_auto_refill;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["terminal_queue_auto_refill"],
+            serde_json::json!(prefs.terminal_queue_auto_refill)
+        );
+        let token = prefs.config_token();
+        prefs.terminal_queue_auto_refill_limit += 1;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["terminal_queue_auto_refill_limit"],
+            serde_json::json!(prefs.terminal_queue_auto_refill_limit)
+        );
     }
 
     #[test]

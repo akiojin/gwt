@@ -543,6 +543,12 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 明示的な `[]` は保存キューが空の場合だけ一致し、`null` は拒否します。省略時は従来互換です。
 比較対象はキュー順の値であり、途中の変更履歴、urgent metadata、優先順だけの変更、他の設定変更は検出しません。
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`terminal_queue_auto_refill` と `terminal_queue_auto_refill_limit` を含みます。
+不一致なら設定を変更せず拒否するため、status を再読して変更を再判断します。
+成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
+`null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
