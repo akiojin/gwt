@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.136.0] - 2026-10-22
+
+### Bug Fixes
+
+- **monitor:** Guard queue refill settings against stale writes
+- **issue-monitor:** Refresh terminal holds before PR discovery
+- **monitor:** Reconcile cancelled claim phases after runtime checks
+- **usage:** Live枠優先と不正creditsの劣化を守る
+- **monitor:** 緊急キュー上限の競合更新を防止する
+- **monitor:** Cold controlの取消をruntime観測後に整合する
+
+### Features
+
+- **usage:** Fable週次枠とUsage creditsを表示する
+
+### Miscellaneous Tasks
+
+- **work:** Link refill guard delivery to pr 5989
+- **work:** Record Issue 4157 delivery PR
+- **work:** Issue #3431 の PR 関連付けを記録する
+
+### Refactor
+
+- **ui:** Batch system settings snapshot rendering
+
+### Testing
+
+- **usage:** Headed検証中のpopover開状態を保持する
+
 ## [9.135.0] - 2026-10-22
 
 ### Bug Fixes

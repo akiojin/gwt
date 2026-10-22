@@ -8361,6 +8361,37 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   printf '%s\n' '[]'
   exit 0
 fi
+case "$GWT_FAKE_GH_MODE" in
+  terminal_hold_merged | terminal_hold_closed | terminal_hold_other_unknown | partial_hold_timeline)
+    case "$*" in
+      "pr view 7 "*)
+        case "$GWT_FAKE_GH_MODE" in
+          terminal_hold_merged | terminal_hold_other_unknown) state=MERGED ;;
+          terminal_hold_closed) state=CLOSED ;;
+          *) exit 1 ;;
+        esac
+        printf '{"number":7,"state":"%s","isDraft":false,"headRefName":"work/issue-44","baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}\n' "$state"
+        exit 0 ;;
+      *"/pulls?state=open"*)
+        if [ "$GWT_FAKE_GH_MODE" = "terminal_hold_other_unknown" ]; then
+          printf '%s\n' '[{"number":8,"head":{"ref":"work/issue-44"}}]'
+          exit 0
+        fi
+        [ "$GWT_FAKE_GH_MODE" = "partial_hold_timeline" ] || exit 1
+        printf '%s\n' '[]'
+        exit 0 ;;
+      "api graphql "*)
+        case "$*" in
+          *"after:"*) exit 1 ;;
+        esac
+        [ "$GWT_FAKE_GH_MODE" = "partial_hold_timeline" ] || exit 1
+        printf '%s\n' '{"data":{"repository":{"i43":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"next-page"}}},"i44":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+        exit 0 ;;
+    esac
+    printf '%s\n' '[{"number":43,"title":"In-flight issue","body":"In-flight body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"},{"number":44,"title":"Queued issue","body":"Queued body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/44","updatedAt":"2026-08-15T00:00:00Z"}]'
+    exit 0
+    ;;
+esac
 if [ "$GWT_FAKE_GH_MODE" = "open_pr_readback_hang" ]; then
   case "$*" in
     *"/pulls?state=open"*)
@@ -11443,6 +11474,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -11557,6 +11589,7 @@ exit 0
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -14312,6 +14345,30 @@ exit 0
     /// can tell a degraded scan from a stopped one.
     #[test]
     fn daemon_scan_continues_to_launch_when_open_pr_readback_exceeds_its_budget() {
+        assert_scan_launches_after_pr_readback_failure("open_pr_readback_hang", || {
+            let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() + Duration::from_secs(20),
+            );
+            Some(_scan_deadline)
+        });
+    }
+
+    #[test]
+    fn issue_4157_daemon_scan_releases_terminal_or_completed_hold_despite_discovery_failure() {
+        for mode in [
+            "terminal_hold_merged",
+            "terminal_hold_closed",
+            "terminal_hold_other_unknown",
+            "partial_hold_timeline",
+        ] {
+            assert_scan_launches_after_pr_readback_failure(mode, || None);
+        }
+    }
+
+    fn assert_scan_launches_after_pr_readback_failure(
+        mode: &str,
+        enter_deadline: impl FnOnce() -> Option<gwt_core::operation_deadline::ScopedOperationDeadline>,
+    ) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -14322,8 +14379,9 @@ exit 0
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_readback_hang");
-        let _budget = ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS", "300");
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        let _budget = (mode == "open_pr_readback_hang")
+            .then(|| ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS", "300"));
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -14359,7 +14417,29 @@ exit 0
             }],
             ..crate::IssueMonitorPrefs::default()
         };
-        let prefs = scheduled_issue_monitor_prefs(prefs, &[44]);
+        let queued: &[u64] = if mode == "partial_hold_timeline" {
+            &[43, 44]
+        } else {
+            &[44]
+        };
+        let mut prefs = scheduled_issue_monitor_prefs(prefs, queued);
+        if mode != "open_pr_readback_hang" {
+            for (issue, pr) in [(44, 7), (43, 9)] {
+                if issue == 43 && mode != "partial_hold_timeline" {
+                    continue;
+                }
+                prefs.open_pr_observations.insert(
+                    issue,
+                    crate::issue_monitor::IssueMonitorOpenPrObservation {
+                        observed_at: "2026-08-15T00:00:00Z".into(),
+                        hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                            pr_number: pr,
+                            lifecycle: "IN-PROGRESS".into(),
+                        }),
+                    },
+                );
+            }
+        }
         crate::save_issue_monitor_prefs(
             &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
             &prefs,
@@ -14370,13 +14450,12 @@ exit 0
 
         // Stands in for the production scan budget the worker installs. The
         // hanging readback must not be allowed to consume all of it.
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() + Duration::from_secs(20),
-        );
+        let _scan_deadline = enter_deadline();
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
             .expect("a single degraded readback must not abort the scan");
 
-        assert!(
+        let expect_hold = mode == "terminal_hold_other_unknown";
+        assert_eq!(
             scanned.pending_effects().iter().any(|effect| matches!(
                 effect.payload,
                 crate::IssueMonitorEffectPayload::AcquireClaim {
@@ -14384,9 +14463,21 @@ exit 0
                     ..
                 }
             )),
-            "the launch stage must still run in the same scan: {:?}",
-            scanned.pending_effects()
+            !expect_hold,
+            "{mode}: expected claim after readback: {:?}; observations: {:?}",
+            scanned.pending_effects(),
+            scanned.prefs().open_pr_observations
         );
+        if mode != "open_pr_readback_hang" {
+            assert_eq!(scanned.open_pr_launch_held(44), expect_hold, "{mode}");
+            if mode == "partial_hold_timeline" {
+                assert!(
+                    scanned.open_pr_launch_held(43),
+                    "incomplete Issue stays held"
+                );
+            }
+            return;
+        }
         assert_eq!(
             scanned.autonomous_record(43).map(|record| record.phase),
             Some(crate::AutonomousPhase::Implementing),
@@ -16989,6 +17080,7 @@ exit 0
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -17514,6 +17606,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -20771,6 +20864,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -20840,6 +20934,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -20961,6 +21056,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -20983,6 +21079,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -21055,6 +21152,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -21944,6 +22042,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -22096,6 +22195,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -22236,6 +22336,7 @@ exit 1
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -22652,6 +22753,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -22896,6 +22998,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -23951,6 +24054,7 @@ exit 1
                     last_failure_message: None,
                     delivering_since: None,
                     review_attempts: None,
+                    cancelled_claim_phase: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -24251,6 +24355,7 @@ exit 1
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,

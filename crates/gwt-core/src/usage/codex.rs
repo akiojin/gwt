@@ -492,6 +492,7 @@ pub(super) fn read_codex_account_with(
         account_id,
         account_label,
         plan: acc.plan,
+        extra_usage: None,
         windows: acc.windows,
         limit_reached: acc.limit_reached,
         state: if let Some(at) = fetched_at {

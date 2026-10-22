@@ -32,6 +32,9 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
+- **Provider usage** — hover over USAGE for account limits, including Claude's
+  Fable weekly limit and enabled Usage credits with utilization, used/limit,
+  and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
@@ -565,6 +568,13 @@ even with Auto-refill off; an explicit queue removal still wins. Up to two urgen
 Issues lead the queue in assignment order by default, without changing the saved
 normal order or `max_active`. Set the head limit with
 `issue.monitor.queue.urgent_limit` (`limit: 0` disables priority, not membership).
+Before changing the limit, read `saved_config` and `config_token` from
+`issue.monitor.status`, then pass that token as `expected_config_token`.
+The saved observation includes `urgent_queue_limit`. A conflict leaves preferences
+unchanged: re-read status and reconsider the change before retrying. The reply
+retains the queue fields and includes `saved_config` and `config_token` from the
+saved snapshot. Omitting the guard retains legacy behavior; this value comparison
+does not detect ABA history.
 Overflow follows normal order. `issue.monitor.queue.demote` (`number`) persistently
 returns an Issue to normal priority, overriding its urgent label across scans and
 restarts. Queue cards and details distinguish urgent, overflow, and demotion;
@@ -583,6 +593,14 @@ an empty saved queue, `null` is rejected, and omitting the guard keeps existing
 behavior. This compares queue order values, without tracking intervening history,
 urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
+Before changing refill settings, read `saved_config` and `config_token` from
+`issue.monitor.status` and pass that token as `expected_config_token`. The saved
+observation includes `terminal_queue_auto_refill` and `terminal_queue_auto_refill_limit`.
+A mismatch rejects the update without changing preferences; read status again and
+reconsider. A successful reply includes the saved observation and new token for
+readback. Omission retains existing behavior; `null`, empty strings and other types
+are rejected. This value comparison does not track intervening history or protect
+other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting

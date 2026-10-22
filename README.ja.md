@@ -29,6 +29,9 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
+- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
+  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+  Claude アカウント枠は Settings → Usage & Limits で有効化してください。
 
 ## インストール
 
@@ -529,6 +532,11 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
 先頭群へ入り、保存済みの通常順序と `max_active` は変わりません。
 `issue.monitor.queue.urgent_limit` の `limit` で上限を変更できます（`0` は先頭群への昇格だけを無効化）。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`urgent_queue_limit` を含みます。不一致なら設定を保存せず、status を再読して変更を再評価します。
+応答は従来のキュー項目を保持し、同じ保存 snapshot の `saved_config` と `config_token` を含みます。
+guard 省略時は従来の挙動を保ちます。この値比較は ABA 履歴を検知しません。
 超過分は通常順序に従います。`issue.monitor.queue.demote` の `number` で指定した Issue は
 永続的に通常優先度へ戻り、scan・再起動後も urgent ラベルより降格が優先されます。
 カードと詳細では urgent・上限超過・降格を区別し、`issue.monitor.queue.list` と
@@ -543,6 +551,12 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 明示的な `[]` は保存キューが空の場合だけ一致し、`null` は拒否します。省略時は従来互換です。
 比較対象はキュー順の値であり、途中の変更履歴、urgent metadata、優先順だけの変更、他の設定変更は検出しません。
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`terminal_queue_auto_refill` と `terminal_queue_auto_refill_limit` を含みます。
+不一致なら設定を変更せず拒否するため、status を再読して変更を再判断します。
+成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
+`null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序

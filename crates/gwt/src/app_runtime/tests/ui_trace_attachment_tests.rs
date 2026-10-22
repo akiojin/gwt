@@ -1293,6 +1293,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },

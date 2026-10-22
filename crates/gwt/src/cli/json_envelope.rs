@@ -930,6 +930,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.auto_refill" => {
             CliCommand::Issue(IssueCommand::MonitorQueueAutoRefill {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 enabled: optional_bool(params, "enabled")?
                     .ok_or(CliParseError::MissingFlag("enabled"))?,
                 limit: required_usize(params, "limit")?,
@@ -938,6 +941,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.urgent_limit" => {
             CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 limit: required_usize(params, "limit")?,
             })
         }
@@ -5270,6 +5276,29 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_queue_urgent_limit_config_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit { .. }) = ok(
+            "issue.monitor.queue.urgent_limit",
+            json!({"limit": 0, "expected_config_token": "observed-config"}),
+        ) else {
+            panic!("urgent limit command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.urgent_limit",
+                json!({"limit": 0, "expected_config_token": invalid}),
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_queue_auto_refill_persists_without_changing_other_preferences() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
@@ -5300,6 +5329,65 @@ mod tests {
         assert_eq!(prefs.terminal_queue_auto_refill_limit, 3);
         assert!(prefs.enabled);
         assert_eq!(prefs.priority_order, vec![7, 42]);
+
+        let mut invoke = |params| {
+            let CliCommand::Issue(command) = ok("issue.monitor.queue.auto_refill", params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let token = prefs.config_token();
+        // An intervening writer changes only the observed refill limit.
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.terminal_queue_auto_refill_limit = 4;
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(json!({
+            "enabled": false, "limit": 0, "expected_config_token": token
+        }))
+        .expect_err("stale refill configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        let reply: Value = serde_json::from_str(
+            &invoke(json!({
+                "enabled": false, "limit": 0, "expected_config_token": token
+            }))
+            .expect("fresh observation must succeed"),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.terminal_queue_auto_refill);
+        assert_eq!(saved.terminal_queue_auto_refill_limit, 0);
+        assert!(saved.enabled);
+        assert_eq!(saved.priority_order, vec![7, 42]);
+        assert_eq!(reply["enabled"], false);
+        assert_eq!(reply["limit"], 0);
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], token);
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.auto_refill",
+                json!({"enabled": true, "limit": 3, "expected_config_token": invalid}),
+            );
+        }
         let _ = err("issue.monitor.queue.auto_refill", json!({"enabled": true}));
         let _ = err("issue.monitor.queue.auto_refill", json!({"limit": 3}));
     }

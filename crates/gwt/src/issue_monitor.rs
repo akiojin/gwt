@@ -714,20 +714,6 @@ fn revoke_uncommitted_claims_for_issue(
     }
 }
 
-fn advance_autonomous_effect_authority(
-    autonomous_mode: &mut bool,
-    effect_authority_epoch: &mut u64,
-    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
-    enabled: bool,
-) -> Option<u64> {
-    if *autonomous_mode == enabled {
-        return Some(*effect_authority_epoch);
-    }
-    let next_epoch = advance_effect_authority(effect_authority_epoch, pending_effects)?;
-    *autonomous_mode = enabled;
-    Some(next_epoch)
-}
-
 fn advance_effect_authority(
     effect_authority_epoch: &mut u64,
     pending_effects: &mut Vec<PendingIssueMonitorEffect>,
@@ -1385,6 +1371,9 @@ impl IssueMonitorPrefs {
             "launch_profiles": self.launch_profile_pool(),
             "launch_auto": self.launch_auto,
             "launch_tiers": self.launch_tiers,
+            "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
+            "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
                 "since": drain.since,
@@ -1530,19 +1519,36 @@ impl IssueMonitorPrefs {
     }
 
     pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
-        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+        let cancelled = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+        // Prefs has no live canvas/process observations. Preserve the exact
+        // cancellation evidence until the runtime can safely reconcile it.
+        for record in &mut self.autonomous_records {
+            if cancelled.contains(&record.issue_number) {
+                record.mark_cancelled_claim_phase(epoch);
+            }
+        }
+        Some(epoch)
     }
 
     /// Advance autonomous authority atomically. Turning autonomous mode off
     /// cancels unsubmitted arm proposals and durably compensates every
     /// outcome-ambiguous arm attempt. Overflow rejects the whole transition.
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
-        advance_autonomous_effect_authority(
-            &mut self.autonomous_mode,
-            &mut self.effect_authority_epoch,
-            &mut self.pending_effects,
-            enabled,
-        )
+        if self.autonomous_mode == enabled {
+            return Some(self.effect_authority_epoch);
+        }
+        let epoch = self.advance_effect_authority_epoch()?;
+        self.autonomous_mode = enabled;
+        Some(epoch)
     }
 }
 
@@ -5375,6 +5381,14 @@ pub struct AutonomousSteeringRequest {
     pub count: u32,
 }
 
+/// Cancellation evidence is monotonic: reconciliation retains its epoch so
+/// a pre-cancellation snapshot cannot recreate provisional implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CancelledClaimPhase {
+    pub authority_epoch: u64,
+    pub reconciled: bool,
+}
+
 /// SPEC #3200 T-022/T-016/T-018: the typed container for one issue's autonomous
 /// state. Single source of truth for the attempt counter (FR-026), the current
 /// lifecycle phase, the launch id binding the in-flight attempt (TOCTOU /
@@ -5386,6 +5400,9 @@ pub struct AutonomousIssueRecord {
     pub issue_number: u64,
     #[serde(default)]
     pub phase: AutonomousPhase,
+    /// A control revoked eligibility before runtime absence was known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_claim_phase: Option<CancelledClaimPhase>,
     /// Launch / window id binding the CURRENT attempt. `None` between attempts.
     #[serde(default)]
     pub active_launch_id: Option<String>,
@@ -5891,6 +5908,25 @@ pub enum AutonomousFailureOutcome {
 }
 
 impl AutonomousIssueRecord {
+    fn mark_cancelled_claim_phase(&mut self, authority_epoch: u64) {
+        if self.phase == AutonomousPhase::Implementing && self.reviewed_sha.is_none() {
+            self.cancelled_claim_phase = Some(CancelledClaimPhase {
+                authority_epoch,
+                reconciled: false,
+            });
+        }
+    }
+
+    fn pending_cancelled_claim_phase(&self) -> Option<CancelledClaimPhase> {
+        self.cancelled_claim_phase.filter(|phase| !phase.reconciled)
+    }
+
+    fn reconcile_cancelled_claim_phase(&mut self) {
+        if let Some(phase) = &mut self.cancelled_claim_phase {
+            phase.reconciled = true;
+        }
+    }
+
     /// The completed verdict remains attached while the live implementation
     /// corrects the reviewed head. `begin_review` ends this state.
     pub fn gate_remediation_reason(&self) -> Option<&str> {
@@ -5928,6 +5964,7 @@ impl AutonomousIssueRecord {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         }
     }
 }
@@ -8765,6 +8802,9 @@ impl IssueMonitorState {
     pub fn set_autonomous_phase(&mut self, issue_number: u64, phase: AutonomousPhase) {
         let record = self.autonomous_record_mut(issue_number);
         record.phase = phase;
+        if phase != AutonomousPhase::Implementing {
+            record.reconcile_cancelled_claim_phase();
+        }
         if phase != AutonomousPhase::Delivering {
             record.delivering_since = None;
         }
@@ -8777,7 +8817,11 @@ impl IssueMonitorState {
     /// SPEC #3200 T-022 / FR-013: bind (or clear) the launch id of the in-flight
     /// attempt — the anchor for stuck detection and reviewed-SHA binding.
     pub fn set_active_launch_id(&mut self, issue_number: u64, launch_id: Option<String>) {
-        self.autonomous_record_mut(issue_number).active_launch_id = launch_id;
+        let record = self.autonomous_record_mut(issue_number);
+        if launch_id.is_some() {
+            record.reconcile_cancelled_claim_phase();
+        }
+        record.active_launch_id = launch_id;
     }
 
     /// SPEC #3200 T-018 / FR-014: capture the launch-time acceptance snapshot,
@@ -10265,7 +10309,9 @@ impl IssueMonitorState {
                 })
                 .collect::<BTreeSet<_>>();
             for number in cancelled {
-                self.clear_provisional_implementation(number);
+                if let Some(record) = self.autonomous_records.get_mut(&number) {
+                    record.mark_cancelled_claim_phase(next_epoch);
+                }
             }
             for delivery in &self.pending_launch_deliveries {
                 let already_pending = self.pending_effects.iter().any(|effect| {
@@ -10302,8 +10348,8 @@ impl IssueMonitorState {
         Some(next_epoch)
     }
 
-    /// Revoke pending effects and their pre-spawn eligibility together. Work
-    /// already handed to a launch or materializer keeps its lifecycle state.
+    /// Revoke pending effects and retain pre-spawn cancellation evidence until
+    /// runtime reconciliation. A restored State has no absence observations.
     pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
         let pending_claims = self.pending_claim_issue_numbers();
         let epoch =
@@ -10315,7 +10361,9 @@ impl IssueMonitorState {
                     .iter()
                     .any(|delivery| delivery.issue_number == number)
             {
-                self.clear_provisional_implementation(number);
+                if let Some(record) = self.autonomous_records.get_mut(&number) {
+                    record.mark_cancelled_claim_phase(epoch);
+                }
             }
         }
         Some(epoch)
@@ -10678,6 +10726,11 @@ impl IssueMonitorState {
         self.active_launches
             .iter()
             .copied()
+            .chain(self.autonomous_records.values().filter_map(|record| {
+                record
+                    .pending_cancelled_claim_phase()
+                    .map(|_| record.issue_number)
+            }))
             .chain(self.inbox.iter().filter_map(|item| {
                 (item.state == MonitorInboxState::Launched
                     || (item.issue.state == IssueMonitorIssueState::Open
@@ -11720,6 +11773,40 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        // Cancellation revisions order only cancellation evidence. Equal
+        // revisions retain the normal GUI/daemon phase ownership policy.
+        let disk_completions = Self::completion_records_from_prefs(disk);
+        let cancellation_records = self
+            .autonomous_records
+            .iter()
+            .filter_map(|(&number, local)| {
+                let incoming = disk
+                    .autonomous_records
+                    .iter()
+                    .find(|record| record.issue_number == number)?;
+                // Delivery/reopen and operator recovery start a new lifecycle and
+                // outrank cancellation evidence from the previous one.
+                if self.completion_records.get(&number) != disk_completions.get(&number)
+                    || self.released_failures.get(&number)
+                        != disk
+                            .released_failures
+                            .iter()
+                            .find(|release| release.issue_number == number)
+                    || local.phase == AutonomousPhase::NeedsHuman
+                    || incoming.phase == AutonomousPhase::NeedsHuman
+                {
+                    return None;
+                }
+                match local
+                    .cancelled_claim_phase
+                    .cmp(&incoming.cancelled_claim_phase)
+                {
+                    std::cmp::Ordering::Greater => Some((number, local.clone())),
+                    std::cmp::Ordering::Less => Some((number, incoming.clone())),
+                    std::cmp::Ordering::Equal => None,
+                }
+            })
+            .collect::<Vec<_>>();
         self.retired_completed_sessions
             .extend(disk.retired_completed_sessions.iter().cloned());
         if let Some(snapshot) = &mut self.window_snapshot {
@@ -11875,6 +11962,13 @@ impl IssueMonitorState {
                     self.autonomous_records
                         .entry(record.issue_number)
                         .or_insert_with(|| record.clone());
+                }
+            }
+        }
+        for (number, cancellation) in cancellation_records {
+            if !reopened_fences.contains(&number) {
+                if let Some(record) = self.autonomous_records.get_mut(&number) {
+                    *record = cancellation;
                 }
             }
         }
@@ -14720,6 +14814,7 @@ impl IssueMonitorState {
             payload,
             IssueMonitorEffectPayload::AcquireClaim { issue_number, heartbeat_at, .. }
                 if self.launch_admission_is_held_at(heartbeat_at)
+                    || self.cancelled_claim_awaits_runtime(*issue_number)
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
         )
@@ -14877,6 +14972,9 @@ impl IssueMonitorState {
             return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
         }
         let number = issue.number;
+        if self.cancelled_claim_awaits_runtime(number) {
+            return EligibilityDecision::HumanGate("claim_cancelled_awaiting_runtime: next successful runtime observation reconciles eligibility".to_string());
+        }
         if self.inbox_item(number).is_some_and(|item| {
             matches!(
                 item.state,
@@ -14914,6 +15012,8 @@ impl IssueMonitorState {
         match &decision {
             EligibilityDecision::Eligible => {
                 self.capture_acceptance_snapshot(number, criteria.snapshot());
+                self.autonomous_record_mut(number)
+                    .reconcile_cancelled_claim_phase();
                 self.set_autonomous_phase(number, AutonomousPhase::Implementing);
                 // The launch consumes the scheduled retry, so the backoff marker
                 // is cleared to avoid stale state on the in-flight attempt.
@@ -14942,11 +15042,73 @@ impl IssueMonitorState {
     /// resumed reviews retain a SHA, and physical implementations keep running.
     fn clear_provisional_implementation(&mut self, issue_number: u64) {
         if self.autonomous_record(issue_number).is_some_and(|record| {
-            record.phase == AutonomousPhase::Implementing && record.reviewed_sha.is_none()
+            record.phase == AutonomousPhase::Implementing
+                && record.reviewed_sha.is_none()
+                && record.pending_cancelled_claim_phase().is_none()
         }) && !self.has_monitor_pane_for_issue(issue_number)
             && !self.process_held_issues.contains(&issue_number)
         {
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+        }
+    }
+
+    fn cancelled_claim_awaits_runtime(&self, issue_number: u64) -> bool {
+        self.autonomous_record(issue_number)
+            .is_some_and(|record| record.pending_cancelled_claim_phase().is_some())
+    }
+
+    /// Reconcile cancellation evidence only after explicit runtime reads.
+    pub(crate) fn reconcile_cancelled_claim_phases(
+        &mut self,
+        observations: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+        now: &str,
+    ) {
+        let cancelled = self
+            .autonomous_records
+            .values()
+            .filter_map(|record| {
+                record
+                    .pending_cancelled_claim_phase()
+                    .filter(|phase| phase.authority_epoch <= self.effect_authority_epoch)
+                    .map(|_| record.issue_number)
+            })
+            .collect::<Vec<_>>();
+        for number in cancelled {
+            // Positive work evidence consumes only the cancellation marker;
+            // even an unavailable canvas must not pause a real implementation.
+            if self.active_launches.contains(&number)
+                || self.launch_bindings.values().any(|issue| *issue == number)
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == number)
+                || self.review_windows.contains_key(&number)
+                || self
+                    .pending_review_dispatches
+                    .iter()
+                    .any(|dispatch| dispatch.issue_number == number)
+                || self.autonomous_record(number).is_some_and(|record| {
+                    record.phase != AutonomousPhase::Implementing
+                        || record.reviewed_sha.is_some()
+                        || record.pr_number.is_some()
+                })
+            {
+                self.autonomous_record_mut(number)
+                    .reconcile_cancelled_claim_phase();
+                continue;
+            }
+            if self.fresh_window_snapshot(now).is_none()
+                || self.has_monitor_pane_for_issue(number)
+                || observations
+                    .get(&number)
+                    .is_none_or(|observation| observation.process_held)
+                || self.process_held_issues.contains(&number)
+            {
+                continue;
+            }
+            self.autonomous_record_mut(number)
+                .reconcile_cancelled_claim_phase();
+            self.clear_provisional_implementation(number);
         }
     }
 
@@ -15010,6 +15172,7 @@ impl IssueMonitorState {
         self.autonomous_records
             .values()
             .filter(|record| Self::is_in_flight_phase(record.phase))
+            .filter(|record| record.pending_cancelled_claim_phase().is_none())
             .filter(|record| {
                 self.review_dispatch_exclusion_reason(record.issue_number)
                     .is_none()
@@ -16950,6 +17113,7 @@ impl IssueMonitorState {
         self.reconcile_terminal_queue();
         let position = self.queue.iter().position(|issue| {
             !self.has_observed_monitor_runtime(*issue)
+                && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
         })?;
@@ -17058,6 +17222,9 @@ impl IssueMonitorState {
         let mut reasons = Vec::new();
         if let Some(reason) = self.launch_source_exclusion(issue_number) {
             reasons.push(reason);
+        }
+        if self.cancelled_claim_awaits_runtime(issue_number) {
+            reasons.push("claim_cancelled_awaiting_runtime: next successful runtime observation reconciles eligibility".to_string());
         }
         if !self.terminal_queue_contains(issue_number) {
             reasons.push("not_in_terminal_queue: use issue.monitor.queue.push".to_string());
@@ -17297,6 +17464,7 @@ impl IssueMonitorState {
         while self.config.enabled && self.gui_connected && self.occupied_slot_count() < max_active {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
+                    && !self.cancelled_claim_awaits_runtime(*issue_number)
                     && !self.has_observed_monitor_runtime(*issue_number)
                     && !self.open_pr_launch_held(*issue_number)
                     && self.launch_source_exclusion(*issue_number).is_none()
@@ -17827,6 +17995,7 @@ impl IssueMonitorState {
             .inbox_item(issue_number)
             .filter(|item| {
                 item.state == MonitorInboxState::Queued
+                    && !self.cancelled_claim_awaits_runtime(issue_number)
                     && !self.launch_admission_is_held_at(now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
@@ -26580,6 +26749,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         let disk = IssueMonitorPrefs {
             launch_profile: Some(profile.clone()),
@@ -26705,6 +26875,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         save_issue_monitor_prefs(
             &path,
@@ -26776,6 +26947,7 @@ mod tests {
                 last_failure_message: None,
                 delivering_since: None,
                 review_attempts: None,
+                cancelled_claim_phase: None,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -26847,6 +27019,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         let older_disk = IssueMonitorPrefs {
             legacy_git_launch_failure_migration_version: 0,
@@ -26907,6 +27080,7 @@ mod tests {
             last_failure_message: None,
             delivering_since: None,
             review_attempts: None,
+            cancelled_claim_phase: None,
         };
         let mut stale = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
@@ -27165,6 +27339,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,
@@ -27844,6 +28019,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: windows
                 .iter()
                 .map(|(kind, used)| gwt_core::usage::UsageWindow::new(*kind, *used, None))
@@ -36802,7 +36978,14 @@ mod tests {
         cold.set_auto_close_merged_issues_with_effect_revocation(Some(false))
             .unwrap();
         authority.advance_effect_authority_epoch().unwrap();
-        for cancelled in [auto_close, authority, cold] {
+        for mut cancelled in [auto_close, authority, cold] {
+            assert_eq!(
+                cancelled.autonomous_record(42).unwrap().phase,
+                AutonomousPhase::Implementing,
+                "authority cancellation must await explicit runtime absence"
+            );
+            assert!(cancelled.cancelled_claim_awaits_runtime(42));
+            observe_cancelled_claims(&mut cancelled);
             assert!(cancelled.autonomous_in_flight_issues().is_empty());
             assert!(cancelled.terminal_queue_contains(42));
             assert!(cancelled.terminal_queue_contains(43));
@@ -36843,6 +37026,7 @@ mod tests {
             monitor.set_autonomous_mode_with_effect_revocation(false),
             Some(1)
         );
+        observe_cancelled_claims(&mut monitor);
         assert!(monitor.autonomous_in_flight_issues().is_empty());
         assert_eq!(monitor.queued_issue_numbers(), vec![42, 43]);
         assert_eq!(monitor.attempt_count(42), 1);
@@ -36861,6 +37045,7 @@ mod tests {
 
         cold.set_autonomous_mode_with_effect_revocation(false)
             .unwrap();
+        observe_cancelled_claims(&mut cold);
         assert!(cold.autonomous_in_flight_issues().is_empty());
         let prefs =
             serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
@@ -38835,10 +39020,13 @@ mod tests {
         assert_eq!(cold.set_enabled_with_effect_revocation(false), Some(1));
         assert_eq!(
             cold.autonomous_record(43).unwrap().phase,
-            AutonomousPhase::Idle,
-            "cold OFF must cancel the durable queue's pre-claim eligibility"
+            AutonomousPhase::Implementing,
+            "cold OFF must preserve unobserved pre-claim work"
         );
+        assert!(cold.cancelled_claim_awaits_runtime(43));
+        observe_cancelled_claims(&mut cold);
         assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        observe_cancelled_claims(&mut monitor);
         for number in [42, 43] {
             assert_eq!(
                 monitor.autonomous_record(number).unwrap().phase,
@@ -39727,6 +39915,273 @@ mod tests {
         completion.expect("exact fence clears after lock release");
     }
 
+    fn provisional_claim_monitor() -> IssueMonitorState {
+        let now = "2026-10-22T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
+        let issues =
+            [42, 43].map(|number| auto_issue(number, "## Acceptance Criteria\n- [ ] AC-1: x\n"));
+        scan_queued_candidates(&mut monitor, &issues, now);
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        for issue in &issues {
+            monitor.record_attempt(issue.number);
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(issue, &protection, now),
+                EligibilityDecision::Eligible
+            );
+        }
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            2
+        );
+        let key = monitor.pending_effects()[1].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        monitor
+    }
+
+    fn observe_cancelled_claims(monitor: &mut IssueMonitorState) {
+        let now = "2026-10-22T00:00:01Z";
+        monitor.record_window_snapshot(idle_snapshot(now, Vec::new()));
+        let settlements = settlements(&[
+            (42, IssueMonitorExecutionSettlement::Unknown),
+            (43, IssueMonitorExecutionSettlement::Unknown),
+        ]);
+        crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+            monitor,
+            &settlements,
+            &BTreeMap::new(),
+            now,
+            now,
+            IssueMonitorIdleReconciliation::default(),
+        );
+        assert!(
+            monitor.autonomous_in_flight_issues().is_empty(),
+            "cancelled unspawned eligibility must not enter review"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(
+            monitor.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert!(monitor.terminal_queue_contains(42));
+        assert!(monitor.terminal_queue_contains(43));
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(
+            monitor
+                .pending_effects()
+                .iter()
+                .filter(|effect| matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ReleaseClaim { .. }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prefs_cancelled_claims_wait_for_runtime_and_do_not_revive_after_rebase() {
+        let original = provisional_claim_monitor();
+        let mut prefs = original.prefs();
+        prefs.advance_effect_authority_epoch().unwrap();
+        assert_cancelled_claims_wait_for_runtime(original.clone(), prefs);
+        let mut cold = test_monitor_with_prefs(original.config.clone(), original.prefs());
+        cold.advance_effect_authority_epoch().unwrap();
+        assert_cancelled_claims_wait_for_runtime(original, cold.prefs());
+    }
+
+    fn assert_cancelled_claims_wait_for_runtime(
+        original: IssueMonitorState,
+        prefs: IssueMonitorPrefs,
+    ) {
+        let now = "2026-10-22T00:00:01Z";
+        let mut cold = test_monitor_with_prefs(original.config.clone(), prefs.clone());
+        assert!(cold.execution_settlement_issue_numbers().contains(&42));
+        assert_eq!(
+            cold.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Implementing
+        );
+        let issue = auto_issue(42, "## Acceptance Criteria\n- [ ] AC-1: x\n");
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".into()],
+        };
+        scan_issue_monitor_candidates(&mut cold, std::slice::from_ref(&issue), now);
+        assert!(
+            matches!(
+                cold.prepare_autonomous_candidate(&issue, &protection, now),
+                EligibilityDecision::HumanGate(_)
+            ),
+            "eligibility precedes runtime reconciliation and must retain the cancellation"
+        );
+        assert!(cold.cancelled_claim_awaits_runtime(42));
+        assert!(cold.autonomous_in_flight_issues().is_empty());
+        assert!(cold
+            .claim_candidate_exclusions(42)
+            .iter()
+            .any(|reason| reason.contains("awaiting_runtime")));
+        let mut fresh = original.pending_effects()[0].clone();
+        fresh.effect_id = "new-claim-before-runtime".into();
+        fresh.authority_epoch = prefs.effect_authority_epoch;
+        assert!(!cold.prepare_effect(fresh));
+        cold.set_gui_connected(true);
+        assert!(cold.next_launch_request(now).is_none());
+
+        let observed = settlements(&[
+            (42, IssueMonitorExecutionSettlement::Unknown),
+            (43, IssueMonitorExecutionSettlement::Unknown),
+        ]);
+        cold.reconcile_cancelled_claim_phases(&observed, now);
+        assert!(
+            cold.cancelled_claim_awaits_runtime(42),
+            "missing canvas is unknown"
+        );
+        cold.record_window_snapshot(idle_snapshot(now, Vec::new()));
+        cold.reconcile_cancelled_claim_phases(&BTreeMap::new(), now);
+        assert!(
+            cold.cancelled_claim_awaits_runtime(42),
+            "missing process observation is unknown"
+        );
+        let mut held = observed.clone();
+        held.get_mut(&42).unwrap().process_held = true;
+        cold.reconcile_cancelled_claim_phases(&held, now);
+        assert!(cold.cancelled_claim_awaits_runtime(42));
+        let mut pane = cold.clone();
+        pane.record_window_snapshot(idle_snapshot(
+            now,
+            vec![idle_observation(
+                "tab-1::manual",
+                Some(42),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        pane.reconcile_cancelled_claim_phases(&held, now);
+        assert_eq!(
+            pane.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Implementing
+        );
+        assert!(
+            pane.cancelled_claim_awaits_runtime(42),
+            "unbound physical work must keep cancellation provenance"
+        );
+
+        let later = "2026-10-22T00:20:01Z";
+        pane.reconcile_cancelled_claim_phases(&observed, later);
+        assert!(
+            pane.cancelled_claim_awaits_runtime(42),
+            "stale pane cannot consume the cancellation"
+        );
+        pane.record_window_snapshot(idle_snapshot(later, Vec::new()));
+        pane.reconcile_cancelled_claim_phases(&observed, later);
+        assert_eq!(
+            pane.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        let mut census = cold.clone();
+        census.record_monitor_runtime_counts(123, 1, BTreeMap::from([(42, 1)]), now);
+        census.reconcile_cancelled_claim_phases(&observed, now);
+        assert!(census.cancelled_claim_awaits_runtime(42));
+        census.record_monitor_runtime_counts(123, 1, BTreeMap::new(), later);
+        census.record_window_snapshot(idle_snapshot(later, Vec::new()));
+        census.reconcile_cancelled_claim_phases(&observed, later);
+        assert_eq!(
+            census.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        let mut active = cold.clone();
+        active.window_snapshot = None;
+        active.active_launches.push(42);
+        active.reconcile_cancelled_claim_phases(&BTreeMap::new(), now);
+        assert_eq!(
+            active.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Implementing
+        );
+        assert!(!active.cancelled_claim_awaits_runtime(42));
+
+        cold.reconcile_cancelled_claim_phases(&observed, now);
+        assert_eq!(
+            cold.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        for gui in [false, true] {
+            let mut restored = cold.clone();
+            if gui {
+                restored.rebase_gui_observer_prefs(&prefs);
+            } else {
+                restored.rebase_daemon_driver_prefs(&prefs);
+            }
+            assert_eq!(
+                restored.autonomous_record(42).unwrap().phase,
+                AutonomousPhase::Idle,
+                "consumed cancellation cannot revive its old phase"
+            );
+            scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&issue), now);
+            assert_eq!(
+                restored.prepare_autonomous_candidate(&issue, &protection, now),
+                EligibilityDecision::Eligible
+            );
+            let admitted = restored.autonomous_record(42).unwrap().clone();
+            restored.rebase_gui_observer_prefs(&prefs);
+            assert_eq!(
+                restored.autonomous_record(42),
+                Some(&admitted),
+                "old cancellation cannot replace fresh eligibility"
+            );
+        }
+        let mut before_cancellation = cold.clone();
+        before_cancellation.rebase_gui_observer_prefs(&original.prefs());
+        assert_eq!(
+            before_cancellation.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle,
+            "a pre-cancellation snapshot cannot revive consumed eligibility"
+        );
+        let mut progressed = cold.prefs();
+        progressed
+            .autonomous_records
+            .iter_mut()
+            .find(|record| record.issue_number == 42)
+            .unwrap()
+            .phase = AutonomousPhase::Reviewing;
+        let mut observer = cold.clone();
+        observer.rebase_gui_observer_prefs(&progressed);
+        assert_eq!(
+            observer.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Reviewing,
+            "equal cancellation revisions retain normal GUI phase updates"
+        );
+        let mut reopened = cold.clone();
+        let mut closed = issue.clone();
+        closed.state = IssueMonitorIssueState::Closed;
+        closed.updated_at = Some("2026-10-22T00:00:02Z".into());
+        reopened.record_candidate(closed);
+        let mut opened = issue.clone();
+        opened.updated_at = Some("2026-10-22T00:00:03Z".into());
+        reopened.record_candidate(opened);
+        reopened.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        let fresh_record = reopened.autonomous_record(42).unwrap().clone();
+        let mut previous = cold.clone();
+        previous.rebase_gui_observer_prefs(&reopened.prefs());
+        assert_eq!(
+            previous.autonomous_record(42),
+            Some(&fresh_record),
+            "a new closure lifecycle outranks old cancellation proof"
+        );
+        let mut stale = original;
+        stale.rebase_daemon_driver_prefs(&prefs);
+        observe_cancelled_claims(&mut stale);
+    }
+
     #[test]
     fn current_authority_fence_recovers_under_a_reused_live_pid_when_lifetime_lock_is_free() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -39740,7 +40195,7 @@ mod tests {
                     pid: u32::MAX,
                     at: "2026-10-17T02:00:00Z".into(),
                 }),
-                ..IssueMonitorPrefs::default()
+                ..provisional_claim_monitor().prefs()
             },
         )
         .expect("seed prefs");
@@ -39775,6 +40230,7 @@ mod tests {
             load_issue_monitor_authority_fence(&prefs_path).expect("load replacement fence"),
             IssueMonitorAuthorityFenceState::Active(current)
         );
+        observe_cancelled_claims(&mut monitor);
         drop(lease);
     }
 
@@ -39937,7 +40393,7 @@ mod tests {
             &prefs_path,
             &IssueMonitorPrefs {
                 effect_authority_epoch: 11,
-                ..IssueMonitorPrefs::default()
+                ..provisional_claim_monitor().prefs()
             },
         )
         .expect("seed prefs");
@@ -39962,6 +40418,9 @@ mod tests {
             IssueMonitorAuthorityFenceState::Missing,
             "the bounded GUI lease must not leave a durable daemon fence"
         );
+        let prefs = load_issue_monitor_prefs(&prefs_path).unwrap();
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        observe_cancelled_claims(&mut monitor);
         drop(lease);
     }
 
@@ -40113,6 +40572,7 @@ mod tests {
         assert!(observation["update_drain"].get("blocking").is_none());
         prefs.max_active_agents += 1;
         prefs.priority_order.push(42);
+        prefs.urgent_queue.demoted.insert(42);
         prefs.last_scan_at = Some("2026-10-22T00:01:00Z".to_string());
         prefs
             .update_drain
@@ -40132,6 +40592,28 @@ mod tests {
         let manual_token = prefs.config_token();
         prefs.max_active_agents += 1;
         assert_ne!(prefs.config_token(), manual_token);
+
+        let token = prefs.config_token();
+        prefs.terminal_queue_auto_refill = !prefs.terminal_queue_auto_refill;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["terminal_queue_auto_refill"],
+            serde_json::json!(prefs.terminal_queue_auto_refill)
+        );
+        let token = prefs.config_token();
+        prefs.terminal_queue_auto_refill_limit += 1;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["terminal_queue_auto_refill_limit"],
+            serde_json::json!(prefs.terminal_queue_auto_refill_limit)
+        );
+        let token = prefs.config_token();
+        prefs.urgent_queue.limit += 1;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["urgent_queue_limit"],
+            serde_json::json!(prefs.urgent_queue.limit)
+        );
     }
 
     #[test]
@@ -45871,6 +46353,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![
                 UsageWindow::new(WindowKind::FiveHour, 26.0, None),
                 UsageWindow::new(WindowKind::Weekly, 26.0, None),

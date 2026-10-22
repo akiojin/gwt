@@ -833,6 +833,23 @@ body cannot hold `plan` / `tasks` sections.
   Omitting the guard retains legacy behavior; an explicit `[]` matches only an
   empty saved queue and `null` is invalid. This value comparison does not detect
   ABA history, urgent metadata, priority-only changes or other configuration changes.
+- For `issue.monitor.queue.auto_refill`, use the same fresh status
+  `config_token` as `expected_config_token`. The saved configuration includes
+  `terminal_queue_auto_refill` and `terminal_queue_auto_refill_limit`.
+  Comparison and update share the prefs lock. On conflict, re-read status and
+  reconsider the change; read back a successful update from its `saved_config`
+  and `config_token`. Omitting the guard retains legacy behavior; `null`, empty
+  strings and other types are invalid. This value comparison does not detect ABA
+  history or protect other control operations.
+- For `issue.monitor.queue.urgent_limit`, use the same fresh status
+  `config_token` as `expected_config_token`. In `saved_config`,
+  `urgent_queue_limit` is the saved urgent head limit; zero disables priority,
+  not queue membership. Comparison and update share the prefs lock. On conflict,
+  re-read status and reconsider the change. Read back the reply's queue fields,
+  `saved_config` and `config_token`, all from the same saved snapshot.
+  Omitting the guard retains legacy behavior; `null`, empty strings and other
+  types are invalid. This value comparison does not detect ABA history or
+  protect urgent membership, demotions or other control operations.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
@@ -4195,6 +4212,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "For `issue.monitor.queue.urgent_limit`, use the same fresh status",
+            "`urgent_queue_limit` is the saved urgent head limit",
+            "For `issue.monitor.queue.auto_refill`, use the same fresh status",
+            "`terminal_queue_auto_refill` and `terminal_queue_auto_refill_limit`",
             "`config_token` as `expected_config_token`",
             "Config conflicts leave preferences unchanged",
             "For `issue.monitor.config.set`, read a fresh status",
