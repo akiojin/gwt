@@ -402,6 +402,9 @@ impl WorktreeManager {
         let tracking_ref = to_tracking_ref(remote_ref)
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {remote_ref}")))?;
 
+        // Git reads shared config even for show-ref. Wait for concurrent
+        // upstream configuration so Windows cannot observe its replacement.
+        let _config_read = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = gwt_core::process::run_git_logged(
             &["show-ref", "--verify", "--quiet", &tracking_ref],
             Some(&self.repo_path),
@@ -3668,6 +3671,29 @@ prunable gitdir file points to non-existent location
         assert!(!manager
             .remote_branch_exists("origin/feature/missing")
             .unwrap());
+
+        let holder = crate::repository::lock_repository_config_write(&repo_path).unwrap();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            crate::repository::CONFIG_WRITE_CONTENTION.with(|slot| {
+                *slot.borrow_mut() = Some(notice_tx.clone());
+            });
+            let result = manager.remote_branch_exists("origin/develop");
+            notice_tx.send("completed").unwrap();
+            result
+        });
+        // Observe contention rather than guessing when a parallel config
+        // writer has replaced the file. Release and reap even on RED.
+        // test-hygiene: allow-wall-clock-deadline hang guard for the causal lock-contention notification
+        let first_notice = notice_rx.recv_timeout(Duration::from_secs(60));
+        drop(holder);
+        let exists = reader.join().expect("config reader thread").unwrap();
+        assert_eq!(
+            first_notice.expect("reader contention or completion"),
+            "contended",
+            "Issue #5694: ref reads must wait for shared Git config writers"
+        );
+        assert!(exists);
     }
 
     #[test]

@@ -1,7 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
+import { readFileSync } from 'node:fs';
 import { markdownContent, renderUiContent } from '../ui-content.js';
+
+test('views render model-typed content without selecting Markdown or injecting a renderer', () => {
+  for (const [file, bindings] of [['pm-chat.js', 1], ['board-logs-surface.js', 1], ['knowledge-kanban-surface.js', 3], ['release-notes-window.js', 1]]) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /markdownContent|createKnowledgeMarkdownBody/, file);
+    assert.equal([...source.matchAll(/renderUiContent\(document, \w+\.content\b/g)].length, bindings,
+      `${file}: every body must use its model content type`);
+  }
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(app, /createKnowledgeMarkdownBody|markdownContent|renderUiContent/);
+});
 
 test('the model type selects the shared renderer and preserves sanitized markdown and plaintext fallback', () => {
   const { document } = parseHTML('<html><body></body></html>');

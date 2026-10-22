@@ -1,5 +1,4 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
-import { markdownContent, renderUiContent } from "/ui-content.js";
 import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
@@ -1329,7 +1328,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
         resyncSocketSurfaces();
-        if (socketProjectKey) requestVisiblePmReports();
+        if (socketProjectKey) requestVisiblePmReports(true);
       }
 
       function closeSocketInputHandoff() {
@@ -1389,7 +1388,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
         syncRunningBranchCleanups();
-        requestVisiblePmReports();
+        requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
       }
 
@@ -2405,6 +2404,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function activateTerminalOnReveal(windowId) {
+        requestVisiblePmReports(true, windowId);
         const activation = runTerminalRevealActivation({
           schedulePendingOutput: () => terminalOutputBatcher.schedulePending(windowId),
           consumePendingRefresh: () =>
@@ -3917,7 +3917,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
         sendKnowledgeSemanticSearchNow,
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
         isKnowledgeWindowVisible: (id) => !document.hidden &&
@@ -4023,7 +4022,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
         },
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
@@ -4147,10 +4145,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (isStrongContinueWorkSuccess(exact)) {
           scheduleKnowledgeRelatedWorkRefresh(true);
         }
-      }
-
-      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
-        return renderUiContent(document, markdownContent(section), className);
       }
 
       // SPEC-2359 US-42 — Workspace Resume Picker controller. The
@@ -4287,6 +4281,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeModal,
         sendWizardAction,
         requestWorkAdvisory,
+      });
+
+      const launchWizardStateModel = createUiStateStore(null);
+      launchWizardStateModel.subscribe(state => state, state => {
+        if (state) applyLaunchWizardStateEvent(state);
+      });
+
+      const launchWizardOpenErrorModel = createUiStateStore(null);
+      launchWizardOpenErrorModel.subscribe(error => error, error => {
+        if (error) applyLaunchWizardOpenErrorEvent(error);
       });
 
       // The controller is created before Settings so pm_status may hydrate its
@@ -4521,7 +4525,12 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       const pmChatViews = new Map();
-      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      subscribePmWindowState(state => state.resyncRequest, recovery => {
+        if (!recovery) return;
+        const request = requestPmReports(recovery.windowId);
+        if (request) send(request);
+      });
       const renderedTerminalPackets = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
@@ -4579,7 +4588,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports();
+            if (!visible) requestVisiblePmReports(true);
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -4595,12 +4604,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestVisiblePmReports();
       }
 
-      function requestVisiblePmReports() {
+      function requestVisiblePmReports(resync = false, onlyWindowId = null) {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
+          if (onlyWindowId !== null && windowData.id !== onlyWindowId) continue;
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_reports", id: windowData.id });
+            const request = requestPmReports(windowData.id, resync);
+            if (request) send(request);
           }
         }
       }
@@ -5134,6 +5145,22 @@ import { createUiStateStore } from "/ui-state-store.js";
         },
       });
 
+      const projectOpenErrorModel = createUiStateStore(null);
+      projectOpenErrorModel.subscribe(error => error, error => {
+        if (!error) return;
+        applyProjectOpenReceiveEvent(error);
+        projectError = error.message;
+        frontendUnits.projectWorkspaceShell.renderProjectPicker();
+        frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
+          frontendUnits.projectWorkspaceShell.activeProjectTab(),
+        );
+      });
+
+      const workAdvisoryResultModel = createUiStateStore(null);
+      workAdvisoryResultModel.subscribe(event => event, event => {
+        if (event) applyWorkAdvisoryResultEvent(event);
+      });
+
       const projectNotificationModel = createUiStateStore(null);
       projectNotificationModel.subscribe(notice => notice, notice => {
         if (notice) agentCompletionNotifier.handleIntent(notice);
@@ -5317,6 +5344,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         recomputeOperatorTelemetry();
       }
       activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
+
+      const remoteStartWorkBranchesModel = createUiStateStore(null);
+      remoteStartWorkBranchesModel.subscribe(state => state, snapshot => {
+        if (snapshot) workspaceOverviewSurface.applyRemoteStartWorkBranches(snapshot);
+      });
 
       function receive(event) {
         if (routeProjectMissing) return;
@@ -5550,12 +5582,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyKnowledgeReceiveEvent(event);
             break;
           case "project_open_error":
-            applyProjectOpenReceiveEvent(event);
-            projectError = event.message;
-            frontendUnits.projectWorkspaceShell.renderProjectPicker();
-            frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
-              frontendUnits.projectWorkspaceShell.activeProjectTab(),
-            );
+            projectOpenErrorModel.update(() => ({
+              kind: event.kind, request_id: event.request_id, message: event.message,
+            }));
             break;
           case "project_opened":
             applyProjectOpenReceiveEvent(event);
@@ -5581,7 +5610,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardOpenErrorEvent(event);
+            launchWizardOpenErrorModel.update(() => ({ title: event.title, message: event.message }));
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
@@ -5590,7 +5619,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
           case "remote_start_work_branches":
-            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
+            remoteStartWorkBranchesModel.update(() => ({ ...event }));
             break;
           case "continue_work_outcome":
             continueWorkOutcomeModel.update(() => ({ ...event }));
@@ -5603,12 +5632,12 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardStateEvent(event);
+            launchWizardStateModel.update(() => ({ wizard: event.wizard }));
             break;
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan
             // Agent work-registration prompt.
-            applyWorkAdvisoryResultEvent(event);
+            workAdvisoryResultModel.update(() => ({ ...event }));
             break;
           case "runtime_hook_event":
             runtimeHookModel.update(() => ({
@@ -6089,10 +6118,12 @@ import { createUiStateStore } from "/ui-state-store.js";
           if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
           else if (socketProjectKey) connectSocket(true);
         }
+        requestVisiblePmReports(true);
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
       });
+      window.addEventListener("pageshow", () => requestVisiblePmReports(true));
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
           focusOrSpawnPreset(button.dataset.preset);

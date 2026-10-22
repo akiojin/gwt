@@ -214,6 +214,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "feedback.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.process",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.retry",
+        aliases: &[],
+    },
+    Operation {
+        name: "feedback.status",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },
@@ -381,6 +397,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "issue.monitor.requeue",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.recovery.record",
         aliases: &[],
     },
     Operation {
@@ -584,6 +604,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.auto_merge.enable",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.reopen",
         aliases: &[],
     },
@@ -760,6 +784,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.events_reconcile",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.join",
         aliases: &[],
     },
@@ -876,7 +904,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// The existing wording opens the message unchanged so log greps still match;
 /// the candidates follow it. When nothing is close, the namespace's actual
 /// operations are listed rather than nothing — an invented name like
-/// `pr.merge` was never a typo of anything, and the caller still has to learn
+/// `pr.nonexistent_operation` is no typo, and the caller still has to learn
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and

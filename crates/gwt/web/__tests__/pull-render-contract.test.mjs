@@ -10,6 +10,81 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Launch wizard state receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
+  const surface = readFileSync(new URL('../launch-wizard-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([[surfaceFile, surface]]),
+  }).filter(finding => finding.context === '/launch_wizard_state');
+  assert.equal(findings(app).length, 0);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'applyLaunchWizardStateEvent(event);']) {
+    const mutated = app.replace('case "launch_wizard_state":',
+      `case "launch_wizard_state": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Launch wizard open error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
+  const surface = readFileSync(new URL('../launch-wizard-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([[surfaceFile, surface]]),
+  }).filter(finding => finding.context === '/launch_wizard_open_error');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'applyLaunchWizardOpenErrorEvent(event);']) {
+    const mutated = app.replace('case "launch_wizard_open_error":',
+      `case "launch_wizard_open_error": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Work advisory receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.context === '/work_advisory_result');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'applyWorkAdvisoryResultEvent(event);']) {
+    const mutated = app.replace('case "work_advisory_result":', `case "work_advisory_result": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Project open error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.context === '/project_open_error');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'frontendUnits.projectWorkspaceShell.renderProjectPicker();']) {
+    const mutated = app.replace('case "project_open_error":', `case "project_open_error": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Remote branch receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/remote_start_work_branches');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'workspaceOverviewSurface.applyRemoteStartWorkBranches(event);']) {
+    const mutated = app.replace('case "remote_start_work_branches":',
+      `case "remote_start_work_branches": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
@@ -732,20 +807,27 @@ test("checkout baseline satisfies the live and Git base contracts", () => {
 });
 
 
-test("cleanup progress/result receivers commit shared data and reject direct rendering", () => {
+test("cleanup and branch error receivers commit shared data and reject direct rendering", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
   const modules = new Map([[surfaceFile, surface]]);
   const selected = findings => findings.filter(finding =>
-    /\/branch_cleanup_(progress|result)$/.test(finding.context));
+    /\/(branch_cleanup_(progress|result)|branch_error)$/.test(finding.context));
   assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
   assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
   const bypass = surface.replace('case "branch_cleanup_result": {',
     'case "branch_cleanup_result": { renderBranches(event.id);');
   assert.notEqual(bypass, surface);
   assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const errorBypass = surface.replace('case "branch_error": {',
+    'case "branch_error": { renderBranches(event.id);');
+  assert.notEqual(errorBypass, surface);
+  assert.ok(selected(scanModule(errorBypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(selected(scanModule(app, appFile, { modules: new Map([[surfaceFile, errorBypass]]) }))
     .some(finding => finding.kind.startsWith('dom-')));
 });
 

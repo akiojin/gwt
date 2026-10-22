@@ -258,36 +258,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_poll_skips_unchanged_loads_but_hydrates_each_viewer() {
+    fn reports_poll_skips_acknowledged_loads_but_hydrates_independent_cursors() {
         use super::reports::{PmReportsData, PmReportsReader};
         let mut reader = PmReportsReader::default();
         let now = Utc::now();
         let data = PmReportsData::default();
+        let (first, _) = reader
+            .poll_with(Some(vec![]), None, now, || data.clone())
+            .unwrap();
         assert!(reader
-            .poll_with(Some(vec![]), "client-a/pm", now, || data.clone())
-            .is_some());
-        assert!(reader
-            .poll_with(Some(vec![]), "client-a/pm", now, || panic!(
+            .poll_with(Some(vec![]), Some(&first), now, || panic!(
                 "unchanged inputs must not be read"
             ))
             .is_none());
-        assert!(reader
-            .poll_with(Some(vec![]), "client-b/pm", now, || panic!(
-                "new viewers reuse the snapshot"
-            ))
-            .is_some());
+        let (second, _) = reader
+            .poll_with(Some(vec![]), None, now, || {
+                panic!("new viewers reuse the snapshot")
+            })
+            .unwrap();
+        assert_eq!(second, first);
         let mut changed = data.clone();
         changed.error = Some("unreadable status".into());
         let changed_input = Some(vec![super::reports::SourceStamp::Update(
             serde_json::json!(1),
         )]);
+        let (failed, _) = reader
+            .poll_with(changed_input.clone(), Some(&first), now, || changed.clone())
+            .unwrap();
+        assert_eq!(failed.revision, first.revision + 1);
+        let (recovered, _) = reader
+            .poll_with(changed_input.clone(), Some(&failed), now, || data.clone())
+            .unwrap();
+        assert_eq!(recovered.revision, failed.revision + 1);
         assert!(reader
-            .poll_with(changed_input.clone(), "client-a/pm", now, || changed
-                .clone())
-            .is_some());
-        assert!(reader
-            .poll_with(changed_input, "client-a/pm", now, || data.clone())
-            .is_some());
+            .poll_with(changed_input.clone(), Some(&recovered), now, || panic!(
+                "the acknowledged recovery stays silent"
+            ))
+            .is_none());
+        assert_eq!(
+            reader
+                .poll_with(changed_input, Some(&second), now, || panic!(
+                    "another client reuses the recovered snapshot"
+                ))
+                .unwrap()
+                .0,
+            recovered
+        );
     }
 
     #[cfg(unix)]

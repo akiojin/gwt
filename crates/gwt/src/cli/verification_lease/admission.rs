@@ -383,7 +383,11 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
             retry_after: None,
         };
     }
-    let holder = holder_liveness(status);
+    let holder = format!(
+        "{}; {}",
+        holder_liveness(status),
+        verification_lease::HolderDiagnostics::read(status, None).detail(status),
+    );
     let progress = match (status.remaining_batches, status.estimated_remaining_ms) {
         (Some(batches), Some(estimate)) => {
             format!(", {batches} batches ≈ {}s", estimate / 1000)
@@ -529,6 +533,63 @@ fn deferred(
     )))
 }
 
+fn self_hold_deferral(
+    started: Instant,
+    budget: Duration,
+    holder: &HeavyLeaseStatus,
+    caller_target: &str,
+    restoration: &str,
+) -> Option<VerificationError> {
+    let identity = verification_lease::HolderDiagnostics::read(holder, Some(caller_target));
+    if !identity.self_hold {
+        return None;
+    }
+    let mut deferral = Deferral::new(
+        started.elapsed(),
+        budget,
+        Duration::ZERO,
+        &format!("{}; {restoration}", identity.detail(holder)),
+        None,
+    );
+    deferral.recovery = format!(
+        "wait for your earlier verification batch; for an idle legacy holder use `verify.lease.release` with params.lease_id={} and params.reason; canonical release still checks that a live workload is protected",
+        holder.lease_id.as_deref().unwrap_or("unknown (inspect verify.lease.status)"),
+    );
+    Some(VerificationError::Deferred(Box::new(deferral)))
+}
+
+fn self_hold_in_pool(
+    started: Instant,
+    budget: Duration,
+    caller_target: &str,
+    artifact_target: Option<&Path>,
+) -> Option<VerificationError> {
+    verification_lease::status()
+        .ok()?
+        .slots
+        .iter()
+        .filter(|slot| slot.status.held)
+        .find_map(|slot| {
+            // An unrelated self-held slot is not evidence about an artifact
+            // lock. Match the exact external lock identity before attributing it.
+            if let Some(target) = artifact_target {
+                let context = slot.status.holder_context.as_ref()?;
+                if Some(&verification_lease::build_artifact_lock_path(target).ok()?)
+                    != context.artifact_lock.as_ref()
+                {
+                    return None;
+                }
+            }
+            self_hold_deferral(
+                started,
+                budget,
+                &slot.status,
+                caller_target,
+                "gwtd artifact restoration: skipped (wait for the self-held verification)",
+            )
+        })
+}
+
 fn sleep_until(deadline: Instant, poll: Duration) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     std::thread::sleep(remaining.min(poll));
@@ -653,34 +714,76 @@ fn admit_inner<E: CliEnv>(
     // that another run's lease belongs to this invocation.
     let guard = loop {
         check_cancellation(attempt)?;
-        let waiting_for_target =
-            match coordinator.request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING.min(poll))
-            {
-                Ok(JobAdmission::Owner(guard)) => break guard,
-                Ok(JobAdmission::Joined(waiter)) => {
-                    // A concurrent canonical run in this same worktree owns
-                    // the target job until its command matrix finishes.
-                    drop(waiter);
-                    true
-                }
-                Err(CoordinatorError::Timeout { .. }) => false,
-                Err(err) => {
-                    return Err(
-                        unexpected(format!("verification job admission failed: {err}")).into(),
-                    )
-                }
-            };
+        let waiting_for_target = match coordinator.request_job(
+            &key,
+            JobPriority::ManualRebuild,
+            NON_BLOCKING.min(poll),
+        ) {
+            Ok(JobAdmission::Owner(guard)) => break guard,
+            Ok(JobAdmission::Joined(waiter)) => {
+                // A concurrent canonical run in this same worktree owns
+                // the target job until its command matrix finishes.
+                drop(waiter);
+                // Prefer the actual lease (including a legacy holder) over
+                // the target ticket, which may only describe host admission.
+                let holder = verification_lease::status()
+                    .ok()
+                    .and_then(|snapshot| {
+                        snapshot
+                            .slots
+                            .into_iter()
+                            .find(|slot| {
+                                slot.status.held
+                                    && slot.status.target.as_deref()
+                                        == Some(key.file_stem().as_str())
+                            })
+                            .map(|slot| slot.status)
+                    })
+                    .or_else(|| {
+                        let ticket: gwt_core::index_coordinator::Ticket =
+                            verification_lease::read_json(&coordinator.target_ticket_path(&key))?;
+                        Some(HeavyLeaseStatus {
+                            held: true,
+                            target: Some(ticket.target),
+                            holder_alive: Some(crate::process::is_host_process_alive(
+                                ticket.owner.pid,
+                            )),
+                            owner: Some(ticket.owner),
+                            acquired_at_ms: Some(ticket.acquired_at_ms),
+                            holder_kind: Some(HeavyHolderKind::Verification),
+                            ..Default::default()
+                        })
+                    });
+                if let Some(error) = holder.as_ref().and_then(|holder| {
+                        self_hold_deferral(started, max_wait, holder, &key.file_stem(),
+                            "gwtd artifact restoration: skipped (another verification owns the target job)")
+                    }) {
+                        check_cancellation(attempt)?;
+                        return Err(error);
+                    }
+                let identity = verification_lease::HolderDiagnostics::read(
+                    holder.as_ref().unwrap_or(&HeavyLeaseStatus::default()),
+                    Some(&key.file_stem()),
+                );
+                Some(format!(
+                        "another verification claimant in this worktree owns the target job; {}; \
+                         gwtd artifact restoration: skipped (another verification owns the target job)",
+                        identity.detail(holder.as_ref().unwrap_or(&HeavyLeaseStatus::default())),
+                    ))
+            }
+            Err(CoordinatorError::Timeout { .. }) => None,
+            Err(err) => {
+                return Err(unexpected(format!("verification job admission failed: {err}")).into())
+            }
+        };
         check_cancellation(attempt)?;
         if Instant::now() >= deadline {
             return Err(deferred(
                 started,
                 max_wait,
-                if waiting_for_target {
-                    "another verification claimant in this worktree owns the target job; \
-                     gwtd artifact restoration: skipped (another verification owns the target job)"
-                } else {
+                waiting_for_target.as_deref().unwrap_or(
                     "verification reservation is being updated; next_turn_reserved: unknown; gwtd artifact restoration: skipped (target admission pending)"
-                },
+                ),
                 None,
             ));
         }
@@ -688,7 +791,9 @@ fn admit_inner<E: CliEnv>(
             env,
             started,
             max_wait,
-            "同じ worktree の target job または予約更新を待機",
+            waiting_for_target
+                .as_deref()
+                .unwrap_or("同じ worktree の予約更新を待機"),
         );
         sleep_until(deadline, poll);
     };
@@ -727,6 +832,11 @@ fn admit_inner<E: CliEnv>(
                 Some(guard) => break Some(guard),
                 None => {
                     check_cancellation(attempt)?;
+                    if let Some(error) =
+                        self_hold_in_pool(started, max_wait, &key.file_stem(), Some(target))
+                    {
+                        return Err(error);
+                    }
                     if Instant::now() >= deadline {
                         let _ = guard.complete(JobOutcome::Failed {
                             message: "host admission deferred".to_string(),
@@ -774,35 +884,34 @@ fn admit_inner<E: CliEnv>(
         ),
     };
     let mut probe = HolderProbe::default();
+    let mut first_acquisition = true;
     let lease = loop {
         check_cancellation(attempt)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
+        // Diagnose self-hold before spending even the first polling interval.
+        let wait = if std::mem::take(&mut first_acquisition) {
+            Duration::ZERO
+        } else {
+            remaining.min(POLL)
+        };
         let acquired = match (shared, attempt) {
-            (true, Some(attempt)) => guard.acquire_heavy_with_disk_budgets_for_attempt(
-                remaining.min(POLL),
-                LEASE_TTL,
-                &budgets,
-                attempt,
-            ),
+            (true, Some(attempt)) => guard
+                .acquire_heavy_with_disk_budgets_for_attempt(wait, LEASE_TTL, &budgets, attempt),
             (false, Some(attempt)) => guard.acquire_exclusive_heavy_with_disk_budget_for_attempt(
-                remaining.min(POLL),
-                LEASE_TTL,
-                &budgets,
-                attempt,
+                wait, LEASE_TTL, &budgets, attempt,
             ),
-            (true, None) => {
-                guard.acquire_heavy_with_disk_budgets(remaining.min(POLL), LEASE_TTL, &budgets)
+            (true, None) => guard.acquire_heavy_with_disk_budgets(wait, LEASE_TTL, &budgets),
+            (false, None) => {
+                guard.acquire_exclusive_heavy_with_disk_budget(wait, LEASE_TTL, &budgets)
             }
-            (false, None) => guard.acquire_exclusive_heavy_with_disk_budget(
-                remaining.min(POLL),
-                LEASE_TTL,
-                &budgets,
-            ),
         };
         match acquired {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
                 check_cancellation(attempt)?;
+                if let Some(error) = self_hold_in_pool(started, max_wait, &key.file_stem(), None) {
+                    return Err(error);
+                }
                 let waited = started.elapsed();
                 let mut holder = describe_holder(&coordinator, &mut probe, worktree);
                 for budget in &budgets {
@@ -913,6 +1022,9 @@ fn admit_inner<E: CliEnv>(
         "no resolved build directory; exclusive command execution limited to 1200s"
     };
     lease.record_runner_context(&worktree, command.unwrap_or("unknown"), resource_reason);
+    if let Some(artifacts) = &artifacts {
+        lease.record_artifact_lock(&artifacts.lock_path);
+    }
     let lease_id = lease.id().to_string();
     let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
@@ -1936,14 +2048,18 @@ mod tests {
         );
         let mut first_env = crate::cli::TestEnv::new(first.path().to_path_buf());
         let mut second_env = crate::cli::TestEnv::new(second.path().to_path_buf());
-        let first_admission = super::admit(
-            &mut first_env,
-            first.path(),
-            Some(&command),
-            Duration::ZERO,
-            |_| String::new(),
-        )
-        .unwrap();
+        let first_admission = {
+            let _session =
+                gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", "foreign-session");
+            super::admit(
+                &mut first_env,
+                first.path(),
+                Some(&command),
+                Duration::ZERO,
+                |_| String::new(),
+            )
+            .unwrap()
+        };
         let key = verification_key_for(second.path());
         let old_job = match lease_root
             .coordinator
@@ -2148,16 +2264,46 @@ mod tests {
         let first = lease_root
             .admit(&mut env, worktree.path(), Duration::ZERO)
             .unwrap();
-        let second = super::admit(&mut env, worktree.path(), None, Duration::ZERO, |_| {
-            panic!("a contender must not restore another verifier's artifact")
-        });
+        let mut report = String::new();
+        verification_lease::run(
+            &mut env,
+            verification_lease::VerificationLeaseCommand::Status,
+            &mut report,
+        )
+        .unwrap();
+        assert!(report.contains("self_hold: true"), "{report}");
+        assert!(
+            report.contains(&std::env::current_exe().unwrap().display().to_string()),
+            "{report}"
+        );
+        let second = super::admit(
+            &mut env,
+            worktree.path(),
+            None,
+            Duration::from_secs(300),
+            |_| panic!("a contender must not restore another verifier's artifact"),
+        );
         assert!(
             second.is_err(),
             "a second canonical run must not borrow the first run's lease: {second:?}; {}",
             lease_root.describe()
         );
-        let refusal = second.unwrap_err().to_string();
+        let error = second.unwrap_err();
+        let VerificationError::Deferred(deferral) = &error else {
+            panic!("expected admission deferral: {error}");
+        };
+        assert!(deferral.waited_secs < deferral.budget_secs, "{deferral}");
+        let refusal = error.to_string();
         assert!(refusal.contains("deferred"), "{refusal}");
+        for field in [
+            "self_hold: true",
+            "holder_exe:",
+            "acquired_at_ms:",
+            "holder_has_live_children:",
+            "verify.lease.release",
+        ] {
+            assert!(refusal.contains(field), "missing {field}: {refusal}");
+        }
         assert!(
             refusal.contains(
                 "gwtd artifact restoration: skipped (another verification owns the target job)"
@@ -2171,6 +2317,91 @@ mod tests {
             .unwrap();
         drop(next);
         lease_root.assert_free("the next run releases its own lease");
+    }
+
+    #[test]
+    fn same_session_on_another_target_defers_without_spending_the_wait_budget() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lease_root = IsolatedLeaseRoot::new();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", "self-hold-session");
+        let worktree = tempfile::tempdir().unwrap();
+        let other = TargetKey::verification("other-repo", "other-worktree");
+        let JobAdmission::Owner(guard) = lease_root
+            .coordinator
+            .request_job(&other, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("private target must be free")
+        };
+        let mut lease = guard
+            .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+            .unwrap();
+        lease.record_runner_context(worktree.path(), "fixture", "exclusive");
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let error = super::admit(
+            &mut env,
+            worktree.path(),
+            None,
+            Duration::from_secs(300),
+            |_| panic!("self-hold must not restore an artifact behind the earlier batch"),
+        )
+        .unwrap_err();
+        let VerificationError::Deferred(deferral) = error else {
+            panic!("expected deferred")
+        };
+        assert!(deferral.waited_secs < deferral.budget_secs, "{deferral}");
+        assert!(deferral.reason.contains("self_hold: true"), "{deferral}");
+        assert!(deferral.recovery.contains(lease.id()), "{deferral}");
+        lease_root.assert_target_free(
+            &verification_key_for(worktree.path()),
+            "self-hold releases only the contender's target",
+        );
+        assert_eq!(lease_root.status().lease_id.as_deref(), Some(lease.id()));
+
+        let shared_target = tempfile::tempdir().unwrap();
+        let command = format!(
+            "CARGO_TARGET_DIR=\"{}\" make quality-checks",
+            shared_target.path().display()
+        );
+        lease.record_runner_context(worktree.path(), "cargo test", "shared");
+        let artifacts = verification_lease::try_lock_build_artifacts(shared_target.path())
+            .unwrap()
+            .unwrap();
+        lease.record_artifact_lock(&artifacts.lock_path);
+        let unrelated_target = tempfile::tempdir().unwrap();
+        let _target =
+            gwt_core::test_support::ScopedEnvVar::set("CARGO_TARGET_DIR", unrelated_target.path());
+        assert!(
+            self_hold_in_pool(
+                Instant::now(),
+                Duration::ZERO,
+                &verification_key_for(worktree.path()).file_stem(),
+                Some(unrelated_target.path())
+            )
+            .is_none(),
+            "an unrelated self-held slot cannot explain a foreign artifact lock"
+        );
+        let error = super::admit(
+            &mut env,
+            worktree.path(),
+            Some(&command),
+            Duration::from_secs(300),
+            |_| panic!("self-held shared artifacts must not be restored"),
+        )
+        .unwrap_err();
+        let VerificationError::Deferred(deferral) = error else {
+            panic!("expected deferred")
+        };
+        assert!(deferral.waited_secs < deferral.budget_secs, "{deferral}");
+        assert!(deferral.reason.contains("self_hold: true"), "{deferral}");
+        assert_eq!(lease_root.status().lease_id.as_deref(), Some(lease.id()));
+        drop(artifacts);
+        drop(lease);
+        drop(guard);
+        lease_root.assert_free("the original holder still controls its own release");
     }
 
     /// Issue #4593: a concurrent fork between the two drops in Admission::settle
@@ -2511,6 +2742,7 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("deferred"), "{message}");
+        assert!(message.contains("self_hold: false"), "{message}");
         assert!(message.contains("rerun `verify.run`"), "{message}");
         assert!(message.contains("queue_position: 1"), "{message}");
         assert!(

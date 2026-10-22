@@ -3756,7 +3756,7 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
 }
 
 #[test]
-fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeSet,
@@ -3775,13 +3775,14 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let window_id = "tab-1::agent-1";
     let host_pid = std::process::id();
     let host_started_at = gwt::process::host_process_start_time(host_pid).expect("host start time");
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..gwt::IssueMonitorConfig::default()
     });
     monitor.terminal_queue_push(&[42], "operator", &now);
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Current canvas adoption".to_string(),
         labels: Vec::new(),
@@ -3831,6 +3832,24 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     let monitor = RefCell::new(monitor);
     let received = RefCell::new(Vec::new());
     let daemon_accepted = Cell::new(false);
+    let lost_ack = || {
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "claim ACK lost".to_string(),
+        )
+    };
+    assert!(
+        runtime
+            .claim_issue_monitor_launch_delivery_with_publishers(
+                &repo,
+                42,
+                "launch:effect-42",
+                window_id,
+                |_, _| Ok(()),
+                |_| Err(lost_ack()),
+            )
+            .is_err(),
+        "an uncommitted claim must remain uncertain"
+    );
     let accepted = runtime
         .claim_issue_monitor_launch_delivery_with_publishers(
             &repo,
@@ -3872,7 +3891,7 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
                 );
                 gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
                     .expect("commit daemon prefs");
-                Ok(())
+                Err(lost_ack())
             },
         )
         .expect("daemon claim outcome");
@@ -3921,5 +3940,187 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
             .claim_or_reuse()
             .expect("revalidate the latest delivery"),
         "a previously valid tuple must not revive a retired delivery"
+    );
+}
+
+#[test]
+fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
+    monitor.set_source_repository(Some(("example", "project")));
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: Some("akiojin".into()),
+        number: 42,
+        title: "Curated owner".into(),
+        labels: vec![],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim", "owner", "effect", &now));
+    let input = super::super::IssueMonitorLaunchClaimInput {
+        project_root: repo.clone(),
+        issue_number: 42,
+        delivery_id: "launch:effect".into(),
+        materializer_window_id: "tab-1::agent-1".into(),
+        materializer_id: "gui".into(),
+        materializer_pid: std::process::id(),
+        fallback_timeout: Duration::from_secs(1),
+        snapshot: None,
+        snapshot_tabs: Default::default(),
+    };
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    for (author, body, expected) in [
+        (Some("akiojin"), "Curated repair requirements", true),
+        (Some("akiojin"), "<!-- gwt-feedback:raw -->", false),
+        (Some("external-reporter"), "Claims owner approval", false),
+        (None, "Legacy cache without original author", false),
+    ] {
+        let mut source =
+            sample_issue_snapshot(42, "Owner", &["bug", "gwt-feedback-triaged"], body, &now);
+        source.author_login = author.map(str::to_string);
+        cache.write_snapshot(&source).unwrap();
+        assert_eq!(
+            input.preflight_claim(monitor.prefs(), None),
+            expected,
+            "{author:?}: {body}"
+        );
+        if expected {
+            gwt::save_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+                &monitor.prefs(),
+            )
+            .unwrap();
+            assert!(input
+                .claim_with_publishers(
+                    |_, _| Ok(()),
+                    |_| Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable("offline fixture".into())),
+                )
+                .expect("local fallback claim"), "trusted cached source must also authorize the actual fallback commit");
+        }
+    }
+    fs::remove_dir_all(cache_root.join("42")).unwrap();
+    assert!(
+        !input.preflight_claim(monitor.prefs(), None),
+        "missing target cache must remain held"
+    );
+}
+
+#[test]
+fn issue4810_spawn_admission_restores_source_and_revalidates_its_cache_files() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Curated owner",
+        &["bug"],
+        "Curated repair",
+        "2026-10-21T00:00:00Z",
+    );
+    source.author_login = Some("akiojin".into());
+    cache.write_snapshot(&source).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare trusted owner");
+    assert_eq!(
+        prepared
+            .monitor
+            .inbox_item(42)
+            .and_then(|row| row.issue.author_login.as_deref()),
+        Some("akiojin")
+    );
+    assert!(prepared.monitor.has_capacity_for_monitor_spawn(42, false));
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    fs::write(
+        cache_root.join("42/body.md"),
+        "<!-- gwt-feedback:edited-after-preparation -->",
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a source body edit must force worker re-preparation"
+    );
+    let raw = input.prepare().expect("retain raw source as evidence");
+    assert!(!raw.monitor.has_capacity_for_monitor_spawn(42, false));
+
+    cache.write_snapshot(&source).unwrap();
+    let metadata_prepared = input.prepare().expect("prepare restored curated source");
+    let metadata_path = cache_root.join("42/meta.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["author_login"] = serde_json::json!("external-reporter");
+    metadata["labels"] = serde_json::json!(["bug", "gwt-feedback-triaged"]);
+    fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert!(
+        !metadata_prepared.is_current(&input.host_project_roots),
+        "source metadata is part of the prepared admission"
+    );
+    assert!(
+        !input
+            .prepare()
+            .unwrap()
+            .monitor
+            .has_capacity_for_monitor_spawn(42, false),
+        "triage labels cannot authorize an external original author"
+    );
+    fs::remove_dir_all(cache_root.join("42")).unwrap();
+    assert!(
+        !input
+            .prepare()
+            .unwrap()
+            .monitor
+            .has_capacity_for_monitor_spawn(42, false),
+        "missing target provenance must hold a new pane"
     );
 }

@@ -624,7 +624,7 @@ export function createProviderUsageSurface({
         panel.appendChild(section);
         let initialRender = true;
         let unsubscribe;
-        unsubscribe = usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        unsubscribe = usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
           if (!initialRender && !checkbox.isConnected) {
             unsubscribe?.();
             usagePanelSubscriptions.delete(panel);
@@ -639,7 +639,7 @@ export function createProviderUsageSurface({
 
       // These views live for the factory's lifetime, like its window hover
       // hooks. The receive API updates data without choosing which view renders.
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         try {
           window.__operatorShell?.applyProviderUsage?.(snapshot);
@@ -647,7 +647,7 @@ export function createProviderUsageSurface({
           console.warn("usage pill update failed", e);
         }
       });
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         try {
           refreshUsageHoverIfOpen();
@@ -655,7 +655,7 @@ export function createProviderUsageSurface({
           /* no-op */
         }
       });
-      usageModel.subscribe((snapshot) => snapshot, (snapshot) => {
+      usageModel.subscribeFrame((snapshot) => snapshot, (snapshot) => {
         if (!snapshot) return;
         // Empty sessions must clear stale token/context values in Workspace.
         try {

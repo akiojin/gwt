@@ -316,15 +316,39 @@ pub fn stop_exact_runtime(
     Ok(())
 }
 
-/// Finalize an unbound legacy Session only while its captured snapshot is unchanged.
+/// Finalize the captured unbound Session without discarding newer hook metadata.
 pub fn finalize_legacy_session(
     sessions_dir: &Path,
     expected: &gwt_agent::Session,
 ) -> std::io::Result<bool> {
-    let mut stopped = expected.clone();
-    stopped.update_status(gwt_agent::AgentStatus::Stopped);
-    stopped.restore_window_on_startup = false;
-    stopped.save_if_unchanged(sessions_dir, expected)
+    if expected.execution_binding.is_some() {
+        return Ok(false);
+    }
+    let mut rejected = false;
+    let result = gwt_agent::update_session_if_changed(sessions_dir, &expected.id, |current| {
+        if current.id != expected.id
+            || current.created_at != expected.created_at
+            || current.worktree_path != expected.worktree_path
+            || current.branch != expected.branch
+            || current.agent_id != expected.agent_id
+            || current.linked_issue_number != expected.linked_issue_number
+            || current.execution_binding.is_some()
+            || (current.status == gwt_agent::AgentStatus::Stopped
+                && !current.restore_window_on_startup)
+        {
+            rejected = true;
+            // Abort the transaction, including migrations, for a replacement.
+            return Err(std::io::Error::other(
+                "legacy close is no longer applicable",
+            ));
+        }
+        current.record_terminal_stop();
+        Ok(())
+    });
+    match result {
+        Err(error) if rejected || error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        result => result.map(|_| true),
+    }
 }
 
 /// How long a pane close keeps waiting for its PTY child to exit before it
@@ -442,13 +466,56 @@ mod tests {
         .unwrap();
         assert!(kill_and_reap(pane.pty(), "close-test").unwrap());
         assert!(pane.pty().try_wait().unwrap().is_some());
+        // Issue #5495: hooks update the durable Session after the GUI cached it.
+        let mut hooked = session.clone();
+        hooked.agent_session_id = Some("native-close-test".into());
+        hooked.project_state_root = Some(temp.path().to_owned());
+        hooked.record_hook_event("PostToolUse");
+        hooked.save(&sessions_dir).unwrap();
         assert!(finalize_legacy_session(&sessions_dir, &session).unwrap());
         let path = sessions_dir.join(format!("{}.toml", session.id));
         let stopped = Session::load(&path).unwrap();
         assert_eq!(stopped.status, AgentStatus::Stopped);
         assert!(!stopped.restore_window_on_startup);
+        assert_eq!(stopped.agent_session_id, hooked.agent_session_id);
+        assert_eq!(stopped.project_state_root, hooked.project_state_root);
+        assert_eq!(stopped.last_hook_event_at, hooked.last_hook_event_at);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!finalize_legacy_session(&sessions_dir, &session).unwrap());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_close_preserves_same_id_successor_and_new_execution_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut captured = Session::new(temp.path(), "work/closed", AgentId::Codex);
+        captured.repo_hash = Some("repo-close-test".into());
+        captured.linked_issue_number = Some(5495);
+        captured.restore_window_on_startup = true;
+        let path = temp.path().join(format!("{}.toml", captured.id));
+        for bound in [false, true] {
+            let mut successor = captured.clone();
+            if bound {
+                successor.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+                    schema_version: 1,
+                    session_id: captured.id.clone(),
+                    repo_hash: "repo-close-test".into(),
+                    owner_kind: "issue".into(),
+                    owner_number: 5495,
+                    identity: gwt_agent::ExecutionBindingIdentity {
+                        generation_id: "successor-generation".into(),
+                        binding_id: "successor-binding".into(),
+                        ledger_head_hash: "successor-head".into(),
+                    },
+                    capability_generation: 1,
+                });
+            } else {
+                successor.created_at += chrono::Duration::seconds(1);
+            }
+            successor.save(temp.path()).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(!finalize_legacy_session(temp.path(), &captured).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
     }
 }

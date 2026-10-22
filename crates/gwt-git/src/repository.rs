@@ -760,11 +760,14 @@ mod tests {
     // ---- clone_repo tests ----
 
     #[test]
-    fn clone_repo_fails_with_invalid_url() {
+    fn clone_repo_fails_with_missing_local_repository() {
+        let _lock = gwt_core::test_support::env_lock().lock().unwrap();
+        let _protocol = gwt_core::test_support::ScopedEnvVar::set("GIT_ALLOW_PROTOCOL", "file");
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("clone-target");
-        let result = clone_repo("https://invalid.example.com/no-such-repo.git", &target);
-        assert!(result.is_err());
+        let missing = tmp.path().join("missing.git");
+        let error = clone_repo(missing.to_str().unwrap(), &target).unwrap_err();
+        assert!(error.to_string().contains("missing.git"), "{error}");
     }
 
     #[test]

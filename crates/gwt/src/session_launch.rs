@@ -354,6 +354,7 @@ mod tests {
         use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
         let client = FakeIssueClient::new();
         client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(42),
             title: "work".into(),
             body: String::new(),

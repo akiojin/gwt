@@ -41,6 +41,7 @@ pub struct TestEnv {
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
+    pub feedback_worker_ids: Vec<String>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
@@ -48,6 +49,7 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
     pub created_pr: Option<PrStatus>,
@@ -108,6 +110,7 @@ impl TestEnv {
             stderr: Vec::new(),
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
+            feedback_worker_ids: Vec::new(),
             linked_prs: HashMap::new(),
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
@@ -115,6 +118,7 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
             created_pr: None,
@@ -236,6 +240,16 @@ impl CliEnv for TestEnv {
     fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
     }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::FeedbackRecord,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        super::super::feedback::send_to_upstream(&self.client, record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.feedback_worker_ids.push(id.to_string());
+        Ok(())
+    }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout
     }
@@ -281,6 +295,22 @@ impl CliEnv for TestEnv {
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         self.pr_current_call_count += 1;
         Ok(self.current_pr.clone())
+    }
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        Ok(self
+            .completion_prs
+            .values()
+            .filter(|snapshot| number.is_none_or(|number| snapshot.inventory.number == number))
+            .map(|snapshot| crate::cli::CompletionPrCandidate {
+                number: snapshot.inventory.number,
+                url: snapshot.inventory.url.clone(),
+                head_ref_name: snapshot.inventory.head_ref_name.clone(),
+                head_sha: snapshot.head_sha.clone(),
+            })
+            .collect())
     }
     fn create_pr(
         &mut self,
@@ -384,6 +414,31 @@ impl CliEnv for TestEnv {
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::other(format!("no completion PR snapshot: {number}")))
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.pr_auto_merge_call_log
+            .push((number, reviewed_head_sha.to_string()));
+        let snapshot = self
+            .completion_prs
+            .get_mut(&number)
+            .ok_or_else(|| io::Error::other("no auto-merge PR"))?;
+        if snapshot.head_sha != reviewed_head_sha {
+            return Err(io::Error::other("PR head changed"));
+        }
+        snapshot.inventory.auto_merge_enabled = true;
+        Ok(
+            serde_json::json!({"number":number,"reviewed_head_sha":reviewed_head_sha,"auto_merge_enabled":true,"state":"OPEN"}),
+        )
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.fetch_completion_pr(number)
     }
     fn edit_pr(
         &mut self,

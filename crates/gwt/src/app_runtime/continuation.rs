@@ -938,7 +938,7 @@ fn split_workspace_state_external_commit_resolution(
     )
 }
 
-fn sanitize_handoff_value(value: &str) -> Option<String> {
+pub(super) fn sanitize_handoff_value(value: &str) -> Option<String> {
     static SECRET: OnceLock<Regex> = OnceLock::new();
     static URL: OnceLock<Regex> = OnceLock::new();
     static ABSOLUTE_PATH: OnceLock<Regex> = OnceLock::new();
@@ -3753,7 +3753,7 @@ impl AppRuntime {
             gwt::cli::execution_state::ContinuationAttemptStatus::Prepared => {
                 if let Some(expected_session_identity) = receipt.expected_session_identity.as_ref()
                 {
-                    gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                    gwt::cli::execution_state::abort_abandoned_successor_and_remove_exact_session(
                         &receipt.worktree_path,
                         owner,
                         &attempt.request,
@@ -4122,7 +4122,7 @@ impl AppRuntime {
         let cleanup = if candidate.attempt.status
             == gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
         {
-            gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+            gwt::cli::execution_state::abort_abandoned_successor_and_remove_exact_session(
                 &candidate.worktree_path,
                 candidate.owner,
                 &candidate.attempt.request,
@@ -4160,7 +4160,7 @@ impl AppRuntime {
                 true
             }
             Ok(false) => {
-                tracing::warn!(session_id = %candidate.binding.session_id, "retained Aborted fresh-launch cleanup evidence after binding mismatch");
+                tracing::warn!(session_id = %candidate.binding.session_id, "retained fresh-launch cleanup evidence while the exact Session is live or its binding changed");
                 false
             }
             Err(error) => {

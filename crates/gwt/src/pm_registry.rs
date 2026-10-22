@@ -4504,6 +4504,16 @@ pub fn is_pm_worktree(path: &Path) -> bool {
 /// and the plain shape test rejects a genuine PM worktree. Comparing both
 /// spellings keeps the answer about the path, not about how it was spelled.
 pub fn is_canonical_pm_worktree(path: &Path) -> bool {
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    // Ordinary Work rows cannot be PM worktrees. Exclude them before resolving
+    // the shared home (and validating its isolation in tests) for every row.
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
     if is_pm_worktree(path) {
         return true;
     }
@@ -4512,14 +4522,6 @@ pub fn is_canonical_pm_worktree(path: &Path) -> bool {
     else {
         return false;
     };
-    let Some(pm_dir) = path.parent() else {
-        return false;
-    };
-    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
-        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
-    {
-        return false;
-    }
     pm_dir
         .parent()
         .and_then(Path::parent)

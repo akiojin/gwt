@@ -595,7 +595,7 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
     init_repo(&foreign_project);
     let closed_id = "tab-owner::agent-closed";
     let now = chrono::Utc::now().to_rfc3339();
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.complete_active_launch_at(5248, closed_id, &now);
     let target = gwt::IssueMonitorStopTarget {
         issue_number: 5248,

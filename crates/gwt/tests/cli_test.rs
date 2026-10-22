@@ -733,6 +733,7 @@ tasks=body\n\
 
 fn seed(env: &TestEnv, number: u64, spec: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Spec {number}"),
         body: mk_body_spec_and_tasks_in_body(spec, tasks),
@@ -813,6 +814,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     // Seed three SPECs in different phases.
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(1),
         title: "draft one".to_string(),
         body: String::new(),
@@ -822,6 +824,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(2),
         title: "impl two".to_string(),
         body: String::new(),
@@ -831,6 +834,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
         comments: Vec::new(),
     });
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(3),
         title: "done three".to_string(),
         body: String::new(),
@@ -945,6 +949,7 @@ fn red_87_dispatch_spec_rename_updates_issue_title_and_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "SPEC-42: Old title".to_string(),
         body: mk_body_spec_and_tasks_in_body("# Old title", "- [ ] T-001"),
@@ -1146,6 +1151,7 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Cached title".to_string(),
         body: "Cached body".to_string(),
@@ -1184,6 +1190,7 @@ fn red_98_dispatch_issue_view_refresh_fetches_and_rewrites_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let old_snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Old title".to_string(),
         body: "Old body".to_string(),
@@ -1228,6 +1235,7 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),
@@ -1303,6 +1311,7 @@ fn red_101_dispatch_issue_comment_refreshes_cache_after_write() {
         "New comment body".to_string(),
     );
     env.client.seed(IssueSnapshot {
+        author_login: None,
         number: IssueNumber(42),
         title: "Issue".to_string(),
         body: "Body".to_string(),

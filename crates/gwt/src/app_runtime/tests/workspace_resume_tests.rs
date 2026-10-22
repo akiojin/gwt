@@ -1101,7 +1101,11 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
+    init_git_clone_with_origin(&worktree);
+    run_git(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "unlanded close fixture"],
+    );
     let tab_id = "tab-1";
     let raw_window_id = "agent-1";
     let window_id = combined_window_id(tab_id, raw_window_id);
@@ -1121,6 +1125,10 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
         .save(&runtime.sessions_dir)
         .expect("save active session");
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    assert!(runtime
+        .launch_wizard_cache
+        .session_by_id(&session.id)
+        .is_some());
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
@@ -1138,6 +1146,13 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
+    // A normal hook can fill in the native conversation after cache creation.
+    session.agent_session_id = Some("native-close-clears-restore".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save hook update");
     runtime.close_window_events(&window_id);
     let finalizer = finalizers
         .lock()
@@ -1153,6 +1168,31 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     )
     .expect("load session");
     assert!(!loaded.restore_window_on_startup);
+    assert_eq!(loaded.agent_session_id, session.agent_session_id);
+    assert_eq!(loaded.last_hook_event_at, session.last_hook_event_at);
+
+    gwt_agent::persist_session_hook_event(&runtime.sessions_dir, &session.id, "Stop")
+        .expect("persist late Stop hook");
+    gwt_agent::persist_session_completed_stop(&runtime.sessions_dir, &session.id)
+        .expect("persist late completed Stop");
+    // Model a restart from disk. An unclosed peer remains restore-eligible.
+    let mut open = session.clone();
+    open.id = "session-unclosed-peer".to_string();
+    open.agent_session_id = Some("native-unclosed-peer".to_string());
+    open.save(&runtime.sessions_dir)
+        .expect("save unclosed peer");
+    drop(runtime);
+    let tab = sample_project_tab(tab_id, "Repo", worktree, ProjectKind::Git, &[]);
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some(tab_id));
+    restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert_eq!(
+        restarted
+            .pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-unclosed-peer"]
+    );
 }
 
 #[test]
@@ -2119,24 +2159,22 @@ fn active_work_projection_source_has_no_live_process_scan_helper() {
 /// Issue #3611 AC-1/AC-2/AC-3: a Session whose worktree was deleted used to
 /// fall through `session_exact_resume_materializable` into
 /// `git rev-parse --git-common-dir` + `git show-ref` **per Session**, on the
-/// GUI event-loop thread. `pane.*` is served from that same single-threaded
-/// loop, so its response latency *is* the projection's occupancy (#3510: 6ms
-/// idle, >2s during a scan). At this fixture's scale the old path meant ~384
-/// short-lived Git processes (~6s) per build.
+/// GUI event-loop thread.
 ///
-/// Both assertions target that cost: the spawn count must stay flat at zero
-/// however many Sessions exist, and the build must finish inside a budget well
-/// below the pre-fix cost while leaving ~40x headroom over the measured
-/// process-free build (~45ms), so a loaded machine cannot flake it.
+/// Preparation now runs off the loop; this synchronous test helper exercises
+/// the same build. Issue #5864 / SPEC #4740: its work budget is one build and
+/// one load of each shared source for all 128 Sessions, with no Git probes.
 #[test]
 fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session() {
+    use crate::app_runtime::workspace_views;
+
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    // Share the fixture root with every HOME reader throughout the measurement.
+    // Share the fixture root with every HOME reader during preparation.
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -2194,11 +2232,13 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     let _path = prepend_tool_parent_to_path(&fake_git);
     let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
 
-    let started = Instant::now();
+    let loads_before = workspace_views::active_work_projection_shared_loads();
+    let builds_before = workspace_views::full_active_work_projection_builds();
     let view = runtime
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("projection view");
-    let elapsed = started.elapsed();
+    let loads_after = workspace_views::active_work_projection_shared_loads();
+    let loads: [usize; 3] = std::array::from_fn(|index| loads_after[index] - loads_before[index]);
 
     assert_eq!(view.active_works.len(), 128);
     assert!(
@@ -2212,12 +2252,13 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     assert!(
         invocations.trim().is_empty(),
         "Session resumability must resolve from the background ref snapshot, \
-         never from a per-Session Git spawn on the event loop; invocations:\n{invocations}"
+         never from a per-Session Git spawn during preparation; invocations:\n{invocations}"
     );
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "128 Sessions held the event loop for {elapsed:?}; \
-         `pane.*` cannot answer while this runs"
+    assert_eq!(loads, [1, 1, 1], "shared sources must load once per build");
+    assert_eq!(
+        workspace_views::full_active_work_projection_builds() - builds_before,
+        1,
+        "all 128 Sessions must render in one projection build"
     );
 }
 

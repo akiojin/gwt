@@ -1577,6 +1577,8 @@ pub fn rebuild_index_target(
             project_root: ctx.project_root.clone(),
             action: action.action.to_string(),
             qos: qos.to_string(),
+            session_id: None,
+            artifact_lock: None,
         }),
         || {
             let rebuild_started = Instant::now();
@@ -4484,6 +4486,14 @@ mod tests {
 
     #[test]
     fn source_poll_detects_edits_in_each_registered_worktree() {
+        // Source polling uses the same Git probe and process-wide fixture
+        // overrides as the search fault-injection tests.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
         let broker =
@@ -4934,6 +4944,7 @@ mod tests {
             gwt_core::repo_hash::compute_repo_hash("https://github.com/example/gwt.git");
         let cache_root = temp.path().join("issue-cache");
         let snapshot = gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(2867),
             title: "Recent Projects".to_string(),
             body: "workspace home".to_string(),

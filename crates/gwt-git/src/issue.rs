@@ -17,6 +17,8 @@ pub const GITHUB_ISSUE_LIST_LIMIT: &str = "1000";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_login: Option<String>,
     pub title: String,
     /// "OPEN" | "CLOSED"
     pub state: String,
@@ -285,6 +287,7 @@ impl From<crate::gh_rest::RestIssueRow> for Issue {
     fn from(row: crate::gh_rest::RestIssueRow) -> Self {
         Self {
             number: row.number,
+            author_login: row.author_login,
             title: row.title,
             state: row.state,
             labels: row.labels,
@@ -397,6 +400,11 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
 
         issues.push(Issue {
             number,
+            author_login: v
+                .pointer("/author/login")
+                .and_then(serde_json::Value::as_str)
+                .filter(|login| !login.is_empty())
+                .map(str::to_string),
             title,
             state,
             labels,
@@ -466,6 +474,7 @@ mod tests {
                 "state": "OPEN",
                 "labels": [{"name": "bug"}],
                 "assignees": [{"login": "alice"}],
+                "author": {"login": "akiojin"},
                 "body": "Description",
                 "url": "https://github.com/owner/repo/issues/42",
                 "updatedAt": "2026-08-05T10:00:00Z"
@@ -489,10 +498,16 @@ mod tests {
         assert_eq!(issues[0].labels, vec!["bug"]);
         assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
         assert_eq!(
+            serde_json::to_value(&issues[0]).unwrap()["author_login"],
+            "akiojin",
+            "the original author must survive parsing and cache serialization"
+        );
+        assert_eq!(
             issues[0].updated_at.as_deref(),
             Some("2026-08-05T10:00:00Z")
         );
         assert_eq!(issues[1].number, 43);
+        assert!(issues[1].author_login.is_none());
         assert!(issues[1].assignee.is_none());
         assert!(issues[1].body.is_none());
         assert_eq!(
@@ -696,6 +711,7 @@ mod tests {
 
         // Write and read back
         let issues = vec![Issue {
+            author_login: None,
             number: 1,
             title: "Test".into(),
             state: "OPEN".into(),
@@ -743,6 +759,7 @@ mod tests {
         let cache = IssueCache::with_dir(tmp.path()).unwrap();
 
         let issues = vec![Issue {
+            author_login: None,
             number: 1,
             title: "Test".into(),
             state: "OPEN".into(),

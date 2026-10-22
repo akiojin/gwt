@@ -53,8 +53,17 @@ fn fixture() -> Fixture {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     git_init_with_origin(project.path());
-    let mut session = Session::new(project.path(), "work/board-cli-test", AgentId::Codex);
-    session.project_state_root = Some(project.path().to_path_buf());
+    let session_id = save_fixture_session(home.path(), project.path());
+    Fixture {
+        home,
+        project,
+        session_id,
+    }
+}
+
+fn save_fixture_session(home: &Path, project: &Path) -> String {
+    let mut session = Session::new(project, "work/board-cli-test", AgentId::Codex);
+    session.project_state_root = Some(project.to_path_buf());
     session.linked_issue_number = Some(1974);
     session
         .set_execution_binding(Some(SessionExecutionBinding {
@@ -73,21 +82,26 @@ fn fixture() -> Fixture {
         .expect("bind fixture Session");
     let session_id = session.id.clone();
     session
-        .save(&home.path().join(".gwt").join("sessions"))
+        .save(&home.join(".gwt").join("sessions"))
         .expect("save session");
-    Fixture {
-        home,
-        project,
-        session_id,
-    }
+    session_id
 }
 
 fn run_board(fixture: &Fixture, json: &str) -> Value {
+    run_board_at(
+        fixture.home.path(),
+        fixture.project.path(),
+        &fixture.session_id,
+        json,
+    )
+}
+
+fn run_board_at(home: &Path, project: &Path, session_id: &str, json: &str) -> Value {
     let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
-        .current_dir(fixture.project.path())
-        .env("HOME", fixture.home.path())
-        .env("USERPROFILE", fixture.home.path())
-        .env("GWT_SESSION_ID", &fixture.session_id)
+        .current_dir(project)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("GWT_SESSION_ID", session_id)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -287,4 +301,149 @@ fn board_post_without_intent_keeps_legacy_human_output() {
         "unexpected output: {output}"
     );
     assert!(serde_json::from_str::<Value>(output.trim()).is_err());
+}
+
+/// The same canonical seed is exercised hermetically in CI and, only with an
+/// explicit browser-check marker, exported for real headed T461 acceptance.
+#[test]
+fn recovery_center_live_fixture_has_three_states_and_one_real_board_entry() {
+    let fixture = fixture();
+    seed_recovery_center(
+        fixture.home.path(),
+        fixture.project.path(),
+        &fixture.session_id,
+    );
+
+    if let Some(home) = std::env::var_os("GWT_T461_FIXTURE_HOME") {
+        let home = std::fs::canonicalize(home).expect("isolated browser-check HOME");
+        // Canonical verification narrows TMPDIR for each child. Use the shared
+        // OS-root guard, which also accepts its parent's temporary fixture.
+        let _isolated_home = gwt_core::test_support::ScopedGwtHome::set(&home);
+        let marker: Value = serde_json::from_slice(
+            &std::fs::read(home.join(".gwt/t461-browser-check.json"))
+                .expect("explicit isolation marker"),
+        )
+        .unwrap();
+        let project = std::fs::canonicalize(marker["project_root"].as_str().unwrap()).unwrap();
+        assert_eq!(project.parent(), Some(home.as_path()));
+        assert!(
+            !home.join(".gwt/sessions").exists(),
+            "export requires a fresh Session ledger"
+        );
+        for path in [&home, &home.join(".gwt"), &home.join(".gwt/projects")] {
+            assert!(!std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        let session_id = save_fixture_session(&home, &project);
+        let public = seed_recovery_center(&home, &project, &session_id);
+        std::fs::write(
+            home.join("t461-public.json"),
+            serde_json::to_vec_pretty(&public).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn seed_recovery_center(home: &Path, project: &Path, session_id: &str) -> Value {
+    use gwt_core::{
+        coordination::{AuthorKind, BoardEntry, BoardEntryKind, BoardWorktreeForm},
+        recovery::{
+            RecoveryConflictKind, RecoveryIntent, RecoveryProvider, RecoveryState, RecoveryStore,
+        },
+        test_support::ScopedGwtHome,
+    };
+    let _home = ScopedGwtHome::set(home);
+    let store = RecoveryStore::for_repo(project, session_id).unwrap();
+    for (name, form) in [
+        ("pending", BoardWorktreeForm::Ephemeral),
+        ("conflicted", BoardWorktreeForm::Unknown),
+    ] {
+        let recovery_id = format!("t461-private-{name}");
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            format!("T461 {name} delivery"),
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.id = format!("t461-unpublished-{name}");
+        entry.origin_session_id = Some(session_id.to_string());
+        entry.origin_worktree_form = Some(form);
+        entry.origin_recovery_id = Some(recovery_id.clone());
+        let record = store
+            .prepare(
+                &format!("prepare-{name}"),
+                RecoveryIntent::new(&recovery_id, RecoveryProvider::Local, form, entry).unwrap(),
+            )
+            .unwrap()
+            .record;
+        if name == "conflicted" {
+            store
+                .mark_conflicted(
+                    &recovery_id,
+                    record.revision,
+                    "conflict",
+                    RecoveryConflictKind::PayloadMismatch,
+                )
+                .unwrap();
+        }
+    }
+    // This invokes the real exact Local append and receipt validation, rather
+    // than manufacturing an acknowledgement or a Board article in a fixture.
+    let title = "T461 acknowledged Board article";
+    let body = "T461 exact Local delivery";
+    let response = run_board_at(
+        home,
+        project,
+        session_id,
+        &serde_json::json!({
+            "schema_version": 1, "operation": "board.post", "params": {
+                "kind": "status", "title": title, "body": body,
+                "intent_id": "t461-acknowledged", "broadcast": true,
+            }
+        })
+        .to_string(),
+    );
+    assert_ok(&response, "exact Local delivery");
+    let report = recovery_report(&response);
+    assert_eq!(report["state"], "acknowledged");
+    assert_eq!(report["worktree_form"], "branch-backed");
+    let records = store.list_read_only().unwrap();
+    assert_eq!(records.len(), 3);
+    for state in [
+        RecoveryState::Pending,
+        RecoveryState::Conflicted,
+        RecoveryState::Acknowledged,
+    ] {
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.state == state)
+                .count(),
+            1
+        );
+    }
+    let acknowledged = records
+        .iter()
+        .find(|record| record.state == RecoveryState::Acknowledged)
+        .unwrap();
+    let entries = gwt::board_provider::load_snapshot(project)
+        .unwrap()
+        .board
+        .entries;
+    assert_eq!(
+        entries.len(),
+        1,
+        "unpublished states must not fabricate Board entries"
+    );
+    assert_eq!(entries[0].id, report["entry_id"].as_str().unwrap());
+    assert_eq!(entries[0], acknowledged.intent.entry);
+    assert_eq!(entries[0].title.as_deref(), Some(title));
+    assert_eq!(entries[0].body, body);
+    serde_json::json!({"entry_id": entries[0].id, "title": title, "body": body})
 }

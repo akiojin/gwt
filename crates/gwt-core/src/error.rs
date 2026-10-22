@@ -64,6 +64,10 @@ impl std::fmt::Display for JsonDecodeKind {
 /// Unified error type for all gwt operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GwtError {
+    /// A live finalizer prevented a Workspace mutation before its callback ran.
+    #[error("workspace operation {operation_id} is in flight; wait for its finalizer to complete and retry in 5 seconds (completion may take longer); no recovery action is needed while it is running")]
+    WorkspaceOperationInFlight { operation_id: String },
+
     /// Existing Workspace state could not be read safely.
     #[error(transparent)]
     WorkspaceStateLoad(#[from] WorkspaceStateLoadError),

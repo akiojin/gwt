@@ -380,6 +380,7 @@ struct SpawnDiagnostic {
 #[derive(Default)]
 struct PtyInputState {
     protected: bool,
+    ordinary_input_revision: u64,
     queued: VecDeque<Vec<u8>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
     /// cleared. Used so PM wake injection can wait instead of splicing a
@@ -596,6 +597,9 @@ pub struct PtyHandle {
     /// read by prompt injection off any thread that holds the handle, so a
     /// delivery worker never needs the pane lock to know how to write a body.
     bracketed_paste: AtomicBool,
+    /// Issue #5839: published by the parsed active screen. Protected prompt
+    /// injection must not feed Codex's Transcript/Find input surface.
+    transcript_overlay: AtomicBool,
     #[cfg(target_os = "macos")]
     reap_requested: AtomicBool,
     #[cfg(target_os = "macos")]
@@ -859,6 +863,7 @@ impl PtyHandle {
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
             bracketed_paste: AtomicBool::new(false),
+            transcript_overlay: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             reap_requested: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
@@ -876,6 +881,20 @@ impl PtyHandle {
     /// parser last saw it.
     pub fn set_bracketed_paste(&self, enabled: bool) {
         self.bracketed_paste.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn set_transcript_overlay(&self, visible: bool) {
+        self.transcript_overlay.store(visible, Ordering::Release);
+    }
+
+    fn ensure_prompt_input_ready(&self) -> Result<(), TerminalError> {
+        if self.transcript_overlay.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "Codex Transcript overlay is open; close it before sending a prompt"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     // Only the unix reaping tests inject a spawn failure; gating on `test`
@@ -902,6 +921,9 @@ impl PtyHandle {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
             });
+        }
+        if !data.is_empty() {
+            state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
         }
         state.note_user_input(data);
         if state.protected {
@@ -937,11 +959,20 @@ impl PtyHandle {
             .unwrap_or(false)
     }
 
+    /// Ordinary input observed through any direct PTY input route.
+    pub fn ordinary_input_revision(&self) -> Option<u64> {
+        self.input_state
+            .lock()
+            .ok()
+            .map(|state| state.ordinary_input_revision)
+    }
+
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
     /// key input is queued until the reservation is released.
     pub fn reserve_input_transaction(
         self: &Arc<Self>,
     ) -> Result<PtyInputReservation, TerminalError> {
+        self.ensure_prompt_input_ready()?;
         let mut state = self
             .input_state
             .lock()
@@ -1618,12 +1649,35 @@ pub struct PtyInputReservation {
 }
 
 impl PtyInputReservation {
+    /// Run an immediate body commit while ordinary input remains unchanged.
+    /// The callback must not acquire the input state again or wait for authority.
+    pub fn with_unchanged_ordinary_input<T>(
+        &self,
+        expected: u64,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
+        let state = self
+            .handle
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if state.ordinary_input_revision != expected || state.unsent_user_input {
+            return Err(TerminalError::PtyIoError {
+                details: "ordinary input changed before protected body commit".into(),
+            });
+        }
+        operation()
+    }
+
     /// Issue #4909: see [`PtyHandle::bracketed_paste_enabled`].
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.handle.bracketed_paste_enabled()
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         if !self.handle.generation_active.load(Ordering::Acquire) {
             return Err(TerminalError::PtyIoError {
                 details: "PTY input generation is no longer active".to_string(),
@@ -1644,6 +1698,7 @@ impl PtyInputReservation {
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
             details: RELEASED_DESCRIPTORS.to_string(),
         })?;
+        self.handle.ensure_prompt_input_ready()?;
         PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
     }
 
@@ -1657,6 +1712,7 @@ impl PtyInputReservation {
             &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
         ) -> Result<(), TerminalError>,
     ) -> Result<(), TerminalError> {
+        self.handle.ensure_prompt_input_ready()?;
         let mut writer = self
             .handle
             .writer
@@ -1669,6 +1725,7 @@ impl PtyInputReservation {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
+        self.handle.ensure_prompt_input_ready()?;
         let mut commit = |mark_attempted: &mut dyn FnMut()| {
             if !self.handle.generation_active.load(Ordering::Acquire) {
                 return Err(TerminalError::PtyIoError {
@@ -1678,6 +1735,7 @@ impl PtyInputReservation {
             let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
                 details: RELEASED_DESCRIPTORS.to_string(),
             })?;
+            self.handle.ensure_prompt_input_ready()?;
             mark_attempted();
             PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
         };
@@ -2775,6 +2833,39 @@ mod tests {
         let state = handle.input_state.lock().expect("settled input state");
         assert!(!state.protected);
         assert!(state.queued.is_empty());
+    }
+
+    #[test]
+    fn ordinary_input_revision_distinguishes_a_submitted_user_prompt_from_protected_input() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let before = handle.ordinary_input_revision().unwrap();
+        handle.write_input(b"user prompt\r").unwrap();
+        assert!(!handle.has_unsent_user_input());
+        assert!(handle.ordinary_input_revision().unwrap() > before);
+        let revision = handle.ordinary_input_revision();
+        let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
+        reservation.write_input(b"protected body").unwrap();
+        reservation.write_input(b"\r").unwrap();
+        assert_eq!(handle.ordinary_input_revision(), revision);
+    }
+
+    #[test]
+    fn ordinary_input_during_authorization_refuses_the_physical_body_commit() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let revision = handle.ordinary_input_revision().unwrap();
+        let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
+        let mut attempted = false;
+        reservation
+            .write_input_authorized(b"automatic body", |commit| {
+                // Browser input can queue while the physical writer is reserved.
+                handle.write_input(b"human prompt\r")?;
+                reservation
+                    .with_unchanged_ordinary_input(revision, || commit(&mut || attempted = true))
+            })
+            .expect_err("new ordinary input must win before body commit");
+        assert!(!attempted);
     }
 
     #[test]

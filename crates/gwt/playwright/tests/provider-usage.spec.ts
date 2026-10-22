@@ -14,6 +14,73 @@ test.describe("Provider usage status summary", () => {
       info.project.name.includes("light") ? "light" : "dark");
   });
 
+  test("Usage frame subscriptions batch bursts and advance with suspended animation frames", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page, true);
+    await page.goto(liveUrl || APP_URL);
+    await page.getByRole("tab", { name: "Usage & Limits" }).click();
+    const checkbox = page.getByRole("checkbox", { name: "Show Claude Code account usage" });
+    await expect(checkbox).toBeChecked();
+    const result = await page.evaluate(async () => {
+      // Exercise the post-dispatch factory from the served checkout. Socket
+      // coalescing alone must not mask repeated synchronous model updates.
+      const modulePath = "/provider-usage-surface.js";
+      const { createProviderUsageSurface } = await import(modulePath);
+      const shell = (window as any).__operatorShell;
+      const originalRender = shell.applyProviderUsage;
+      const originalFrame = window.requestAnimationFrame;
+      const renders: number[] = [];
+      let workspaceRenders = 0;
+      shell.applyProviderUsage = (snapshot: any) => {
+        renders.push(snapshot.accounts[0].windows[0].used_percent);
+        originalRender(snapshot);
+      };
+      const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows: () => workspaceRenders++ });
+      const usage = (value: number) => ({
+        accounts: [{ provider: "claude_code", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: value }] }],
+        sessions: Array.from({ length: 5 }, (_, i) => ({ session_id: `frame-${i}`, value })), consumption: [],
+      });
+      const panel = document.querySelector<HTMLElement>('[data-settings-panel="usage"]')!;
+      try {
+        surface.renderUsagePanel(panel);
+        const control = panel.querySelector("input")!;
+        control.focus();
+        for (let value = 1; value <= 50; value++) surface.applyProviderUsageUi(usage(value));
+        const immediate = surface.usageForSession("frame-4").value;
+        const beforeFrame = renders.length;
+        await new Promise<void>(resolve => originalFrame(() => resolve()));
+        const normal = { renders: [...renders], workspaceRenders, immediate, beforeFrame };
+        window.requestAnimationFrame = () => -1;
+        const start = performance.now();
+        for (let value = 51; value <= 70; value++) surface.applyProviderUsageUi(usage(value));
+        while (renders.length < 2 && performance.now() - start < 1000) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return { normal, renders, workspaceRenders, fallbackMs: performance.now() - start,
+          focused: document.activeElement === control, checked: control.checked };
+      } finally {
+        window.requestAnimationFrame = originalFrame;
+        shell.applyProviderUsage = originalRender;
+      }
+    });
+    expect(result.normal).toEqual({ renders: [50], workspaceRenders: 1, immediate: 50, beforeFrame: 0 });
+    expect(result.renders).toEqual([50, 70]);
+    expect(result.workspaceRenders).toBe(2);
+    expect(result.fallbackMs).toBeLessThan(1000);
+    expect(result.focused && result.checked).toBe(true);
+    await expect(checkbox).toBeFocused();
+    await expect(page.locator("#op-strip-usage")).toContainText("CC 70%");
+    await page.locator("#op-strip-usage").hover();
+    await expect(page.locator("#provider-usage-popover")).toContainText(/Weekly\s*70%/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: info.outputPath("usage-frame.png"), fullPage: true });
+    await info.attach("frame-results", { body: JSON.stringify(result), contentType: "application/json" });
+    expect(errors).toEqual([]);
+  });
+
   test("mounted Usage setting follows snapshots without replacing its focused control", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));

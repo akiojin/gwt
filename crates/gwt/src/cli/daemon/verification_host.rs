@@ -50,11 +50,8 @@ impl VerificationHost {
 
 /// Decide where a run's commands are launched.
 ///
-/// The only error this returns is a malformed [`SPAWN_HOST_ENV`]. Placement
-/// itself always succeeds: when no daemon can take the workload it stays in the
-/// agent tree and the note explains why, rather than refusing. See
-/// [`gwt_core::verification_priority::decide_placement`] for why the refusal is
-/// a separate change.
+/// Refuse when a degraded launcher has no compatible daemon to escape to, or
+/// when [`SPAWN_HOST_ENV`] is malformed. Callers must not launch on an error.
 pub(crate) fn resolve(worktree: &Path) -> Result<(VerificationHost, String), String> {
     resolve_with(
         worktree,
@@ -106,6 +103,7 @@ fn resolve_with(
 
     let (availability, endpoint) = locate(worktree);
     match decide_placement(launcher, &availability) {
+        SpawnPlacement::Refuse { reason } => Err(reason),
         SpawnPlacement::Inherit { reason } => Ok((
             VerificationHost::Inherit,
             format!("spawn-host: inherit ({reason})\n"),
@@ -131,14 +129,12 @@ fn resolve_with(
 /// The lease record's answer to "is this holder's workload inside the agent
 /// tree, and at what priority" (Issue #4409 AC-4).
 ///
-/// `unknown` covers the one case placement cannot answer — a malformed
-/// [`SPAWN_HOST_ENV`] — because a waiter reading this is deciding whether to
-/// keep queueing and needs a value rather than a gap.
+/// `refused` covers unavailable baseline placement or a malformed declaration.
 pub(crate) fn describe_for_lease(worktree: &Path) -> (String, Option<i32>) {
     let nice = gwt_core::verification_priority::LauncherPriority::current().nice;
     let label = match resolve(worktree) {
         Ok((host, _)) => host.label().to_string(),
-        Err(_) => "unknown".to_string(),
+        Err(_) => "refused".to_string(),
     };
     (label, nice)
 }
@@ -159,6 +155,7 @@ pub(crate) enum DelegatedRunError {
     Failed(String),
     TimedOut(std::time::Duration),
     Cancelled,
+    InteractiveAuthentication(String),
 }
 
 /// Find a daemon that can host verification for `worktree`.
@@ -331,6 +328,27 @@ async fn run_async_cancellable<G>(
     timeout: Option<std::time::Duration>,
     check_cancelled: Option<&(dyn Fn() -> Result<bool, String> + Sync)>,
 ) -> Result<DelegatedRun, DelegatedRunError> {
+    let mut detector =
+        crate::cli::verification_record::interactive_process::InteractiveProcessDetector::default();
+    run_async_cancellable_with_detector(
+        endpoint,
+        request,
+        on_started,
+        timeout,
+        check_cancelled,
+        &mut |pid| detector.detect(pid),
+    )
+    .await
+}
+
+async fn run_async_cancellable_with_detector<G>(
+    endpoint: &DaemonEndpoint,
+    request: &VerificationSpawnRequest,
+    on_started: impl FnOnce(u32) -> G,
+    timeout: Option<std::time::Duration>,
+    check_cancelled: Option<&(dyn Fn() -> Result<bool, String> + Sync)>,
+    detect: &mut (impl FnMut(u32) -> Option<String> + Send),
+) -> Result<DelegatedRun, DelegatedRunError> {
     if let Some(check_cancelled) = check_cancelled {
         if check_cancelled().map_err(DelegatedRunError::Failed)? {
             return Err(DelegatedRunError::Cancelled);
@@ -339,39 +357,73 @@ async fn run_async_cancellable<G>(
     let completion = async {
         let mut start_acknowledged = false;
         let execution = async {
-            let mut client = DaemonClient::connect(endpoint).await?;
+            let mut client = DaemonClient::connect(endpoint)
+                .await
+                .map_err(DelegatedRunError::Failed)?;
             client
                 .send_frame(&ClientFrame::SpawnVerification(request.clone()))
-                .await?;
+                .await
+                .map_err(DelegatedRunError::Failed)?;
 
-            let accepted = match client.read_frame::<DaemonFrame>().await? {
+            let accepted = match client
+                .read_frame::<DaemonFrame>()
+                .await
+                .map_err(DelegatedRunError::Failed)?
+            {
                 DaemonFrame::VerificationAccepted(accepted) => accepted,
                 DaemonFrame::Error { message } => {
-                    return Err(format!("daemon refused the verification spawn: {message}"))
+                    return Err(DelegatedRunError::Failed(format!(
+                        "daemon refused the verification spawn: {message}"
+                    )))
                 }
-                other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
+                other => {
+                    return Err(DelegatedRunError::Failed(format!(
+                        "expected VerificationAccepted, got: {other:?}"
+                    )))
+                }
             };
             start_acknowledged = true;
             // Keep the caller's command scope alive until completion or error.
             // The PID is already part of the existing protocol response.
             let _command_scope = on_started(accepted.pid);
-
+            let command_pid = accepted.pid;
+            let frames = async {
+                loop {
+                    match client.read_frame::<DaemonFrame>().await? {
+                        DaemonFrame::VerificationFinished(finished) => {
+                            return Ok(DelegatedRun {
+                                exit_code: finished.exit_code,
+                                signal: finished.signal,
+                                accepted,
+                                reclaimed_survivors: finished.reclaimed_survivors,
+                            })
+                        }
+                        DaemonFrame::Error { message } => {
+                            return Err(format!("daemon reported a spawn failure: {message}"))
+                        }
+                        // Unrelated control frames do not end this run.
+                        _ => continue,
+                    }
+                }
+            };
+            // read_frame uses read_line: keep the same future alive between
+            // probes so an interval tick cannot discard a partial JSON frame.
+            tokio::pin!(frames);
+            let mut probe = tokio::time::interval(std::time::Duration::from_millis(100));
+            probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                match client.read_frame::<DaemonFrame>().await? {
-                    DaemonFrame::VerificationFinished(finished) => {
-                        return Ok(DelegatedRun {
-                            exit_code: finished.exit_code,
-                            signal: finished.signal,
-                            accepted,
-                            reclaimed_survivors: finished.reclaimed_survivors,
-                        })
+                tokio::select! {
+                    biased;
+                    // Completion must win if a host-wide process snapshot
+                    // takes longer than the interval on a saturated host.
+                    result = &mut frames => return result.map_err(DelegatedRunError::Failed),
+                    _ = probe.tick() => {
+                        if let Some(diagnostic) = detect(command_pid) {
+                            // Dropping this client invokes the daemon's
+                            // existing connection-owned reclamation handle.
+                            return Err(DelegatedRunError::InteractiveAuthentication(diagnostic));
+                        }
                     }
-                    DaemonFrame::Error { message } => {
-                        return Err(format!("daemon reported a spawn failure: {message}"))
-                    }
-                    // The daemon may fan unrelated control frames down any
-                    // connection; none of them ends this run.
-                    _ => continue,
                 }
             }
         };
@@ -389,9 +441,8 @@ async fn run_async_cancellable<G>(
                              command start was acknowledged; inspect the daemon connection and health"
                         ))
                     }
-                })?
-                .map_err(DelegatedRunError::Failed),
-            None => execution.await.map_err(DelegatedRunError::Failed),
+                })?,
+            None => execution.await,
         }
     };
     match check_cancelled {
@@ -554,6 +605,87 @@ mod tests {
                 "start acknowledgement timeout must be a transport failure"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interactive_authentication_disconnects_only_its_delegated_tree() {
+        use std::time::Duration;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = scratch();
+        let root = directory.path();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root);
+        let endpoint = fixture_endpoint(root);
+        let server = super::super::server::spawn_server(
+            endpoint.clone(),
+            root.join("daemon.sock"),
+            root.join("endpoint.json"),
+            super::super::broadcast::BroadcastHub::new(),
+        )
+        .unwrap();
+        let mut unrelated = DaemonClient::connect(&endpoint).await.unwrap();
+        unrelated
+            .send_frame(&ClientFrame::SpawnVerification(held_command(
+                root,
+                "unrelated-auth",
+            )))
+            .await
+            .unwrap();
+        let unrelated_pid = match unrelated.read_frame::<DaemonFrame>().await.unwrap() {
+            DaemonFrame::VerificationAccepted(accepted) => accepted.pid,
+            other => panic!("expected unrelated command acceptance, got {other:?}"),
+        };
+        let mut child_pid = None;
+        let result = run_async_cancellable_with_detector(
+            &endpoint,
+            &held_command(root, "authentication"),
+            |pid| child_pid = Some(pid),
+            Some(Duration::from_secs(30)),
+            None,
+            &mut |_| {
+                root.join("authentication-ready")
+                    .exists()
+                    .then(|| "interactive authentication fixture".to_string())
+            },
+        )
+        .await;
+        let grandchild_pid = std::fs::read_to_string(root.join("authentication-grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let child_pid = child_pid.unwrap();
+        // test-hygiene: allow-wall-clock-deadline OS process reclamation has no completion event available to this fixture.
+        let safety = std::time::Instant::now() + Duration::from_secs(30);
+        while (crate::process::is_process_alive(child_pid)
+            || crate::process::is_process_alive(grandchild_pid))
+            // test-hygiene: allow-wall-clock-deadline Observe actual process death rather than assert a scheduling budget.
+            && std::time::Instant::now() < safety
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let unrelated_survived = crate::process::is_process_alive(unrelated_pid);
+        std::fs::write(root.join("unrelated-auth-release"), "release").unwrap();
+        let unrelated_result = unrelated.read_frame::<DaemonFrame>().await.unwrap();
+        server.abort();
+        let _ = server.await;
+        assert!(
+            matches!(result, Err(DelegatedRunError::InteractiveAuthentication(message))
+            if message == "interactive authentication fixture")
+        );
+        assert!(!crate::process::is_process_alive(child_pid));
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(
+            unrelated_survived,
+            "only the owned command tree may be reclaimed"
+        );
+        assert!(
+            matches!(unrelated_result, DaemonFrame::VerificationFinished(finished)
+            if finished.exit_code == 0)
+        );
     }
 
     #[cfg(unix)]
@@ -787,21 +919,17 @@ mod tests {
         (guard, cleared)
     }
 
-    /// A degraded launcher with no daemon to escape to runs in place, and the
-    /// note carries the reason into the run's transcript and lease record.
-    ///
-    /// Refusing instead is the change that has to wait: it would have stopped
-    /// every agent worktree, starting with the one implementing it.
+    /// Issue #4473: missing infrastructure refuses before a workload can
+    /// silently inherit the degraded launcher's priority.
     #[test]
-    fn a_degraded_launcher_without_a_daemon_runs_in_place_and_says_why() {
+    fn a_degraded_launcher_without_a_daemon_is_refused_with_recovery() {
         let _env = without_declared_spawn_host();
         let dir = scratch();
-        let (host, note) = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
-            .expect("placement never refuses");
-        assert_eq!(host.label(), "inherit");
-        assert!(note.contains("nice 10"), "{note}");
-        assert!(note.contains("no gwt daemon is reachable"), "{note}");
-        assert!(note.contains("The run continues"), "{note}");
+        let error = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
+            .expect_err("a missing daemon cannot provide baseline priority");
+        for expected in ["nice 10", "nice 0", "no gwt daemon", "GUI", "retry"] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
     }
 
     /// The same launcher at baseline priority runs in place: there is nothing
@@ -824,10 +952,8 @@ mod tests {
         let _env = without_declared_spawn_host();
         let dir = scratch();
         let (label, _) = describe_for_lease(dir.path());
-        assert!(
-            matches!(label.as_str(), "inherit" | "daemon"),
-            "unexpected lease spawn-host label: {label}"
-        );
+        let expected = resolve(dir.path()).map_or("refused", |(host, _)| host.label());
+        assert_eq!(label, expected);
     }
 
     /// A worktree with no endpoint descriptor at all is `Absent`, not a

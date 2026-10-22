@@ -23,7 +23,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22t%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function entry(number, monitorState, extra = {}) {
@@ -415,7 +415,7 @@ test("AC-25: the detail pane renders in FR-023 order with the row's badge vocabu
     sections: [
       { title: "Description", body: "## Summary\n\nbody\n\n- [x] AC-1: one\n- [ ] AC-2: two" },
       { title: "Comment 1", body: "a comment" },
-    ],
+    ].map(section => ({ ...section, content: { type: "markdown", body: section.body, body_html: "" } })),
     related_works: [],
   };
   surface.renderKnowledgeBridge("win-1");

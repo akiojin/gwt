@@ -4201,7 +4201,7 @@ impl WorkItemsIntakeSnapshot {
         })
     }
 
-    fn detachments(&self) -> Result<ContainerDetachments> {
+    pub(crate) fn detachments(&self) -> Result<ContainerDetachments> {
         let (path, bytes) = &self.files[1];
         match bytes {
             Some(bytes) => serde_json::from_slice(bytes).map_err(|error| {
@@ -4827,10 +4827,9 @@ fn with_workspace_transaction_recovery_observed_profiled<T>(
                             )?
                             .is_none()
                             {
-                                return Err(GwtError::Other(format!(
-                                    "workspace operation {} is in flight; wait for its finalizer to complete and retry in 5 seconds (completion may take longer); no recovery action is needed while it is running",
-                                    external_commit.operation_id
-                                )));
+                                return Err(GwtError::WorkspaceOperationInFlight {
+                                    operation_id: external_commit.operation_id.clone(),
+                                });
                             }
                             return Err(GwtError::Other(format!(
                                 "workspace state transaction {} external commit is unresolved for operation {} (owner {}); use JSON operation execution.release_prepared with the owning issue/spec, this exact operation_id, and a non-empty reason to reconcile its durable launch decision; do not delete the transaction markers",

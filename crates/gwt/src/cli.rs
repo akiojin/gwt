@@ -22,6 +22,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+mod feedback;
 mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
@@ -48,6 +49,7 @@ mod pr;
 mod provider_reset;
 pub(crate) mod register;
 mod release;
+mod reliability;
 pub(crate) mod search;
 mod skill_state_runtime;
 pub(crate) mod spec_artifact_lint;
@@ -60,6 +62,7 @@ pub mod update;
 pub mod verification_lease;
 pub mod verification_record;
 pub(crate) mod verify_derivation;
+mod work_event_reconcile;
 mod workflow;
 mod workspace;
 pub(crate) mod worktree_gc;
@@ -69,6 +72,7 @@ use std::{io, path::PathBuf};
 pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
+pub use completion_pr::CompletionPrCandidate;
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
@@ -95,6 +99,7 @@ pub fn dispatch_json_input<E: CliEnv>(env: &mut E, prog: &str, input: &str) -> i
 /// variants and dispatch becomes a nested match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Feedback(feedback::FeedbackCommand),
     ProviderReset(provider_reset::ProviderResetCommand),
     Issue(IssueCommand),
     Pr(PrCommand),
@@ -166,6 +171,8 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
+    EventsReconcile { reference: String, dry_run: bool },
     /// Ask the authenticated Host to close one eligible Work record.
     Close { work_id: String, close_kind: String },
     /// Read the outcome of one update without contacting or mutating the Host.
@@ -335,7 +342,7 @@ pub enum PaneCommand {
 pub enum SkillStateAction {
     Start { spec: u64 },
     Phase { spec: u64, label: String },
-    Complete { spec: u64 },
+    Complete { spec: u64, pr: Option<u64> },
     Abort { spec: u64, reason: Option<String> },
 }
 
@@ -549,7 +556,7 @@ pub(crate) fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction
         }
         "complete" => {
             let spec = parse_named_u64(rest, "--spec")?;
-            Ok(SkillStateAction::Complete { spec })
+            Ok(SkillStateAction::Complete { spec, pr: None })
         }
         "abort" => {
             let spec = parse_named_u64(rest, "--spec")?;
@@ -602,6 +609,7 @@ pub(crate) fn run_collect<E: CliEnv>(
 ) -> Result<(i32, String), SpecOpsError> {
     let mut out = String::new();
     let code = match cmd {
+        CliCommand::Feedback(inner) => feedback::run(env, inner, &mut out)?,
         CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,

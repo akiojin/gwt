@@ -62,6 +62,15 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn repo_path(&self) -> &std::path::Path {
         self.inner.repo_path()
     }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::FeedbackRecord,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        self.inner.deliver_feedback(record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.inner.spawn_feedback_worker(id)
+    }
 
     fn stdout(&mut self) -> &mut dyn io::Write {
         self.stdout
@@ -97,6 +106,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         self.inner.fetch_current_pr()
+    }
+
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.inner.fetch_completion_pr_candidates(number)
     }
 
     fn create_pr(
@@ -142,6 +158,19 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.inner.fetch_completion_pr(number)
+    }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.enable_pr_auto_merge(number, reviewed_head_sha)
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_auto_merge_pr(number)
     }
     fn edit_pr(
         &mut self,

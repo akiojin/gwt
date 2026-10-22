@@ -41,6 +41,88 @@ test.describe("Workspace state diagnostics", () => {
   test.setTimeout(90_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
+  test("notice bursts render the latest error once and recover with suspended rAF", async ({ page }, testInfo) => {
+    await withLiveGwtBackendLock(BASE, testInfo, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+      const retries: unknown[] = [];
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        const server = socket.connectToServer();
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "retry_workspace_state_load") retries.push(payload);
+          else server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind !== "workspace_state_notice") socket.send(message);
+        });
+      });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await page.bringToFront();
+      const control = page.locator("#close-project-button");
+      await expect(control).toBeVisible();
+      await control.focus();
+      await control.hover();
+      const burst = await page.evaluate(async () => {
+        const app = document.getElementById("app")!;
+        const focused = document.activeElement;
+        let renders = 0;
+        const observer = new MutationObserver(records => {
+          renders += records.flatMap(record => [...record.addedNodes])
+            .filter(node => node instanceof Element && node.matches(".workspace-state-notice")).length;
+        });
+        observer.observe(app, { childList: true });
+        try {
+          for (let index = 1; index <= 50; index++) {
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+              kind: "workspace_state_notice", notice: { kind: "load_error",
+                path: "/fixture/current.json", message: `Error <${index}>` },
+            } }));
+          }
+          const deferred = !document.querySelector(".workspace-state-notice");
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          const banner = document.querySelector(".workspace-state-notice")!;
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: { kind: "runtime_health", snapshot: {} } }));
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          return { deferred, renders, text: banner.textContent,
+            safeText: banner.querySelector("img, script") === null,
+            unrelatedPreserved: document.querySelector(".workspace-state-notice") === banner,
+            focusPreserved: document.activeElement === focused, hoverPreserved: focused?.matches(":hover") };
+        } finally { observer.disconnect(); }
+      });
+      expect(burst).toMatchObject({ deferred: true, renders: 1, safeText: true,
+        unrelatedPreserved: true, focusPreserved: true, hoverPreserved: true });
+      expect(burst.text).toBe("/fixture/current.json: Error <50>Retry");
+      await testInfo.attach("notice-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+      const banner = page.locator('.workspace-state-notice[role="alert"]');
+      await banner.getByRole("button", { name: "Retry", exact: true }).click();
+      await expect.poll(() => retries.length).toBe(1);
+      await expect(banner).toContainText("Error <50>");
+      await page.evaluate(() => {
+        (window as any).__noticeRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: { kind: "workspace_state_notice",
+          notice: { kind: "load_error", path: "/fixture/current.json", message: "Fallback error" } } }));
+      });
+      try {
+        await expect(banner).toContainText("Fallback error", { timeout: 1000 });
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        await testInfo.attach(`notice-frame-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+          detail: { kind: "workspace_state_notice", notice: null },
+        })));
+        await expect(banner).toHaveCount(0, { timeout: 1000 });
+      } finally {
+        await page.evaluate(() => { window.requestAnimationFrame = (window as any).__noticeRaf; });
+      }
+      expect(errors).toEqual([]);
+    });
+  });
+
   test("retired HOME layout is preserved and shows the upgrade path after reconnect", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
       const statePath = await isolatedStatePath();

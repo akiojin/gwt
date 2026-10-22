@@ -777,6 +777,95 @@ fn prepare_issue_monitor_answer(
     .ok_or_else(|| "answered autonomous handoff requires its exact Session".to_string())
 }
 
+/// Carry context from the exact completed slice; launch authority still comes
+/// from the normal fresh successor transaction, never from Work metadata.
+fn append_issue_monitor_completed_slice_handoff(
+    prompt: String,
+    project_root: &Path,
+    branch: &str,
+    issue_number: u64,
+    strategy: gwt::IssueMonitorLaunchSessionStrategy,
+) -> String {
+    use gwt::cli::execution_state as execution;
+    use gwt_core::workspace_projection as work;
+
+    if strategy != gwt::IssueMonitorLaunchSessionStrategy::FreshRequired {
+        return prompt;
+    }
+    let context = (|| {
+        let (_, worktree) = launch_runtime_context_paths(project_root, branch);
+        let worktree = worktree?;
+        let owner = execution::current_generation_owner(&worktree).ok()??;
+        if owner.number != issue_number {
+            return None;
+        }
+        let ledger = execution::load_generation_ledger(&worktree, owner).ok()??;
+        if ledger.current_effective_status() != Some(execution::ExecutionControlStatus::Completed) {
+            return None;
+        }
+        let record = execution::load(&worktree).ok()??;
+        if !execution::integrity_ok(&record)
+            || record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.status != execution::ExecutionControlStatus::Completed
+        {
+            return None;
+        }
+        let works = work::load_workspace_work_items(project_root).ok()??;
+        let work_id = work::current_work_id_for_launch(
+            &works,
+            project_root,
+            Some(branch),
+            Some(&worktree),
+            None,
+        )
+        .ok()??;
+        let item = works.work_items.iter().find(|item| item.id == work_id)?;
+        if item.status_category != work::WorkspaceStatusCategory::Done
+            || item.discarded
+            || item.owner.as_deref()
+                != Some(super::workspace::workspace_owner_label(owner).as_str())
+            || !item
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == record.primary_session_id)
+        {
+            return None;
+        }
+        let summary = item
+            .summary
+            .as_deref()
+            .or(item.progress_summary.as_deref())
+            .and_then(super::continuation::sanitize_handoff_value);
+        let next_action = item
+            .latest_next_action()
+            .and_then(super::continuation::sanitize_handoff_value);
+        if summary.is_none() && next_action.is_none() {
+            return None;
+        }
+        let predecessor = execution::current_execution_binding(&worktree, owner).ok()??;
+        let mut lines = vec![
+            "Completed slice handoff (context only)".to_string(),
+            format!("Predecessor Work: {work_id}"),
+            format!("Predecessor generation: {}", predecessor.generation_id),
+            "Start the next slice with fresh authority. Re-read the current SPEC, plan and tasks before choosing the next incomplete acceptance criterion and minimal Plan; the predecessor notes below may be stale.".to_string(),
+        ];
+        for (label, value) in [
+            ("Summary", summary),
+            ("Next AC / minimal Plan", next_action),
+        ] {
+            if let Some(value) = value {
+                lines.push(format!("{label}: {value}"));
+            }
+        }
+        Some(lines.join("\n"))
+    })();
+    match context {
+        Some(context) => format!("{prompt}\n\n{context}"),
+        None => prompt,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_issue_monitor_launch(
     context: &super::ProjectContext,
@@ -855,14 +944,20 @@ fn prepare_issue_monitor_launch(
     session
         .wizard
         .apply(gwt::LaunchWizardAction::SetInitialPrompt {
-            value: gwt::append_issue_monitor_requeue_reason(
-                gwt::issue_monitor_launch_prompt_for_base(
-                    request.linked_issue_kind,
-                    request.issue_number,
-                    &base_branch,
-                    delivery,
+            value: append_issue_monitor_completed_slice_handoff(
+                gwt::append_issue_monitor_requeue_reason(
+                    gwt::issue_monitor_launch_prompt_for_base(
+                        request.linked_issue_kind,
+                        request.issue_number,
+                        &base_branch,
+                        delivery,
+                    ),
+                    requeue_reason.as_deref(),
                 ),
-                requeue_reason.as_deref(),
+                project_root,
+                &session.wizard.branch_name,
+                request.issue_number,
+                request.launch_session_strategy,
             ),
         });
     record_issue_monitor_worker_phase("monitor_prompt", &mut phase_started);
@@ -898,13 +993,32 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
         &dispatch.diff,
     );
     format!(
-        "{base}\n\nAfter producing the verdict JSON, report it to the Issue Monitor \
+        "{base}\n\nReview completion order for PR #{pr}: inspect the diff now, but before \
+         finalizing or publishing a verdict, wait for all required CI checks to finish \
+         using `gh pr checks {pr} --required --watch`. Pending, missing, or unreadable \
+         CI evidence is a wait, never by itself a FAIL verdict. A completed CI failure \
+         is evidence to evaluate; do not ignore it or turn it into PASS. Keep this \
+         review pane active while waiting. After the wait, re-read PR #{pr}'s head SHA \
+         and CI evidence, and re-evaluate every \
+         acceptance criterion against the completed evidence. A merged PR with the \
+         same head still needs its acceptance review. If the head changed or the PR \
+         closed without merging, do not wait for the old head to return: report your \
+         verdict for the originally reviewed SHA {sha} so the daemon's existing \
+         head/closure gate can route recovery. Never review or approve the new head \
+         under the old SHA.\n\n\
+         After producing the refreshed verdict JSON, report it to the Issue Monitor \
          daemon by running the gwtd JSON operation `issue.monitor.review_verdict` \
          with params {{\"issue_number\": {issue}, \"reviewed_sha\": \"{sha}\", \
          \"verdict_raw\": <the verdict JSON as a string>}}. The daemon re-judges the \
          verdict against the launch-time criteria; a verdict for any other SHA is \
-         rejected.",
+         rejected. If the operation returns status `deferred`, no verdict was published: \
+         keep this same pane active, wait for the stated condition, re-read head/CI, \
+         re-evaluate the criteria, and retry with a refreshed verdict. Do not end the \
+         review or escalate merely because CI is still pending. Status `obsolete` \
+         means the review binding was superseded: stop this old review without \
+         retrying or changing the current review.",
         issue = dispatch.issue_number,
+        pr = dispatch.pr_number,
         sha = dispatch.reviewed_sha,
     )
 }
@@ -5274,14 +5388,20 @@ impl AppRuntime {
                         &base_branch_name,
                         &target_branch,
                     );
-                    gwt::append_issue_monitor_requeue_reason(
-                        gwt::issue_monitor_launch_prompt_for_base(
-                            linked_issue_kind,
-                            issue_number,
-                            &base_branch_name,
-                            delivery,
+                    append_issue_monitor_completed_slice_handoff(
+                        gwt::append_issue_monitor_requeue_reason(
+                            gwt::issue_monitor_launch_prompt_for_base(
+                                linked_issue_kind,
+                                issue_number,
+                                &base_branch_name,
+                                delivery,
+                            ),
+                            requeue_reason.as_deref(),
                         ),
-                        requeue_reason.as_deref(),
+                        &project_root,
+                        &target_branch,
+                        issue_number,
+                        launch_session_strategy,
                     )
                 });
                 session
@@ -7761,6 +7881,19 @@ mod review_dispatch_tests {
             "instructs verdict report-back via the gwtd op"
         );
         assert!(prompt.contains("42"), "names the issue");
+        assert!(prompt.contains("PR #99"), "names the reviewed PR");
+        assert!(
+            prompt.contains("--required --watch"),
+            "waits for required CI"
+        );
+        assert!(
+            prompt.contains("deferred"),
+            "handles nonterminal publication"
+        );
+        assert!(
+            prompt.contains("re-evaluate"),
+            "refreshes the verdict after CI"
+        );
     }
 }
 

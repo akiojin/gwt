@@ -569,8 +569,18 @@ test("Usage snapshot owns its data so strip and hover stay consistent", async ()
     document: globalThis.document,
     window: globalThis.window,
     requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
   };
-  Object.assign(globalThis, { document, window, requestAnimationFrame: (cb) => cb() });
+  const frames = new Map();
+  let frameId = 0;
+  const flush = () => {
+    for (const callback of frames.values()) callback();
+    frames.clear();
+  };
+  Object.assign(globalThis, { document, window,
+    requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  });
   window.innerWidth = 1200;
   window.innerHeight = 800;
   window.__operatorShell = { applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot) };
@@ -584,6 +594,8 @@ test("Usage snapshot owns its data so strip and hover stay consistent", async ()
     const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => workspaceRefreshes++ });
     assert.equal(workspaceRefreshes, 0, "factory construction must not call a late-bound Workspace view");
     surface.applyProviderUsageUi(payload);
+    assert.equal(workspaceRefreshes, 0, "views wait for the shared frame");
+    flush();
     // A caller changing the received payload must not change model data.
     payload.accounts[0].windows[0].used_percent = 70;
     const strip = document.getElementById("op-strip-usage");
@@ -592,12 +604,18 @@ test("Usage snapshot owns its data so strip and hover stay consistent", async ()
     const popover = document.getElementById("provider-usage-popover");
     assert.match(strip.textContent, /CX 10%/);
     assert.match(popover.textContent, /Weekly\s*10%/);
+    flush(); // Finish the popover's independent positioning frame.
 
+    surface.applyProviderUsageUi({ ...payload, accounts: [] });
     surface.applyProviderUsageUi(payload);
+    assert.match(strip.textContent, /CX 10%/, "burst updates do not render intermediate snapshots");
+    assert.equal(frames.size, 1);
+    flush();
     assert.match(strip.textContent, /CX 70%/);
     assert.match(popover.textContent, /Weekly\s*70%/);
     assert.equal(workspaceRefreshes, 2);
   } finally {
+    flush();
     Object.assign(globalThis, previous);
   }
 });
@@ -605,8 +623,9 @@ test("Usage snapshot owns its data so strip and hover stay consistent", async ()
 test("Mounted usage panel follows snapshots while preserving local controls", async () => {
   const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
   const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
-  const previous = { document: globalThis.document, window: globalThis.window };
-  Object.assign(globalThis, { document, window });
+  const previous = { document: globalThis.document, window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, requestAnimationFrame: callback => callback() });
   const usage = (kind) => ({ accounts: [{ provider: "claude_code", state: { kind } }] });
   try {
     const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => {} });

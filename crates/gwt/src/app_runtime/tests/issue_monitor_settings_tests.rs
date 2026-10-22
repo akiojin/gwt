@@ -570,10 +570,9 @@ fn app_runtime_issue_monitor_configure_profile_shows_the_saved_head_while_it_is_
     // The agent picker follows the installed agents in this environment, so
     // the profile the form was filled from shows in what the save would
     // write: an unchanged save must leave the saved pool exactly as it is.
-    let saved_summary =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), seeded)
-            .status_view()
-            .launch_profile_summary;
+    let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), seeded)
+        .status_view()
+        .launch_profile_summary;
     assert_eq!(
         pool.resulting_summary, saved_summary,
         "the form must open on the saved head's own model and reasoning: {pool:?}"
@@ -1037,8 +1036,7 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
         "routing tags stay with the set whose agent did not change"
     );
     assert_eq!(saved[2], claude, "a set that was never opened is untouched");
-    let status =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs).status_view();
+    let status = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs).status_view();
     assert_eq!(
         status.launch_profile_summary, previewed_summary,
         "the form previews the summary the Monitor reports after the save"

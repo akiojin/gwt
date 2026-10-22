@@ -3092,7 +3092,12 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
         .join()
         .expect("join transaction")
         .expect("external commit and Work publication succeed");
-    let error = in_flight_result.expect_err("writer must wait").to_string();
+    let error = in_flight_result.expect_err("writer must wait");
+    assert!(
+        matches!(&error, GwtError::WorkspaceOperationInFlight { operation_id }
+        if operation_id == "continue-operation-in-flight")
+    );
+    let error = error.to_string();
     assert!(error.contains("continue-operation-in-flight"), "{error}");
     assert!(error.contains("in flight"), "{error}");
     assert!(
@@ -14204,6 +14209,7 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     audit.id = format!("superseded-{occupied_id}");
     audit.related_work_item_id = Some(predecessor_id);
     audit.execution_container = start.execution_container.clone();
+    audit.bind_successor_supersession_identity().unwrap();
     start.work_item_id = successor_id.clone();
     start.id = format!("owner-successor-{successor_id}");
     start.owner = Some("Issue #4074".to_string());

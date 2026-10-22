@@ -179,6 +179,16 @@ pub fn publish_issue_monitor_control(
     publish_issue_monitor_control_with_timeout(project_root, payload, DEFAULT_TIMEOUT)
 }
 
+/// Publish a durable command from a CLI or background worker. These callers
+/// can wait for the serialized prefs commit without blocking the GUI event
+/// loop. An ambiguous timeout still forbids replay or a local fallback.
+pub fn publish_durable_issue_monitor_control(
+    project_root: &Path,
+    payload: Value,
+) -> Result<(), IssueMonitorControlPublishError> {
+    publish_issue_monitor_control_with_timeout(project_root, payload, Duration::from_secs(5))
+}
+
 /// Use a bounded custom budget for controls outside the GUI hot path.
 pub fn publish_issue_monitor_control_with_timeout(
     project_root: &Path,
@@ -548,13 +558,29 @@ pub fn publish_issue_monitor_window_snapshot(
     snapshot: &crate::IssueMonitorWindowSnapshot,
     project_tab_ids: &std::collections::BTreeSet<String>,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control(
+    publish_issue_monitor_window_snapshot_with_timeout(
+        project_root,
+        snapshot,
+        project_tab_ids,
+        DEFAULT_TIMEOUT,
+    )
+}
+
+/// Publish the same canvas control with a caller-owned timeout budget.
+pub fn publish_issue_monitor_window_snapshot_with_timeout(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+    project_tab_ids: &std::collections::BTreeSet<String>,
+    timeout: Duration,
+) -> Result<(), IssueMonitorControlPublishError> {
+    publish_issue_monitor_control_with_timeout(
         project_root,
         crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({ "window_snapshot": snapshot, "window_snapshot_project_tabs": project_tab_ids }),
             std::process::id(),
         ),
+        timeout,
     )
 }
 
@@ -573,7 +599,21 @@ pub(crate) fn read_issue_monitor_status_with_timeout(
     timeout: Duration,
 ) -> Result<Option<Value>, IssueMonitorControlPublishError> {
     let started = std::time::Instant::now();
-    let Some(endpoint) = resolve_issue_monitor_endpoint_with_liveness(project_root, &is_alive)?
+    let Some(endpoint) = resolve_issue_monitor_endpoint_with_liveness(project_root, &is_alive)
+        .map_err(|error| match error {
+            IssueMonitorControlPublishError::OutcomeUnknown(cause) => {
+                let prefs = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+                IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                    "{cause}; prefs={} authority_marker={}. Recovery: preserve the prefs and \
+                     authority marker, resolve the reported lock or invalid durable state with \
+                     the PM, then restart only this project's daemon. Do not delete the \
+                     authority marker or pending effects.",
+                    prefs.display(),
+                    crate::issue_monitor_authority_fence_path(&prefs).display(),
+                ))
+            }
+            error => error,
+        })?
     else {
         return Ok(None);
     };
@@ -797,6 +837,43 @@ async fn send_event(
 // Liveness probe shared with `cli::daemon` and `main`; see
 // `crate::process::is_process_alive`.
 use crate::process::is_process_alive as is_alive;
+
+#[cfg(test)]
+mod issue_monitor_status_tests {
+    #[test]
+    fn issue_5694_blocked_status_reports_authority_cause_and_recovery_without_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let project = temp.path().join("repo");
+        std::fs::create_dir_all(&project).expect("project");
+        let prefs = crate::issue_monitor_prefs_path_for_repo_path(&project);
+        crate::save_issue_monitor_prefs(&prefs, &crate::IssueMonitorPrefs::default())
+            .expect("prefs");
+        let marker = crate::issue_monitor_authority_fence_path(&prefs);
+        std::fs::write(&marker, "{broken").expect("malformed authority marker");
+
+        let error = super::read_issue_monitor_status(&project).expect_err("blocked authority");
+        assert!(!error.allows_local_fallback());
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("malformed or unreadable"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("Recovery:"), "{diagnostic}");
+        assert!(
+            diagnostic.contains(&prefs.display().to_string()),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&marker.display().to_string()),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("retained marker"),
+            "{broken"
+        );
+    }
+}
 
 /// Issue #4131: the canvas publish must reach the transport on every host the
 /// daemon runs on, Windows included. Kept out of the `unix`-only module below

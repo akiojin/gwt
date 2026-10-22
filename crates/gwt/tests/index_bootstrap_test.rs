@@ -130,6 +130,7 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
     let cache_root = gwt_cache_dir().join("issues").join(repo_hash.as_str());
     gwt_github::Cache::new(cache_root)
         .write_snapshot(&gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(3772),
             title: "Refresh Broker admission storm".to_string(),
             body: "Startup submits one canonical base intent.".to_string(),

@@ -2615,14 +2615,32 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         );
     }
 
+    // Resolve the empty cache before launch so a later lazy disk load cannot
+    // hide a missing direct-preset Session registration.
+    let _ = runtime.launch_wizard_cache.agent_preferences();
     runtime.restart_window_events(&codex_id);
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds, None);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
+    let uncached_sessions = runtime
+        .active_agent_sessions
+        .values()
+        .filter(|active| {
+            runtime
+                .launch_wizard_cache
+                .session_by_id(&active.session_id)
+                .is_none()
+        })
+        .map(|active| active.session_id.clone())
+        .collect::<Vec<_>>();
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();
     for id in &live_windows {
         runtime.stop_window_runtime(id);
     }
+    assert!(
+        uncached_sessions.is_empty(),
+        "direct preset Sessions must be cached before spawn for durable close: {uncached_sessions:?}"
+    );
     assert_eq!(
         live_windows.len(),
         2,

@@ -265,8 +265,62 @@ fn startup_latency_budget_passes(
         && click_ms.is_some_and(|ms| ms <= 500.0)
 }
 
+fn click_ack(log: &str, sent_at: chrono::DateTime<chrono::Utc>) -> Option<(f64, Value)> {
+    log.lines()
+        .filter_map(|line| {
+            let row: Value = serde_json::from_str(line).ok()?;
+            if row["target"] != "gwt_tray"
+                || !matches!(
+                    row["fields"]["message"].as_str(),
+                    Some(
+                        "tray request accepted during startup"
+                            | "tray Open browser launch requested"
+                    )
+                )
+            {
+                return None;
+            }
+            let received = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str()?).ok()?;
+            let elapsed = received.signed_duration_since(sent_at).to_std().ok()?;
+            Some((elapsed.as_secs_f64() * 1000.0, row))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+}
+
 #[test]
 fn startup_metric_and_native_command_contract() {
+    let sent_at = chrono::DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let ack = r#"{"timestamp":"2026-10-21T11:00:00.120+09:00","target":"gwt_tray","fields":{"message":"tray request accepted during startup"}}"#;
+    let ack_ms = |log: &str| click_ack(log, sent_at).map(|(ms, _)| ms);
+    // Reading this record after 600ms must still measure the ACK at 120ms.
+    assert_eq!(ack_ms(ack), Some(120.0));
+    assert_eq!(
+        ack_ms(&ack.replace(
+            "tray request accepted during startup",
+            "tray Open browser launch requested"
+        )),
+        Some(120.0)
+    );
+    for invalid in [
+        String::new(),
+        ack.replace("timestamp", "missing_timestamp"),
+        ack.replace("2026-10-21T11:00:00.120+09:00", "invalid"),
+        ack.replace("11:00:00.120", "10:59:59.999"),
+        ack.replace("gwt_tray", "unrelated"),
+        ack.replace("tray request accepted during startup", "unrelated"),
+    ] {
+        assert_eq!(ack_ms(&invalid), None);
+    }
+    let slow_ack = ack.replace(".120", ".500001");
+    assert!(ack_ms(&slow_ack).is_some_and(|ms| ms > 500.0 && ms < 501.0));
+    assert!(!startup_latency_budget_passes(
+        Some(100.0),
+        Some(100.0),
+        ack_ms(&slow_ack)
+    ));
+    assert_eq!(ack_ms(&format!("{slow_ack}\n{ack}")), Some(120.0));
     let mark = r#"{"startup":{"phase":"tray_ready","start_ms":0},"value":1750}"#;
     assert_eq!(tray_ready_ms(mark), Some(1750.0));
     assert!(startup_latency_budget_passes(
@@ -357,21 +411,33 @@ fn startup_tray_under_large_stopped_session_load() {
             ready = tray_ready_ms(&text);
         }
         let mut click_ms = None;
+        let mut click_observed_ms = None;
+        let mut click_sent_at = None;
+        let mut click_ack_record = None;
         if let Some(hwnd) = hwnd {
             if ready.is_some() && !is_control {
                 let click = Instant::now();
+                click_sent_at = Some(chrono::Utc::now());
                 menu_command(hwnd, OPEN);
                 while click.elapsed() < Duration::from_secs(2) {
                     text = logs(&log_dir);
-                    if text.contains("tray request accepted during startup")
-                        || text.contains("tray Open browser launch requested")
-                    {
-                        click_ms = Some(click.elapsed().as_secs_f64() * 1000.0);
+                    // The writer is asynchronous and polling has its own latency;
+                    // use the event timestamp for the native response budget.
+                    if let Some((ack_ms, record)) = click_ack(&text, click_sent_at.unwrap()) {
+                        click_ms = Some(ack_ms);
+                        click_observed_ms = Some(click.elapsed().as_secs_f64() * 1000.0);
+                        click_ack_record = Some(record);
                         break;
                     }
                     std::thread::sleep(POLL);
                 }
             }
+            eprintln!(
+                "{}",
+                json!({"run":run, "click_sent_at":click_sent_at,
+                    "click_ack_record":click_ack_record, "click_ack_ms":click_ms,
+                    "click_ack_observed_ms":click_observed_ms})
+            );
             if run == REPEATS - 1 && ready.is_some() && !is_control {
                 // Observe the whole first ten minutes, not just immediate tray readiness.
                 loop {
@@ -443,6 +509,8 @@ fn startup_tray_under_large_stopped_session_load() {
         samples.push(
             json!({"run":run, "native_window_ms":hwnd.map(|_| native_window_ms),
             "native_window_found":hwnd.is_some(), "tray_ready_ms":ready, "click_ack_ms":click_ms,
+            "click_ack_observed_ms":click_observed_ms,
+            "click_sent_at":click_sent_at, "click_ack_record":click_ack_record,
             "startup_phases":phases, "failure_stderr":stderr}),
         );
         drop(child);
@@ -473,6 +541,7 @@ fn startup_tray_under_large_stopped_session_load() {
         "dispatch_observation_seconds":600, "dispatch_observation_complete":dispatch_observation_complete,
         "max_logged_dispatch_ms":max_logged_dispatch_ms,
         "native_response_probe_timeouts":probe_timeouts, "diagnostic_logs":diagnostic_logs,
+        "click_ack_measurement":"ACK event timestamp minus send timestamp; log observation delay reported separately",
         "dispatch_measurement":"frontend timing target only; durations below the 100ms warning threshold are not logged",
         "missing_measurements":"null means unmeasured/RED, never zero"});
     let out =

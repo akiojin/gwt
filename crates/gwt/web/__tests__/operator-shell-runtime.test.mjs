@@ -11,19 +11,33 @@ const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 
-test("runtime health cell and detail subscribe to the same immutable snapshot", async () => {
+test("runtime health batches a frame into the same latest immutable cell and detail snapshot", async () => {
   const { subscribeRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof subscribeRuntimeHealth, "function");
   const { document, window } = parseHTML(html);
-  const model = createUiStateStore(null);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
   const unsubscribe = subscribeRuntimeHealth(document, model);
+  const cell = document.getElementById("op-strip-runtime-health-value");
+  const initial = cell.textContent;
+  model.update(() => ({ state: "warn", cpu_percent: 40, processes: [] }));
   const payload = { state: "hot", cpu_percent: 80, memory_bytes: 1024 ** 3,
     processes: [{ pid: 7, name: "original", cpu_percent: 80, memory_bytes: 1024 ** 3 }] };
   model.update(() => payload);
   const previous = model.read();
+  assert.equal(previous.cpu_percent, 80, "model reads stay synchronous");
+  assert.equal(cell.textContent, initial, "updates must wait for the display frame");
+  assert.equal(frames.size, 1, "a burst schedules only one display frame");
+  const flush = () => {
+    const callbacks = [...frames];
+    frames.clear();
+    callbacks.forEach(callback => callback());
+  };
   payload.processes[0].name = "mutated";
   payload.cpu_percent = 5;
-  const cell = document.getElementById("op-strip-runtime-health-value");
+  flush();
   const detail = document.getElementById("op-runtime-health-detail");
   detail.querySelector('[data-sort="cpu"]')?.dispatchEvent(new window.Event("click"));
   assert.equal(cell.textContent, "HOT 80% 1.0G");
@@ -31,13 +45,21 @@ test("runtime health cell and detail subscribe to the same immutable snapshot", 
   assert.doesNotMatch(detail.textContent, /mutated/);
   assert.equal(previous.processes[0].name, "original");
   model.update(() => ({ state: "ok", cpu_percent: 5, processes: [] }));
+  assert.equal(cell.textContent, "HOT 80% 1.0G");
+  flush();
   assert.match(cell.textContent, /^OK 5%/);
   assert.doesNotMatch(detail.textContent, /original/);
   assert.equal(previous.cpu_percent, 80);
-  unsubscribe();
   const last = cell.textContent;
   model.update(() => ({ state: "warn", cpu_percent: 50 }));
+  assert.equal(frames.size, 1);
+  const cancelled = [...frames][0];
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending display frame");
+  cancelled();
+  model.update(() => ({ state: "hot", cpu_percent: 90 }));
   assert.equal(cell.textContent, last);
+  assert.equal(frames.size, 0);
 });
 
 test("clock uses second boundaries and cancels all work while hidden", async () => {
