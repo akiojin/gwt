@@ -2678,6 +2678,15 @@ fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
 
 #[test]
 fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn() {
+    automatic_resume_capability_install(false);
+}
+
+#[test]
+fn automatic_resume_capability_install_failure_reaches_unbound_pty() {
+    automatic_resume_capability_install(true);
+}
+
+fn automatic_resume_capability_install(fail_install: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2759,6 +2768,12 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
         "ws://127.0.0.1:45155/internal/pane-ws",
     );
     runtime.agent_capability_issuer = Some(issuer.clone());
+    // The coordinator remains available; only the subsequent installer refuses.
+    let closing = fail_install.then(|| {
+        let target = issuer.issue(&repo, predecessor_session_id).unwrap();
+        let grant = issuer.grant_for_test(&target.token).unwrap();
+        issuer.begin_self_close_if_current(&grant).unwrap()
+    });
     let window_id = combined_window_id("tab-1", "agent-successor");
     let (proxy, launch_events) = AppEventProxy::stub();
 
@@ -2772,6 +2787,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
         Some(issuer.clone()),
     );
 
+    // test-hygiene: allow-wall-clock-deadline Bound the real launch worker's event delivery; no timing order is asserted.
     wait_for_recorded_event(
         "SuccessorCreated launch completion",
         &launch_events,
@@ -2791,7 +2807,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let completion = recorded
+    let mut completion = recorded
         .iter()
         .find_map(|event| match event {
             UserEvent::LaunchComplete {
@@ -2817,6 +2833,60 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
     let successor =
         gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
             .expect("load activated successor Session");
+    if fail_install {
+        assert_ne!(successor.id, predecessor_session_id);
+        assert!(successor.execution_binding.is_none());
+        assert!(completion.11.expected_execution_identity.is_none());
+        assert!(completion.11.active_launch_handshake.is_none());
+        assert!(!completion
+            .0
+            .env
+            .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV));
+        if let Some(token) = completion.0.env.get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV) {
+            let grant = issuer.grant_for_test(token).expect("unbound capability");
+            assert!(!grant.principal().authorizes_producing_mutation());
+            assert!(grant.principal().execution_binding().is_none());
+        }
+        assert!(recorded.iter().any(|event| matches!(event,
+            UserEvent::LaunchTerminalOutput { data, .. }
+                if String::from_utf8_lossy(data).contains("Resume degraded to unbound")
+                    && String::from_utf8_lossy(data).contains("closing")
+                    && String::from_utf8_lossy(data).contains("Start Work")
+        )));
+        assert!(recorded.iter().any(|event| matches!(event,
+            UserEvent::Dispatch(events) if events.iter().any(|event| matches!(&event.event,
+                BackendEvent::IssueMonitorToast { level, issue_number: Some(42), message, .. }
+                    if level == "warn" && message.contains("closing")
+            ))
+        )));
+        let retained = gwt_agent::Session::load(&predecessor_path).unwrap();
+        assert!(
+            retained.execution_binding.is_some(),
+            "retain coordinator authority for recovery"
+        );
+        // Use an input-waiting child at the real PTY seam, without a provider.
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/d", "/c", "set /p gwt_test_input="])
+        } else {
+            ("/bin/sh", vec!["-c", "read input"])
+        };
+        completion.0.command = command.into();
+        completion.0.args = args.into_iter().map(str::to_string).collect();
+        runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
+        assert!(
+            runtime.runtimes.contains_key(&window_id),
+            "degraded resume must own a PTY"
+        );
+        assert!(
+            runtime.pty_writers.read().unwrap().contains_key(&window_id),
+            "PTY accepts input"
+        );
+        assert!(runtime
+            .terminal_input_events(&window_id, "resume input\r")
+            .is_empty());
+        assert!(issuer.rollback_self_close(closing.as_ref().unwrap()));
+        return;
+    }
     let successor_identity = gwt_agent::SessionExecutionIdentity::from_session(&successor)
         .expect("validate successor Session identity")
         .expect("activated successor identity");
