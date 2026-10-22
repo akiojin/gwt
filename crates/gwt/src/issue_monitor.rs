@@ -968,6 +968,14 @@ pub struct IssueMonitorOpenPrObservation {
     pub hold: Option<IssueMonitorOpenPrHold>,
 }
 
+/// The latest aborted scan, retained independently of per-Issue failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorScanError {
+    pub message: String,
+    pub phase: String,
+    pub recorded_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -1216,6 +1224,8 @@ pub struct IssueMonitorPrefs {
     /// scanned kept reporting a completely healthy snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_error: Option<IssueMonitorScanError>,
     /// Issue #3628 (AC-5): when this project's fleet last went to zero running
     /// agents while it still had work it could run. `None` while at least one
     /// agent is running, while nothing is runnable, or while the monitor is off.
@@ -1329,6 +1339,7 @@ impl Default for IssueMonitorPrefs {
             last_control_receipt: None,
             autonomous_handoffs: Vec::new(),
             last_scan_at: None,
+            last_scan_error: None,
             agent_blackout_since: None,
         }
     }
@@ -3856,6 +3867,14 @@ pub struct IssueMonitorAgentStatus {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
+    /// Issue #3924: durable evidence of an aborted scan, including offline reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_error: Option<IssueMonitorScanError>,
+    #[serde(default)]
+    pub scan_aborted: bool,
+    /// `failed_issues` identifies a historical banner rather than a scan fault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_source: Option<String>,
     /// Issue #3633 (AC-5): why the scan cadence looks stopped, when it does.
     ///
     /// Deliberately its own field rather than a projection onto `last_error`.
@@ -4775,6 +4794,8 @@ pub struct IssueMonitorState {
     #[serde(default, skip)]
     legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
     last_scan_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_scan_error: Option<IssueMonitorScanError>,
     /// Authority recovery blocks the daemon until replacement; ordinary scan
     /// success or failure must not erase its cause and recovery instructions.
     #[serde(skip)]
@@ -7575,6 +7596,7 @@ impl IssueMonitorState {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
             last_scan_at: None,
+            last_scan_error: None,
             scan_recovery_error: None,
             agent_blackout_since: None,
             last_error: None,
@@ -7686,6 +7708,7 @@ impl IssueMonitorState {
         state.terminal_queue_exclusions = prefs.terminal_queue_exclusions;
         state.terminal_queue_auto_refill_limit = prefs.terminal_queue_auto_refill_limit;
         state.last_scan_at = prefs.last_scan_at;
+        state.last_scan_error = prefs.last_scan_error;
         state.agent_blackout_since = prefs.agent_blackout_since;
         state.provider_quota_holds = normalize_provider_quota_holds(&prefs.provider_quota_holds);
         state.provider_quota_hold_evidence =
@@ -7944,6 +7967,7 @@ impl IssueMonitorState {
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
             last_scan_at: self.last_scan_at.clone(),
+            last_scan_error: self.last_scan_error.clone(),
             agent_blackout_since: self.agent_blackout_since.clone(),
         }
     }
@@ -10531,6 +10555,34 @@ impl IssueMonitorState {
         self.last_scan_at = last_scan_at;
     }
 
+    /// A cache-only rebuild is not a successful scan and must retain its fault.
+    pub(crate) fn restore_persisted_scan_diagnostics(&mut self, prefs: &IssueMonitorPrefs) {
+        if self
+            .last_scan_error
+            .as_ref()
+            .is_some_and(|error| self.last_error.as_deref() == Some(error.message.as_str()))
+        {
+            self.last_error = None;
+        }
+        self.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
+        self.last_scan_error = prefs.last_scan_error.clone();
+    }
+
+    pub(crate) fn record_scan_failure(
+        &mut self,
+        now: impl Into<String>,
+        phase: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        let error = IssueMonitorScanError {
+            message: error.into(),
+            phase: phase.into(),
+            recorded_at: now.into(),
+        };
+        self.record_scan_error(error.recorded_at.clone(), error.message.clone());
+        self.last_scan_error = Some(error);
+    }
+
     pub fn record_scan_error(&mut self, now: impl Into<String>, error: impl Into<String>) {
         self.last_scan_at = Some(now.into());
         self.last_error = Some(error.into());
@@ -11683,6 +11735,7 @@ impl IssueMonitorState {
     /// drive autonomous lifecycle transitions, so disk owns the complete
     /// autonomous record map, including an updated value for an existing key.
     pub fn rebase_gui_observer_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.restore_persisted_scan_diagnostics(disk);
         self.missing_window_observations = disk.missing_window_observations.clone();
         self.rebase_cross_process_prefs(disk, AutonomousRecordRebasePolicy::DiskAuthoritative);
     }
@@ -13310,6 +13363,16 @@ impl IssueMonitorState {
         // banner. It is the one condition where the rest of this view is
         // describing state that was destroyed rather than state that happened,
         // so a reader must see it before drawing any conclusion from the queue.
+        let current_error =
+            self.last_error
+                .as_ref()
+                .filter(|message| {
+                    !self.is_stop_only_error_banner(message)
+                        && !self.failed_issues.iter().any(|(number, reason)| {
+                            *message == &format!("issue #{number}: {reason}")
+                        })
+                })
+                .cloned();
         let last_error = self.scan_recovery_error.clone().or_else(|| self
             .last_prefs_reset
             .as_ref()
@@ -13322,6 +13385,8 @@ impl IssueMonitorState {
                     reason = reset.reason,
                 )
             })
+            .or_else(|| current_error.clone())
+            .or_else(|| self.last_scan_error.as_ref().map(|error| error.message.clone()))
             .or_else(|| {
                 self.last_error
                     .as_ref()
@@ -13334,11 +13399,7 @@ impl IssueMonitorState {
         let has_current_error = self.scan_recovery_error.is_some()
             || self.last_prefs_reset.is_some()
             || (!self.launch_auth_required
-                && self.last_error.as_ref().is_some_and(|error| {
-                    !self.failed_issues.iter().any(|(issue_number, reason)| {
-                        error == &format!("issue #{issue_number}: {reason}")
-                    })
-                }));
+                && (self.last_scan_error.is_some() || current_error.is_some()));
         let host = crate::process::current_hostname();
         let local_entries = self.terminal_queues.get(&host).map(|queue| {
             queue
@@ -13899,8 +13960,28 @@ impl IssueMonitorState {
                     }
                 }),
             closure_held: self.closure_held.iter().copied().collect(),
+            last_error_source: status.last_error.as_ref().map(|message| {
+                if self
+                    .last_scan_error
+                    .as_ref()
+                    .is_some_and(|error| &error.message == message)
+                {
+                    "scan_failure"
+                } else if self
+                    .failed_issues
+                    .iter()
+                    .any(|(number, reason)| message == &format!("issue #{number}: {reason}"))
+                {
+                    "failed_issues"
+                } else {
+                    "monitor"
+                }
+                .to_string()
+            }),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
+            last_scan_error: self.last_scan_error.clone(),
+            scan_aborted: self.last_scan_error.is_some(),
             scan_stall: None,
             agent_blackout: None,
             needs_human_fleet: self.fleet_needs_human_at(now),
@@ -23655,6 +23736,7 @@ pub fn scan_issue_monitor_candidates(
             || monitor.launched_windows.contains_key(&item.issue.number)
     });
     monitor.last_scan_at = Some(now.to_string());
+    monitor.last_scan_error = None;
     monitor.last_error = None;
     monitor.launch_auth_required = false;
     // Issue #4918 AC-5: anchored to the scan, so the recorded instant is a real
@@ -25215,6 +25297,9 @@ mod tests {
                     source: IssueMonitorCandidateSource::Cache,
                 }),
                 closure_held: Vec::new(),
+                last_scan_error: None,
+                scan_aborted: false,
+                last_error_source: None,
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
                 // `agent_status` reports the queue; the scan-cadence and
@@ -32175,10 +32260,50 @@ mod tests {
             "a successful scan retains the Issue diagnostic for notifications"
         );
         assert_eq!(monitor.status_view().state, "idle");
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(status["last_error_source"], "failed_issues");
+        assert_eq!(status["scan_aborted"], false);
+        assert!(status["last_scan_error"].is_null());
         monitor.last_error = Some("issue #42: stopped: operator pause".to_string());
         monitor.failed_issues.remove(&99);
         assert_eq!(monitor.status_view().last_error, None);
         assert_ne!(monitor.status_view().state, "error");
+    }
+
+    #[test]
+    fn issue_3924_scan_diagnostics_follow_observer_and_driver_authority() {
+        let mut driver = test_monitor(IssueMonitorConfig::default());
+        let mut observer = driver.clone();
+        driver.record_scan_failure("2026-10-22T00:00:00Z", "candidate-load", "scan failed");
+        let failed = driver.prefs();
+        observer.rebase_gui_observer_prefs(&failed);
+        assert_eq!(observer.prefs().last_scan_error, failed.last_scan_error);
+        assert_eq!(observer.prefs().last_scan_at, failed.last_scan_at);
+
+        observer.record_scan_failure("2026-10-22T00:00:00Z", "candidate-load", "old fault");
+        scan_queued_candidates(&mut driver, &[], "2026-10-22T00:00:01Z");
+        observer.rebase_gui_observer_prefs(&driver.prefs());
+        assert!(observer.prefs().last_scan_error.is_none());
+        assert!(observer.status_view().last_error.is_none());
+        driver.rebase_daemon_driver_prefs(&failed);
+        assert!(driver.prefs().last_scan_error.is_none());
+
+        driver.record_scan_failure("2026-10-22T00:00:02Z", "candidate-load", "scan failed");
+        driver.record_control_commit_error("current control fault");
+        assert_eq!(
+            driver.status_view().last_error.as_deref(),
+            Some("current control fault")
+        );
+        let status = serde_json::to_value(driver.agent_status()).unwrap();
+        assert_eq!(status["last_error_source"], "monitor");
+        driver.config.enabled = true;
+        driver.record_launch_auth_required("2026-10-22T00:00:03Z");
+        assert_eq!(driver.status_view().state, "auth_required");
+        assert_eq!(
+            driver.status_view().last_error.as_deref(),
+            Some(github_auth_setup_message())
+        );
+        assert!(driver.prefs().last_scan_error.is_some());
     }
 
     /// Issue #4425 AC-4: a failed launch loses its live identity before the
