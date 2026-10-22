@@ -2914,6 +2914,17 @@ fn try_apply_typed_issue_monitor_failure(
         IssueMonitorControl::AgentFailed {
             issue_number,
             window_id,
+            failure: Some(crate::IssueMonitorFailure::ProviderAuthenticationRequired { provider }),
+            ..
+        } => {
+            let issue_number = issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+            Some(issue_number.is_some_and(|issue_number| {
+                monitor.try_escalate_provider_auth_notice(issue_number, &window_id, &provider)
+            }))
+        }
+        IssueMonitorControl::AgentFailed {
+            issue_number,
+            window_id,
             message,
             failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
             ..
@@ -2971,7 +2982,11 @@ fn try_apply_typed_issue_monitor_failure(
         // launch channel has no source window identity and is never allowed to
         // commit this terminal transition.
         IssueMonitorControl::LaunchFailed {
-            failure: Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt),
+            failure:
+                Some(
+                    crate::IssueMonitorFailure::CodexDirectoryTrustPrompt
+                    | crate::IssueMonitorFailure::ProviderAuthenticationRequired { .. },
+                ),
             ..
         } => Some(false),
         IssueMonitorControl::LaunchFailed {
@@ -3188,7 +3203,10 @@ fn apply_routine_issue_monitor_control(
             // Issue #3616: the launch path cannot observe a provider refusal —
             // the agent has to be running to be refused.
             Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
-            Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
+            Some(
+                crate::IssueMonitorFailure::CodexDirectoryTrustPrompt
+                | crate::IssueMonitorFailure::ProviderAuthenticationRequired { .. },
+            ) => false,
             Some(crate::IssueMonitorFailure::Termination { .. }) => false,
             None => monitor.record_launch_failed_delivery_at(
                 issue_number,
@@ -3243,6 +3261,13 @@ fn apply_routine_issue_monitor_control(
                     evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
+            }
+            Some(crate::IssueMonitorFailure::ProviderAuthenticationRequired { provider }) => {
+                let issue_number =
+                    issue_number.or_else(|| monitor.launched_window_issue(&window_id));
+                issue_number.is_some_and(|issue_number| {
+                    monitor.try_escalate_provider_auth_notice(issue_number, &window_id, &provider)
+                })
             }
             Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                 let issue_number =
@@ -12227,6 +12252,47 @@ exit 0
                 "the typed failure and optional known holder must survive daemon decode"
             );
         }
+    }
+
+    #[test]
+    fn provider_auth_notice_control_is_typed_and_rejects_a_stale_pane() {
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..Default::default()
+            },
+        );
+        let control = |window: &str| {
+            decode_issue_monitor_control(
+            crate::runtime_daemon_events::issue_monitor_payload("control", serde_json::json!({
+                "agent_failed": { "issue_number": 42, "window_id": window,
+                    "message": "Codex reauthentication required",
+                    "failure": { "kind": "provider_authentication_required", "provider": "codex" } }
+            }), std::process::id() + 1),
+        ).unwrap()
+        };
+        let before = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            control("tab-1::old")
+        ));
+        assert_eq!(monitor.prefs(), before);
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            control("tab-1::agent-42")
+        ));
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::AutonomousPhase::NeedsHuman
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().retry_not_before,
+            None
+        );
     }
 
     #[test]

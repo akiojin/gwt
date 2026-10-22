@@ -1761,6 +1761,8 @@ pub enum IssueMonitorFailure {
     /// Only the exact Issue Monitor window binding may commit this terminal
     /// human handoff; standalone and stale panes are rejected by the driver.
     CodexDirectoryTrustPrompt,
+    /// Issue #4224: the running CLI requires a person to sign in again.
+    ProviderAuthenticationRequired { provider: String },
     /// Issue #3616: the provider backing the agent ran out of quota.
     ///
     /// Distinct from every other agent exit because the cause is stated by the
@@ -4561,6 +4563,18 @@ pub fn provider_auth_state_from_env(agent_id: &str) -> ProviderAuthState {
     )
 }
 
+/// A live provider request that waiting cannot repair (Issue #4224).
+pub fn provider_reauthentication_required_message(agent_id: &str) -> String {
+    let provider = match usage_provider_for_agent(agent_id) {
+        Some(gwt_core::usage::UsageProvider::Codex) => "Codex",
+        Some(gwt_core::usage::UsageProvider::ClaudeCode) => "Claude Code",
+        None => agent_id,
+    };
+    format!(
+        "{provider} reauthentication required; sign in to the provider CLI, then retry the Issue."
+    )
+}
+
 /// Identifiable launch-refusal message for an unauthenticated provider CLI
 /// (Issue #3676 AC-2). The `provider_unauthenticated:` prefix is the machine
 /// marker; the rest tells the operator how to restore the provider.
@@ -5359,14 +5373,14 @@ pub enum AutonomousPhase {
     Delivering,
     /// Work merged — terminal success for the autonomous path.
     Merged,
-    /// Parked for a human decision. Issue #3944: only a destructive-change
-    /// approval or a user choice reaches this phase (see [`NeedsHumanKind`]).
+    /// Parked for the human action described by [`NeedsHumanKind`].
     NeedsHuman,
 }
 
-/// Issue #3944 AC-1: the only two reasons an autonomous Issue may be parked in
-/// `needs_human`. Every other stop cause (stuck/idle, attempts exhausted,
-/// launch failure, readiness, CI, review, branch protection) is an automatic
+/// Human actions that can park an autonomous Issue in `needs_human`, plus
+/// the externally recoverable stranded-generation exception. Other stop causes
+/// (stuck/idle, attempts exhausted, launch failure, readiness, CI, review,
+/// branch protection) use automatic
 /// recovery: a steering request to the PM, a requeue, or `not_ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5375,6 +5389,8 @@ pub enum NeedsHumanKind {
     DestructiveChangeApproval,
     /// A spec decision only the user can make.
     UserChoiceRequired,
+    /// Waiting cannot repair the provider credentials (Issue #4224).
+    ProviderAuthenticationRequired,
     /// Issue #4200 AC-4: an execution generation still refuses every launch and
     /// nothing the Monitor can observe will ever release it.
     ///
@@ -5382,7 +5398,7 @@ pub enum NeedsHumanKind {
     /// because it is *not* retryable: the row's `launch_failed` message is
     /// indistinguishable from a transient failure, so without a park it burns
     /// the retry budget forever and then sits in the queue looking ordinary.
-    /// Unlike the other two kinds it is externally checkable, so
+    /// Unlike human handoffs it is externally checkable, so
     /// [`IssueMonitorState::release_stranded_generation_failures`] un-parks it
     /// by itself once the generation goes terminal — an operator running
     /// `issue.monitor.stop` is enough, and no human has to remember the Issue.
@@ -5395,6 +5411,7 @@ impl NeedsHumanKind {
         match self {
             Self::DestructiveChangeApproval => "destructive change approval required",
             Self::UserChoiceRequired => "user choice required",
+            Self::ProviderAuthenticationRequired => "provider reauthentication required",
             Self::StrandedExecutionGeneration => "stranded execution generation",
         }
     }
@@ -5404,6 +5421,7 @@ impl NeedsHumanKind {
         match self {
             Self::DestructiveChangeApproval => "destructive_change_approval",
             Self::UserChoiceRequired => "user_choice_required",
+            Self::ProviderAuthenticationRequired => "provider_authentication_required",
             Self::StrandedExecutionGeneration => "stranded_execution_generation",
         }
     }
@@ -9546,6 +9564,73 @@ impl IssueMonitorState {
             return false;
         }
         self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
+        true
+    }
+
+    /// Park only the current pane or the evidenced quota-waiting predecessor
+    /// when no successor has acquired its slot (Issue #4224).
+    pub fn try_escalate_provider_auth_notice(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        provider: &str,
+    ) -> bool {
+        let Some(provider) = normalize_issue_monitor_provider(provider)
+            .filter(|provider| usage_provider_for_agent(provider).is_some())
+        else {
+            return false;
+        };
+        if self.issue_is_closed(issue_number) {
+            return false;
+        }
+        let live = self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|window| issue_monitor_window_ids_match(window, source_window_id));
+        let held = !self.active_launches.contains(&issue_number)
+            && self.queue.contains(&issue_number)
+            && !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            && self.autonomous_record(issue_number).is_some_and(|record| {
+                record.retry_hold_provider.as_deref() == Some(provider.as_str())
+            })
+            && self
+                .provider_quota_hold_evidence
+                .get(&provider)
+                .is_some_and(|evidence| {
+                    let window = match evidence
+                        .attempts
+                        .iter()
+                        .rev()
+                        .find(|attempt| attempt.issue_number == Some(issue_number))
+                    {
+                        Some(attempt) => attempt.window_id.as_deref(),
+                        None if evidence.issue_number == Some(issue_number) => {
+                            evidence.window_id.as_deref()
+                        }
+                        None => None,
+                    };
+                    window.is_some_and(|window| {
+                        issue_monitor_window_ids_match(window, source_window_id)
+                    })
+                });
+        if !live && !held {
+            return false;
+        }
+        let reason = provider_reauthentication_required_message(&provider);
+        self.escalate_to_needs_human(
+            issue_number,
+            NeedsHumanKind::ProviderAuthenticationRequired,
+            &reason,
+        );
+        let record = self.autonomous_record_mut(issue_number);
+        record.retry_not_before = None;
+        record.retry_hold_reason = Some(reason);
+        // This is no longer a quota retry: a quota release must not clear
+        // the authentication diagnosis or admit an automatic retry.
+        record.retry_hold_provider = None;
         true
     }
 
@@ -33281,6 +33366,150 @@ mod tests {
             successor,
             "a stale source window cannot revoke the fresh successor"
         );
+    }
+
+    #[test]
+    fn provider_auth_notice_parks_the_owner_without_a_timed_retry() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let record = monitor.autonomous_record_mut(42);
+        record.retry_not_before = Some("2026-08-23T00:00:00Z".to_string());
+        record.retry_hold_reason = Some("Codex usage limit reached".to_string());
+        record.retry_hold_provider = Some("codex".to_string());
+        let attempts = monitor.attempt_count(42);
+
+        assert!(monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "codex"));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.attempt_count(42), attempts);
+        let record = monitor.autonomous_record(42).unwrap();
+        assert_eq!(record.phase, AutonomousPhase::NeedsHuman);
+        assert_eq!(
+            record.needs_human_kind,
+            Some(NeedsHumanKind::ProviderAuthenticationRequired)
+        );
+        assert_eq!(record.retry_not_before, None);
+        assert_eq!(record.retry_hold_provider, None);
+        let reason = record.retry_hold_reason.as_deref().unwrap();
+        assert!(reason.contains("Codex") && reason.contains("reauthentication required"));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().error_message.as_deref(),
+            Some(reason)
+        );
+
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-08-24T00:00:00Z");
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+    }
+
+    #[test]
+    fn provider_auth_notice_replaces_a_quota_wait_only_for_its_recorded_pane() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-old",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-08-23T00:00:00Z"),
+                Some(IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    "2026-08-22T00:00:00Z",
+                    "tab-1::agent-old",
+                    "quota notice",
+                )),
+                "2026-08-22T00:00:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        // A second Issue on the account replaces the top-level evidence,
+        // but the first pane is still waiting on that same provider.
+        monitor.record_candidate(issue(43));
+        monitor.complete_active_launch(43, "tab-1::agent-other");
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                43,
+                "tab-1::agent-other",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-08-23T00:00:00Z"),
+                Some(IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    "2026-08-22T00:01:00Z",
+                    "tab-1::agent-other",
+                    "quota notice",
+                )),
+                "2026-08-22T00:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        let held = monitor.prefs();
+        assert!(!monitor.try_escalate_provider_auth_notice(42, "tab-1::other", "codex"));
+        assert_eq!(monitor.prefs(), held);
+        let mut successor = test_monitor_with_prefs(IssueMonitorConfig::default(), held);
+        successor.complete_active_launch(42, "tab-1::agent-successor");
+        let before = successor.prefs();
+        assert!(!successor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "codex"));
+        assert_eq!(successor.prefs(), before);
+        assert_eq!(
+            successor.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-successor",
+                "codex",
+                "Codex usage limit reached",
+                Some("2026-08-23T00:00:00Z"),
+                Some(IssueMonitorProviderQuotaHoldEvidence::screen_notice(
+                    "2026-08-22T00:02:00Z",
+                    "tab-1::agent-successor",
+                    "quota notice",
+                )),
+                "2026-08-22T00:02:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        let before = successor.prefs();
+        assert!(!successor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "codex"));
+        assert_eq!(successor.prefs(), before);
+
+        assert!(monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "codex"));
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().retry_not_before,
+            None
+        );
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+        let reason = monitor
+            .autonomous_record(42)
+            .unwrap()
+            .retry_hold_reason
+            .clone();
+        monitor.clear_provider_quota_hold("codex", "quota reset", "2026-08-24T00:00:00Z");
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().retry_hold_reason,
+            reason
+        );
+        scan_queued_candidates(&mut monitor, &[issue(42)], "2026-08-24T00:00:00Z");
+        assert!(!monitor.queued_issue_numbers().contains(&42));
+    }
+
+    #[test]
+    fn provider_auth_notice_rejects_foreign_and_stale_panes() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let before = monitor.prefs();
+        assert!(!monitor.try_escalate_provider_auth_notice(42, "tab-2::agent-old", "codex"));
+        assert!(!monitor.try_escalate_provider_auth_notice(43, "tab-1::agent-old", "codex"));
+        assert!(!monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", ""));
+        assert_eq!(monitor.prefs(), before);
+        assert!(monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "claude"));
+        let parked = monitor.prefs();
+        assert!(!monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "claude"));
+        assert_eq!(monitor.prefs(), parked);
+        monitor.complete_active_launch(42, "tab-1::agent-successor");
+        let successor = monitor.prefs();
+        assert!(!monitor.try_escalate_provider_auth_notice(42, "tab-1::agent-old", "claude"));
+        assert_eq!(monitor.prefs(), successor);
     }
 
     #[test]
