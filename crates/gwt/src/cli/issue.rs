@@ -304,23 +304,41 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::MonitorQueueAutoRefill {
             project_root,
+            expected_config_token,
             enabled,
             limit,
-        } => run_monitor_queue_auto_refill(env, project_root.as_deref(), enabled, limit, out)?,
+        } => run_monitor_queue_auto_refill(
+            env,
+            project_root.as_deref(),
+            expected_config_token.as_deref(),
+            enabled,
+            limit,
+            out,
+        )?,
         IssueCommand::MonitorQueueUrgentLimit {
             project_root,
+            expected_config_token,
             limit,
         } => {
             let root = issue_monitor_project_root(env, project_root.as_deref())?;
-            crate::try_mutate_issue_monitor_prefs(
+            let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
                 &crate::issue_monitor_prefs_path_for_repo_path(&root),
                 |prefs| {
+                    crate::issue_monitor::check_expected_issue_monitor_config_token(
+                        prefs,
+                        expected_config_token.as_deref(),
+                    )?;
                     prefs.urgent_queue.limit = limit;
                     Ok(())
                 },
             )
             .map_err(io_as_api_error)?;
-            run_monitor_queue_list(env, Some(&root), None, out)?
+            let mut reply = monitor_queue_reply(&prefs, None);
+            reply["saved_config"] = prefs.config_observation();
+            reply["config_token"] = prefs.config_token().into();
+            out.push_str(&reply.to_string());
+            out.push('\n');
+            0
         }
         IssueCommand::MonitorQueueDemote {
             project_root,
@@ -1566,6 +1584,15 @@ fn run_monitor_queue_list<E: CliEnv>(
     let prefs =
         crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
             .map_err(io_as_api_error)?;
+    out.push_str(&monitor_queue_reply(&prefs, terminal).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn monitor_queue_reply(
+    prefs: &crate::IssueMonitorPrefs,
+    terminal: Option<&str>,
+) -> serde_json::Value {
     let key = terminal
         .unwrap_or(&crate::process::current_hostname())
         .to_string();
@@ -1582,9 +1609,7 @@ fn run_monitor_queue_list<E: CliEnv>(
             row["kind"] = "issue".into();
         }
     }
-    out.push_str(&serde_json::to_string(&projection).expect("queue serializes"));
-    out.push('\n');
-    Ok(0)
+    projection
 }
 
 /// Push Issues onto this host's terminal queue, naming every number it would
@@ -2055,6 +2080,7 @@ fn run_monitor_queue_move<E: CliEnv>(
 fn run_monitor_queue_auto_refill<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_config_token: Option<&str>,
     enabled: bool,
     limit: usize,
     out: &mut String,
@@ -2062,6 +2088,10 @@ fn run_monitor_queue_auto_refill<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            prefs,
+            expected_config_token,
+        )?;
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -2077,6 +2107,8 @@ fn run_monitor_queue_auto_refill<E: CliEnv>(
         &serde_json::json!({
             "enabled": prefs.terminal_queue_auto_refill,
             "limit": prefs.terminal_queue_auto_refill_limit,
+            "saved_config": prefs.config_observation(),
+            "config_token": prefs.config_token(),
         })
         .to_string(),
     );
@@ -6511,43 +6543,67 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh(
     repo: &str,
     numbers: &[u64],
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
-    fetch_linked_prs_bulk_via_gh_with(numbers, |query| {
-        let hub = gwt_core::process_console::global();
-        let output = gwt_core::process_console::spawn_logged_blocking(
-            &hub,
-            gwt_core::process_console::ProcessKind::Gh,
-            "gh",
-            &[
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={query}"),
-                "-f",
-                &format!("owner={owner}"),
-                "-f",
-                &format!("repo={repo}"),
-            ],
-            gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
-        )?;
-        if !output.success() {
-            return Err(io::Error::other(format!(
-                "gh api graphql failed: {}",
-                output.stderr.trim()
-            )));
-        }
-        Ok(output.stdout)
-    })
+    fetch_linked_prs_bulk_via_gh_observing(owner, repo, numbers, |_, _| {})
+}
+
+/// Publish only completed Issues, so a later page failure does not erase their
+/// evidence. The return value retains the strict all-pages error contract.
+pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    observe: impl FnMut(u64, &[LinkedPrSummary]),
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_via_gh_with_observer(
+        numbers,
+        |query| {
+            let hub = gwt_core::process_console::global();
+            let output = gwt_core::process_console::spawn_logged_blocking(
+                &hub,
+                gwt_core::process_console::ProcessKind::Gh,
+                "gh",
+                &[
+                    "api",
+                    "graphql",
+                    "-f",
+                    &format!("query={query}"),
+                    "-f",
+                    &format!("owner={owner}"),
+                    "-f",
+                    &format!("repo={repo}"),
+                ],
+                gwt_core::process_console::SpawnOptions::new("gh api graphql issue timelines"),
+            )?;
+            if !output.success() {
+                return Err(io::Error::other(format!(
+                    "gh api graphql failed: {}",
+                    output.stderr.trim()
+                )));
+            }
+            Ok(output.stdout)
+        },
+        observe,
+    )
 }
 
 /// Injectable core of [`fetch_linked_prs_bulk_via_gh`]: `run` executes one
 /// bulk query and answers its JSON body.
+#[cfg(test)]
 pub(crate) fn fetch_linked_prs_bulk_via_gh_with<F>(
     numbers: &[u64],
-    mut run: F,
+    run: F,
 ) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>>
 where
     F: FnMut(&str) -> io::Result<String>,
 {
+    fetch_linked_prs_bulk_via_gh_with_observer(numbers, run, |_, _| {})
+}
+
+fn fetch_linked_prs_bulk_via_gh_with_observer(
+    numbers: &[u64],
+    mut run: impl FnMut(&str) -> io::Result<String>,
+    mut observe: impl FnMut(u64, &[LinkedPrSummary]),
+) -> io::Result<std::collections::BTreeMap<u64, Vec<LinkedPrSummary>>> {
     let mut linked = std::collections::BTreeMap::new();
     for chunk in numbers.chunks(LINKED_PR_BULK_CHUNK) {
         let mut pending = chunk.to_vec();
@@ -6624,7 +6680,9 @@ where
                 let complete = serde_json::json!({"timelineItems": {
                     "nodes": nodes_by_issue.remove(number).unwrap_or_default()
                 }});
-                linked.insert(*number, parse_linked_pr_timeline(&complete, *number));
+                let prs = parse_linked_pr_timeline(&complete, *number);
+                observe(*number, &prs);
+                linked.insert(*number, prs);
             }
             pending = next;
         }
@@ -9681,6 +9739,48 @@ mod tests {
         );
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let observed_token = monitor.prefs().config_token();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.urgent_queue.limit = 3;
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+        let mut invoke = |token: String| {
+            let command = crate::cli::json_envelope::parse_operation(
+                "issue.monitor.queue.urgent_limit",
+                &serde_json::json!({"limit": 0, "expected_config_token": token}),
+            )
+            .unwrap();
+            let crate::cli::CliCommand::Issue(command) = command else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            let result = run(&mut env, command, &mut out);
+            (result, out)
+        };
+        let (result, out) = invoke(observed_token);
+        let error = result.expect_err("stale urgent limit must refuse");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let fresh = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let (result, out) = invoke(fresh.config_token());
+        assert_eq!(result.unwrap(), 0);
+        let saved = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(saved.urgent_queue.limit, 0);
+        assert_eq!(saved.urgent_queue.grants, fresh.urgent_queue.grants);
+        assert_eq!(saved.terminal_queues, fresh.terminal_queues);
+        assert_eq!(reply["urgent_limit"], 0);
+        assert_eq!(reply["queue_order"], serde_json::json!([1, 2]));
+        assert_eq!(reply["entries"][1]["kind"], "issue");
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
         for (operation, params) in [
             (
                 "issue.monitor.queue.urgent_limit",
@@ -10864,6 +10964,7 @@ mod tests {
                 account_id: Some("acct".to_string()),
                 account_label: None,
                 plan: Some("pro".to_string()),
+                extra_usage: None,
                 windows: vec![gwt_core::usage::UsageWindow::new(
                     gwt_core::usage::WindowKind::Weekly,
                     100.0,
@@ -12956,15 +13057,17 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(
-            &prefs_path,
-            &crate::IssueMonitorPrefs {
+        let mut seed = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
-        )
-        .expect("save prefs");
+        );
+        seed.terminal_queue_push(&[42], "test", "2026-10-22T00:00:00Z");
+        seed.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        crate::save_issue_monitor_prefs(&prefs_path, &seed.prefs()).expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
@@ -12992,6 +13095,15 @@ mod tests {
         assert!(!prefs.autonomous_mode);
         assert_eq!(prefs.max_active_agents, 3);
         assert_eq!(prefs.effect_authority_epoch, 2);
+        let record = prefs
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .unwrap();
+        assert_eq!(record.phase, crate::AutonomousPhase::Implementing);
+        assert!(record
+            .cancelled_claim_phase
+            .is_some_and(|phase| !phase.reconciled));
         let change =
             serde_json::to_value(&prefs).expect("prefs json")["max_active_last_change"].clone();
         assert_eq!(change["source"], "json_operation");

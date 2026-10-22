@@ -2401,6 +2401,7 @@ fn issue_monitor_autonomous_record(
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        cancelled_claim_phase: None,
     }
 }
 
@@ -9201,6 +9202,7 @@ fn codex_usage_account(
         account_id: None,
         account_label: None,
         plan: None,
+        extra_usage: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,

@@ -1,6 +1,119 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.136.0] - 2026-10-22
+
+### Bug Fixes
+
+- **monitor:** Guard queue refill settings against stale writes
+- **issue-monitor:** Refresh terminal holds before PR discovery
+- **monitor:** Reconcile cancelled claim phases after runtime checks
+- **usage:** Live枠優先と不正creditsの劣化を守る
+- **monitor:** 緊急キュー上限の競合更新を防止する
+- **monitor:** Cold controlの取消をruntime観測後に整合する
+
+### Features
+
+- **usage:** Fable週次枠とUsage creditsを表示する
+
+### Miscellaneous Tasks
+
+- **work:** Link refill guard delivery to pr 5989
+- **work:** Record Issue 4157 delivery PR
+- **work:** Issue #3431 の PR 関連付けを記録する
+
+### Refactor
+
+- **ui:** Batch system settings snapshot rendering
+
+### Testing
+
+- **usage:** Headed検証中のpopover開状態を保持する
+
+## [9.135.0] - 2026-10-22
+
+### Bug Fixes
+
+- **pm:** 復元する PM の権限設定を役割に合わせる
+- **monitor:** Fence settled slice continuations across stale prefs
+- **monitor:** Durable claimの権限前提を起動前に検証する
+- **monitor:** Recheck permission readiness when claims succeed
+- **monitor:** Clear in-flight phases on permission rejection
+- **pm:** Bound auxiliary delegation across intake and subscribe
+- **monitor:** Clear provisional phases for excluded candidates
+- **monitor:** Clear provisional phases on readiness rejection
+- **pm:** Preserve launch activity timestamp precision
+- **monitor:** Recheck admission holds when claims succeed
+- **pm:** Preserve capacity timestamp precision
+- **monitor:** Clear provisional phases after provider claim cancellation
+- **monitor:** Clear provisional phase when PR holds cancel claims
+- **monitor:** 古い優先順の上書きを CAS で防ぐ
+- **monitor:** Clear provisional phases after queue removal
+- **monitor:** Preserve unobserved phases during queue reconciliation
+- **monitor:** Guard launch priority updates against stale order
+- **monitor:** Clear cancelled phases across monitor toggles
+- **monitor:** Guard queue edits against stale observations
+- **monitor:** 自律モード切替で取消した起動前状態を解除する
+- **monitor:** Reconcile cancelled claims at authority changes
+- **issue-monitor:** Honor PR holds in backlog and tied observations
+- **feedback:** 公開情報と承認画面の表示範囲を制限する
+- **monitor:** Wait for startup restore inventory before launching
+- **monitor:** 古い保存設定の観測による上書きを拒否する
+- **monitor:** Continue completed slices after child exits
+- **gui:** 固定面から旧キャンバスの窓操作を撤去する
+- **verify:** 子検証プロセスから自動起動の環境変数を隔離する
+- **gui:** ターミナルの選択範囲を右クリックでコピー可能にする
+- **test:** 隔離検証でもPlaywrightの依存参照先を維持する
+- **test:** Linux CIではターミナルの明示コピーキーを使う
+- **verify:** Stop ancestry checks at recycled parent pids
+- **test:** 検証スクリプトの実行要件と作業ディレクトリを固定する
+- **monitor:** Preserve scans during liveness updates
+
+### Features
+
+- **pm:** PM runtime の skill 配布を役割に限定する
+- **monitor:** Share agent limits across projects
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3431 の復元修正 PR を記録する
+- **work:** Issue #3431 の PM skill 配布 PR を記録する
+- **work:** Record auxiliary budget pull request
+- **work:** Record activity precision pull request
+- **work:** Record capacity precision pull request
+- **work:** 優先順 CAS の PR 参照を記録する
+- **work:** Launch_now CAS の PR 参照を記録する
+- **work:** キュー変更CASのPR参照を記録する
+- **work:** Record issue 4157 relaunch delivery
+- **work:** Link issue 4157 review pull request
+- **work:** PR #5963 の参照を記録する
+- **work:** Record startup inventory delivery
+- **work:** 設定CASのPR参照を記録する
+- **work:** Issue #4878 と PR #5981 の関連付けを記録する
+- **work:** Associate issue 5966 with pr 5985
+- **work:** Link issue 5644 pull request
+
+### Refactor
+
+- **ui:** Batch project metadata rendering by frame
+- **ui:** Batch index health rendering by frame
+- **ui:** Batch agent backend rendering by frame
+- **ui:** Batch update status rendering by frame
+- **ui:** Batch workspace load notices by frame
+- **ui:** Batch release notes rendering by frame
+- **ui:** Batch update progress rendering by frame
+- **ui:** Batch custom agent list rendering by frame
+- **ui:** Skip already rendered custom agent snapshots
+- **ui:** Batch migration progress rendering by frame
+- **ui:** Batch clone progress rendering by frame
+- **ui:** Batch supported agent catalog rendering
+
+### Testing
+
+- **monitor:** Serialize partial policy save fault injection
+- **monitor:** Serialize completed-child recovery environment
+- **monitor:** Recover poisoned environment lock
+
 ## [9.134.0] - 2026-10-21
 
 ### Bug Fixes

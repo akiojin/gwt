@@ -355,11 +355,13 @@ test.describe("Autostart Settings (isolated live backend)", () => {
           const payload = typeof message === "string" ? JSON.parse(message) : null;
           // Control System replies without changing real hooks or process policy.
           if (["get_system_settings", "update_system_settings"].includes(payload?.kind)) requests.push(payload);
-          else server.send(message);
+          else if (payload?.kind !== "get_autostart_status") server.send(message);
         });
         server.onMessage(message => {
           const payload = typeof message === "string" ? JSON.parse(message) : null;
-          if (!/^system_settings(?:_updated|_error)?$/.test(payload?.kind ?? "")) socket.send(message);
+          // The explicit autostart reply below must not race a real status
+          // receipt that replaces the entire System panel during the burst probe.
+          if (!/^(?:system_settings(?:_updated|_error)?|autostart_status|autostart_error)$/.test(payload?.kind ?? "")) socket.send(message);
         });
       });
       const resource = { enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2 };
@@ -392,6 +394,57 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(language).toHaveValue("ja");
       await expect(trust).not.toBeChecked();
       await expect(status).toHaveText("Saved system settings.");
+      await trust.focus();
+      await panel.hover();
+      for (const suspendRaf of [false, true]) {
+        const result = await panel.evaluate(async (panel, { resource, suspendRaf }) => {
+          const before = panel.innerHTML;
+          const status = panel.querySelector('[data-role="system-settings-status"]')!;
+          const focused = document.activeElement;
+          const originalRaf = window.requestAnimationFrame;
+          if (suspendRaf) window.requestAnimationFrame = () => 0;
+          const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent")!;
+          let writes = 0;
+          let renderFinished: (() => void) | undefined;
+          Object.defineProperty(status, "textContent", {
+            configurable: true,
+            get() { return descriptor.get!.call(this); },
+            set(value) { writes++; descriptor.set!.call(this, value); queueMicrotask(() => renderFinished?.()); },
+          });
+          let timer: ReturnType<typeof setTimeout>;
+          const started = performance.now();
+          try {
+            const rendered = new Promise<void>((resolve, reject) => {
+              // A scalar patch may write the same text and produce no DOM mutation.
+              // Resolve from the actual renderer write after its synchronous work ends.
+              renderFinished = resolve;
+              timer = setTimeout(() => reject(new Error(`System frame exceeded one second: writes=${writes}, connected=${status.isConnected}, same=${panel.querySelector('[data-role="system-settings-status"]') === status}`)), 1000);
+            });
+            for (let index = 1; index <= 50; index++) {
+              window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+                kind: "system_settings", language: "ja", board_provider: "slack", codex_trust_managed_hooks: false,
+                agent_resource: { ...resource, build_jobs: index },
+              } }));
+            }
+            const unchangedBeforeFrame = panel.innerHTML === before && writes === 0;
+            await rendered;
+            return { unchangedBeforeFrame, writes, elapsed: performance.now() - started,
+              jobs: panel.querySelector<HTMLInputElement>('[id$="-settings-system-agent-build-jobs"]')!.value,
+              sameStatus: panel.querySelector('[data-role="system-settings-status"]') === status,
+              focused: document.activeElement === focused, hovered: panel.matches(":hover") };
+          } finally {
+            clearTimeout(timer!);
+            delete (status as any).textContent;
+            window.requestAnimationFrame = originalRaf;
+          }
+        }, { resource, suspendRaf });
+        expect(result).toMatchObject({ unchangedBeforeFrame: true, writes: 1, jobs: "50",
+          sameStatus: true, focused: true, hovered: true });
+        expect(result.elapsed).toBeLessThan(1000);
+        await info.attach(suspendRaf ? "system-settings-fallback" : "system-settings-frame", {
+          body: JSON.stringify(result), contentType: "application/json",
+        });
+      }
       const jobs = panel.getByLabel("Build parallelism per agent (jobs)", { exact: true });
       await jobs.fill("4");
       await jobs.evaluate(element => element.setAttribute("data-focused-resource", "original"));
@@ -429,6 +482,13 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(panel.getByLabel("Build parallelism per agent (jobs)", { exact: true })).toHaveValue("2");
       await expect(secret).toHaveValue("");
       expect(requests.filter(request => request.kind === "update_system_settings")).toHaveLength(2);
+      const provider = await panel.evaluate(panel => {
+        const select = panel.querySelector<HTMLSelectElement>('[id$="-settings-system-board-provider"]')!;
+        select.value = "teams";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        return panel.querySelector<HTMLElement>(".board-config-form")?.dataset.provider;
+      });
+      expect(provider).toBe("teams");
       await settings.evaluate(element => element.querySelector('select[id$="-settings-system-language"]')?.scrollIntoView({ block: "center" }));
       await info.attach(`system-settings-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
       expect(errors).toEqual([]);

@@ -739,6 +739,95 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
   }
 });
 
+test("Claude usage popover labels Fable weekly with its reported usage and reset", async () => {
+  const { createProviderUsageSurface } = await import(
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
+  );
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const resetsAt = "2031-01-02T03:04:05Z";
+    surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "ok" },
+      windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }] }],
+      consumption: [], sessions: [] });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    const row = document.querySelector('.op-usage-card[data-provider="claude_code"] .op-usage-win');
+    assert.equal(row.querySelector(".op-usage-win__lbl").textContent, "Fable weekly");
+    assert.equal(row.querySelector(".op-usage-win__pct").textContent, "0%");
+    assert.equal(row.querySelector(".op-usage-bar__fill").style.width, "0%");
+    assert.equal(row.querySelector(".op-usage-win__reset").textContent,
+      `↻ ${new Date(resetsAt).toLocaleString(undefined, {
+        month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+      })}`);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("Claude usage credits preserve supplied amounts and missing values", async () => {
+  const { createProviderUsageSurface } = await import(
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
+  );
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const account = { provider: "claude_code", state: { kind: "ok" },
+      windows: [{ kind: "weekly", used_percent: 12 }] };
+    const applyExtraUsage = extraUsage => surface.applyProviderUsageUi({
+      accounts: [{ ...account, extra_usage: extraUsage }], consumption: [], sessions: [],
+    });
+    applyExtraUsage({ is_enabled: true, used_credits: 24.5, monthly_limit: 100,
+      utilization: 24.5, currency: "USD", disabled_reason: null });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    let credits = document.querySelector('[data-usage-credits="true"]');
+    assert.ok(credits, "enabled usage credits should be visible");
+    assert.equal(credits.querySelector(".op-usage-win__lbl").textContent, "Usage credits");
+    assert.equal(credits.querySelector(".op-usage-win__pct").textContent, "25%");
+    assert.equal(credits.querySelector(".op-usage-bar__fill").style.width, "25%");
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "24.5 / 100 USD");
+
+    applyExtraUsage({ is_enabled: true, used_credits: 0, monthly_limit: null,
+      utilization: null, currency: "USD", disabled_reason: null });
+    credits = document.querySelector('[data-usage-credits="true"]');
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "0 / — USD");
+    assert.equal(credits.querySelector(".op-usage-win__pct").textContent, "—");
+    assert.equal(credits.querySelector(".op-usage-bar"), null);
+
+    applyExtraUsage({ is_enabled: true, used_credits: null, monthly_limit: null,
+      utilization: null, currency: null, disabled_reason: null });
+    credits = document.querySelector('[data-usage-credits="true"]');
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "— / —");
+    assert.doesNotMatch(credits.textContent, /0|USD/);
+
+    for (const extraUsage of [undefined, null, { is_enabled: false, used_credits: 24.5,
+      monthly_limit: 100, utilization: 24.5, currency: "USD", disabled_reason: null }]) {
+      applyExtraUsage(extraUsage);
+      assert.equal(document.querySelector('[data-usage-credits="true"]'), null);
+      assert.equal(document.querySelector(".op-usage-win__pct").textContent, "12%");
+    }
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
 test("Usage popover lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
   const { createProviderUsageSurface } = await import(
     pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
