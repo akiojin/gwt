@@ -219,6 +219,7 @@ pub enum IssueCommand {
     },
     MonitorQueueUrgentLimit {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         limit: usize,
     },
     MonitorQueueDemote {

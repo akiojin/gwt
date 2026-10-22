@@ -941,6 +941,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.urgent_limit" => {
             CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 limit: required_usize(params, "limit")?,
             })
         }
@@ -5270,6 +5273,29 @@ mod tests {
                 "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
+    }
+
+    #[test]
+    fn issue_monitor_queue_urgent_limit_config_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit { .. }) = ok(
+            "issue.monitor.queue.urgent_limit",
+            json!({"limit": 0, "expected_config_token": "observed-config"}),
+        ) else {
+            panic!("urgent limit command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.urgent_limit",
+                json!({"limit": 0, "expected_config_token": invalid}),
+            );
+        }
     }
 
     #[test]

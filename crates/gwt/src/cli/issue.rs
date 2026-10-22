@@ -317,18 +317,28 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::MonitorQueueUrgentLimit {
             project_root,
+            expected_config_token,
             limit,
         } => {
             let root = issue_monitor_project_root(env, project_root.as_deref())?;
-            crate::try_mutate_issue_monitor_prefs(
+            let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
                 &crate::issue_monitor_prefs_path_for_repo_path(&root),
                 |prefs| {
+                    crate::issue_monitor::check_expected_issue_monitor_config_token(
+                        prefs,
+                        expected_config_token.as_deref(),
+                    )?;
                     prefs.urgent_queue.limit = limit;
                     Ok(())
                 },
             )
             .map_err(io_as_api_error)?;
-            run_monitor_queue_list(env, Some(&root), None, out)?
+            let mut reply = monitor_queue_reply(&prefs, None);
+            reply["saved_config"] = prefs.config_observation();
+            reply["config_token"] = prefs.config_token().into();
+            out.push_str(&reply.to_string());
+            out.push('\n');
+            0
         }
         IssueCommand::MonitorQueueDemote {
             project_root,
@@ -1574,6 +1584,15 @@ fn run_monitor_queue_list<E: CliEnv>(
     let prefs =
         crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
             .map_err(io_as_api_error)?;
+    out.push_str(&monitor_queue_reply(&prefs, terminal).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn monitor_queue_reply(
+    prefs: &crate::IssueMonitorPrefs,
+    terminal: Option<&str>,
+) -> serde_json::Value {
     let key = terminal
         .unwrap_or(&crate::process::current_hostname())
         .to_string();
@@ -1590,9 +1609,7 @@ fn run_monitor_queue_list<E: CliEnv>(
             row["kind"] = "issue".into();
         }
     }
-    out.push_str(&serde_json::to_string(&projection).expect("queue serializes"));
-    out.push('\n');
-    Ok(0)
+    projection
 }
 
 /// Push Issues onto this host's terminal queue, naming every number it would
@@ -9704,6 +9721,48 @@ mod tests {
         );
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let observed_token = monitor.prefs().config_token();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.urgent_queue.limit = 3;
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+        let mut invoke = |token: String| {
+            let command = crate::cli::json_envelope::parse_operation(
+                "issue.monitor.queue.urgent_limit",
+                &serde_json::json!({"limit": 0, "expected_config_token": token}),
+            )
+            .unwrap();
+            let crate::cli::CliCommand::Issue(command) = command else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            let result = run(&mut env, command, &mut out);
+            (result, out)
+        };
+        let (result, out) = invoke(observed_token);
+        let error = result.expect_err("stale urgent limit must refuse");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let fresh = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let (result, out) = invoke(fresh.config_token());
+        assert_eq!(result.unwrap(), 0);
+        let saved = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(saved.urgent_queue.limit, 0);
+        assert_eq!(saved.urgent_queue.grants, fresh.urgent_queue.grants);
+        assert_eq!(saved.terminal_queues, fresh.terminal_queues);
+        assert_eq!(reply["urgent_limit"], 0);
+        assert_eq!(reply["queue_order"], serde_json::json!([1, 2]));
+        assert_eq!(reply["entries"][1]["kind"], "issue");
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
         for (operation, params) in [
             (
                 "issue.monitor.queue.urgent_limit",

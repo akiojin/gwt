@@ -565,6 +565,13 @@ even with Auto-refill off; an explicit queue removal still wins. Up to two urgen
 Issues lead the queue in assignment order by default, without changing the saved
 normal order or `max_active`. Set the head limit with
 `issue.monitor.queue.urgent_limit` (`limit: 0` disables priority, not membership).
+Before changing the limit, read `saved_config` and `config_token` from
+`issue.monitor.status`, then pass that token as `expected_config_token`.
+The saved observation includes `urgent_queue_limit`. A conflict leaves preferences
+unchanged: re-read status and reconsider the change before retrying. The reply
+retains the queue fields and includes `saved_config` and `config_token` from the
+saved snapshot. Omitting the guard retains legacy behavior; this value comparison
+does not detect ABA history.
 Overflow follows normal order. `issue.monitor.queue.demote` (`number`) persistently
 returns an Issue to normal priority, overriding its urgent label across scans and
 restarts. Queue cards and details distinguish urgent, overflow, and demotion;
