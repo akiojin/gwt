@@ -901,6 +901,8 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "execution.status"
             | "execution.continue"
             | "hook.health"
+            | "fleet.inventory"
+            | "fleet.orphans"
             | "pane.list"
             | "pane.health"
             | "pane.read"

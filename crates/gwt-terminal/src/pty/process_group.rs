@@ -241,6 +241,10 @@ mod imp {
                         self.pgid = None;
                         return Ok(true);
                     }
+                    // macOS reports EPERM for zombie-only groups; wait for
+                    // reap to establish ESRCH without treating EPERM as exit.
+                    #[cfg(target_os = "macos")]
+                    Err(Errno::EPERM) => {}
                     Err(error) => return Err(format!("probe PTY process group {pgid}: {error}")),
                     Ok(()) => {}
                 }
