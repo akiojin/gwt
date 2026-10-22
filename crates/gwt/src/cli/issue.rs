@@ -1193,7 +1193,6 @@ pub(crate) fn load_monitor_agent_status(
     }
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
-    let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor = authority.clone();
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
@@ -1205,7 +1204,8 @@ pub(crate) fn load_monitor_agent_status(
     // (this used to report the literal string `gwtd-status`) told every reader
     // the monitor had just run, which is exactly how a permanently stopped
     // monitor kept looking healthy.
-    monitor.restore_persisted_last_scan_at(persisted_last_scan_at);
+    monitor.restore_persisted_last_scan_at(prefs.last_scan_at.clone());
+    monitor.restore_persisted_scan_diagnostics(&prefs);
     // Serialize through the same projection as the daemon branch above. The
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
@@ -11273,6 +11273,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11370,6 +11373,9 @@ mod tests {
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
@@ -11519,6 +11525,9 @@ mod tests {
                 }],
                 inbox_coverage: None,
                 closure_held: Vec::new(),
+                last_scan_error: None,
+                scan_aborted: false,
+                last_error_source: None,
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
@@ -11606,6 +11615,9 @@ mod tests {
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
@@ -11893,6 +11905,8 @@ mod tests {
             .remove("max_active_agents_override");
         assert_eq!(status["released"], serde_json::json!([]));
         status.as_object_mut().unwrap().remove("released");
+        assert_eq!(status["scan_aborted"], false);
+        status.as_object_mut().unwrap().remove("scan_aborted");
         for pointer in ["/inbox", "/urgent_queue/entries"] {
             for row in status.pointer_mut(pointer).unwrap().as_array_mut().unwrap() {
                 assert_eq!(row["kind"], "issue");
@@ -12062,6 +12076,44 @@ mod tests {
                 .is_some_and(|reason| reason.contains("2020-01-01T00:00:00Z")),
             "a scan that last ran in 2020 must read as stalled: {status}"
         );
+    }
+
+    #[test]
+    fn issue_3924_status_restores_scan_failure_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let scan_error = serde_json::json!({
+            "phase": "candidate-load", "message": "original candidate load failure",
+            "recorded_at": now,
+        });
+        let mut prefs = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        prefs["enabled"] = serde_json::json!(true);
+        prefs["last_scan_at"] = serde_json::json!(now);
+        prefs["last_scan_error"] = scan_error.clone();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .unwrap();
+        let status: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(status["last_scan_error"], scan_error);
+        assert_eq!(status["last_error_source"], "scan_failure");
+        assert_eq!(status["scan_aborted"], true);
+        assert!(status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("original candidate load failure"));
     }
 
     /// Issue #4087 AC-1: the PM reads from the status snapshot that the full
@@ -15492,6 +15544,9 @@ command = "my-agent-cli"
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
+            last_scan_error: None,
+            scan_aborted: false,
+            last_error_source: None,
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,

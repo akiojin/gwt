@@ -48,6 +48,8 @@ use tokio::{
     sync::{broadcast::error::RecvError, mpsc, Notify},
 };
 
+use crate::issue_monitor_worker::record_scan_failure_ledger;
+
 use super::broadcast::{
     BroadcastHub, IssueMonitorControlCompletion, IssueMonitorControlQueueError,
     IssueMonitorControlRequest,
@@ -1399,6 +1401,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         &mut monitor,
                         chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        &scope.project_root,
                     ) {
                         let Some(next_revision) = revision.checked_add(1) else {
                             tracing::error!("issue monitor revision exhausted; stopping worker");
@@ -1446,10 +1449,13 @@ fn spawn_issue_monitor_worker_with_lease(
                             } else if captured_revision == revision
                                 && Instant::now() >= captured_deadline
                             {
-                                monitor.record_scan_error(
+                                record_scan_abort(
+                                    &mut monitor,
                                     chrono::Utc::now()
                                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                                    "issue monitor scan completed at or after the outer watchdog boundary",
+                                    "outer-watchdog",
+                                    "issue monitor scan completed at or after the outer watchdog boundary".into(),
+                                    &scope.project_root,
                                 );
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
@@ -1482,6 +1488,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 failure,
                                 chrono::Utc::now()
                                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                &scope.project_root,
                             );
                             let Some(next_revision) = revision.checked_add(1) else {
                                 tracing::error!("issue monitor revision exhausted; stopping worker");
@@ -1498,6 +1505,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 error.to_string(),
                                 chrono::Utc::now()
                                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                &scope.project_root,
                             );
                             let Some(next_revision) = revision.checked_add(1) else {
                                 tracing::error!("issue monitor revision exhausted; stopping worker");
@@ -2167,6 +2175,7 @@ fn expire_issue_monitor_scan_at_watchdog(
     in_flight: &mut Option<InFlightIssueMonitorScan>,
     monitor: &mut crate::IssueMonitorState,
     now: String,
+    project_root: &Path,
 ) -> bool {
     let Some(scan) = in_flight.as_mut() else {
         return false;
@@ -2176,7 +2185,13 @@ fn expire_issue_monitor_scan_at_watchdog(
     }
     scan.watchdog_fired = true;
     scan.handle.abort();
-    monitor.record_scan_error(now, "issue monitor scan timed out at outer watchdog stage");
+    record_scan_abort(
+        monitor,
+        now,
+        "outer-watchdog",
+        "issue monitor scan timed out at outer watchdog stage".into(),
+        project_root,
+    );
     true
 }
 
@@ -4973,17 +4988,20 @@ async fn scan_issue_monitor_once(
     // Keep a copy of the prior state so a `spawn_blocking` panic preserves it
     // instead of collapsing to a fresh default (see `scan_join_failure_fallback`).
     let preserved = monitor.clone();
+    let project_root = scope.project_root.clone();
     match spawn_issue_monitor_scan(scope, monitor, gui_connected).await {
         Ok(Ok(scanned)) => scanned,
         Ok(Err(failure)) => scan_failure_fallback(
             preserved,
             failure,
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &project_root,
         ),
         Err(error) => scan_join_failure_fallback(
             preserved,
             error.to_string(),
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &project_root,
         ),
     }
 }
@@ -5045,6 +5063,32 @@ fn spawn_issue_monitor_scan_with_deadline(
     })
 }
 
+fn record_scan_abort(
+    monitor: &mut crate::IssueMonitorState,
+    now: String,
+    phase: &str,
+    message: String,
+    project_root: &Path,
+) {
+    record_scan_failure_ledger(project_root, phase, &message, None);
+    monitor.record_scan_failure(now, phase, message);
+}
+
+fn push_scan_degradation(
+    degradations: &mut Vec<crate::issue_monitor_worker::IssueMonitorScanDegradation>,
+    project_root: &Path,
+    degradation: crate::issue_monitor_worker::IssueMonitorScanDegradation,
+) {
+    // Record before another stage can abort and discard this scan's proposal.
+    record_scan_failure_ledger(
+        project_root,
+        degradation.stage.as_str(),
+        &degradation.to_string(),
+        Some(degradation.continuation.as_str()),
+    );
+    degradations.push(degradation);
+}
+
 /// Fallback state for a `scan_issue_monitor_once` `JoinError` (the scan task
 /// panicked). It preserves the prior in-memory state — the `enabled` flag,
 /// `merged_issues`, autonomous records — and only records the scan error.
@@ -5058,8 +5102,15 @@ fn scan_join_failure_fallback(
     mut preserved: crate::IssueMonitorState,
     error: String,
     now: String,
+    project_root: &Path,
 ) -> crate::IssueMonitorState {
-    preserved.record_scan_error(now, format!("issue monitor worker join failed: {error}"));
+    record_scan_abort(
+        &mut preserved,
+        now,
+        "worker-join",
+        format!("issue monitor worker join failed: {error}"),
+        project_root,
+    );
     preserved
 }
 
@@ -5067,11 +5118,19 @@ fn scan_failure_fallback(
     mut preserved: crate::IssueMonitorState,
     failure: crate::issue_monitor_worker::IssueMonitorScanFailure,
     now: String,
+    project_root: &Path,
 ) -> crate::IssueMonitorState {
     // Issue #3963 AC-4: an aborted scan never reached the launch stage. Say so
     // in the same line, so a reader can tell it from a degraded scan
     // (`continued_with_*`) without knowing either message by heart.
-    preserved.record_scan_error(now, format!("{failure} (launch_suppressed)"));
+    let message = format!("{failure} (launch_suppressed)");
+    record_scan_abort(
+        &mut preserved,
+        now,
+        failure.stage.as_str(),
+        message,
+        project_root,
+    );
     preserved
 }
 
@@ -6444,7 +6503,7 @@ fn scan_issue_monitor_once_blocking(
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
-    use crate::issue_monitor_worker::IssueMonitorScanStage;
+    use crate::issue_monitor_worker::{IssueMonitorScanContinuation, IssueMonitorScanStage};
 
     let span =
         tracing::info_span!("issue_monitor_scan", project_root = %scope.project_root.display());
@@ -6494,13 +6553,17 @@ fn scan_issue_monitor_once_blocking(
             .live_error
             .as_deref()
             .unwrap_or("live issue list unavailable");
-        degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation {
-            stage: IssueMonitorScanStage::CandidateLoad,
-            target: Some(format!("{owner}/{repo}")),
-            continuation:
-                crate::issue_monitor_worker::IssueMonitorScanContinuation::PreviousCandidates,
-            detail: error.to_string(),
-        });
+        push_scan_degradation(
+            &mut degradations,
+            &scope.project_root,
+            crate::issue_monitor_worker::IssueMonitorScanDegradation {
+                stage: IssueMonitorScanStage::CandidateLoad,
+                target: Some(format!("{owner}/{repo}")),
+                continuation:
+                    crate::issue_monitor_worker::IssueMonitorScanContinuation::PreviousCandidates,
+                detail: error.to_string(),
+            },
+        );
     }
     timing.next("execution-observation");
     let execution_observations =
@@ -6530,75 +6593,82 @@ fn scan_issue_monitor_once_blocking(
     // They are neither confirmed nor launched this pass — the claim planner
     // skips them — and stay queued for the scan after the backoff window.
     let mut deferred_candidates = std::collections::BTreeSet::new();
-    let confirmed_previous_candidates =
-        if candidates_are_from_previous_result {
-            let claimable_cap = if monitor.has_launch_profile() {
-                monitor.effective_max_active_agents()
-            } else {
-                0
+    let confirmed_previous_candidates = if candidates_are_from_previous_result {
+        let claimable_cap = if monitor.has_launch_profile() {
+            monitor.effective_max_active_agents()
+        } else {
+            0
+        };
+        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+        let mut confirmed = std::collections::BTreeSet::new();
+        let mut deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> = None;
+        for issue_number in claimable
+            .into_iter()
+            .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
+        {
+            let Some(index) = loaded
+                .issues
+                .iter()
+                .position(|issue| issue.number == issue_number)
+            else {
+                continue;
             };
-            let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
-            let mut confirmed = std::collections::BTreeSet::new();
-            let mut deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> = None;
-            for issue_number in claimable
-                .into_iter()
-                .take(crate::issue_monitor_worker::ISSUE_MONITOR_TARGETED_REFRESH_LIMIT)
-            {
-                let Some(index) = loaded
-                    .issues
-                    .iter()
-                    .position(|issue| issue.number == issue_number)
-                else {
-                    continue;
-                };
-                match crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
-                    &scope.project_root,
-                    &owner,
-                    &repo,
-                    &loaded.issues[index],
-                ) {
-                    Ok(refreshed) => {
-                        loaded.issues[index] = refreshed;
-                        confirmed.insert(issue_number);
-                    }
-                    // Issue #4436 AC-1: a per-candidate readback failure used to
-                    // abort the whole scan (`launch_suppressed`), so one Issue
-                    // whose cache entry could not be parsed stopped every other
-                    // Issue from launching. The candidate is left unconfirmed —
-                    // exactly as for a rate-limit refusal — and the pass goes on.
-                    Err(failure) => {
-                        deferred_candidates.insert(issue_number);
-                        deferral.get_or_insert(failure);
-                    }
+            match crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
+                &scope.project_root,
+                &owner,
+                &repo,
+                &loaded.issues[index],
+            ) {
+                Ok(refreshed) => {
+                    loaded.issues[index] = refreshed;
+                    confirmed.insert(issue_number);
+                }
+                // Issue #4436 AC-1: a per-candidate readback failure used to
+                // abort the whole scan (`launch_suppressed`), so one Issue
+                // whose cache entry could not be parsed stopped every other
+                // Issue from launching. The candidate is left unconfirmed —
+                // exactly as for a rate-limit refusal — and the pass goes on.
+                Err(failure) => {
+                    record_scan_failure_ledger(
+                        &scope.project_root,
+                        failure.stage.as_str(),
+                        &failure.to_string(),
+                        Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                    );
+                    deferred_candidates.insert(issue_number);
+                    deferral.get_or_insert(failure);
                 }
             }
-            if let Some(failure) = deferral {
-                degradations.push(crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
-                failure,
-                Some(
-                    deferred_candidates
-                        .iter()
-                        .map(|issue_number| format!("#{issue_number}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+        }
+        if let Some(failure) = deferral {
+            degradations.push(
+                crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
+                    failure,
+                    Some(
+                        deferred_candidates
+                            .iter()
+                            .map(|issue_number| format!("#{issue_number}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    crate::issue_monitor_worker::IssueMonitorScanContinuation::DeferredCandidates,
                 ),
-                crate::issue_monitor_worker::IssueMonitorScanContinuation::DeferredCandidates,
-            ));
-            }
-            if !confirmed.is_empty() {
-                // Re-apply the canonical transition so the inbox rows the launch
-                // stage reads carry the confirmed state, not the remembered one.
-                crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
-                    &mut monitor,
-                    &loaded,
-                    &scope.project_root,
-                    &now,
-                );
-            }
-            confirmed
-        } else {
-            std::collections::BTreeSet::new()
-        };
+            );
+        }
+        if !confirmed.is_empty() {
+            // Re-apply the canonical transition so the inbox rows the launch
+            // stage reads carry the confirmed state, not the remembered one.
+            crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                &mut monitor,
+                &loaded,
+                &scope.project_root,
+                &now,
+            );
+        }
+        confirmed
+    } else {
+        std::collections::BTreeSet::new()
+    };
     // Merge discovery must leave the launch reserve intact. A later read or
     // deadline check can fail after slots were reconciled, so adopt those
     // changes only when the whole stage completes successfully.
@@ -6620,7 +6690,9 @@ fn scan_issue_monitor_once_blocking(
             reconciliation
         }
         Err(failure) => {
-            degradations.push(
+            push_scan_degradation(
+                &mut degradations,
+                &scope.project_root,
                 crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
                     failure,
                     Some(format!("{owner}/{repo}")),
@@ -6635,15 +6707,15 @@ fn scan_issue_monitor_once_blocking(
     // the SPEC #3165 human-gated flow unchanged).
     timing.next("autonomous-eligibility");
     if loaded.authorizes_remote_effects() {
-        degradations.extend(
-            crate::issue_monitor_worker::try_apply_autonomous_eligibility(
-                &mut monitor,
-                &loaded.issues,
-                &format!("{owner}/{repo}"),
-                &scope.project_root,
-                &now,
-            )?,
-        );
+        for degradation in crate::issue_monitor_worker::try_apply_autonomous_eligibility(
+            &mut monitor,
+            &loaded.issues,
+            &format!("{owner}/{repo}"),
+            &scope.project_root,
+            &now,
+        )? {
+            push_scan_degradation(&mut degradations, &scope.project_root, degradation);
+        }
     }
     // Issue #3478 (FR-025): drive the question handoffs the intercepting hook
     // wrote. Parking runs BEFORE the stuck sweep so a recognized question frees
@@ -6706,16 +6778,16 @@ fn scan_issue_monitor_once_blocking(
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
     timing.next("autonomous-progress");
     if loaded.authorizes_remote_effects() {
-        degradations.extend(
-            crate::issue_monitor_worker::try_advance_autonomous_in_flight(
-                &mut monitor,
-                &loaded.issues,
-                &format!("{owner}/{repo}"),
-                &scope.project_root,
-                daemon_run_secret(),
-                &now,
-            )?,
-        );
+        for degradation in crate::issue_monitor_worker::try_advance_autonomous_in_flight(
+            &mut monitor,
+            &loaded.issues,
+            &format!("{owner}/{repo}"),
+            &scope.project_root,
+            daemon_run_secret(),
+            &now,
+        )? {
+            push_scan_degradation(&mut degradations, &scope.project_root, degradation);
+        }
         // Issue #3970 AC-1: a confirmed delivery retires its work branch. The
         // prune is self-reporting and never fails the scan — an unreadable or
         // rate-limited remote just leaves the branches for the next delivery.
@@ -6809,6 +6881,12 @@ fn scan_issue_monitor_once_blocking(
                                 &failure.detail,
                             ) =>
                         {
+                            record_scan_failure_ledger(
+                                &scope.project_root,
+                                failure.stage.as_str(),
+                                &failure.to_string(),
+                                Some(IssueMonitorScanContinuation::DeferredCandidates.as_str()),
+                            );
                             probe_deferred.insert(issue_number);
                             probe_deferral.get_or_insert(failure);
                             Ok(crate::issue_monitor::ClaimProbeOutcome::Deferred)
@@ -7994,6 +8072,189 @@ fn issue_4783_scan_commit_does_not_restore_a_binding_removed_by_verified_ownersh
 // handshake / status / publish / subscribe) is covered on every host by
 // `super::client::tests`, `super::transport::tests`, and
 // `crate::daemon_subscriber::tests`.
+#[cfg(test)]
+mod scan_failure_contract_tests {
+    use super::test_monitor_with_prefs;
+
+    #[test]
+    fn issue_3924_degradation_survives_a_later_scan_abort() {
+        use crate::issue_monitor_worker::{
+            IssueMonitorScanContinuation, IssueMonitorScanDegradation, IssueMonitorScanFailure,
+            IssueMonitorScanStage,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut degradations = Vec::new();
+        super::push_scan_degradation(
+            &mut degradations,
+            temp.path(),
+            IssueMonitorScanDegradation::new(
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::MergeReconciliation,
+                    "merge read failed",
+                ),
+                None,
+                IssueMonitorScanContinuation::PreviousCandidates,
+            ),
+        );
+        let preserved = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        let failed = super::scan_failure_fallback(
+            preserved,
+            IssueMonitorScanFailure::new(
+                IssueMonitorScanStage::DefaultBaseBranch,
+                "base read failed",
+            ),
+            "2026-10-22T00:00:00Z".into(),
+            temp.path(),
+        );
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].context["stage"], "merge-reconciliation");
+        assert!(rows[0].message.contains("merge read failed"));
+        assert_eq!(rows[1].context["stage"], "default-base-branch");
+        assert!(rows[1].message.contains("base read failed"));
+        assert_eq!(
+            failed.agent_status().last_scan_error.unwrap().phase,
+            "default-base-branch"
+        );
+    }
+
+    #[test]
+    fn issue_3924_scan_failure_is_queryable_with_stage_and_status() {
+        use crate::issue_monitor_worker::IssueMonitorScanStage::*;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let since = chrono::DateTime::from_timestamp(0, 0).unwrap();
+        for stage in [
+            RemoteResolution,
+            CandidateLoad,
+            MergeReconciliation,
+            DefaultBaseBranch,
+            BranchProtection,
+            OpenPrReadback,
+            HeadShaReadback,
+            PrDiffReadback,
+            StatusCheckReadback,
+            MergeCommitReadback,
+            MergeabilityReadback,
+            ClaimCompletionReadback,
+            MergedIssueSettlementReadback,
+            BranchPrune,
+            ProposalReturn,
+        ] {
+            let preserved = test_monitor_with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    enabled: true,
+                    failed_issues: vec![crate::IssueMonitorFailedIssue {
+                        issue_number: 42,
+                        message: "old launch failure".into(),
+                        window_id: None,
+                    }],
+                    ..crate::IssueMonitorPrefs::default()
+                },
+            );
+            let failure = crate::issue_monitor_worker::IssueMonitorScanFailure::new(
+                stage,
+                "original GitHub readback failure",
+            );
+            let mut failed = super::scan_failure_fallback(
+                preserved,
+                failure,
+                "2026-10-22T00:00:00Z".into(),
+                temp.path(),
+            );
+            let status = serde_json::to_value(failed.agent_status()).unwrap();
+            assert_eq!(status["last_scan_error"]["phase"], stage.as_str());
+            assert_eq!(
+                status["last_scan_error"]["recorded_at"],
+                "2026-10-22T00:00:00Z"
+            );
+            assert!(status["last_scan_error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("original GitHub readback failure"));
+            assert_eq!(status["last_error_source"], "scan_failure");
+            assert_eq!(status["scan_aborted"], true);
+            assert_eq!(status["last_error"], status["last_scan_error"]["message"]);
+            let restored = test_monitor_with_prefs(
+                crate::IssueMonitorConfig::default(),
+                serde_json::from_value(serde_json::to_value(failed.prefs()).unwrap()).unwrap(),
+            );
+            let restored_status = serde_json::to_value(restored.agent_status()).unwrap();
+            assert_eq!(
+                restored_status["last_scan_error"],
+                status["last_scan_error"]
+            );
+            assert_eq!(restored_status["last_error"], status["last_error"]);
+            let records = gwt_core::error_ledger::list_since(Some(since)).expect("ledger");
+            let row = serde_json::to_value(records.last().expect("scan failure row")).unwrap();
+            assert_eq!(row["kind"], "scan_failure");
+            assert_eq!(row["context"]["stage"], stage.as_str());
+            assert_eq!(
+                row["target"]["project_root"],
+                temp.path().display().to_string()
+            );
+            assert!(row["message"]
+                .as_str()
+                .unwrap()
+                .contains("original GitHub readback failure"));
+            crate::scan_issue_monitor_candidates(&mut failed, &[], "2026-10-22T00:00:01Z");
+            let recovered = serde_json::to_value(failed.agent_status()).unwrap();
+            assert!(recovered["last_scan_error"].is_null());
+            assert_eq!(recovered["scan_aborted"], false);
+            assert_eq!(recovered["last_error_source"], "failed_issues");
+            assert_ne!(failed.status_view().state, "error");
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_3924_watchdog_and_join_report_the_latest_abort() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        let mut in_flight = Some(super::InFlightIssueMonitorScan {
+            revision: 0,
+            authority_epoch: 0,
+            handle: tokio::spawn(std::future::pending()),
+            deadline: std::time::Instant::now(),
+            watchdog_fired: false,
+        });
+        assert!(super::expire_issue_monitor_scan_at_watchdog(
+            &mut in_flight,
+            &mut monitor,
+            "2026-10-22T00:00:00Z".into(),
+            temp.path(),
+        ));
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(status["scan_aborted"], true);
+        assert_eq!(status["last_scan_error"]["phase"], "outer-watchdog");
+        let monitor = super::scan_join_failure_fallback(
+            monitor,
+            "worker panic".into(),
+            "2026-10-22T00:00:01Z".into(),
+            temp.path(),
+        );
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        assert_eq!(status["last_scan_error"]["phase"], "worker-join");
+        assert!(status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("worker panic"));
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.kind == gwt_core::error_ledger::ErrorKind::ScanFailure));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::{test_monitor, test_monitor_with_prefs};
@@ -14555,6 +14816,15 @@ exit 0
             .expect("the degraded scan still reports merge discovery failure");
         assert!(error.contains("merge-reconciliation"), "{error}");
         assert!(error.contains(expected_error), "{error}");
+        let rows = gwt_core::error_ledger::list_since(None).expect("scan ledger");
+        assert!(rows.iter().any(|row| {
+            row.kind == gwt_core::error_ledger::ErrorKind::ScanFailure
+                && row.context.get("stage").map(String::as_str) == Some("merge-reconciliation")
+                && row.message.contains(expected_error)
+                && row.context.get("continuation").map(String::as_str)
+                    == Some("continued_with_previous_candidates")
+        }));
+        assert!(!monitor.agent_status().scan_aborted);
         assert!(
             error.contains("continued_with_previous_candidates"),
             "{error}"
@@ -19631,6 +19901,7 @@ exit 1
             &mut in_flight,
             &mut canonical,
             "2026-07-27T00:00:00Z".to_string(),
+            temp.path(),
         ));
 
         let retained = in_flight.as_ref().expect("single-flight handle retained");
@@ -19834,8 +20105,12 @@ exit 1
             "operation deadline expired",
         );
 
-        let failed =
-            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        let failed = super::scan_failure_fallback(
+            preserved,
+            failure,
+            "2026-07-28T00:00:00Z".to_string(),
+            std::path::Path::new("."),
+        );
 
         assert_eq!(failed.effect_authority_epoch(), 7);
         assert_eq!(failed.pending_effects(), &[effect]);
@@ -22659,8 +22934,12 @@ exit 1
         let preserved = monitor.clone();
         let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect_err("remote failure stays typed");
-        let mut monitor =
-            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        let mut monitor = super::scan_failure_fallback(
+            preserved,
+            failure,
+            "2026-07-28T00:00:00Z".to_string(),
+            std::path::Path::new("."),
+        );
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
 
         assert_eq!(
@@ -22880,6 +23159,7 @@ exit 1
             monitor,
             "task panicked".to_string(),
             "2026-06-30T00:00:00Z".to_string(),
+            std::path::Path::new("."),
         );
 
         assert!(
@@ -23284,8 +23564,12 @@ exit 1
         let preserved = monitor.clone();
         let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect_err("remote failure stays typed");
-        let mut monitor =
-            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        let mut monitor = super::scan_failure_fallback(
+            preserved,
+            failure,
+            "2026-07-28T00:00:00Z".to_string(),
+            std::path::Path::new("."),
+        );
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
         let prefs = monitor.prefs();
 
