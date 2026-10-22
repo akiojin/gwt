@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use super::model_context;
 use super::types::{
-    ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
+    ExtraUsage, ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
 };
 
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -25,6 +25,7 @@ const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeAccount {
     pub windows: Vec<UsageWindow>,
+    pub extra_usage: Option<ExtraUsage>,
     pub limit_reached: bool,
 }
 
@@ -60,6 +61,7 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
         ("seven_day", WindowKind::Weekly),
         ("seven_day_opus", WindowKind::OpusWeekly),
         ("seven_day_sonnet", WindowKind::SonnetWeekly),
+        ("seven_day_overage_included", WindowKind::FableWeekly),
     ] {
         if let Some(obj) = v.get(key) {
             if let Some(w) = claude_window(obj, kind, now) {
@@ -67,12 +69,54 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
             }
         }
     }
-    if windows.is_empty() {
+    // Older CLI schemas expose model_scoped; the live endpoint exposes raw
+    // weekly_scoped limits. Prefer a named window when both are present.
+    if !windows.iter().any(|w| w.kind == WindowKind::FableWeekly) {
+        let model_scoped = v
+            .get("model_scoped")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|limit| {
+                limit
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
+            })
+            .and_then(|limit| claude_window(limit, WindowKind::FableWeekly, now));
+        let fable = model_scoped.or_else(|| {
+            let limit = v.get("limits")?.as_array()?.iter().find(|limit| {
+                limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped")
+                    && limit
+                        .pointer("/scope/model/display_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
+                    && limit.pointer("/scope/surface").is_none_or(Value::is_null)
+            })?;
+            let normalized = serde_json::json!({
+                "utilization": limit.get("percent"),
+                "resets_at": limit.get("resets_at"),
+            });
+            claude_window(&normalized, WindowKind::FableWeekly, now)
+        });
+        if let Some(fable) = fable {
+            windows.push(fable);
+        }
+    }
+    let extra_usage = v
+        .get("extra_usage")
+        .and_then(|extra| serde_json::from_value::<ExtraUsage>(extra.clone()).ok())
+        .map(|mut extra| {
+            extra.utilization = extra.utilization.map(super::types::clamp_percent);
+            extra
+        });
+    if windows.is_empty() && extra_usage.is_none() {
         return None;
     }
     let limit_reached = windows.iter().any(|w| w.used_percent >= 100.0);
     Some(ClaudeAccount {
         windows,
+        extra_usage,
         limit_reached,
     })
 }
@@ -258,6 +302,7 @@ pub async fn fetch_claude_account(
                     account_id,
                     account_label,
                     plan,
+                    extra_usage: acc.extra_usage,
                     windows: acc.windows,
                     limit_reached: acc.limit_reached,
                     state: UsageState::Ok,
@@ -268,6 +313,7 @@ pub async fn fetch_claude_account(
                     account_id,
                     account_label,
                     plan,
+                    extra_usage: None,
                     windows: Vec::new(),
                     limit_reached: false,
                     state: UsageState::Unavailable {
@@ -282,6 +328,7 @@ pub async fn fetch_claude_account(
             account_id,
             account_label,
             plan,
+            extra_usage: None,
             windows: Vec::new(),
             limit_reached: false,
             state: map_status_to_state(r.status().as_u16()),
@@ -292,6 +339,7 @@ pub async fn fetch_claude_account(
             account_id,
             account_label,
             plan,
+            extra_usage: None,
             windows: Vec::new(),
             limit_reached: false,
             state: UsageState::Unavailable {
@@ -453,6 +501,77 @@ pub fn read_claude_session(home: &Path, session_id: &str) -> Option<SessionUsage
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_live_fable_weekly_limit() {
+        let acc = parse_oauth_usage(
+            include_str!("fixtures/claude-oauth-usage-2026-10-22.json"),
+            now(),
+        )
+        .unwrap();
+        let fable = acc
+            .windows
+            .iter()
+            .find(|w| w.kind.as_str() == "fable_weekly")
+            .expect("live weekly_scoped Fable limit must be retained");
+        assert_eq!(fable.used_percent, 0.0);
+        assert_eq!(
+            fable.resets_at.unwrap().to_rfc3339(),
+            "2026-10-23T09:00:00+00:00"
+        );
+        assert_eq!(acc.windows.len(), 3);
+    }
+
+    #[test]
+    fn parses_live_disabled_credits_and_enabled_credits_only() {
+        let live = parse_oauth_usage(
+            include_str!("fixtures/claude-oauth-usage-2026-10-22.json"),
+            now(),
+        )
+        .unwrap();
+        let disabled = live
+            .extra_usage
+            .expect("disabled credits retain their actual state");
+        assert!(!disabled.is_enabled);
+        assert_eq!(disabled.monthly_limit, None);
+        assert_eq!(disabled.utilization, None);
+        let enabled = parse_oauth_usage(
+            r#"{"extra_usage":{"is_enabled":true,
+            "monthly_limit":100,"used_credits":25,"utilization":25,"currency":"USD"}}"#,
+            now(),
+        )
+        .expect("credits-only response is usable")
+        .extra_usage
+        .unwrap();
+        assert!(enabled.is_enabled);
+        assert_eq!(enabled.monthly_limit, Some(100.0));
+        assert_eq!(enabled.used_credits, Some(25.0));
+        assert_eq!(enabled.utilization, Some(25.0));
+        assert_eq!(enabled.currency.as_deref(), Some("USD"));
+        let absent = parse_oauth_usage(
+            r#"{"five_hour":{"utilization":10},"extra_usage":null}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(absent.extra_usage, None);
+    }
+
+    #[test]
+    fn parses_fable_legacy_and_model_scoped_without_duplicates() {
+        let body = r#"{
+            "seven_day_overage_included": {"utilization": 40, "resets_at": "2026-10-23T09:00:00Z"},
+            "model_scoped": [{"display_name": "Fable", "utilization": 40, "resets_at": "2026-10-23T09:00:00Z"}]
+        }"#;
+        let acc = parse_oauth_usage(body, now()).expect("Fable-only response is usable");
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].kind.as_str(), "fable_weekly");
+        assert_eq!(acc.windows[0].used_percent, 40.0);
+        let model_only = r#"{"model_scoped":[{"display_name":"Fable", "utilization":55}]}"#;
+        assert_eq!(
+            parse_oauth_usage(model_only, now()).unwrap().windows[0].used_percent,
+            55.0
+        );
+    }
 
     #[test]
     fn user_agent_requires_a_valid_claude_semver() {

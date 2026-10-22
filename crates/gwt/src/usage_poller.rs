@@ -399,10 +399,10 @@ impl Poller {
                     ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
                 };
             }
-            // Only a successful fetch (has windows) replaces the cache. A
+            // Only a successful fetch (windows or credits) replaces the cache. A
             // transient failure (429 / auth / network) keeps the last good
             // value shown as stale instead of wiping the display.
-            if !fresh.windows.is_empty() {
+            if !fresh.windows.is_empty() || fresh.extra_usage.is_some() {
                 self.cached_claude = Some(fresh.clone());
                 return fresh;
             }
@@ -423,14 +423,14 @@ impl Poller {
 
 /// Serve the last good cached account (as stale) when present, else the given
 /// fallback. Keeps a transient fetch failure (e.g. 429) from wiping a usable
-/// display. "Good" = the cached value carries windows.
+/// display. "Good" = the cached value carries windows or credits.
 fn serve_cached_or(
     cached: &Option<ProviderUsage>,
     now: DateTime<Utc>,
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(c) if !c.windows.is_empty() => {
+        Some(c) if !c.windows.is_empty() || c.extra_usage.is_some() => {
             let mut c = c.clone();
             c.state = apply_staleness(c.state, c.fetched_at, now, DEFAULT_STALE_AFTER_SECS);
             c
@@ -448,7 +448,7 @@ fn serve_stale_cached_or(
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(cached) if !cached.windows.is_empty() => {
+        Some(cached) if !cached.windows.is_empty() || cached.extra_usage.is_some() => {
             let mut cached = cached.clone();
             cached.state = UsageState::Stale {
                 age_secs: cached
@@ -644,6 +644,27 @@ mod tests {
     }
 
     #[test]
+    fn credits_only_cache_survives_cooldown_and_failed_refresh() {
+        let mut good = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::Ok);
+        good.fetched_at = Some(now());
+        good.extra_usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "is_enabled":true, "monthly_limit":100, "used_credits":25,
+                "utilization":25, "currency":"USD"
+            }))
+            .unwrap(),
+        );
+        let fail = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData);
+        assert_eq!(
+            serve_cached_or(&Some(good.clone()), now(), fail.clone()),
+            good
+        );
+        let stale = serve_stale_cached_or(&Some(good.clone()), now(), fail);
+        assert_eq!(stale.extra_usage, good.extra_usage);
+        assert_eq!(stale.state, UsageState::Stale { age_secs: 0 });
+    }
+
+    #[test]
     fn serve_cached_keeps_last_good_on_failure() {
         let when = now();
         let good = ProviderUsage {
@@ -651,6 +672,7 @@ mod tests {
             account_id: None,
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
                 19.0,
@@ -921,6 +943,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
             state: UsageState::Ok,

@@ -27059,6 +27059,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,
@@ -27738,6 +27739,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: windows
                 .iter()
                 .map(|(kind, used)| gwt_core::usage::UsageWindow::new(*kind, *used, None))
@@ -45708,6 +45710,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![
                 UsageWindow::new(WindowKind::FiveHour, 26.0, None),
                 UsageWindow::new(WindowKind::Weekly, 26.0, None),
