@@ -431,7 +431,9 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
     let mut session = gwt_agent::Session::new(&project, "work/test", gwt_agent::AgentId::Codex);
     tab.workspace
         .set_session_id("agent-1", Some(session.id.clone()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     session.save(&runtime.sessions_dir).expect("save session");
     let principal = AgentSessionPrincipal::for_test(&project, "pm-session").expect("principal");
     let window_id = "tab-1::agent-1";
@@ -545,20 +547,43 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
         request(&session.id),
     );
     assert!(
-        matches!(
-            events.first(),
-            Some(OutboundEvent {
-                event: BackendEvent::PaneCloseResult {
-                    ok: true,
-                    reason: None,
-                    ..
-                },
-                ..
-            })
-        ),
-        "{events:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })),
+        "recovery must wait for process exit: {events:?}"
     );
     assert!(!runtime.window_lookup.contains_key(window_id));
+    let queued = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect::<Vec<_>>();
+    assert_eq!(queued.len(), 1, "only the proven restore queues teardown");
+    for finalizer in queued {
+        finalizer();
+    }
+    let recorded = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let replies = recorded
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => Some(events),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| {
+            matches!(event, OutboundEvent {
+        target: DispatchTarget::Client(client_id),
+        event: BackendEvent::PaneCloseResult { ok: true, window_id: closed, reason: None },
+        ..
+    } if client_id == "pane-client" && closed == window_id)
+        })
+        .count();
+    assert_eq!(
+        replies, 1,
+        "the completed restore close replies once to its requesting client"
+    );
 }
 
 /// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
@@ -988,6 +1013,12 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
         );
         thread::sleep(Duration::from_millis(100));
     };
+    #[cfg(windows)]
+    assert_eq!(
+        gwt::process::host_process_liveness(child_pid),
+        Some(true),
+        "the descendant must be running before close"
+    );
     let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
     // Issue #3777 AC-3: `active_work_projection_for_tab` no longer decodes the
     // projection inline — it schedules the background prepare and returns
@@ -1090,19 +1121,6 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
             .all(|pty| pty.try_wait().expect("probe reaped child").is_some()),
         "every finalizer must terminate and reap its detached PTY"
     );
-    let mut system = sysinfo::System::new();
-    let child = sysinfo::Pid::from_u32(child_pid);
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[child]),
-        true,
-        sysinfo::ProcessRefreshKind::nothing(),
-    );
-    assert!(
-        system
-            .process(child)
-            .is_none_or(|process| process.status() == sysinfo::ProcessStatus::Zombie),
-        "a successful peer close must leave no running descendant"
-    );
     let recorded = recorded
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1124,6 +1142,30 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
         "each reaped peer close receives one final result"
     );
     drop(recorded);
+    // Windows snapshots can retain a terminated process object with status Run.
+    // Observe the native process signal immediately, without waiting after success.
+    #[cfg(windows)]
+    assert_eq!(
+        gwt::process::host_process_liveness(child_pid),
+        Some(false),
+        "a successful peer close must leave descendant {child_pid} terminated"
+    );
+    #[cfg(unix)]
+    {
+        let mut system = sysinfo::System::new();
+        let child = sysinfo::Pid::from_u32(child_pid);
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[child]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        assert!(
+            system
+                .process(child)
+                .is_none_or(|process| process.status() == sysinfo::ProcessStatus::Zombie),
+            "a successful peer close must leave no running descendant"
+        );
+    }
     drop(child_guard);
 }
 
@@ -2993,17 +3035,8 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
             ))
             .await
             .expect("send peer close");
-        let _removed = next_test_agent_websocket_event(
-            &mut socket,
-            "workspace_state",
-            Duration::from_millis(400),
-        )
-        .await;
-        assert!(
-            close_started.elapsed() < Duration::from_millis(400),
-            "real WebSocket visible removal exceeded the bridge budget"
-        );
-
+        // Agent sockets receive client replies, not project broadcasts. Keep
+        // the seeded scope until re-close has exercised the removed target.
         let reclose_started = Instant::now();
         socket
             .send(WebSocketMessage::Text(
@@ -3020,6 +3053,11 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         )
         .await;
         assert_eq!(reclose["ok"], false);
+        assert_eq!(reclose["window_id"], target_window_id);
+        assert!(
+            close_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket close and re-close exceeded the bridge budget"
+        );
         assert!(
             reclose_started.elapsed() < Duration::from_millis(400),
             "real WebSocket failed peer re-close exceeded the bridge budget"
