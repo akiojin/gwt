@@ -74,6 +74,59 @@ test.describe("Surface rail", () => {
     });
   }
 
+  for (const id of ["pm-window", "shell-window"]) {
+    test(`fixed ${id} has no destructive canvas chrome after restoration`, async ({ page }, testInfo) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page);
+      await installSurfaceRailBackend(page, true, false, id);
+      await page.goto(surfaceAppUrl);
+      const surface = page.getByRole("region", { name: "Main pane", exact: true });
+      const content = id === "pm-window"
+        ? surface.locator(`[data-id="${id}"]`)
+        : surface.locator(`[data-agent-id="${id}"]`);
+      const assertFixed = async () => {
+        await expect(content).toBeVisible();
+        await expect(surface.locator('[data-action="close"], [data-action="minimize-to-issue"], .resize-handle, .window-tabs')).toHaveCount(0);
+        await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
+        await expect(content.locator(".issue-window-header")).toHaveCount(0);
+      };
+      await assertFixed();
+      if (id === "pm-window") {
+        const header = content.locator(".titlebar");
+        const before = await content.boundingBox();
+        await header.click();
+        const box = await header.boundingBox();
+        await page.mouse.move(box!.x + 30, box!.y + 10);
+        await page.mouse.down();
+        await page.mouse.move(box!.x + 150, box!.y + 80, { steps: 3 });
+        await page.mouse.up();
+        expect(await content.boundingBox()).toEqual(before);
+        await page.evaluate(() => (window as any).__updateSurfaceAgent("pm-window", { status: "exited" }));
+        await expect(content.locator('[data-action="restart"]')).toBeHidden();
+      }
+      await content.locator(".xterm-helper-textarea").press("Escape");
+      await content.locator(".xterm-helper-textarea").press("Delete");
+      await assertFixed();
+      await page.reload();
+      await assertFixed();
+      // A fresh document receives the persisted workspace just as a restarted
+      // GUI or an applied update does; no old DOM or renderer state survives.
+      const restored = await page.context().newPage();
+      const restoredErrors = captureBrowserErrors(restored);
+      try {
+        await installSurfaceAssets(restored);
+        await installSurfaceRailBackend(restored, true, false, id);
+        await restored.goto(surfaceAppUrl);
+        await expect(restored.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", id === "pm-window" ? "pm" : "agents");
+        await expect(restored.locator('[data-action="close"], [data-action="minimize-to-issue"], #window-close-confirm-modal')).toHaveCount(0);
+        expect(restoredErrors).toEqual([]);
+      } finally { await restored.close(); }
+      expect((await sentMessages(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window", "move_window", "resize_window"].includes(message.kind || ""))).toEqual([]);
+      await page.screenshot({ path: testInfo.outputPath(`fixed-${id}.png`) });
+      expect(errors).toEqual([]);
+    });
+  }
+
   test("Settings events and notification framing retain the fixed surface layout", async ({ page }, testInfo) => {
     const errors = captureBrowserErrors(page);
     await installSurfaceAssets(page);
@@ -179,12 +232,8 @@ test.describe("Surface rail", () => {
     await expectPm();
     await page.locator("#op-pm-settings-button").click();
     await expect(auxiliary).toHaveAttribute("data-id", auxiliaryId!);
-    await auxiliary.locator('[data-action="close"]').click();
-    const close = page.locator("#window-close-confirm-modal");
-    await close.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(auxiliary).toBeVisible();
-    await auxiliary.locator('[data-action="close"]').click();
-    await close.getByRole("button", { name: "Close window", exact: true }).click();
+    await expect(auxiliary.locator('[data-action="close"]')).toHaveCount(0);
+    await page.evaluate(id => (window as any).__removeSurfaceAgent(id), auxiliaryId);
     await expectPm();
     await page.locator("#op-pm-settings-button").click();
     await expect(auxiliary).toBeVisible();
@@ -910,6 +959,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         title: "Project Manager",
         preset: "claude",
         is_pm: true,
+        linked_issue_number: 4777,
+        minimized: true,
+        tab_group_id: "retired-pm-group",
+        tab_group_active: false,
         status: "running",
         agent_id: "pm-window",
         agent_color: "yellow",
@@ -950,6 +1003,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     if (groupedSettings) {
       Object.assign(windows.find((data) => data.id === "board-window")!, { tab_group_id: "group", tab_group_active: true });
       windows.push(canvasWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
+    }
+    if (focusedId === "shell-window") {
+      windows.push(canvasWindow(focusedId, { preset: "shell", status: "running", minimized: true,
+        tab_group_id: "retired-group", tab_group_active: false }));
     }
     if (focusedId === "legacy-issues-window") {
       windows.push(canvasWindow(focusedId, { preset: "issue", title: "Issues" }));

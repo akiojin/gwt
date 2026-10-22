@@ -36,12 +36,11 @@
 // - appendRenderKeyPart(parts, value): shared render-key primitive (also
 //   used by the render keys that stayed in app.js).
 // - runtimeStateForWindow / windowDisplayTitle / windowTitleTooltip /
-//   windowRoleBadgeLabel / windowGeometryLabel / shouldShowRuntimeStatus /
+//   windowRoleBadgeLabel / shouldShowRuntimeStatus /
 //   visibleWindowData / presetSurface: window presentation helpers owned
 //   by app.js (still used by the core window renderers there).
 // - focusWindowRemotely(windowId, opts): focus path owned by app.js.
-// - frameWindow(windowId, opts): SPEC-2008 camera-focus path owned by app.js;
-//   flies the local camera to frame a window (used by the switcher rows).
+// - frameWindow(windowId, opts): select a window in its fixed rail host.
 // - scheduleTerminalFit(windowId, persist): terminal core scheduler.
 // - visibleBounds(): current visible canvas bounds in world space.
 // - addButton: toolbar button owned by app.js
@@ -83,13 +82,11 @@ export function createProjectShellSurface({
   windowDisplayTitle,
   windowTitleTooltip,
   windowRoleBadgeLabel,
-  windowGeometryLabel,
   shouldShowRuntimeStatus,
   visibleWindowData,
   presetSurface,
   focusWindowRemotely,
-  // SPEC-2008 camera-focus: window-list rows teleport the camera to a window
-  // (frameWindow) instead of maximizing/restoring it.
+  // Window-list rows select the window in its fixed rail host.
   frameWindow,
   scheduleTerminalFit,
   visibleBounds,
@@ -146,7 +143,6 @@ export function createProjectShellSurface({
         // active tab's.
         const model = groupProjectWindowList(appState, windowListEntries);
         const appendEntryKey = (parts, entry) => {
-          const geometry = entry?.geometry || {};
           const runtimeState = runtimeStateForWindow(entry);
           appendRenderKeyPart(parts, "id");
           appendRenderKeyPart(parts, entry?.id || "");
@@ -180,27 +176,6 @@ export function createProjectShellSurface({
           appendRenderKeyPart(parts, windowDisplayTitle(entry));
           appendRenderKeyPart(parts, "title_tooltip");
           appendRenderKeyPart(parts, windowTitleTooltip(entry));
-          appendRenderKeyPart(parts, "geometry");
-          appendRenderKeyPart(parts, "x");
-          appendRenderKeyPart(parts, geometry.x ?? 0);
-          appendRenderKeyPart(parts, "y");
-          appendRenderKeyPart(parts, geometry.y ?? 0);
-          appendRenderKeyPart(parts, "width");
-          appendRenderKeyPart(parts, geometry.width ?? 0);
-          appendRenderKeyPart(parts, "height");
-          appendRenderKeyPart(parts, geometry.height ?? 0);
-          appendRenderKeyPart(parts, "geometry_label");
-          appendRenderKeyPart(parts, windowGeometryLabel(entry));
-          appendRenderKeyPart(parts, "minimized");
-          appendRenderKeyPart(parts, Boolean(entry?.minimized));
-          appendRenderKeyPart(parts, "maximized");
-          appendRenderKeyPart(parts, Boolean(entry?.maximized));
-          appendRenderKeyPart(parts, "z_index");
-          appendRenderKeyPart(parts, entry?.z_index ?? 0);
-          appendRenderKeyPart(parts, "tab_group_id");
-          appendRenderKeyPart(parts, entry?.tab_group_id || "");
-          appendRenderKeyPart(parts, "tab_group_active");
-          appendRenderKeyPart(parts, Boolean(entry?.tab_group_active));
         };
         const parts = [];
         appendRenderKeyPart(parts, "open");
@@ -487,7 +462,6 @@ export function createProjectShellSurface({
           row.dataset.agentColor = entry.agent_color;
         }
         applyWindowWorktreeData(row, entry);
-        const geometryLabel = windowGeometryLabel(entry);
         const runtimeState = runtimeStateForWindow(entry);
         const runtimeLabel = windowRuntimeLabel(runtimeState);
         const runtimeChip = shouldShowRuntimeStatus(entry)
@@ -521,17 +495,13 @@ export function createProjectShellSurface({
             <div class="window-list-meta">
               ${worktreeBadge}
               ${roleBadge}
-              <span class="window-list-geometry">${geometryLabel}</span>
             </div>
           </div>
           ${runtimeChip}
         `;
         const windowListTitle = row.querySelector(".window-list-title");
         if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
-        // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
-        // the local camera to frame the chosen window (teleport). There is no
-        // maximize/restore anymore; frameWindow applies local focus + sends
-        // focus_window for highlight.
+        // Select the live view in its fixed host and notify backend focus.
         row.addEventListener("click", () => {
           windowListOpen = false;
           renderWindowList();

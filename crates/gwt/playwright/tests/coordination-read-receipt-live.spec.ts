@@ -197,17 +197,15 @@ console.log('GWT_COORDINATION_RECORDER_READY');
       expect(closed.ok, JSON.stringify(closed)).toBe(true);
       await expect(targetPane).toHaveCount(0);
 
-      // Human close uses the real titlebar and confirmation dialog. A fresh
-      // unread post from the remaining Session must not apply the agent guard.
-      const humanEvidence = await command(caller.session_id, "board.post", {
-        kind: "status", body: "Unread evidence does not prevent a human canvas close", broadcast: true,
-      });
-      expect(humanEvidence.ok, JSON.stringify(humanEvidence)).toBe(true);
+      // The fixed surface has no human canvas-close escape. Explicit runtime
+      // cleanup still follows the read-receipt contract through pane.close.
       const callerPane = page.locator(`.workspace-window[data-id="${caller.id}"]`);
-      await callerPane.locator('[data-action="close"]').click();
-      await page.locator('#window-close-confirm-modal [data-role="window-close-confirm"]').click();
+      await expect(callerPane.locator('[data-action="close"]')).toHaveCount(0);
+      await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
+      const cleanup = await command(caller.session_id, "pane.close", { id: caller.id });
+      expect(cleanup.ok, JSON.stringify(cleanup)).toBe(true);
       await expect(callerPane).toHaveCount(0);
-      await screenshot(`explicit-read-retry-and-human-close-${theme}`);
+      await screenshot(`explicit-read-retry-and-fixed-surface-${theme}`);
       expect(errors, "console and page errors during lifecycle/read receipt checks").toEqual([]);
     } finally {
       await fixture.stop();

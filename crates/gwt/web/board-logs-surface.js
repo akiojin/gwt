@@ -80,7 +80,7 @@ export function createBoardLogsSurface({
 
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
-          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .filter((windowData) => windowData.preset === "board")
           .map((windowData) => windowData.id);
       }
 
