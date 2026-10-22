@@ -135,7 +135,7 @@ impl AppRuntime {
             Ok(()) => None,
             Err(error) if error.allows_local_fallback() => {
                 remaining()?;
-                let (cached_issues, projection_error, now) =
+                let (cached_issues, projection_error, now, source_repository) =
                     Self::load_local_issue_monitor_fallback_projection(project_root);
                 Some(
                     gwt::try_mutate_issue_monitor_prefs_without_authority_fence(
@@ -148,6 +148,11 @@ impl AppRuntime {
                             let mut monitor = gwt::IssueMonitorState::with_prefs(
                                 gwt::IssueMonitorConfig::default(),
                                 prefs.clone(),
+                            );
+                            monitor.set_source_repository(
+                                source_repository
+                                    .as_ref()
+                                    .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
                             );
                             monitor.advance_effect_authority_epoch().ok_or_else(|| {
                                 std::io::Error::other("authority epoch exhausted")

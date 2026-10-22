@@ -3483,9 +3483,13 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     // Rebase already restored the complete disk-owned pool,
                     // authority epoch and revoked effects. Reapplying would
                     // advance the epoch twice or reject the committed CAS.
-                    if candidate.prefs() != *disk {
+                    if !crate::issue_monitor::monitor_project_prefs_equal(
+                        prefs_path,
+                        &candidate.prefs(),
+                        disk,
+                    ) {
                         receipt_convergence_failed = true;
-                        return;
+                        return Ok(());
                     }
                 } else if !monitor_has_exact_receipt {
                     // The rename may have become visible while the prior
@@ -3605,7 +3609,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 IssueMonitorControl::ProfilesPatch(request) => {
                     let Ok((profiles, _)) = request.resolve(disk) else {
                         rejected = Some(IssueMonitorControlCommit::Rejected);
-                        return;
+                        return Ok(());
                     };
                     IssueMonitorControl::ProfilesSet {
                         profiles,
