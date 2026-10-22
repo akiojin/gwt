@@ -17,6 +17,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use gwt_agent::{AgentId, AgentLaunchBuilder, LaunchConfig, SessionMode};
@@ -25,11 +27,14 @@ use gwt_core::{
     workspace_projection,
 };
 
-use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
+use gwt::{
+    board_audience::{gui_default_board_scope, post_audience_for_gui},
+    pm_registry,
+};
 
 use super::{
     combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -752,6 +757,7 @@ impl AppRuntime {
             context,
             mut events,
             milestone,
+            decision_notifications,
         } = refreshed;
         if !context
             .as_ref()
@@ -759,10 +765,13 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let context = context.as_ref().expect("current Board project context");
+        for notification in decision_notifications {
+            self.notify_board_decision(context, notification);
+        }
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
-                self.project_key_for_window(id)
-                    == context.as_ref().map(|context| &context.project_key)
+                self.project_key_for_window(id) == Some(&context.project_key)
             }
             _ => false,
         });
@@ -772,6 +781,203 @@ impl AppRuntime {
             );
         }
         events
+    }
+
+    /// Board notifications have internal authority to send only this fixed
+    /// pointer to a saved decision. They never grant an agent PM input rights
+    /// or turn the decision's untrusted body into a privileged prompt.
+    fn notify_board_decision(
+        &self,
+        context: &super::ProjectContext,
+        notification: BoardDecisionNotification,
+    ) {
+        let Some((window_id, max_submit_attempts)) =
+            self.active_agent_sessions.iter().find_map(|(id, session)| {
+                if session.session_id != notification.session_id
+                    || session.window_id != *id
+                    || self.project_key_for_window(id) != Some(&context.project_key)
+                {
+                    return None;
+                }
+                let address = self.window_lookup.get(id)?;
+                let window = self
+                    .tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?;
+                (session.tab_id == address.tab_id
+                    && window.status == WindowProcessStatus::Idle
+                    && window.session_id.as_deref() == Some(notification.session_id.as_str())
+                    && window.preset.is_agent_terminal())
+                .then(|| {
+                    // Known hook providers can acknowledge a successful submit,
+                    // so reuse the existing CR-only recovery without staging a
+                    // second body. Other providers receive only one submit.
+                    let attempts =
+                        if matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
+                            || matches!(session.agent_id.as_str(), "claude" | "codex")
+                        {
+                            2
+                        } else {
+                            1
+                        };
+                    (id.clone(), attempts)
+                })
+            })
+        else {
+            return;
+        };
+        let Some(expected) = self
+            .pty_writers
+            .read()
+            .ok()
+            .and_then(|writers| writers.get(&window_id).cloned())
+            .filter(|entry| entry.project_key == context.project_key)
+        else {
+            return;
+        };
+        let Some(ordinary_revision) = expected.handle.ordinary_input_revision() else {
+            return;
+        };
+        if expected.handle.has_unsent_user_input() {
+            return;
+        }
+        let writers = Arc::clone(&self.pty_writers);
+        let receipt_path =
+            pm_registry::pm_delivery_receipts_path_for_repo_path(&context.project_root);
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _deadline =
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            let operation_id = board_notification_operation_id(&notification);
+            let short_id = notification
+                .entry_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(12)
+                .collect::<String>();
+            let body = format!(
+                "[gwt Board notification — not an owner message] Board decision {short_id} mentions this session; run board.show before continuing."
+            );
+            // Hash the complete Board source label too. The shared exact
+            // UserPromptSubmit ACK already accepts this protected marker.
+            let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
+            let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
+            let prepared = pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.clone(),
+                recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: format!("gwt-board:{}", notification.entry_id),
+                target_window_id: window_id.clone(),
+                target_session_id: notification.session_id.clone(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            };
+            match pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared) {
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Prepared) => {}
+                // Watcher/daemon duplicates and restarts never stage a second
+                // body, including when a prior attempt was unconfirmed.
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(_)) => return,
+                Err(error) => {
+                    tracing::warn!(%error, operation_id, "Board notification receipt prepare failed");
+                    return;
+                }
+            }
+            let mut attempted = false;
+            let mut lost = false;
+            let result = (|| {
+                if !writers
+                    .read()
+                    .map_err(|error| error.to_string())?
+                    .get(&window_id)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &expected))
+                {
+                    lost = true;
+                    return Err("Board notification target generation changed".to_string());
+                }
+                let reservation = Arc::clone(&expected.handle)
+                    .reserve_input_transaction()
+                    .map_err(|error| error.to_string())?;
+                super::pty_io::drive_verified_pane_submit(
+                    &prompt,
+                    reservation.bracketed_paste_enabled(),
+                    max_submit_attempts,
+                    |bytes| {
+                        reservation
+                            .write_input_authorized(bytes, |commit| {
+                                let current = writers.read().map_err(|error| {
+                                    gwt_terminal::TerminalError::PtyIoError {
+                                        details: error.to_string(),
+                                    }
+                                })?;
+                                if !current
+                                    .get(&window_id)
+                                    .is_some_and(|entry| Arc::ptr_eq(entry, &expected))
+                                {
+                                    lost = true;
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification target generation changed".into(),
+                                    });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification delivery deadline expired".into(),
+                                    });
+                                }
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut || attempted = true)
+                                })
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                    |settle| {
+                        std::thread::sleep(
+                            settle.min(deadline.saturating_duration_since(Instant::now())),
+                        )
+                    },
+                    || {
+                        pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                            .map(|receipt| {
+                                receipt.is_some_and(|receipt| {
+                                    receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+                                })
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                )
+            })();
+            let (status, reason) = match result {
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified { .. }) => {
+                    (pm_registry::PmDeliveryReceiptStatus::Verified, None)
+                }
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { .. }) => (
+                    pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+                    Some("Board notification has no exact Session acknowledgement".to_string()),
+                ),
+                Err(error) => (
+                    if lost {
+                        pm_registry::PmDeliveryReceiptStatus::Lost
+                    } else if attempted {
+                        pm_registry::PmDeliveryReceiptStatus::Unconfirmed
+                    } else {
+                        pm_registry::PmDeliveryReceiptStatus::Refused
+                    },
+                    Some(error),
+                ),
+            };
+            if let Err(error) = pm_registry::finish_pm_delivery_receipt(
+                &receipt_path,
+                &operation_id,
+                &notification.session_id,
+                &body_sha256,
+                status,
+                reason.as_deref(),
+            ) {
+                tracing::warn!(%error, operation_id, "Board notification receipt finish failed");
+            }
+        });
+        if let Err(error) = spawn {
+            tracing::warn!(%error, "Board notification worker unavailable");
+        }
     }
 
     #[cfg(test)]
@@ -813,6 +1019,30 @@ pub(crate) struct BoardProjectionRefreshed {
     /// The Workspace projection after the latest post was recorded as a Work
     /// milestone, when it resolved to one.
     pub(crate) milestone: Option<(PathBuf, workspace_projection::WorkspaceProjection)>,
+    /// Saved decision pointers, independent of whether any Board window is open.
+    pub(crate) decision_notifications: Vec<BoardDecisionNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoardDecisionNotification {
+    entry_id: String,
+    session_id: String,
+}
+
+fn board_notification_operation_id(notification: &BoardDecisionNotification) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"gwt-board-notification-v1");
+    for value in [&notification.entry_id, &notification.session_id] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.finalize()[..16]);
+    // UUIDv8: this is an application-defined deterministic identity.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
@@ -836,6 +1066,24 @@ pub(crate) fn run_board_projection_refresh(
     let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
         return (refreshed, views);
     };
+    refreshed.decision_notifications = snapshot
+        .board
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == BoardEntryKind::Decision)
+        .flat_map(|entry| {
+            entry
+                .mentions
+                .iter()
+                .filter(|mention| {
+                    mention.target_kind == coordination::BoardMentionTargetKind::Session
+                })
+                .map(|mention| BoardDecisionNotification {
+                    entry_id: entry.id.clone(),
+                    session_id: mention.target.clone(),
+                })
+        })
+        .collect();
     for window in job.windows {
         let scope = if window.all_view {
             coordination::BoardAudienceScope::All

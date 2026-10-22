@@ -1178,6 +1178,10 @@ in that same agent session with JSON operation `board.show` and
 read. Implementation agents send decision requests to `agent:pm`; only the
 registered PM may address a `user:<id>` from an agent Board post.
 
+When a Board decision mentions an idle agent session (`session:<id>`), gwt
+sends that agent a one-line notice to read the ruling and continue. Repeated
+Board refreshes do not repeat the notice.
+
 JSON operation `hook.health` lists external skill commands that conflict with
 gwt's GitHub mutation policy, together with the affected files and alternatives.
 By default it inspects enabled Claude plugins. To select explicit skill/command

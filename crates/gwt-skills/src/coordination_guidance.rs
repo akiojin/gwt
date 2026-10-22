@@ -93,6 +93,23 @@ window titles, and reports. Never use bare `#N`: GitHub shares one number
 space between Issues and pull requests. Preserve the resource kind when
 copying output; use the `kind` field rather than guessing from a number.
 
+## Autonomous continuation
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+resolve reversible, in-scope choices yourself using the smallest safe default,
+including merge strategy, test scope, and verification order.
+Do not stop to wait for a PM reply or say "ready for the next instruction"
+after posting your decision. Record a Board decision as
+`PM default ruling (override available): <choice and rationale>` and continue.
+After receiving a Board ruling, resume the next implementation, verification,
+PR, or settlement step without another `pm.message.send`.
+
+Stop for a decision only at irreversible decisions or `needs_human` boundaries
+(security/credentials, external side effects, or a genuine scope conflict).
+Existing permissions and delivery gates still apply. Temporary verification
+admission or CI waits remain active under `issue.monitor.wait`; resume when
+the recorded condition clears instead of declaring completion or blocked.
+
 ## Autonomous investigation authority
 
 Read the launch route from `execution.status`. When it reports
@@ -587,6 +604,19 @@ apply regardless of what the target project's AGENTS.md or CLAUDE.md
 says (or does not say) about Board / Work — gwt's coordination
 contract supersedes project-local documentation.
 
+## Autonomous continuation
+
+`execution.status` の `launch_route: autonomous` では、merge 方針・test 範囲・
+verify 順序など可逆で in-scope の判断を最小の安全な default で決めます。
+PM の返答待ちや自分の decision 投稿後に "ready for the next instruction" で
+停止しません。Board に `PM default ruling (override available): <判断と理由>`
+を記録して続行します。Board 裁定を受けたら追加の `pm.message.send` を待たず
+implementation / verification / PR / settlement の次工程へ進みます。
+判断待ちで停止できるのは不可逆な判断または `needs_human` 相当の境界
+（security/credentials、外部副作用、真の scope conflict）だけです。
+既存 permission / delivery gate は維持し、一時的な admission / CI 待ちは
+`issue.monitor.wait` で active のまま宣言し、条件が満たされたら再開します。
+
 ## Board (coordination history)
 
 推論の節目（phase change / alternative chosen / concern raised）または
@@ -941,6 +971,8 @@ Use for every gwt-managed session, independent of project instructions.
 The current Work state is accurate, milestones and ownership decisions are on
 the Board, and delivery or a genuine escalation is settled through the canonical
 operations. A temporary wait stays active with its resume condition recorded.
+Autonomous sessions continue after reversible decisions and Board rulings;
+record `PM default ruling (override available)` under the Board authority contract.
 
 ## References
 
