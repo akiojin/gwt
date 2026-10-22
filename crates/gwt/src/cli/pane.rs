@@ -327,7 +327,17 @@ async fn run_async(
             project_root: explicit_project_root,
             id,
             text,
-        } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
+            operation_id,
+        } => {
+            send_pm_pane_input(
+                ws_url,
+                explicit_project_root.as_deref(),
+                &id,
+                &text,
+                operation_id.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -373,10 +383,13 @@ async fn send_pm_pane_input(
     project_root: Option<&str>,
     requested_id: &str,
     text: &str,
+    requested_operation_id: Option<&str>,
 ) -> Result<String, String> {
-    let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
-    tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
-        let mut expected_window_id = None::<String>;
+    let operation_id = requested_operation_id
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+    let mut expected_window_id = None::<String>;
+    let result = tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
         let mut response_loss = None::<String>;
         for attempt in 0..2 {
             let mut socket = connect_pane_websocket(ws_url).await?;
@@ -384,6 +397,15 @@ async fn send_pm_pane_input(
             let windows = next_pm_workspace_windows(&mut socket, project_root).await?;
             let window_id = if let Some(expected) = expected_window_id.as_deref() {
                 expected.to_string()
+            } else if requested_operation_id.is_some()
+                && requested_id
+                    .split_once("::")
+                    .is_some_and(|(tab, window)| !tab.is_empty() && !window.is_empty())
+            {
+                // Receipt readback must survive target teardown. Only an exact
+                // saved identity bypasses live resolution; the server still
+                // checks its principal, target Session and body hash.
+                requested_id.to_string()
             } else {
                 resolve_pm_send_target(&windows, requested_id)?.id.clone()
             };
@@ -439,22 +461,16 @@ async fn send_pm_pane_input(
                 continue;
             };
             return match reply.status.as_str() {
-                "delivered" => Ok(format!("pm message delivered to {window_id}\n")),
-                "queued" => Ok(format!("pm message queued for {window_id}\n")),
-                // Issue #3608 (AC-2): an unacknowledged submit is not a failed
-                // one. The input reached the pane; only the target's
-                // acknowledgement is still outstanding, so this must never
-                // read as "the message did not arrive".
-                //
-                // SPEC #4778 AC-4: and so it is not an error either. Handing
-                // the caller an `Err` invites the one recovery that actually
-                // does harm — sending again, which injects the line twice into
-                // a pane that already has it. The operation's job is to get the
-                // line in front of the agent, and that part succeeded; whether
-                // the agent has acknowledged it yet is the agent's business.
-                "unverified" => Ok(format!(
-                    "pm message submitted to {window_id}; acknowledgement outstanding ({}). \
-                     Do not send it again — the line is already in the pane.\n",
+                "delivered" => Ok(format!("pm message delivered to {window_id}")),
+                "queued" => Ok(format!("pm message queued for {window_id}")),
+                // Older peers call the same unresolved result `unverified`.
+                // Neither spelling proves that the target acted on the prompt.
+                "unconfirmed" | "unverified" => Ok(format!(
+                    "pm message delivery is unconfirmed for {window_id}: {}",
+                    reply.reason.unwrap_or_else(|| "no target acknowledgement".to_string())
+                )),
+                "lost" => Err(format!(
+                    "pm message replay is unavailable (lost): {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
                 )),
                 "refused" => Err(format!(
@@ -476,12 +492,21 @@ async fn send_pm_pane_input(
         ))
     })
     .await
-    .map_err(|_| {
-        format!(
+    .unwrap_or_else(|_| {
+        Err(format!(
             "pm.message.send timed out after {} seconds",
             PM_MESSAGE_SEND_DEADLINE.as_secs()
-        )
-    })?
+        ))
+    });
+    result
+        .map(|output| format!("{output} (operation {operation_id})\n"))
+        .map_err(|error| {
+            let target = match expected_window_id.as_deref() {
+                Some(target) => format!("target {target}"),
+                None => format!("requested target {requested_id}"),
+            };
+            format!("{error} (operation {operation_id}) ({target})")
+        })
 }
 
 /// SPEC-3050 FR-001/FR-002: queue one line into the calling agent's own pane.
@@ -4372,14 +4397,14 @@ mod tests {
                 None,
                 "codex-1",
                 "same operation body",
+                None,
             )
             .await;
             let mutations = server.await.expect("PM replay mock task");
 
-            assert_eq!(
-                result,
-                Ok("pm message delivered to tab::codex-1\n".to_string())
-            );
+            let output = result.expect("replayed delivery succeeds");
+            assert!(output.contains("pm message delivered to tab::codex-1"));
+            assert!(output.contains(mutations[0]["operation_id"].as_str().unwrap()));
             assert_eq!(mutations.len(), 2);
             assert_eq!(mutations[0]["kind"], "pm_pane_send_input");
             assert_eq!(mutations[0]["operation_id"], mutations[1]["operation_id"]);
@@ -4388,13 +4413,11 @@ mod tests {
         });
     }
 
-    /// Issue #3608 (AC-2) and SPEC #4778 (AC-4): "the acknowledgement never
-    /// arrived" and "the input never committed" are different answers and must
-    /// not collapse. #3608 separated them into two errors; #4778 finished the
-    /// job by making the first one a success, because an `Err` here invites a
-    /// resend that injects the same line into the pane twice.
+    /// Issue #3897: unresolved delivery and unavailable replay must remain
+    /// distinct from refusal and failure, and every result must retain the
+    /// identity needed for same-operation recovery.
     #[test]
-    fn pm_message_unverified_and_failed_are_distinct_caller_outcomes() {
+    fn pm_message_unconfirmed_lost_refused_and_failed_are_distinct_caller_outcomes() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4407,12 +4430,14 @@ mod tests {
         runtime.block_on(async {
             let mut outcomes = Vec::new();
             for (status, reason) in [
-                ("unverified", "submit was not acknowledged"),
+                ("unconfirmed", "submit was not acknowledged"),
+                ("lost", "the original target pane is no longer available"),
                 ("failed", "input mutation was refused"),
                 (
                     "refused",
                     "self-delivery to PM window tab::codex-1 is refused",
                 ),
+                ("unverified", "older peer has no target acknowledgement"),
             ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -4446,33 +4471,46 @@ mod tests {
                         ))
                         .await
                         .expect("send PM outcome");
+                    mutation["operation_id"].as_str().unwrap().to_string()
                 });
                 let outcome = send_pm_pane_input(
                     &format!("ws://{address}/internal/pane-ws"),
                     None,
                     "codex-1",
                     "one outcome body",
+                    None,
                 )
                 .await;
-                server.await.expect("PM outcome mock task");
-                // An unverified submit reached the pane, so it reports success;
-                // the other two did not, so they stay errors.
+                let operation_id = server.await.expect("PM outcome mock task");
+                assert_eq!(
+                    outcome.is_ok(),
+                    matches!(status, "unconfirmed" | "unverified")
+                );
                 outcomes.push(match outcome {
                     Ok(message) => message,
                     Err(error) => error,
                 });
+                assert!(outcomes.last().unwrap().contains(&operation_id));
             }
 
-            let unverified = &outcomes[0];
-            let failed = &outcomes[1];
-            let refused = &outcomes[2];
+            let unconfirmed = &outcomes[0];
+            let lost = &outcomes[1];
+            let failed = &outcomes[2];
+            let refused = &outcomes[3];
             assert!(
-                unverified.contains("acknowledgement outstanding")
-                    && unverified.contains("submit was not acknowledged")
-                    && unverified.contains("Do not send it again")
-                    && !unverified.contains("pm message failed")
-                    && !unverified.contains("invalid status"),
-                "{unverified}"
+                unconfirmed.contains("unconfirmed")
+                    && unconfirmed.contains("submit was not acknowledged")
+                    && !unconfirmed.contains("pm message failed")
+                    && !unconfirmed.contains("pm message delivered")
+                    && !unconfirmed.contains("pm message submitted"),
+                "{unconfirmed}"
+            );
+            assert!(
+                lost.contains("replay is unavailable")
+                    && lost.contains("original target pane")
+                    && !lost.contains("undelivered")
+                    && !lost.contains("never executed"),
+                "{lost}"
             );
             assert!(
                 failed.contains("pm message failed") && !failed.contains("unverified"),
@@ -4485,6 +4523,125 @@ mod tests {
                     && !refused.contains("invalid status"),
                 "{refused}"
             );
+            assert!(outcomes[4].contains("unconfirmed"), "{}", outcomes[4]);
+        });
+    }
+
+    #[test]
+    fn pm_message_transport_failure_retains_the_operation_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+        let error = runtime
+            .block_on(send_pm_pane_input(
+                "ws://127.0.0.1:0/internal/pane-ws",
+                None,
+                "codex-1",
+                "status",
+                None,
+            ))
+            .expect_err("unreachable transport must not report a delivery");
+        let operation_id = error
+            .split("(operation ")
+            .nth(1)
+            .and_then(|tail| tail.split_once(')').map(|(id, _)| id))
+            .expect("even a transport error must retain its operation identity");
+        assert!(uuid::Uuid::parse_str(operation_id).is_ok(), "{error}");
+        assert!(error.contains("requested target codex-1"), "{error}");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut target = window("tab::codex-1", WindowPreset::Codex, Some("codex"));
+            target.session_id = Some("codex-session".into());
+            let workspace = workspace_state_for_test("/repo/pm", vec![target]);
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                socket
+                    .send(Message::Text(workspace.to_string().into()))
+                    .await
+                    .unwrap();
+                let mutation = next_frontend_json(&mut socket).await;
+                socket.close(None).await.unwrap();
+                mutation["operation_id"].as_str().unwrap().to_string()
+            });
+            let error = send_pm_pane_input(
+                &format!("ws://{address}/internal/pane-ws"),
+                None,
+                "codex-1",
+                "status",
+                None,
+            )
+            .await
+            .expect_err("response loss and an unavailable replay remain unresolved");
+            let operation_id = server.await.expect("response-loss mock task");
+            assert!(error.contains(&operation_id), "{error}");
+            assert!(error.contains("(target tab::codex-1)"), "{error}");
+        });
+    }
+
+    #[test]
+    fn pm_message_replay_reads_the_receipt_after_the_exact_target_disappears() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+        runtime.block_on(async {
+            let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643c2";
+            let target = "tab::former-codex";
+            for status in ["lost", "delivered"] {
+                let command = super::super::json_envelope::parse_operation(
+                    "pm.message.send",
+                    &json!({"id": target, "text": "original body", "operation_id": operation_id}),
+                )
+                .expect("same-operation replay must be a public input");
+                let crate::cli::CliCommand::Pane(command) = command else {
+                    panic!("PM message must dispatch to the pane operation");
+                };
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind receipt replay mock");
+                let address = listener.local_addr().unwrap();
+                let workspace = workspace_state_for_test("/repo/pm", vec![]);
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                    socket.send(Message::Text(workspace.to_string().into())).await.unwrap();
+                    let mutation = next_frontend_json(&mut socket).await;
+                    assert_eq!(mutation["operation_id"], operation_id);
+                    assert_eq!(mutation["window_id"], target);
+                    socket.send(Message::Text(json!({
+                        "kind": "pm_message_send_result",
+                        "operation_id": operation_id,
+                        "window_id": target,
+                        "status": status,
+                        "reason": if status == "lost" { Some("original target is gone") } else { None },
+                    }).to_string().into())).await.unwrap();
+                });
+                let result = run_async(&format!("ws://{address}/internal/pane-ws"), "/repo/pm", command).await;
+                let output = if status == "delivered" {
+                    result.expect("verified receipt is readable after target teardown")
+                } else {
+                    let error = result.expect_err("unavailable replay must remain a distinct outcome");
+                    assert!(error.contains("replay is unavailable"), "{error}");
+                    error
+                };
+                assert!(output.contains(operation_id), "{output}");
+                assert!(output.contains(target), "{output}");
+                server.await.expect("receipt replay mock task");
+            }
         });
     }
 

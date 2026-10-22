@@ -444,7 +444,14 @@ pub enum PmDeliveryReceiptStatus {
     Prepared,
     Verified,
     Refused,
+    /// Legacy outcome: absence of acknowledgement was previously ambiguous.
     Ambiguous,
+    /// The bounded attempt ended without an exact target acknowledgement.
+    /// Same-operation readback may still upgrade this observation to Verified.
+    Unconfirmed,
+    /// The original target is unavailable for recovery. This does not prove
+    /// that the prompt never ran; a late exact acknowledgement still wins.
+    Lost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,7 +626,17 @@ fn validated_pm_delivery_operation<'a>(
             {
                 true
             }
-            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous
+                | PmDeliveryReceiptStatus::Unconfirmed
+                | PmDeliveryReceiptStatus::Lost,
+                PmDeliveryReceiptStatus::Verified,
+            ) => true,
+            (
+                PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                PmDeliveryReceiptStatus::Lost,
+            ) => true,
+            (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => true,
             _ => false,
         };
         if !transition_is_valid {
@@ -729,10 +746,27 @@ pub fn finish_pm_delivery_receipt(
         {
             match (existing.status, status) {
                 (existing, requested) if existing == requested => return Ok(existing),
-                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
-                    return Ok(PmDeliveryReceiptStatus::Verified)
-                }
-                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                (
+                    PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                ) => return Ok(PmDeliveryReceiptStatus::Lost),
+                (
+                    PmDeliveryReceiptStatus::Verified,
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                ) => return Ok(PmDeliveryReceiptStatus::Verified),
+                (
+                    PmDeliveryReceiptStatus::Ambiguous
+                    | PmDeliveryReceiptStatus::Unconfirmed
+                    | PmDeliveryReceiptStatus::Lost,
+                    PmDeliveryReceiptStatus::Verified,
+                ) => {}
+                (
+                    PmDeliveryReceiptStatus::Ambiguous | PmDeliveryReceiptStatus::Unconfirmed,
+                    PmDeliveryReceiptStatus::Lost,
+                ) => {}
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Unconfirmed) => {}
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -8346,6 +8380,60 @@ mod tests {
         assert!(!fs::read_to_string(path)
             .expect("receipt file")
             .contains(body));
+    }
+
+    #[test]
+    fn delivery_receipt_target_loss_still_accepts_a_late_exact_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d79135763897".into(),
+            recorded_at: "2026-10-22T00:00:00Z".into(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm".into(),
+            target_window_id: "tab::agent".into(),
+            target_session_id: "agent".into(),
+            body_sha256: pm_delivery_prompt_sha256("one prompt"),
+            reason: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).unwrap();
+        let settle = |status, reason| {
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                status,
+                reason,
+            )
+            .unwrap()
+        };
+        settle(
+            PmDeliveryReceiptStatus::Ambiguous,
+            Some("submit_unconfirmed"),
+        );
+        settle(
+            PmDeliveryReceiptStatus::Unconfirmed,
+            Some("submit_unconfirmed"),
+        );
+        // Target loss proves recovery unavailable, not that the turn never ran.
+        let lost: PmDeliveryReceiptStatus = serde_json::from_str("\"lost\"").unwrap();
+        assert_eq!(settle(lost, Some("target_unavailable")), lost);
+        assert_eq!(
+            settle(PmDeliveryReceiptStatus::Verified, None),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            settle(lost, Some("target_unavailable")),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            pm_delivery_receipt_for_operation(&path, &prepared.operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PmDeliveryReceiptStatus::Verified
+        );
     }
 
     #[test]

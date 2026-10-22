@@ -335,6 +335,7 @@ pub enum PaneCommand {
         project_root: Option<String>,
         id: String,
         text: String,
+        operation_id: Option<String>,
     },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).

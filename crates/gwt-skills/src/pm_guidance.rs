@@ -1062,13 +1062,28 @@ drive them.
   receipt log. Use it to nudge an idle pane, announce a Board handoff,
   or tell an agent to stop what it is doing; never to smuggle
   instructions past the Monitor's launch path.
-- A `pm.message.send` that reports the delivery as **unverified** is not a
-  message that failed to arrive. The line was written into the pane and
-  submitted; only the target's acknowledgement did not land inside the
-  operation's window, which is ordinary when that pane is mid-turn. Do not
-  resend it, do not look for another way to reach the pane, and do not tell
-  the user the instruction was not delivered. Observe the pane instead. Only
-  a **failed** result means the input never reached it.
+- Every `pm.message.send` result retains its operation id. Save it with the
+  exact target window id from `pane.list` and the original text for recovery.
+  An error before target resolution labels the input as a requested target.
+  **delivered** means the exact target Session's own UserPromptSubmit hook
+  acknowledged that prompt; a successful PTY write alone does not prove it.
+- **unconfirmed** means no exact acknowledgement arrived. Do not claim the
+  instruction was delivered, lost, or acted on. Read the pane and recover
+  with the same `params.operation_id`, the same exact `params.id`, and the
+  same `params.text`; never start a fresh operation for that instruction.
+  The runtime retries only the submit key when it can prove the complete
+  body still belongs to that unchanged target input; it never writes the
+  body again. Older receipts, partial writes, restart, or any intervening
+  input make the operation readback-only. If it remains unresolved, make a
+  Board handoff naming the instruction and operation instead of leaving
+  an idle agent without a recovery path.
+- **lost** means the original target or safe replay is unavailable. It
+  does not prove the instruction never ran: a later exact acknowledgement
+  still takes precedence. Read back the target's state and use a Board
+  handoff to reconcile the obligation. **refused** means authorization
+  rejected the input; **failed** means the operation could not finish.
+  Preserve their reason and receipt, including any partial-write uncertainty,
+  before choosing recovery.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -2598,10 +2613,14 @@ mod tests {
             // FR-111: PM-privileged pane message delivery with receipts.
             "`pm.message.send`",
             "receipt log",
-            // Issue #3608: an unverified delivery is not an undelivered one.
-            "reports the delivery as **unverified**",
-            "message that failed to arrive",
-            "resend it, do not look for another way to reach the pane",
+            // Issue #3897: uncertainty must have a safe recovery path.
+            "**unconfirmed**",
+            "**lost**",
+            "same `params.operation_id`",
+            "never writes the body again",
+            "readback-only",
+            "Board handoff",
+            "does not prove the instruction never ran",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",
