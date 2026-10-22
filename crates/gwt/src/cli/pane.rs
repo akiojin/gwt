@@ -2354,8 +2354,12 @@ mod tests {
         command.arg("60");
         #[cfg(windows)]
         let mut command = {
+            use std::os::windows::process::CommandExt;
+
             let mut command = gwt_core::process::hidden_command("cmd");
             command.args(["/C", "set /p health="]);
+            // Later assertions need a leaf; a hidden console would own conhost.
+            command.creation_flags(windows::Win32::System::Threading::DETACHED_PROCESS.0);
             command
         };
         struct OwnedChild(std::process::Child);
