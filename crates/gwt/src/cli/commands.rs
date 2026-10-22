@@ -202,10 +202,12 @@ pub enum IssueCommand {
     },
     MonitorQueueRemove {
         project_root: Option<std::path::PathBuf>,
+        expected_queue_order: Option<Vec<u64>>,
         issue_numbers: Vec<u64>,
     },
     MonitorQueueMove {
         project_root: Option<std::path::PathBuf>,
+        expected_queue_order: Option<Vec<u64>>,
         number: u64,
         position: usize,
     },

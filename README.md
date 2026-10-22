@@ -569,6 +569,14 @@ observed GitHub label actor/time. Missing audit data is shown as unknown.
 Agents and automation can inspect the queue with `issue.monitor.status` and
 change membership/order with `issue.monitor.queue.push`,
 `issue.monitor.queue.remove`, and `issue.monitor.queue.move`. The
+`issue.monitor.queue.list` reply includes the selected terminal's saved
+`queue_order`, separately from the urgent display order. Before a move or removal,
+read the current terminal's list and pass that array as `expected_queue_order`.
+A mismatch rejects the change without modifying preferences; read the list again
+and reconsider, then read back a successful change. An explicit `[]` matches only
+an empty saved queue, `null` is rejected, and omitting the guard keeps existing
+behavior. This compares queue order values, without tracking intervening history,
+urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
