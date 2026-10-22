@@ -385,34 +385,102 @@ fn descends_from(system: &System, pid: u32, seeds: &[u32]) -> bool {
 fn validate_gwt_ancestors(system: &System, pid: u32, caps: &[JobCap]) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let mut next = system
-            .process(sysinfo::Pid::from_u32(pid))
-            .and_then(|process| process.parent());
-        let mut visited = BTreeSet::new();
-        while let Some(parent) = next {
-            if !visited.insert(parent) {
-                return Err("measurement process ancestry contains a cycle".into());
-            }
-            let Some(process) = system.process(parent) else {
-                break;
-            };
+        validate_gwt_ancestors_with(pid, caps, |pid| {
+            let process = system.process(sysinfo::Pid::from_u32(pid))?;
             let name = process.name().to_string_lossy();
-            if (name.eq_ignore_ascii_case("gwt.exe") || name.eq_ignore_ascii_case("gwt"))
-                && !caps.iter().any(|cap| cap.owner_pid == parent.as_u32())
-            {
-                return Err(format!("PID {pid} has unregistered ancestor gwt PID {}; restart that GUI with the updated runtime before measuring", parent.as_u32()));
-            }
-            next = process.parent();
-        }
+            Some((
+                process.parent().map(|parent| parent.as_u32()),
+                process.start_time(),
+                name.eq_ignore_ascii_case("gwt.exe") || name.eq_ignore_ascii_case("gwt"),
+            ))
+        })
     }
     #[cfg(not(windows))]
-    let _ = (system, pid, caps);
+    {
+        let _ = (system, pid, caps);
+        Ok(())
+    }
+}
+
+#[cfg(any(windows, test))]
+fn validate_gwt_ancestors_with(
+    pid: u32,
+    caps: &[JobCap],
+    mut lookup: impl FnMut(u32) -> Option<(Option<u32>, u64, bool)>,
+) -> Result<(), String> {
+    let Some((mut next, mut child_start_time, _)) = lookup(pid) else {
+        return Ok(());
+    };
+    let mut visited = BTreeSet::new();
+    while let Some(parent) = next {
+        let Some((ancestor, start_time, is_gwt)) = lookup(parent) else {
+            break;
+        };
+        // A stored parent PID can outlive its process and belong to a newer
+        // process, even a descendant. Stop before registration or cycle checks.
+        if start_time > child_start_time {
+            break;
+        }
+        if !visited.insert(parent) {
+            return Err("measurement process ancestry contains a cycle".into());
+        }
+        if is_gwt && !caps.iter().any(|cap| cap.owner_pid == parent) {
+            return Err(format!("PID {pid} has unregistered ancestor gwt PID {parent}; restart that GUI with the updated runtime before measuring"));
+        }
+        next = ancestor;
+        child_start_time = start_time;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestry_ignores_recycled_parent_before_gwt_registration() {
+        let processes = [(Some(1), 100, false), (None, 200, true)];
+        assert_eq!(
+            validate_gwt_ancestors_with(0, &[], |pid| processes.get(pid as usize).copied()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ancestry_checks_each_link_before_cycle_detection() {
+        let processes = [
+            (Some(1), 300, false),
+            (Some(2), 200, false),
+            (Some(1), 100, false),
+        ];
+        assert_eq!(
+            validate_gwt_ancestors_with(0, &[], |pid| processes.get(pid as usize).copied()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ancestry_rejects_old_unregistered_gwt_and_accepts_registered_gwt() {
+        let processes = [(Some(1), 300, false), (None, 200, true)];
+        let lookup = |pid| processes.get(pid as usize).copied();
+        let reason = validate_gwt_ancestors_with(0, &[], lookup).unwrap_err();
+        assert!(reason.contains("PID 0 has unregistered ancestor gwt PID 1"));
+        let caps = [JobCap {
+            job_name: "registered pane".into(),
+            owner_pid: 1,
+            hard_cap_percent: None,
+        }];
+        assert_eq!(validate_gwt_ancestors_with(0, &caps, lookup), Ok(()));
+    }
+
+    #[test]
+    fn ancestry_rejects_real_cycle_with_equal_start_times() {
+        let processes = [(Some(1), 100, false), (Some(0), 100, false)];
+        assert_eq!(
+            validate_gwt_ancestors_with(0, &[], |pid| processes.get(pid as usize).copied()),
+            Err("measurement process ancestry contains a cycle".into())
+        );
+    }
 
     #[test]
     fn ordinary_commands_do_not_change_scheduling_or_start_a_monitor() {
