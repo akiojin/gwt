@@ -280,13 +280,28 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::MonitorQueueRemove {
             project_root,
+            expected_queue_order,
             issue_numbers,
-        } => run_monitor_queue_remove(env, project_root.as_deref(), &issue_numbers, out)?,
+        } => run_monitor_queue_remove(
+            env,
+            project_root.as_deref(),
+            expected_queue_order.as_deref(),
+            &issue_numbers,
+            out,
+        )?,
         IssueCommand::MonitorQueueMove {
             project_root,
+            expected_queue_order,
             number,
             position,
-        } => run_monitor_queue_move(env, project_root.as_deref(), number, position, out)?,
+        } => run_monitor_queue_move(
+            env,
+            project_root.as_deref(),
+            expected_queue_order.as_deref(),
+            number,
+            position,
+            out,
+        )?,
         IssueCommand::MonitorQueueAutoRefill {
             project_root,
             enabled,
@@ -1553,6 +1568,11 @@ fn run_monitor_queue_list<E: CliEnv>(
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
     let mut projection =
         serde_json::to_value(prefs.urgent_queue.projection(&queue)).expect("queue serializes");
+    projection["queue_order"] = serde_json::json!(queue
+        .entries
+        .iter()
+        .map(|entry| entry.number)
+        .collect::<Vec<_>>());
     if let Some(rows) = projection["entries"].as_array_mut() {
         for row in rows {
             row["kind"] = "issue".into();
@@ -1948,9 +1968,37 @@ fn queue_claim_lease_expired(expires_at: &str, now: &str) -> bool {
     }
 }
 
+/// Compare the saved queue, before reconciliation or any mutation, under the prefs lock.
+fn check_expected_queue_order(
+    prefs: &crate::IssueMonitorPrefs,
+    expected: Option<&[u64]>,
+) -> io::Result<()> {
+    if let Some(expected) = expected {
+        let current = prefs
+            .terminal_queues
+            .get(&crate::process::current_hostname())
+            .map(|queue| {
+                queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.number)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if current != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "queue_order changed since observation; re-read issue.monitor.queue.list and reconsider the change before retrying",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn run_monitor_queue_remove<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_queue_order: Option<&[u64]>,
     numbers: &[u64],
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -1958,6 +2006,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        check_expected_queue_order(prefs, expected_queue_order)?;
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -1975,6 +2024,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
 fn run_monitor_queue_move<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_queue_order: Option<&[u64]>,
     number: u64,
     position: usize,
     out: &mut String,
@@ -1983,6 +2033,7 @@ fn run_monitor_queue_move<E: CliEnv>(
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        check_expected_queue_order(prefs, expected_queue_order)?;
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
@@ -9359,6 +9410,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_monitor_queue_list_exposes_saved_order_separately_from_urgent_display() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let env = crate::cli::TestEnv::new(repo.clone());
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-22T00:00:00Z");
+        let mut prefs = serde_json::to_value(monitor.prefs()).unwrap();
+        prefs["urgent_queue"]["grants"] = serde_json::json!({"3": {
+            "label_present": true, "observed_at": "2026-10-22T00:00:00Z"
+        }});
+        let mut other = prefs["terminal_queues"][crate::process::current_hostname()].clone();
+        other["entries"].as_array_mut().unwrap().reverse();
+        prefs["terminal_queues"]["another-host"] = other;
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &serde_json::from_value(prefs).unwrap(),
+        )
+        .unwrap();
+        for (terminal, expected) in [
+            (None, serde_json::json!([1, 2, 3])),
+            (Some("another-host"), serde_json::json!([3, 2, 1])),
+            (Some("absent-host"), serde_json::json!([])),
+        ] {
+            let mut out = String::new();
+            run_monitor_queue_list(&env, None, terminal, &mut out).unwrap();
+            let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(listed["queue_order"], expected);
+            if terminal.is_none() {
+                assert_eq!(listed["entries"][0]["number"], 3);
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_compare_and_set_preserves_unseen_updates() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-22T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut invoke = |operation, params| {
+            let super::super::CliCommand::Issue(command) =
+                super::super::json_envelope::parse_operation(operation, &params).unwrap()
+            else {
+                panic!("expected Issue command")
+            };
+            let mut out = String::new();
+            let result = run(&mut env, command, &mut out);
+            if result.is_err() {
+                assert!(out.is_empty());
+            }
+            result
+        };
+        let before = std::fs::read(&path).unwrap();
+        for (operation, params) in [
+            (
+                "issue.monitor.queue.move",
+                serde_json::json!({
+                    "number":3, "position":0, "expected_queue_order":[1,3,2]
+                }),
+            ),
+            (
+                "issue.monitor.queue.remove",
+                serde_json::json!({
+                    "numbers":[1], "expected_queue_order":[]
+                }),
+            ),
+        ] {
+            let error = invoke(operation, params).expect_err("stale queue must be refused");
+            assert!(error.to_string().contains("queue_order changed"), "{error}");
+            assert!(
+                error.to_string().contains("issue.monitor.queue.list"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        invoke(
+            "issue.monitor.queue.move",
+            serde_json::json!({
+                "number":3, "position":0, "expected_queue_order":[1,2,3]
+            }),
+        )
+        .unwrap();
+        assert_eq!(queued_numbers(&repo), vec![3, 1, 2]);
+        invoke(
+            "issue.monitor.queue.remove",
+            serde_json::json!({
+                "numbers":[1], "expected_queue_order":[3,1,2]
+            }),
+        )
+        .unwrap();
+        assert_eq!(queued_numbers(&repo), vec![3, 2]);
+        invoke(
+            "issue.monitor.queue.move",
+            serde_json::json!({
+                "number":2, "position":0
+            }),
+        )
+        .unwrap();
+        assert_eq!(queued_numbers(&repo), vec![2, 3]);
+        invoke(
+            "issue.monitor.queue.remove",
+            serde_json::json!({"numbers":[3,2]}),
+        )
+        .unwrap();
+        invoke(
+            "issue.monitor.queue.remove",
+            serde_json::json!({
+                "numbers":[], "expected_queue_order":[]
+            }),
+        )
+        .unwrap();
+        assert!(queued_numbers(&repo).is_empty());
+    }
+
     // ---- Issue #4819: `queue.push` must never refuse silently ----
 
     #[test]
@@ -9545,10 +9718,11 @@ mod tests {
         assert_eq!(labeled["urgent_queue"]["accepted"], serde_json::json!([3]));
         out.clear();
         run_monitor_queue_list(&env, None, None, &mut out).unwrap();
-        let listed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let mut listed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(listed["entries"][0]["number"], 2);
         assert_eq!(listed["entries"][0]["assigned_by"], "alice");
         assert_eq!(listed["entries"][1]["assigned_at"], "2026-10-03T00:01:00Z");
+        listed.as_object_mut().unwrap().remove("queue_order");
         out.clear();
         run_monitor_status(&env, None, &mut out).unwrap();
         let status: serde_json::Value = serde_json::from_str(&out).unwrap();

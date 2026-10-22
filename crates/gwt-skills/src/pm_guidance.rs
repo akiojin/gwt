@@ -825,6 +825,14 @@ body cannot hold `plan` / `tasks` sections.
   the order instead of blindly retrying. Read back status after a successful write.
   Omitting the guard retains legacy behavior; value equality does not detect ABA
   history or guard other configuration changes.
+- For `issue.monitor.queue.move` and `issue.monitor.queue.remove`, re-read
+  `issue.monitor.queue.list` for the current terminal before writing. Pass its
+  saved `queue_order`, not the urgent display order, as `expected_queue_order`.
+  The comparison and mutation share the prefs lock. On conflict, re-read the
+  list and reconsider the change; read back the list after a successful write.
+  Omitting the guard retains legacy behavior; an explicit `[]` matches only an
+  empty saved queue and `null` is invalid. This value comparison does not detect
+  ABA history, urgent metadata, priority-only changes or other configuration changes.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
@@ -4178,6 +4186,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`expected_queue_order`",
+            "For `issue.monitor.queue.move` and `issue.monitor.queue.remove`",
+            "saved `queue_order`, not the urgent display order",
             "`expected_priority_order`",
             "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
             "full saved `priority_order`",

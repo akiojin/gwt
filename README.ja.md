@@ -534,6 +534,11 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 
 Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor.queue.push`、
 `issue.monitor.queue.remove`、`issue.monitor.queue.move` で所属と順序を変更できます。
+`issue.monitor.queue.list` は、選択端末の保存順 `queue_order` を urgent の表示順と別に返します。
+move/remove の前に現在端末の list を読み、その配列を `expected_queue_order` として渡します。
+不一致なら設定を変更せず拒否するため、list を再読して変更を再判断し、成功後も読み戻します。
+明示的な `[]` は保存キューが空の場合だけ一致し、`null` は拒否します。省略時は従来互換です。
+比較対象はキュー順の値であり、途中の変更履歴、urgent metadata、優先順だけの変更、他の設定変更は検出しません。
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。

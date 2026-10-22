@@ -914,10 +914,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.monitor.queue.remove" => CliCommand::Issue(IssueCommand::MonitorQueueRemove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             issue_numbers: required_u64_vec(params, "numbers")?,
         }),
         "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             number: required_u64(params, "number")?,
             position: required_usize(params, "position")?,
         }),
@@ -5765,6 +5771,28 @@ mod tests {
             assert_ne!(ok(operation, params.clone()), unconditional);
             for invalid in [Value::Null, json!("1,2")] {
                 params["expected_priority_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            (
+                "issue.monitor.queue.move",
+                json!({"number":42,"position":0}),
+            ),
+            ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_queue_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            for invalid in [Value::Null, json!("1,2")] {
+                params["expected_queue_order"] = invalid;
                 assert!(matches!(
                     err(operation, params.clone()),
                     CliParseError::InvalidJson(_)
