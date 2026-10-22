@@ -3,9 +3,9 @@ import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helper
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 test.use({ headless: false, viewport: { width: 1440, height: 1000 } });
+test.skip(!BASE, "requires browser-check isolated checkout instance");
 
 test("fleet close refuses an unauthenticated browser without removing its pane", async ({ page }, testInfo) => {
-  test.skip(!BASE, "requires browser-check isolated checkout instance");
   test.setTimeout(120_000);
   await withLiveGwtBackendLock(BASE, testInfo, async () => {
     const errors: string[] = [];
