@@ -278,8 +278,8 @@ mod imp {
                 // A complete native census is required. An absent original
                 // PGID or a partial/failed snapshot cannot prove tree exit.
                 self.validate_root_identity()?;
-                let observed = session_processes(session_id)?;
-                let mut live = observed.iter().any(|process| process.running);
+                let (observed, census_stable) = session_processes(session_id)?;
+                let mut live = !census_stable || observed.iter().any(|process| process.running);
                 for process in observed {
                     if !captured.iter().any(|known| known.same_identity(&process)) {
                         captured.push(process);
@@ -312,9 +312,10 @@ mod imp {
                     self.tree_exited = true;
                     return Ok(true);
                 }
-                // Re-enumerate after signalling: a still-running descendant
-                // may have forked since the previous census. Native zombies
-                // have exited and cannot keep working or holding a lease.
+                // Re-enumerate after signalling or process-list churn: a
+                // descendant may have forked and exited between enumeration
+                // and its native read. An unstable zero census proves nothing.
+                // Native zombies have exited and cannot keep working or holding a lease.
                 let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                     return Ok(false);
                 };
@@ -374,13 +375,18 @@ mod imp {
         }
     }
 
-    fn session_processes(session_id: libc::pid_t) -> Result<Vec<NativeProcess>, String> {
-        let pids = native_process_ids()?;
+    fn session_processes(session_id: libc::pid_t) -> Result<(Vec<NativeProcess>, bool), String> {
+        let mut pids = native_process_ids()?;
+        pids.sort_unstable();
+        #[cfg(test)]
+        if let Some(hook) = CENSUS_HOOK.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         if !pids.contains(&(std::process::id() as libc::pid_t)) {
             return Err("native process census omitted the observing process".into());
         }
         let mut processes = Vec::new();
-        for pid in pids {
+        for &pid in &pids {
             if process_session(pid)? != Some(session_id) {
                 continue;
             }
@@ -391,7 +397,16 @@ mod imp {
                 processes.push(process);
             }
         }
-        Ok(processes)
+        let mut after = native_process_ids()?;
+        after.sort_unstable();
+        Ok((processes, pids == after))
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        pub(super) static CENSUS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
     }
 
     #[cfg(target_os = "linux")]
@@ -580,16 +595,23 @@ mod tests {
         reason = "the regression owns a session leader and its independently grouped child"
     )]
     fn tree_confirmation_reclaims_a_separate_group_after_the_leader_is_reaped() {
-        use std::{os::unix::process::CommandExt, process::Command, time::Duration};
+        use std::{
+            cell::Cell, io::Write, os::unix::process::CommandExt, process::Command, rc::Rc,
+            time::Duration,
+        };
 
         struct Fixture {
             leader: std::process::Child,
             descendant: Option<u32>,
+            successor: Rc<Cell<Option<u32>>>,
         }
 
         impl Drop for Fixture {
             fn drop(&mut self) {
-                if let Some(pid) = self.descendant {
+                for pid in [self.descendant, self.successor.get()]
+                    .into_iter()
+                    .flatten()
+                {
                     // SAFETY: only reclaim the fixture child while it still
                     // belongs to the captured session, including on RED.
                     unsafe {
@@ -605,6 +627,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let child_path = directory.path().join("child.pid");
+        let successor_path = child_path.with_extension("successor.pid");
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -613,7 +636,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("GWT_SEPARATE_GROUP_CHILD_PID", &child_path)
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         // SAFETY: setsid is async-signal-safe and gives this owned fixture
@@ -629,6 +652,7 @@ mod tests {
         let mut fixture = Fixture {
             leader: command.spawn().unwrap(),
             descendant: None,
+            successor: Rc::new(Cell::new(None)),
         };
         let leader_pid = fixture.leader.id();
         let mut group = super::ProcessGroup::attach(leader_pid).unwrap();
@@ -664,14 +688,65 @@ mod tests {
 
         // Match pane close's existing nonblocking kill followed by a later
         // finalizer: original-group absence must not hide the other group.
+        let mut writer = fixture.leader.stdin.take().unwrap();
         group.terminate().unwrap();
         fixture.leader.wait().unwrap();
-        let confirmed = group.terminate_and_wait(Duration::from_secs(2)).unwrap();
+
+        struct ResetCensusHook;
+        impl Drop for ResetCensusHook {
+            fn drop(&mut self) {
+                super::imp::CENSUS_HOOK.with(|hook| hook.borrow_mut().take());
+            }
+        }
+        let _reset_hook = ResetCensusHook;
+        let successor = Rc::clone(&fixture.successor);
+        super::imp::CENSUS_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // The PID vector is already fixed. Let its only live owned
+                // member fork a new child and exit before its native read.
+                writer.write_all(b"go\n").unwrap();
+                // test-hygiene: allow-wall-clock-deadline Bounds the external fork handshake, not a scheduling-order assertion.
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                let successor_pid = loop {
+                    if let Some(pid) = std::fs::read_to_string(&successor_path)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                    {
+                        successor.set(Some(pid));
+                        break pid;
+                    }
+                    assert!(
+                        // test-hygiene: allow-wall-clock-deadline This watchdog prevents the fork handshake from hanging the test.
+                        std::time::Instant::now() < deadline,
+                        "successor did not publish its PID"
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                };
+                assert!(fixture_child_is_running(successor_pid));
+                while fixture_child_is_running(child_pid) {
+                    assert!(
+                        // test-hygiene: allow-wall-clock-deadline Observe the old process exit before allowing the native census to continue.
+                        std::time::Instant::now() < deadline,
+                        "original child did not exit after publishing its successor"
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }));
+        });
+        // The test hook's 20s startup watchdog is charged to this operation;
+        // retain another 2s for the normal confirmation after the handshake.
+        let confirmed = group.terminate_and_wait(Duration::from_secs(22)).unwrap();
         let survived_confirmation = fixture_child_is_running(child_pid);
+        let successor_pid = fixture.successor.get().expect("the census hook must run");
+        let successor_survived_confirmation = fixture_child_is_running(successor_pid);
         assert!(confirmed, "the captured tree did not finish teardown");
         assert!(
             !survived_confirmation,
             "tree confirmation succeeded while separate-group child {child_pid} was running"
+        );
+        assert!(
+            !successor_survived_confirmation,
+            "tree confirmation succeeded while successor {successor_pid} omitted from the first census was running"
         );
     }
 
@@ -692,8 +767,13 @@ mod tests {
         unsafe {
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }
-        let mut child = Command::new("/bin/sleep")
-            .arg("600")
+        let successor_path = std::path::Path::new(&path).with_extension("successor.pid");
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' HUP; IFS= read -r go || exit 0; [ \"$go\" = go ] || exit 0; /bin/sleep 600 & printf '%s\\n' \"$!\" > \"$GWT_SEPARATE_GROUP_SUCCESSOR_PID\"",
+            ])
+            .env("GWT_SEPARATE_GROUP_SUCCESSOR_PID", successor_path)
             .process_group(0)
             .spawn()
             .unwrap();
