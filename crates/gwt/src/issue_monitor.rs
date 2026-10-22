@@ -22243,10 +22243,63 @@ impl IssueMonitorState {
         {
             self.verified_live_window_owners = None;
         }
+        self.record_pane_output_activity(&snapshot);
         self.reconcile_review_windows(&snapshot, &project_tabs);
         self.window_snapshot = Some(snapshot);
         self.window_snapshot_host = host;
         self.window_snapshot_tabs = project_tabs;
+    }
+
+    fn record_pane_output_activity(&mut self, snapshot: &IssueMonitorWindowSnapshot) {
+        let Some(observed_at) = parse_rfc3339_utc(&snapshot.observed_at) else {
+            return;
+        };
+        for pane in &snapshot.windows {
+            let Some(issue) = pane.issue_number else {
+                continue;
+            };
+            if !pane.monitor_owned
+                || pane.review_dispatch
+                || !idle_window_is_alive(pane.status)
+                || pane.status == WindowState::Interrupted
+                || !self.active_launches.contains(&issue)
+                || self.launched_windows.get(&issue) != Some(&pane.window_id)
+            {
+                continue;
+            }
+            let Some(output_at) = pane.last_output_at.as_deref().and_then(parse_rfc3339_utc) else {
+                continue;
+            };
+            if output_at > observed_at
+                || self.launch_confirmations.get(&issue).is_some_and(|ack| {
+                    ack.window_id != pane.window_id
+                        || parse_rfc3339_utc(&ack.confirmed_at)
+                            .is_none_or(|confirmed_at| output_at < confirmed_at)
+                })
+            {
+                continue;
+            }
+            let Some(record) = self.autonomous_records.get_mut(&issue) else {
+                continue;
+            };
+            if record
+                .last_heartbeat
+                .as_deref()
+                .and_then(parse_rfc3339_utc)
+                .is_some_and(|current| current >= output_at)
+            {
+                continue;
+            }
+            // Issue #3809: a long tool call can emit PTY output without hooks.
+            // Use the output time, never the scan time, for the shared clock.
+            record.last_heartbeat = pane.last_output_at.clone();
+            if record.steering.as_ref().is_some_and(|steering| {
+                parse_rfc3339_utc(&steering.requested_at)
+                    .is_some_and(|requested_at| output_at >= requested_at)
+            }) {
+                record.steering = None;
+            }
+        }
     }
 
     fn park_unbound_live_monitor_panes(&mut self, now: &str) {
@@ -42221,6 +42274,89 @@ mod tests {
     }
 
     #[test]
+    fn issue_3809_pane_output_advances_activity_without_false_stuck_requeue() {
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T01:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:59:30Z"),
+            None,
+        ));
+        let activity = |monitor: &IssueMonitorState| {
+            monitor
+                .agent_status_at("2026-06-29T01:00:00Z")
+                .inbox
+                .into_iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap()
+                .last_activity_at
+        };
+        assert_eq!(activity(&monitor).as_deref(), Some("2026-06-29T00:59:30Z"));
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T01:00:00Z")
+            .is_empty());
+        assert!(monitor
+            .recover_stuck_autonomous("2026-06-29T01:00:00Z")
+            .is_empty());
+        assert!(monitor.active_issue_numbers().contains(&42));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+
+        // A replay cannot rewind a later hook's activity.
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T01:00:00Z");
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T01:00:01Z",
+            WindowState::Running,
+            Some("2026-06-29T00:59:30Z"),
+            None,
+        ));
+        assert_eq!(activity(&monitor).as_deref(), Some("2026-06-29T01:00:00Z"));
+    }
+
+    #[test]
+    fn issue_3809_unrelated_or_invalid_output_cannot_refresh_a_launch() {
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        let snapshot = silent_pane_snapshot(
+            "2026-06-29T01:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:59:30Z"),
+            None,
+        );
+        let mut foreign = snapshot.clone();
+        foreign.windows[0].issue_number = Some(43);
+        monitor.record_window_snapshot(foreign);
+        let mut review = snapshot.clone();
+        review.windows[0].review_dispatch = true;
+        monitor.record_window_snapshot(review);
+        let mut stopped = snapshot.clone();
+        stopped.windows[0].status = WindowState::Stopped;
+        monitor.record_window_snapshot(stopped);
+        for output in [
+            "not-a-timestamp",
+            "2026-06-29T01:00:01Z",
+            "2026-06-25T23:59:59Z",
+        ] {
+            let mut invalid = snapshot.clone();
+            invalid.windows[0].last_output_at = Some(output.to_string());
+            monitor.record_window_snapshot(invalid);
+        }
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some("2026-06-29T00:00:00Z")
+        );
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T01:00:00Z"),
+            vec![42]
+        );
+    }
+
+    #[test]
     fn recover_stuck_releases_and_requeues_a_running_pane_whose_output_is_also_silent() {
         // Issue #4608 AC-1/AC-2/AC-5: `pane_state: running`, a consistent
         // runtime join, and a heartbeat past the timeout. The heartbeat alone
@@ -42315,7 +42451,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_stuck_keeps_steering_a_pane_that_is_still_writing_output() {
+    fn recover_stuck_preserves_live_output_and_keeps_unknown_output_on_steering_path() {
         // Issue #4608 AC-1: a stopped heartbeat alone never releases. The
         // healthy window in the PM's counter-example kept working for 65
         // minutes with a frozen heartbeat; its pane output is the signal that
@@ -42343,18 +42479,26 @@ mod tests {
             scanned.merge_scan_observations_from(&refreshed);
             assert_eq!(scanned.window_snapshot, refreshed.window_snapshot);
             refreshed.record_autonomous_heartbeat(42, "2026-06-29T01:00:01Z");
-            assert!(
-                !refreshed.scan_observations_compatible_with(&monitor, "2026-06-29T01:00:01Z"),
-                "new liveness must fence an obsolete stuck decision"
+            assert_eq!(
+                refreshed.scan_observations_compatible_with(&monitor, "2026-06-29T01:00:01Z"),
+                last_output_at.is_some(),
+                "a hook fences a stuck decision only when pane output has not already answered it"
             );
             let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
-            assert!(
-                matches!(
-                    recovered.as_slice(),
-                    [(42, AutonomousFailureOutcome::SteeringRequested { count: 1 })]
-                ),
-                "{last_output_at:?}: {recovered:?}"
-            );
+            if last_output_at.is_some() {
+                assert!(
+                    recovered.is_empty(),
+                    "fresh output is progress: {recovered:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        recovered.as_slice(),
+                        [(42, AutonomousFailureOutcome::SteeringRequested { count: 1 })]
+                    ),
+                    "unknown output retains steering: {recovered:?}"
+                );
+            }
             assert_eq!(monitor.active_count(), 1, "{last_output_at:?}");
             assert!(monitor.take_pending_idle_pane_closes().is_empty());
         }

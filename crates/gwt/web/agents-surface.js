@@ -1,5 +1,6 @@
 import { surfaceForWindow } from "./surface-rail.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { normalizeWindowRuntimeState, windowRuntimeLabel, windowRuntimeDescription } from "./window-runtime-state.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
@@ -37,6 +38,21 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
     node.querySelector(".agent-title__purpose").textContent = title.slice(name.length);
     node.setAttribute("aria-label", title);
     setControlExplanation(node, title);
+  }
+  function createRuntimeChip() {
+    const chip = document.createElement("span");
+    chip.className = "status-chip";
+    chip.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span class="status-label"></span>';
+    return chip;
+  }
+  function setRuntimeChip(chip, data) {
+    const state = normalizeWindowRuntimeState(data.status, data.preset);
+    const label = windowRuntimeLabel(state);
+    const description = windowRuntimeDescription(state, data.preset);
+    chip.className = `status-chip ${state}`;
+    chip.querySelector(".status-label").textContent = label;
+    chip.title = description;
+    chip.setAttribute("aria-label", label === description ? label : `${label}: ${description}`);
   }
   function syncPreview() {
     if (!previewElement) return;
@@ -76,6 +92,10 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
       }
       const title = source.querySelector("h3");
       setTitle(preview.tile.querySelector("h3"), title.textContent, title.querySelector(".agent-title__name").textContent);
+      const chip = source.querySelector(".status-chip").cloneNode(true);
+      const previousChip = preview.tile.querySelector(".status-chip");
+      if (previousChip) previousChip.replaceWith(chip);
+      else preview.tile.querySelector("h3").after(chip);
       preview.tile.hidden = source.hidden;
     }
     previewGrid.classList.toggle("is-single", selectedId !== null);
@@ -180,6 +200,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
     tabs.set(id, tab);
     entry.appendChild(tab);
     if (id !== null) {
+      entry.appendChild(tiles.get(id).querySelector(".status-chip").cloneNode(true));
       const close = document.createElement("button");
       close.type = "button";
       close.className = "icon-button agents-tab-close";
@@ -233,6 +254,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
         tile.addEventListener("focusin", () => onFocus(data.id));
         tile.innerHTML = `<header class="agent-tile__header"><h3 tabindex="0"></h3><button type="button" class="agent-tile__open">Open tab</button><span class="agent-tile__mode">Interactive</span></header>
           <div class="agent-tile__terminal terminal-root"></div>`;
+        tile.querySelector("h3").after(createRuntimeChip());
         tile.querySelector(".agent-tile__open").addEventListener("click", () => openTab(data.id));
         tiles.set(data.id, tile);
         grid.appendChild(tile);
@@ -244,10 +266,12 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
         ? String(data.agent_name || "").trim() : "";
       const open = tile.querySelector(".agent-tile__open");
       setTitle(tile.querySelector("h3"), title, name);
+      setRuntimeChip(tile.querySelector(".status-chip"), data);
       open.setAttribute("aria-label", `Open ${title} tab`);
       const tab = tabs.get(data.id);
       if (tab) {
         setTitle(tab, title, name);
+        setRuntimeChip(tab.parentElement.querySelector(".status-chip"), data);
         tab.parentElement.querySelector(".agents-tab-close").setAttribute("aria-label", `Close ${title} tab`);
       }
       const shell = data.preset === "shell";
