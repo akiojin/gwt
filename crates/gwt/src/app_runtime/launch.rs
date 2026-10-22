@@ -7648,6 +7648,10 @@ impl AppRuntime {
                 &mut config.env_vars,
                 active_launch_handshake_cleanup.as_ref(),
             );
+            issued_capability_token = config
+                .env_vars
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .cloned();
             active_launch_handshake_cleanup = match capability_install {
                 Ok(handshake) => handshake,
                 Err(error) if rebound_continuation.is_some() => {
@@ -7699,6 +7703,10 @@ impl AppRuntime {
                             config.remove_env.retain(|removed| removed != key);
                         }
                     }
+                    issued_capability_token = config
+                        .env_vars
+                        .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                        .cloned();
                     let reason = gwt_core::error_ledger::sanitize_error_message(
                         &Self::sanitize_launch_log_error(&error.to_string()),
                     );
@@ -7739,10 +7747,6 @@ impl AppRuntime {
                 }
                 Err(error) => return Err(error),
             };
-            issued_capability_token = config
-                .env_vars
-                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
-                .cloned();
             if manual_successor_prepared {
                 config.env_vars.insert(
                     gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
