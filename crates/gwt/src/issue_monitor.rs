@@ -22327,55 +22327,87 @@ impl IssueMonitorState {
     }
 
     fn record_pane_output_activity(&mut self, snapshot: &IssueMonitorWindowSnapshot) {
-        let Some(observed_at) = parse_rfc3339_utc(&snapshot.observed_at) else {
-            return;
-        };
         for pane in &snapshot.windows {
-            let Some(issue) = pane.issue_number else {
-                continue;
-            };
-            if !pane.monitor_owned
-                || pane.review_dispatch
-                || !idle_window_is_alive(pane.status)
-                || pane.status == WindowState::Interrupted
-                || !self.active_launches.contains(&issue)
-                || self.launched_windows.get(&issue) != Some(&pane.window_id)
-            {
-                continue;
-            }
-            let Some(output_at) = pane.last_output_at.as_deref().and_then(parse_rfc3339_utc) else {
-                continue;
-            };
-            if output_at > observed_at
-                || self.launch_confirmations.get(&issue).is_some_and(|ack| {
-                    ack.window_id != pane.window_id
-                        || parse_rfc3339_utc(&ack.confirmed_at)
-                            .is_none_or(|confirmed_at| output_at < confirmed_at)
-                })
-            {
-                continue;
-            }
-            let Some(record) = self.autonomous_records.get_mut(&issue) else {
-                continue;
-            };
-            if record
-                .last_heartbeat
-                .as_deref()
-                .and_then(parse_rfc3339_utc)
-                .is_some_and(|current| current >= output_at)
-            {
-                continue;
-            }
-            // Issue #3809: a long tool call can emit PTY output without hooks.
-            // Use the output time, never the scan time, for the shared clock.
-            record.last_heartbeat = pane.last_output_at.clone();
-            if record.steering.as_ref().is_some_and(|steering| {
-                parse_rfc3339_utc(&steering.requested_at)
-                    .is_some_and(|requested_at| output_at >= requested_at)
-            }) {
-                record.steering = None;
+            if let Some(at) = pane.last_output_at.as_deref() {
+                self.record_owned_pane_activity(pane, at, &snapshot.observed_at);
             }
         }
+    }
+
+    /// Join measured work into the PTY/hook activity clock without inventing output.
+    pub(crate) fn record_bound_process_activity(
+        &mut self,
+        issue_number: u64,
+        session_id: &str,
+        at: &str,
+        now: &str,
+    ) -> bool {
+        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+            return false;
+        };
+        let mut panes = snapshot.windows.iter().filter(|pane| {
+            pane.issue_number == Some(issue_number)
+                && pane.session_id.as_deref() == Some(session_id)
+        });
+        let Some(pane) = panes.next() else {
+            return false;
+        };
+        if session_id.is_empty() || panes.next().is_some() {
+            return false;
+        }
+        let pane = pane.clone();
+        self.record_owned_pane_activity(&pane, at, now)
+    }
+
+    fn record_owned_pane_activity(
+        &mut self,
+        pane: &IssueMonitorWindowObservation,
+        at: &str,
+        observed_at: &str,
+    ) -> bool {
+        let Some(issue) = pane.issue_number else {
+            return false;
+        };
+        let Some((activity_at, observed_at)) =
+            parse_rfc3339_utc(at).zip(parse_rfc3339_utc(observed_at))
+        else {
+            return false;
+        };
+        if !pane.monitor_owned
+            || pane.review_dispatch
+            || !idle_window_is_alive(pane.status)
+            || pane.status == WindowState::Interrupted
+            || !self.active_launches.contains(&issue)
+            || self.launched_windows.get(&issue) != Some(&pane.window_id)
+            || activity_at > observed_at
+            || self.launch_confirmations.get(&issue).is_some_and(|ack| {
+                ack.window_id != pane.window_id
+                    || parse_rfc3339_utc(&ack.confirmed_at)
+                        .is_none_or(|confirmed_at| activity_at < confirmed_at)
+            })
+        {
+            return false;
+        }
+        let Some(record) = self.autonomous_records.get_mut(&issue) else {
+            return false;
+        };
+        if record
+            .last_heartbeat
+            .as_deref()
+            .and_then(parse_rfc3339_utc)
+            .is_some_and(|current| current >= activity_at)
+        {
+            return false;
+        }
+        // Use actual output/progress time, never a scan-time heartbeat.
+        record.last_heartbeat = Some(at.to_string());
+        if record.steering.as_ref().is_some_and(|steering| {
+            parse_rfc3339_utc(&steering.requested_at)
+                .is_some_and(|requested_at| activity_at >= requested_at)
+        }) {
+            record.steering = None;
+        }
+        true
     }
 
     fn park_unbound_live_monitor_panes(&mut self, now: &str) {
@@ -42356,6 +42388,72 @@ mod tests {
                 session_id: None,
             }],
         }
+    }
+
+    #[test]
+    fn issue_3809_bound_child_progress_joins_the_clock_and_fences_silent_recovery() {
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        let mut snapshot = silent_pane_snapshot(
+            "2026-06-29T01:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:00:00Z"),
+            None,
+        );
+        snapshot.windows[0].session_id = Some("current-holder".into());
+        monitor.record_window_snapshot(snapshot);
+        let silent_scan = monitor.clone();
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "predecessor",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T01:00:01Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        monitor.request_autonomous_steering(42, "check progress", "2026-06-29T01:00:00Z");
+        assert!(monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(monitor.autonomous_record(42).unwrap().steering.is_some());
+        assert!(monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T01:00:00Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(monitor.autonomous_record(42).unwrap().steering.is_none());
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(!monitor.scan_observations_compatible_with(&silent_scan, "2026-06-29T01:00:00Z"));
+        assert!(monitor
+            .recover_stuck_autonomous("2026-06-29T01:00:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert!(monitor.active_issue_numbers().contains(&42));
+        let row = monitor
+            .agent_status_at("2026-06-29T01:00:00Z")
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(
+            row.last_activity_at.as_deref(),
+            Some("2026-06-29T01:00:00Z")
+        );
     }
 
     #[test]

@@ -3813,6 +3813,10 @@ fn execute_inherited_command_cancellable(
         let stderr_reader = fs::File::open(stderr)?;
         let mut spawned = InheritedVerificationChild::spawn(process)?;
         let _command_scope = progress.map(|progress| progress.start(spawned.spawned.child.id()));
+        let _activity = VerificationCommandActivity::start(
+            process.get_current_dir(),
+            spawned.spawned.child.id(),
+        );
         let (status, stopped) = spawned.wait_cancellable(timeout, &mut now, check)?;
         let output = std::process::Output {
             status,
@@ -4113,7 +4117,13 @@ fn execute_command_on_daemon(
     let delegated = crate::cli::daemon::verification_host::run_cancellable(
         endpoint,
         request,
-        |pid| progress.map(|progress| progress.start(pid)),
+        |pid| {
+            let command_scope = progress.map(|progress| progress.start(pid));
+            (
+                VerificationCommandActivity::start(Some(&request.cwd), pid),
+                command_scope,
+            )
+        },
         command_timeout(command, progress),
         check,
     );
@@ -6255,6 +6265,209 @@ fn revalidate_verification_caller_authority(
         return Err(verification_caller_authority_error());
     }
     Ok(())
+}
+
+/// The command root comes from spawn/accept, including Light commands that
+/// have no heavy lease. Keep its producing identity separate from hook state.
+struct VerificationCommandActivityContext {
+    worktree: PathBuf,
+    authority: VerificationCallerAuthority,
+    execution_identity: gwt_agent::SessionExecutionIdentity,
+    pane_runtime: crate::issue_monitor_worker::ActivitySessionRoot,
+    command_pid: u32,
+    command_started_at: u64,
+}
+
+impl VerificationCommandActivityContext {
+    fn capture(worktree: &Path, session_id: &str, command_pid: u32) -> Option<Self> {
+        let command_started_at = crate::process::host_process_start_time(command_pid)?;
+        let worktree = dunce::canonicalize(worktree).ok()?;
+        let authority = snapshot_verification_caller_authority(&worktree, session_id).ok()?;
+        authority.execution_binding.as_ref()?;
+        let binding = authority.session_binding.as_ref()?;
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .ok()?;
+        let execution_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&session).ok()??;
+        if &execution_identity.execution_binding != binding {
+            return None;
+        }
+        let pane_runtime = crate::issue_monitor_worker::activity_session_root(&session)?;
+        let context = Self {
+            worktree,
+            authority,
+            execution_identity,
+            pane_runtime,
+            command_pid,
+            command_started_at,
+        };
+        context.is_current().then_some(context)
+    }
+
+    fn is_current(&self) -> bool {
+        if crate::process::host_process_start_time(self.command_pid)
+            != Some(self.command_started_at)
+        {
+            return false;
+        }
+        let session_id = &self.execution_identity.session_id;
+        let binding = &self.execution_identity.execution_binding;
+        let kind = match binding.owner_kind.as_str() {
+            "issue" => execution_state::ExecutionOwnerKind::Issue,
+            "spec" => execution_state::ExecutionOwnerKind::Spec,
+            _ => return false,
+        };
+        let owner = execution_state::ExecutionOwnerKey {
+            kind,
+            number: binding.owner_number,
+        };
+        // Verification can recover a Blocked execution; activity may only
+        // refresh its currently Active producing generation.
+        if revalidate_verification_caller_authority(&self.worktree, session_id, &self.authority)
+            .is_err()
+            || !execution_state::current_active_execution_binding_matches(
+                &self.worktree,
+                owner,
+                session_id,
+                &binding.identity,
+            )
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let Ok(session) = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        ) else {
+            return false;
+        };
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .ok()
+            .flatten();
+        identity.as_ref() == Some(&self.execution_identity)
+            && crate::issue_monitor_worker::activity_session_root(&session)
+                == Some(self.pane_runtime)
+            && crate::process::host_process_start_time(self.command_pid)
+                == Some(self.command_started_at)
+    }
+
+    fn sample_payload(&self, stopped: &std::sync::atomic::AtomicBool) -> Option<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+
+        if stopped.load(Ordering::Acquire) || !self.is_current() {
+            return None;
+        }
+        // This exact command is still in its canonical wait scope, including
+        // silent I/O waits. Stamp the successful observation before readback
+        // or IPC can delay it.
+        let at = Utc::now().to_rfc3339();
+        if stopped.load(Ordering::Acquire) || !self.is_current() || stopped.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "child_progress": {
+                    "session_id": self.execution_identity.session_id,
+                    "execution_identity": self.execution_identity,
+                    "pane_runtime": self.pane_runtime,
+                    "command_pid": self.command_pid,
+                    "command_started_at": self.command_started_at,
+                    "at": at,
+                }
+            }),
+            std::process::id(),
+        ))
+    }
+}
+
+/// Stop and join with the exact command scope, including cancellation.
+struct VerificationCommandActivity {
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl VerificationCommandActivity {
+    fn start(worktree: Option<&Path>, command_pid: u32) -> Option<Self> {
+        let worktree = worktree?;
+        let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+        let context =
+            VerificationCommandActivityContext::capture(worktree, &session_id, command_pid)?;
+        #[cfg(test)]
+        let home = gwt_core::test_support::gwt_home_override();
+        Self::spawn(std::time::Duration::from_secs(30), move |stopped| {
+            #[cfg(test)]
+            let _home = home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
+            let Some(payload) = context.sample_payload(stopped) else {
+                return;
+            };
+            if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let project_root = context
+                .execution_identity
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&context.worktree);
+            if let Err(error) =
+                crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+            {
+                tracing::debug!(%error, "verification command activity publication unconfirmed");
+            }
+        })
+    }
+
+    fn spawn(
+        interval: std::time::Duration,
+        mut observe: impl FnMut(&std::sync::atomic::AtomicBool) + Send + 'static,
+    ) -> Option<Self> {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let (stop, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("verification-command-activity".to_string())
+            .spawn(move || {
+                if !worker_stopped.load(Ordering::Acquire) {
+                    observe(&worker_stopped);
+                }
+                while matches!(
+                    receiver.recv_timeout(interval),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    if worker_stopped.load(Ordering::Acquire) {
+                        break;
+                    }
+                    observe(&worker_stopped);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stopped,
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for VerificationCommandActivity {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn board_decision_field<'a>(body: &'a str, label: &str) -> Option<&'a str> {
@@ -12425,6 +12638,172 @@ fn default_integration_test_builds_a_guarded_binary() {
             .save(&sessions_dir)
             .expect("persist advanced generation-scoped Session binding");
         binding
+    }
+
+    #[test]
+    fn verification_child_activity_fixture() {
+        use std::io::Read;
+
+        let Some(ready) = std::env::var_os("GWT_VERIFY_CHILD_ACTIVITY_FIXTURE") else {
+            return;
+        };
+        fs::write(ready, "ready").unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+    }
+
+    #[test]
+    fn issue_3809_verification_child_progress_uses_exact_command_and_current_authority() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let session_id = "session-command-progress";
+        let binding = initialize_generation_scoped_execution(dir.path(), session_id);
+        persist_generation_scoped_session(dir.path(), session_id, binding.clone(), 1);
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), session_id);
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            started,
+            std::process::id(),
+            started,
+        );
+        runtime.save(&runtime_path).unwrap();
+        let ready = dir.path().join("command-ready");
+        let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_child_activity_fixture",
+            ])
+            .env("GWT_VERIFY_CHILD_ACTIVITY_FIXTURE", &ready)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = InheritedVerificationChild::spawn(&mut command).unwrap();
+        // test-hygiene: allow-wall-clock-deadline Readiness comes from the child; the deadline only bounds a failed launch.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline The child readiness event determines success; this only bounds a failed launch.
+                std::time::Instant::now() < deadline,
+                "child never became ready"
+            );
+            assert!(child.spawned.child.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let pid = child.spawned.child.id();
+        let context = VerificationCommandActivityContext::capture(dir.path(), session_id, pid)
+            .expect("a managed command has exact producing authority");
+        let stopped = AtomicBool::new(false);
+        let payload = context
+            .sample_payload(&stopped)
+            .expect("a real command blocked on I/O must publish while its exact root lives");
+        let crate::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } =
+            crate::runtime_daemon_events::decode_runtime_daemon_event(
+                crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                payload.clone(),
+                0,
+            )
+            .expect("the actual publication must satisfy the receiver's wire envelope")
+        else {
+            panic!("command progress must use the Issue Monitor control channel");
+        };
+        assert_eq!(payload["source_pid"], std::process::id());
+        assert_eq!(event["event"], "control");
+        let payload = &event["payload"];
+        assert_eq!(payload["child_progress"]["session_id"], session_id);
+        assert_eq!(payload["child_progress"]["command_pid"], pid);
+        assert_eq!(
+            payload["child_progress"]["pane_runtime"],
+            serde_json::json!({
+                "process": [std::process::id() as u64, started],
+                "host": [std::process::id() as u64, started],
+                "incarnation": 1,
+            })
+        );
+        assert_eq!(
+            payload["child_progress"]["command_started_at"],
+            context.command_started_at
+        );
+        assert_eq!(
+            payload["child_progress"]["execution_identity"],
+            serde_json::to_value(&context.execution_identity).unwrap()
+        );
+        assert!(
+            DateTime::parse_from_rfc3339(payload["child_progress"]["at"].as_str().unwrap()).is_ok()
+        );
+        runtime.runtime_incarnation = Some(2);
+        runtime.save(&runtime_path).unwrap();
+        assert!(
+            context.sample_payload(&stopped).is_none(),
+            "an unchanged Session and capability cannot lend an old command to a new pane"
+        );
+        runtime.runtime_incarnation = Some(1);
+        runtime.save(&runtime_path).unwrap();
+        stopped.store(true, Ordering::Release);
+        assert!(context.sample_payload(&stopped).is_none());
+        stopped.store(false, Ordering::Release);
+        advance_generation_scoped_session_binding(session_id, binding);
+        assert!(
+            context.sample_payload(&stopped).is_none(),
+            "an observer with superseded authority must fail closed"
+        );
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap();
+        runtime.execution_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&session).unwrap();
+        runtime.save(&runtime_path).unwrap();
+        let current = VerificationCommandActivityContext::capture(dir.path(), session_id, pid)
+            .expect("the same live command can capture the current authority");
+        child.reclaim();
+        child.spawned.child.wait().unwrap();
+        child.reaped = true;
+        assert!(
+            current.sample_payload(&stopped).is_none(),
+            "the exact command root must still be alive"
+        );
+    }
+
+    #[test]
+    fn issue_3809_verification_child_observer_joins_on_drop() {
+        use std::{sync::mpsc, time::Duration};
+
+        assert!(VerificationCommandActivity::start(None, std::process::id()).is_none());
+        let (sent, received) = mpsc::channel();
+        let observer = VerificationCommandActivity::spawn(Duration::from_secs(30), move |_| {
+            sent.send(()).unwrap();
+        })
+        .unwrap();
+        received
+            // test-hygiene: allow-wall-clock-deadline The channel observes admission; the timeout only bounds a missing initial notification.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command scope must publish before its periodic interval");
+        drop(observer);
+        while received.try_recv().is_ok() {}
+        assert_eq!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected),
+            "scope teardown must stop and join before returning"
+        );
     }
 
     #[derive(Debug, PartialEq, Eq)]

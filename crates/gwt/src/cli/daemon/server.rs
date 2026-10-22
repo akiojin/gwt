@@ -1091,12 +1091,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let launch_ack = matches!(&control, IssueMonitorControl::Launched { .. });
                                 let window_snapshot = matches!(&control, IssueMonitorControl::WindowSnapshot { .. });
-                                let observation_kind = match &control {
-                                    IssueMonitorControl::WindowSnapshot { .. } => Some("window-snapshot"),
-                                    IssueMonitorControl::Heartbeat { .. } => Some("heartbeat"),
-                                    IssueMonitorControl::ScanNow => Some("scan-request"),
-                                    _ => None,
-                                };
+                                let observation_kind = control.observation_kind();
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     completion.reject(IssueMonitorControlQueueError::Closed);
@@ -2265,6 +2260,14 @@ enum IssueMonitorControl {
         /// on a held provider can prove that provider has recovered.
         agent_id: Option<String>,
     },
+    ChildProgress {
+        session_id: String,
+        execution_identity: Box<gwt_agent::SessionExecutionIdentity>,
+        pane_runtime: crate::issue_monitor_worker::ActivitySessionRoot,
+        command_pid: u32,
+        command_started_at: u64,
+        at: String,
+    },
     /// Issue #4366 AC-5: the usage poller reads a held provider as usable, so
     /// its re-verification launch is brought forward to `at`.
     QuotaHoldReverify {
@@ -2435,6 +2438,18 @@ enum IssueMonitorControl {
     },
 }
 
+impl IssueMonitorControl {
+    fn observation_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::WindowSnapshot { .. } => Some("window-snapshot"),
+            Self::Heartbeat { .. } => Some("heartbeat"),
+            Self::ChildProgress { .. } => Some("child-progress"),
+            Self::ScanNow => Some("scan-request"),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AcceptedIssueMonitorControl {
     control_id: String,
@@ -2460,7 +2475,12 @@ impl AcceptedIssueMonitorControl {
         }
         Self {
             control_id: uuid::Uuid::new_v4().to_string(),
-            processed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            // A measured child sample may arrive within this same second.
+            processed_at: if matches!(&control, IssueMonitorControl::ChildProgress { .. }) {
+                chrono::Utc::now().to_rfc3339()
+            } else {
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            },
             control,
         }
     }
@@ -3140,6 +3160,31 @@ fn apply_routine_issue_monitor_control(
             monitor.record_autonomous_heartbeat(issue_number, &at);
             // Heartbeats are liveness evidence, not provider quota recovery.
             let _ = agent_id;
+            false
+        }
+        IssueMonitorControl::ChildProgress {
+            session_id,
+            execution_identity,
+            pane_runtime,
+            command_pid,
+            command_started_at,
+            at,
+        } => {
+            if session_id == execution_identity.session_id
+                && crate::issue_monitor_worker::load_current_activity_session(&execution_identity)
+                    .and_then(|session| {
+                        crate::issue_monitor_worker::activity_session_root(&session)
+                    })
+                    == Some(pane_runtime)
+                && crate::process::host_process_start_time(command_pid) == Some(command_started_at)
+            {
+                monitor.record_bound_process_activity(
+                    execution_identity.execution_binding.owner_number,
+                    &session_id,
+                    &at,
+                    now,
+                );
+            }
             false
         }
         IssueMonitorControl::QuotaHoldReverify { provider, at } => {
@@ -4599,6 +4644,36 @@ fn decode_issue_monitor_control_in_repo(
                     issue_number,
                     at,
                     agent_id,
+                });
+            }
+            if let Some(progress) = payload.get("child_progress") {
+                let session_id = progress.get("session_id")?.as_str()?.trim();
+                let execution_identity: gwt_agent::SessionExecutionIdentity =
+                    serde_json::from_value(progress.get("execution_identity")?.clone()).ok()?;
+                let pane_runtime =
+                    serde_json::from_value(progress.get("pane_runtime")?.clone()).ok()?;
+                let command_pid = u32::try_from(progress.get("command_pid")?.as_u64()?).ok()?;
+                let command_started_at = progress.get("command_started_at")?.as_u64()?;
+                let at = progress.get("at")?.as_str()?;
+                chrono::DateTime::parse_from_rfc3339(at).ok()?;
+                if session_id.is_empty()
+                    || session_id != execution_identity.session_id
+                    || command_pid == 0
+                    || command_started_at == 0
+                    || repo_path.is_some_and(|repo| {
+                        crate::index_worker::detect_repo_hash(repo).map(|hash| hash.to_string())
+                            != execution_identity.repo_hash
+                    })
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ChildProgress {
+                    session_id: session_id.to_string(),
+                    execution_identity: Box::new(execution_identity),
+                    pane_runtime,
+                    command_pid,
+                    command_started_at,
+                    at: at.to_string(),
                 });
             }
             if let Some(reverify) = payload.get("quota_hold_reverify") {
@@ -6600,6 +6675,11 @@ fn scan_issue_monitor_once_blocking(
             &mut monitor,
             &scope.project_root,
         );
+    crate::issue_monitor_worker::refresh_issue_monitor_child_activity(
+        &mut monitor,
+        &scope.project_root,
+        &now,
+    );
     // Candidate projection may run again for refreshed cache rows. Retire the
     // dead predecessor once, before any verified ownership repair can requeue it.
     let terminal_windows = monitor.reconcile_dead_terminal_launches(&execution_observations, &now);
@@ -7578,6 +7658,177 @@ async fn heal_endpoint_descriptor_loop(
 
 fn config_error(message: impl Into<String>) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.into()))
+}
+
+#[cfg(test)]
+mod child_progress_contract_tests {
+    use super::*;
+
+    #[test]
+    fn issue_3809_child_progress_control_requires_the_current_holder_and_command_incarnation() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, _) =
+            crate::issue_monitor_worker::tests::issue_3809_bound_activity_fixture(repo.path());
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut progress = serde_json::json!({
+            "session_id": session.id, "execution_identity": identity,
+            "command_pid": std::process::id(),
+            "command_started_at": crate::process::host_process_start_time(std::process::id()).unwrap(),
+            "pane_runtime": {
+                "process": [std::process::id(), crate::process::host_process_start_time(std::process::id()).unwrap()],
+                "host": [std::process::id(), crate::process::host_process_start_time(std::process::id()).unwrap()],
+                "incarnation": 1,
+            },
+            "at": now,
+        });
+        let decode = |progress| {
+            decode_issue_monitor_control_in_repo(
+                crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"child_progress": progress}),
+                    std::process::id().wrapping_add(1),
+                ),
+                Some(repo.path()),
+            )
+        };
+        let stale = monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .last_heartbeat
+            .clone();
+        let mut recycled = progress.clone();
+        recycled["command_started_at"] = serde_json::json!(1);
+        assert_eq!(
+            try_apply_issue_monitor_control(
+                &mut monitor,
+                decode(recycled).expect("well-formed control"),
+                &now
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            monitor.autonomous_record(3809).unwrap().last_heartbeat,
+            stale
+        );
+        let mut wrong_session = progress.clone();
+        wrong_session["session_id"] = serde_json::json!("old-holder");
+        if let Some(control) = decode(wrong_session) {
+            assert_eq!(
+                try_apply_issue_monitor_control(&mut monitor, control, &now),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            monitor.autonomous_record(3809).unwrap().last_heartbeat,
+            stale
+        );
+        let control = decode(progress.clone()).expect("current child progress must decode");
+        assert_eq!(control.observation_kind(), Some("child-progress"));
+        let silent_scan = monitor.clone();
+        let accepted = AcceptedIssueMonitorControl::new(control);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&accepted.processed_at).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+        );
+        assert_eq!(
+            try_apply_issue_monitor_control(&mut monitor, accepted.control, &accepted.processed_at),
+            Some(false)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(now.as_str())
+        );
+        assert!(
+            !monitor.scan_observations_compatible_with(&silent_scan, &accepted.processed_at),
+            "first progress fences a scan that could reclaim the silent pane"
+        );
+        let mut recent_scan = monitor.clone();
+        let newer = chrono::Utc::now().to_rfc3339();
+        progress["at"] = serde_json::json!(newer);
+        assert_eq!(
+            try_apply_issue_monitor_control(
+                &mut monitor,
+                decode(progress.clone()).unwrap(),
+                &newer
+            ),
+            Some(false)
+        );
+        assert!(
+            monitor.scan_observations_compatible_with(&recent_scan, &newer),
+            "repeated fresh progress coalesces instead of starving a long scan"
+        );
+        recent_scan.merge_scan_observations_from(&monitor);
+        assert_eq!(
+            recent_scan
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(newer.as_str())
+        );
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        let runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        let mut replacement = runtime.clone();
+        replacement.runtime_incarnation = Some(2);
+        replacement.save(&runtime_path).unwrap();
+        let after_restart = chrono::Utc::now().to_rfc3339();
+        progress["at"] = serde_json::json!(after_restart);
+        assert_eq!(
+            try_apply_issue_monitor_control(
+                &mut monitor,
+                decode(progress.clone()).unwrap(),
+                &after_restart
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(newer.as_str()),
+            "same Session/capability still cannot lend an old runtime's command to a new pane"
+        );
+        runtime.save(&runtime_path).unwrap();
+        crate::cli::execution_state::settle(
+            repo.path(),
+            &session.id,
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "settled during delivery".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        let later = chrono::Utc::now().to_rfc3339();
+        progress["at"] = serde_json::json!(later);
+        assert_eq!(
+            try_apply_issue_monitor_control(&mut monitor, decode(progress).unwrap(), &later),
+            Some(false)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(newer.as_str()),
+            "the receiver revalidates authority at serialized application time"
+        );
+    }
 }
 
 #[cfg(test)]
