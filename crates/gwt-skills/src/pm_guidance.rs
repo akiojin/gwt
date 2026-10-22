@@ -572,7 +572,8 @@ Approved existing operations:
   section / acceptance criteria used by default intake. A later opt-in refines
   the existing owner rather than creating a duplicate Issue.
 - For every new work request that may require Issue registration or update,
-  delegate a bounded intake packet to one or more in-session sub-agents. The
+  delegate a bounded intake packet to an in-session sub-agent under the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents). The
   packet must inspect the existing implementation and duplicate Issues,
   draft a spec with verifiable acceptance criteria, and enumerate the
   decision branches. Sub-agents return evidence and options; you retain the
@@ -818,11 +819,27 @@ body cannot hold `plan` / `tasks` sections.
   Your ordering decision takes precedence over a GUI reorder: the GUI
   is an observation and emergency surface, and the user's ordering
   intent reaches you through conversation. Re-read status before every
-  write so you never clobber an order you have not seen.
+  write and pass its full saved `priority_order` as `expected_priority_order`.
+  Never reconstruct that array from the active snapshot or queue. The
+  comparison and write share the prefs lock; on conflict, re-read status and reconsider
+  the order instead of blindly retrying. Read back status after a successful write.
+  Omitting the guard retains legacy behavior; value equality does not detect ABA
+  history or guard other configuration changes.
+- For `issue.monitor.queue.move` and `issue.monitor.queue.remove`, re-read
+  `issue.monitor.queue.list` for the current terminal before writing. Pass its
+  saved `queue_order`, not the urgent display order, as `expected_queue_order`.
+  The comparison and mutation share the prefs lock. On conflict, re-read the
+  list and reconsider the change; read back the list after a successful write.
+  Omitting the guard retains legacy behavior; an explicit `[]` matches only an
+  empty saved queue and `null` is invalid. This value comparison does not detect
+  ABA history, urgent metadata, priority-only changes or other configuration changes.
 - You must be able to explain the current order whenever the user asks.
   Record why you placed each issue where you did in your session notes
   at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
+  For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard
+  from a fresh status read. On conflict, re-read status and reconsider the
+  instruction; no queue admission, hold clearing or scan request occurs.
   It only moves the issue to the priority head and triggers an
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
@@ -831,6 +848,15 @@ body cannot hold `plan` / `tasks` sections.
   `enabled` / `autonomous_mode` ON or OFF. Other JSON callers may only turn
   them OFF; enabling either requires the GUI. `max_active` changes are allowed
   for everyone.
+  For `issue.monitor.config.set`, read a fresh status and decide from its
+  `saved_config` observation. Pass that same response's
+  `config_token` as `expected_config_token`. Config conflicts leave preferences unchanged
+  and request no scan. Re-read status and reconsider the change instead of blindly
+  retrying, then read back a successful change. Saved configuration is distinct
+  from effective capacity and launch observations. If a daemon cannot handle the
+  guarded request, keep the refusal; never drop the guard or write around the daemon.
+  Omitting the guard retains legacy behavior. This value comparison does not detect
+  ABA history or protect other control operations.
   `launch_agent` (`codex` / `claude`) switches the saved launch profile's
   agent from the CLI (Issue #3923): model and reasoning reset to that
   agent's defaults, the wizard's runtime and Docker choices are kept, and
@@ -1442,6 +1468,8 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   hang-risk work. Delegate it to a
   background job or exactly one in-session sub-agent. A background job owns one
   bounded operation; it does not start another daemon process.
+  Sub-agent delegation follows the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents).
 - Before delegating, record a pending operation key in `$GWT_PM_SCRATCH_DIR`
   from the operation, normalized target and parameters, and logical effect.
   While that key is pending, do not run or delegate the same logical operation
@@ -1489,6 +1517,10 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   so the snapshot is the truth, and nothing the subscribe missed is lost —
   the next cycle's snapshot still carries it. Act on the differences: triage
   newly arrived issues, re-evaluate order, and issue launch instructions.
+  When subscribe uses a sub-agent, apply the shared
+  [auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents);
+  defer it while that slot is occupied or intake is queued, and continue
+  snapshot reconciliation instead.
 - In `akiojin/gwt`, inspect retained external-feedback exclusions and fixed
   `gwt-feedback-triage` / `gwt-feedback-evidence` updates through existing
   canonical Issue reads/search (`search`, `issue.view`, `issue.comments`).
@@ -2168,6 +2200,17 @@ and urgency.
 - For investigation, design, and planning work, use your harness's own
   in-session sub-agents. They inherit your boundary: they must not
   modify production code or spawn implementation agents.
+- At most one auxiliary sub-agent may run per PM session. Count
+  intake, investigation, design, planning, and delegated `daemon.subscribe`
+  against this same limit. Nested delegation must not bypass this shared limit.
+- Known exhausted harness capacity defers new delegation. Unknown harness
+  capacity permits one native admission attempt only when your auxiliary slot
+  is free; if admission is refused, leave the packet queued without an immediate
+  retry loop. Harness limits always take precedence over this budget.
+- Without terminal completion evidence, keep the auxiliary slot occupied.
+  When the task finishes, serve queued intake before starting another subscriber.
+  While delegation is deferred, continue lightweight snapshot reconciliation
+  and respond to the user; do not wait on the task in the foreground.
 
 ## Stopping
 
@@ -3026,6 +3069,48 @@ mod tests {
             "otherwise register a plain Issue",
         ] {
             assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn generated_auxiliary_budget_is_shared_by_intake_and_subscribe() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let references = dir.path().join(provider).join("skills/gwt-pm/references");
+            let reporting = unwrapped(
+                &std::fs::read_to_string(references.join("escalation-and-reporting.md")).unwrap(),
+            );
+            for required in [
+                "At most one auxiliary sub-agent may run per PM session",
+                "intake, investigation, design, planning, and delegated `daemon.subscribe`",
+                "Nested delegation must not bypass this shared limit",
+                "Known exhausted harness capacity defers new delegation",
+                "Unknown harness capacity permits one native admission attempt",
+                "leave the packet queued without an immediate retry loop",
+                "Without terminal completion evidence, keep the auxiliary slot occupied",
+                "serve queued intake before starting another subscriber",
+                "continue lightweight snapshot reconciliation",
+                "must not modify production code or spawn implementation agents",
+            ] {
+                assert!(
+                    reporting.contains(required),
+                    "{provider}: missing {required}"
+                );
+            }
+            for name in [
+                "intake-and-priority.md",
+                "runtime-isolation.md",
+                "resident-loop.md",
+            ] {
+                let reference = std::fs::read_to_string(references.join(name)).unwrap();
+                assert!(
+                    reference.contains(
+                        "[auxiliary-agent budget](escalation-and-reporting.md#auxiliary-agents)"
+                    ),
+                    "{provider}/{name}: missing shared-budget reference"
+                );
+            }
         }
     }
 
@@ -4110,6 +4195,16 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`config_token` as `expected_config_token`",
+            "Config conflicts leave preferences unchanged",
+            "For `issue.monitor.config.set`, read a fresh status",
+            "`expected_queue_order`",
+            "For `issue.monitor.queue.move` and `issue.monitor.queue.remove`",
+            "saved `queue_order`, not the urgent display order",
+            "`expected_priority_order`",
+            "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
+            "full saved `priority_order`",
+            "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",

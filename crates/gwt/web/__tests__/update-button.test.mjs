@@ -287,7 +287,7 @@ test("update CTA shell mounts in the shared notice host", () => {
   );
 });
 
-function createFixture({ confirmResult = true, now } = {}) {
+function createFixture({ confirmResult = true, now, scheduleFrame = callback => { callback(); return () => {}; } } = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
   );
@@ -301,6 +301,7 @@ function createFixture({ confirmResult = true, now } = {}) {
     versionUpdates,
     options: {
       document,
+      scheduleFrame,
       ...(now ? { now } : {}),
       send(message) {
         sent.push(message);
@@ -371,32 +372,60 @@ test("update progress retains an immutable snapshot before the modal mounts", ()
   assert.equal(counter.textContent, "3.0 MB / 4.0 MB");
 });
 
-test("phase19: update_progress events update modal progress bar and byte counter", () => {
-  const fixture = createFixture();
+test("update progress batches the latest snapshot without delaying mount, cancel, or lifecycle transitions", () => {
+  const frames = [];
+  const fixture = createFixture({ scheduleFrame: callback => { frames.push(callback); return () => {}; } });
+  const flush = () => { for (const callback of frames.splice(0)) callback(); };
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.26.0");
+  const mb = 1024 * 1024;
+  const payload = { downloaded: mb, total: 4 * mb };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = 0;
   fixture.document.getElementById("update-cta").click();
-
-  controller.handleUpdateProgress({
-    downloaded: 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
-  controller.handleUpdateProgress({
-    downloaded: 3 * 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
-
   const modal = fixture.document.getElementById("update-modal");
   const progress = modal.querySelector("[data-update-modal-progress]");
   const counter = modal.querySelector("[data-update-modal-byte-counter]");
-  assert.ok(progress, "expected progress bar element");
-  assert.ok(counter, "expected byte counter element");
-  assert.equal(progress.getAttribute("aria-valuenow"), "75");
-  assert.match(counter.textContent, /3.0\s*MB\s*\/\s*4.0\s*MB/);
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "mount reads the immutable model synchronously");
+  flush();
+  let renders = 0;
+  const setAttribute = progress.setAttribute.bind(progress);
+  progress.setAttribute = (name, value) => {
+    if (name === "aria-valuenow") renders++;
+    setAttribute(name, value);
+  };
+  for (let index = 1; index <= 50; index++) {
+    controller.handleUpdateProgress({ downloaded: index * mb, total: 100 * mb });
+  }
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "existing DOM waits for the frame");
+  assert.equal(frames.length, 1);
+  assert.equal(renders, 0);
+  flush();
+  assert.equal(renders, 1);
+  assert.equal(progress.getAttribute("aria-valuenow"), "50");
+  assert.equal(counter.textContent, "50.0 MB / 100.0 MB");
+
+  controller.handleUpdateProgress({ downloaded: 75 * mb, total: 100 * mb });
+  controller.handleUpdateReady({ version: "9.26.0" });
+  flush();
+  assert.equal(modal.dataset.state, "ready", "pending progress cannot replace the ready modal");
+  controller.beginDownloadingFor("9.26.0");
+  controller.handleUpdateProgress({ downloaded: 80 * mb, total: 100 * mb });
+  fixture.document.querySelector("[data-update-modal-cancel]").click();
+  assert.deepEqual(fixture.sent.at(-1), { kind: "cancel_update_download" }, "cancel sends synchronously");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal"), null, "pending progress cannot reopen the modal");
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+
+  controller.handleUpdateProgress({ downloaded: 90 * mb, total: 100 * mb });
+  controller.handleUpdateApplyError({ reason: "Fixture failure" });
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "failed");
+  fixture.document.querySelector("[data-update-modal-close]").click();
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "90");
 });
 
 test("phase19: cancel during download sends cancel_update_download and returns CTA to available", () => {

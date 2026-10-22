@@ -520,6 +520,12 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
     init_repo_with_initial_commit(&repo);
@@ -571,6 +577,12 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
         panic!("prepared completion")
     };
     // Controls can change after preparation but before the GUI applies it.
+    gwt::machine_agent_settings::set(
+        Some(4),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:01:00Z",
+    )
+    .expect("concurrent machine control");
     gwt::save_issue_monitor_prefs(&prefs_path, &latest).expect("concurrent controls");
     assert!(runtime
         .issue_monitor_scheduled_scan_prepared_events(*stale)
@@ -1692,6 +1704,12 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
     gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
 
     for manual in [None, Some(9)] {
+        gwt::machine_agent_settings::set(
+            manual,
+            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed shared mode for the capacity observation");
         let mut durable = test_monitor_with_prefs(
             gwt::IssueMonitorConfig::default(),
             gwt::IssueMonitorPrefs::default(),

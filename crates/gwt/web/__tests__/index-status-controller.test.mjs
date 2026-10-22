@@ -28,7 +28,7 @@ const settingsSurfaceSource = readFileSync(
   "utf8",
 );
 
-async function indexHealthFixture(t, onSettings = () => {}) {
+async function indexHealthFixture(t, onSettings = () => {}, scheduleFrame) {
   const source = indexSurfaceSource.replace(/from "\/(.*?)"/g,
     (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
   const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -63,6 +63,7 @@ async function indexHealthFixture(t, onSettings = () => {}) {
     clearChildren: node => node.replaceChildren(),
     renderIndexPanelInAllSettingsWindows: onSettings,
     requestFullIndexStatusRefresh: () => sent.push({ kind: 'refresh_index_status' }),
+    scheduleFrame,
   });
   controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
   return { controller, document, sent, activateProject: root => {
@@ -73,22 +74,46 @@ async function indexHealthFixture(t, onSettings = () => {}) {
 
 test("Index health commits an immutable project snapshot and ignores unrelated project updates", async t => {
   let settingsRenders = 0;
-  const { controller, document, activateProject } = await indexHealthFixture(t, () => { settingsRenders += 1; });
+  let settingsSnapshot;
+  const frames = [];
+  const { controller, document, activateProject } = await indexHealthFixture(t, () => {
+    settingsRenders += 1;
+    settingsSnapshot = controller.getIndexStatus('/repo');
+  }, callback => { frames.push(callback); return () => {}; });
+  const originalSummary = document.querySelector('.index-search-health-summary').firstChild;
   const payload = { state: 'ready', scopes: { issues: { healthy: true, document_count: 12 } } };
   controller.setIndexStatus('/repo', payload);
   const committed = controller.getIndexStatus('/repo');
   assert.ok(Object.isFrozen(committed.scopes.issues));
   payload.scopes.issues.document_count = 99;
   assert.equal(committed.scopes.issues.document_count, 12);
+  assert.equal(settingsRenders, 0, 'model commits must not render before the frame');
+  assert.ok(document.querySelector('.index-search-health-summary').firstChild === originalSummary);
+  for (let count = 13; count <= 50; count += 1) {
+    controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true, document_count: count } } });
+  }
+  const latest = controller.getIndexStatus('/repo');
+  controller.setIndexStatus('/other', { state: 'error' });
+  assert.equal(frames.length, 1, 'both views share one pending frame despite unrelated trailing status');
+  frames.shift()();
+  assert.ok(settingsSnapshot === latest, 'Settings pulls the latest committed snapshot');
   assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.match(document.querySelector("tr[data-scope='issues']").textContent, /50 docs/);
   controller.setIndexStatus('/other', { state: 'error' });
   assert.equal(settingsRenders, 1);
-  assert.strictEqual(controller.getIndexStatus('/repo'), committed);
+  assert.ok(controller.getIndexStatus('/repo') === latest);
   activateProject('/other');
   const summary = document.querySelector('.index-search-health-summary').firstChild;
   controller.setIndexStatus('/repo', { state: 'repair_required' });
+  while (frames.length) frames.shift()();
   assert.equal(settingsRenders, 1, 'switching projects must not turn an unrelated update into a redraw');
   assert.strictEqual(document.querySelector('.index-search-health-summary').firstChild, summary);
+  activateProject('/repo');
+  const restoredSummary = document.querySelector('.index-search-health-summary').firstChild;
+  controller.setIndexStatus('/other', { state: 'ready' });
+  while (frames.length) frames.shift()();
+  assert.equal(settingsRenders, 1, 'returning to a project must not revive its old render eligibility');
+  assert.ok(document.querySelector('.index-search-health-summary').firstChild === restoredSummary);
 });
 
 test("Index search renders committed responses, recovers lost reads and clears closed-window subscriptions", async t => {
@@ -178,8 +203,11 @@ test("Index search isolates window selectors and cancels pending searches on clo
 });
 
 test("Index health still renders a committed snapshot when another view fails", async t => {
-  const { controller, document } = await indexHealthFixture(t, () => { throw new Error('settings failed'); });
-  assert.throws(() => controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true } } }), /settings failed/);
+  const frames = [];
+  const { controller, document } = await indexHealthFixture(t, () => { throw new Error('settings failed'); },
+    callback => { frames.push(callback); return () => {}; });
+  controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true } } });
+  assert.throws(() => frames.shift()(), /settings failed/);
   assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
   assert.equal(controller.getIndexStatus('/repo').scopes.issues.healthy, true);
 });

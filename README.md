@@ -524,12 +524,17 @@ settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
 Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Existing saved limits remain Manual. Values above
+follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+by all projects on this machine. Manual is a total worker limit; each project receives
+the remaining capacity after other projects' workers, while PM windows stay separate.
+Settings shows this project's allocation and other projects' worker consumption.
+See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. Automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
-`max_active_agents_override`, and the shared `agent_capacity` measurement.
+`max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
+and the shared `agent_capacity` measurement.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -569,12 +574,35 @@ observed GitHub label actor/time. Missing audit data is shown as unknown.
 Agents and automation can inspect the queue with `issue.monitor.status` and
 change membership/order with `issue.monitor.queue.push`,
 `issue.monitor.queue.remove`, and `issue.monitor.queue.move`. The
+`issue.monitor.queue.list` reply includes the selected terminal's saved
+`queue_order`, separately from the urgent display order. Before a move or removal,
+read the current terminal's list and pass that array as `expected_queue_order`.
+A mismatch rejects the change without modifying preferences; read the list again
+and reconsider, then read back a successful change. An explicit `[]` matches only
+an empty saved queue, `null` is rejected, and omitting the guard keeps existing
+behavior. This compares queue order values, without tracking intervening history,
+urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
-`issue.monitor.priority.set` operations remain available. The
+`issue.monitor.priority.set` operations remain available. To prevent overwriting
+an intervening priority change, read the full `priority_order` from
+`issue.monitor.status` and pass that array as `expected_priority_order` to either
+priority operation or `issue.monitor.launch_now`. A mismatch rejects the update
+before queue admission, hold clearing, or a scan request; read status again and reconsider
+the order, then confirm a successful update by reading it back. An explicit `[]`
+matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
+the existing behavior. The comparison protects the current order value, without
+tracking intervening history or other configuration changes. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. The registered PM for the repository
+mode, or set a positive `max_active` limit. For a conditional settings change,
+read `saved_config` and `config_token` from `issue.monitor.status`, then pass that
+token as `expected_config_token` to `config.set`. A mismatch leaves preferences
+unchanged and requests no scan; read status again and reconsider the change.
+Read back a successful change. The token compares saved configuration values;
+it excludes runtime observations and does not track intervening history. Omitting
+it keeps existing behavior; `null` is rejected. An older daemon refuses guarded
+changes rather than applying them without the guard. The registered PM for the repository
 can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
 to enable them. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
@@ -790,6 +818,13 @@ PM decomposes it into Issues, registers them, plans the design-required ones,
 decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
+
+The PM delegates intake and investigation to at most one auxiliary agent at a
+time, including any delegated event subscription. Further requests wait for that
+agent to finish; queued intake takes precedence over another subscription while
+the PM continues responding and checking status snapshots. Native harness limits
+still apply. If capacity is unknown, the PM may try admission once when its
+auxiliary slot is free; a refusal leaves the work queued without a retry loop.
 
 Ask the PM to link planned Issues to a project goal or an explicit maintenance
 or compliance category. `pm.plan.status` shows the saved planning revision and a
@@ -1059,7 +1094,7 @@ entrypoints are:
 For a gwt bug or workflow problem, PM and implementation agents can use
 `gwt-feedback` to collect the affected operation, original refusal,
 reproduction steps, and workaround. The `feedback.create` JSON operation always
-targets `akiojin/gwt` and adds source-project and environment information.
+targets `akiojin/gwt` and collects local diagnostic context.
 It saves a local receipt. Outside the actual gwt repository, intake returns
 immediately so project work can continue; sending requires the user's **Send
 feedback** action in a native dialog. Cancellation or an unavailable desktop
@@ -1067,8 +1102,12 @@ keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
 The local receipt keeps the complete original. Public reports automatically mask
-known credentials, environment assignment values, paths (including URLs), and
-Markdown code fragments; the native preview and submission use the same content.
+known credentials, environment assignment values, source identifiers, paths
+(including URLs), and source code. Public metadata includes only gwt/gwtd
+versions and OS/architecture; source-project metadata and arbitrary context are
+omitted. The scrollable native preview keeps both actions visible and shows
+removed categories, the masked proportion, and a warning when most text is masked.
+The preview and submission use the same content.
 Unmasked refusal text is preserved without truncation. Masks are conservative
 and cannot detect every arbitrary secret; do not publish the raw receipt.
 
@@ -1509,6 +1548,12 @@ not loaded as PM configuration. Implementation agents keep their normal
 project configuration. Existing PM conversations are not migrated automatically;
 the isolated directory is used on the next PM session launch.
 
+The PM receives skills for coordination, agent observation, search, request
+intake, and planning, plus their search and registration helpers. Implementation,
+verification, and PR workflow skills remain with implementation agents. Managed
+asset refresh removes old implementation skills and their `gwt-*` command aliases
+from the PM runtime; implementation agents keep the full skill set.
+
 To explicitly supply project policy, add `settings.project_policy_files` to
 `~/.gwt/projects/<project-hash>/project-state/pm.json`, preserving its other
 fields. For example, `"project_policy_files": ["docs/pm-policy.md"]` selects a
@@ -1521,6 +1566,7 @@ an entry removes its copied policy on the next refresh.
 
 - Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
 - Open **PM** from its separate rail entry; PM uses a single pane.
+- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
 - Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
 - Use **Close split** to keep the active surface in one pane.
 - In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.

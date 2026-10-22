@@ -46,6 +46,8 @@ pub mod issue_monitor_settlement;
 pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
+pub mod machine_agent_admission;
+pub mod machine_agent_settings;
 pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;

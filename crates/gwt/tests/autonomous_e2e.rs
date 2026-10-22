@@ -535,6 +535,7 @@ mod idle_windows {
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
+                        exited_holder_session_id: None,
                     },
                 )
             })

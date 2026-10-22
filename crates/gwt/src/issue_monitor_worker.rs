@@ -591,6 +591,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
+                        exited_holder_session_id: None,
                     },
                 );
             }
@@ -696,6 +697,12 @@ pub(crate) fn read_execution_observations_from_inventory(
                     settlement,
                     process_held,
                     holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    exited_holder_session_id: diagnosis.holder_session_id.clone().filter(|_| {
+                        matches!(
+                            diagnosis.holder_runtime.as_deref(),
+                            Some("child_exited" | "terminal")
+                        )
+                    }),
                     dead_holder_hosts,
                     held_holder_session_id: diagnosis.holder_session_id.clone().filter(|holder| {
                         matches!(
@@ -3303,7 +3310,7 @@ mod linked_pr_batch_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn test_monitor(config: crate::IssueMonitorConfig) -> crate::IssueMonitorState {
@@ -4646,6 +4653,33 @@ mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
 
+        // Immediate admission and full scans use the durable planner, not the
+        // synchronous claim API below. Both must reject before any effect.
+        let mut durable = monitor.clone();
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
+            0,
+            "an unsupported provider must produce no durable claim effect"
+        );
+        assert!(durable.pending_effects().is_empty());
+        assert!(durable.take_pending_launch_requests().is_empty());
+        assert_eq!(durable.active_count(), 0);
+        let blocked = durable.inbox_item(42).expect("excluded durable candidate");
+        assert_eq!(blocked.state, MonitorInboxState::NotReady);
+        let reason = blocked.exclusion_reason.as_deref().expect("gate reason");
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
+        assert_eq!(
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:20Z", 1, |_| false),
+            1,
+            "a corrected profile is re-evaluated on the next scan"
+        );
+
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
             "host:1",
@@ -4709,6 +4743,17 @@ mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
 
+        assert_eq!(
+            monitor.clone().prepare_claim_effects_with_probe(
+                "host:1",
+                "2026-07-02T00:00:10Z",
+                1,
+                |_| false,
+            ),
+            1,
+            "a supported provider still prepares a durable claim"
+        );
+
         let launches = monitor.claim_next_launch_requests_with_probe(
             &client,
             "host:1",
@@ -4721,6 +4766,79 @@ mod tests {
             launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
             vec![42]
         );
+    }
+
+    #[test]
+    fn permission_readiness_rechecks_the_profile_when_a_claim_succeeds() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        // Autonomous eligibility marks a candidate Implementing before claims.
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_attempt(42);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        let crate::IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected claim acquisition");
+        };
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+        // config_set.launch_agent can change the selected provider while the
+        // GitHub request is in flight, without changing effect authority.
+        monitor.switch_launch_profile_agent("openclaw").unwrap();
+        assert!(monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .is_some());
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            crate::AutonomousPhase::Idle
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        let item = monitor.inbox_item(42).unwrap();
+        assert_eq!(item.state, MonitorInboxState::NotReady);
+        let reason = item.exclusion_reason.as_deref().unwrap();
+        for required in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(required), "{reason}");
+        }
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(&monitor.pending_effects()[0].payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id: released, owner: released_owner }
+                if released == claim_id && released_owner == owner));
+
+        // The next scan may prepare eligibility again while the unsupported
+        // profile remains selected; every permission rejection must be idle.
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 1, |_| false),
+            0
+        );
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+        assert_eq!(monitor.attempt_count(42), 1);
+
+        monitor.switch_launch_profile_agent("codex").unwrap();
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        assert!(monitor.apply_confirmed_claim(42, "new-claim", owner, "new-effect", now));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
     }
 
     /// A launch profile naming `agent_id`, with every other field at the value
@@ -5320,6 +5438,255 @@ mod tests {
                 .current_effective_status(),
             Some(ExecutionControlStatus::Active)
         );
+    }
+
+    pub(crate) fn completed_child_exit_fixture(
+        worktree: &Path,
+    ) -> (crate::cli::execution_state::ExecutionOwnerKey, String, u64) {
+        use crate::cli::execution_state::{self, ExecutionControlRecord, LegacyActiveDisposition};
+        let session_id = "completed-child-exited";
+        let record: ExecutionControlRecord = serde_json::from_value(serde_json::json!({
+            "owner_kind": "issue", "owner_number": 42,
+            "primary_session_id": session_id, "entrypoint": "gwt-execute",
+            "status": "completed", "launched_at": "2026-09-07T03:00:00Z",
+            "settled_at": "2026-09-07T04:00:00Z"
+        }))
+        .unwrap();
+        execution_state::save(worktree, &record).unwrap();
+        let owner = execution_state::ExecutionOwnerKey {
+            kind: execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            LegacyActiveDisposition::Unknown,
+        )
+        .unwrap();
+        let binding = execution_state::current_execution_binding(worktree, owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session =
+            gwt_agent::Session::new(worktree, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.into();
+        session.linked_issue_number = Some(42);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: 42,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let host_started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            host_started,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+        (owner, session_id.to_string(), host_started)
+    }
+
+    #[test]
+    fn issue_5876_completed_child_exit_requeues_on_the_next_scan() {
+        use crate::cli::execution_state;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let (owner, session_id, host_started) = completed_child_exit_fixture(worktree.path());
+        assert_eq!(
+            execution_state::diagnose_owner(worktree.path(), owner)
+                .holder_runtime
+                .as_deref(),
+            Some("child_exited")
+        );
+        let mut observed = read_execution_observations(worktree.path(), &[42]);
+        assert!(!observed[&42].process_held);
+        assert!(!observed[&42].holder_host_dead);
+
+        let now = "2026-09-07T04:00:01Z";
+        let mut candidate = issue(42);
+        candidate.labels.push("gwt-spec".into());
+        candidate.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        let mut base = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        base.set_gui_connected(true);
+        base.set_autonomous_mode(true);
+        base.terminal_queue_push(&[42], "test", now);
+        base.record_candidate(candidate.clone());
+        base.complete_active_launch_at(42, "tab-1::finished", "2026-09-07T03:59:59Z");
+        let pane = crate::IssueMonitorWindowObservation {
+            monitor_owned: true,
+            window_id: "tab-1::finished".into(),
+            issue_number: Some(42),
+            status: crate::WindowState::Stopped,
+            review_dispatch: false,
+            hold_reason: None,
+            last_output_at: None,
+            session_id: Some(session_id.clone()),
+        };
+        let snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.into(),
+            windows: vec![pane],
+        };
+        base.record_window_snapshot_from_host(
+            snapshot.clone(),
+            std::process::id(),
+            host_started,
+            Default::default(),
+        );
+        base.record_monitor_runtime_windows(
+            std::process::id(),
+            host_started,
+            BTreeMap::from([(42, 1)]),
+            BTreeMap::from([("tab-1::finished".into(), 42)]),
+            now,
+        );
+        for mode in ["bound", "settled", "cold"] {
+            if mode == "cold" {
+                let runtime_path = gwt_agent::runtime_state_path(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &session_id,
+                );
+                let mut runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+                runtime.status = gwt_agent::AgentStatus::Stopped;
+                runtime.save(&runtime_path).unwrap();
+                assert_eq!(
+                    execution_state::diagnose_owner(worktree.path(), owner)
+                        .holder_runtime
+                        .as_deref(),
+                    Some("terminal")
+                );
+                observed = read_execution_observations(worktree.path(), &[42]);
+            }
+            let mut monitor = if mode == "cold" {
+                let old = base.prefs();
+                let mut cold = test_monitor_with_prefs(
+                    IssueMonitorConfig {
+                        enabled: true,
+                        max_active: 1,
+                        ..IssueMonitorConfig::default()
+                    },
+                    crate::IssueMonitorPrefs {
+                        enabled: true,
+                        autonomous_mode: true,
+                        max_active_agents: 1,
+                        terminal_queues: old.terminal_queues,
+                        monitor_runtime_counts: old.monitor_runtime_counts,
+                        ..crate::IssueMonitorPrefs::default()
+                    },
+                );
+                cold.set_gui_connected(true);
+                cold.record_window_snapshot_from_host(
+                    snapshot.clone(),
+                    std::process::id(),
+                    host_started,
+                    Default::default(),
+                );
+                cold.record_candidate(candidate.clone());
+                cold
+            } else {
+                base.clone()
+            };
+            if mode == "settled" {
+                let id = monitor.launch_identity(42);
+                monitor
+                    .settle_exact_terminal_delivery(&crate::IssueMonitorStopTarget {
+                        issue_number: 42,
+                        claim_id: id.claim_id,
+                        delivery_id: id.delivery_id,
+                        window_id: id.window_id,
+                    })
+                    .unwrap();
+            }
+            let stale = monitor.prefs();
+            let attempts = monitor.attempt_count(42);
+            let result = monitor.reconcile_dead_terminal_launches(&observed, now);
+            assert_eq!(
+                monitor.active_count(),
+                0,
+                "mode={mode}: exited pane cannot hold capacity"
+            );
+            assert_eq!(result.requeued, vec![42], "mode={mode}");
+            assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+            assert_eq!(monitor.attempt_count(42), attempts);
+            assert!(result.pane_closes.is_empty());
+            monitor.record_window_snapshot_from_host(
+                snapshot.clone(),
+                std::process::id(),
+                host_started,
+                Default::default(),
+            );
+            assert_eq!(
+                monitor.active_count(),
+                0,
+                "a new GUI snapshot must not restore the completed pane"
+            );
+            monitor.rebase_daemon_driver_prefs(&stale);
+            assert_eq!(monitor.active_count(), 0, "stale accounting cannot return");
+            assert!(monitor
+                .reconcile_dead_terminal_launches(&observed, now)
+                .requeued
+                .is_empty());
+            let persisted =
+                serde_json::from_slice(&serde_json::to_vec(&monitor.prefs()).unwrap()).unwrap();
+            let mut restored = test_monitor_with_prefs(
+                IssueMonitorConfig {
+                    enabled: true,
+                    max_active: 1,
+                    ..IssueMonitorConfig::default()
+                },
+                persisted,
+            );
+            restored.record_window_snapshot_from_host(
+                snapshot.clone(),
+                std::process::id(),
+                host_started,
+                Default::default(),
+            );
+            assert_eq!(
+                restored.active_count(),
+                0,
+                "cold restore must retain exact Session retirement"
+            );
+            restored.set_gui_connected(true);
+            restored.record_candidate(candidate.clone());
+            let next = restored
+                .next_launch_request(now)
+                .expect("fresh successor without TTL wait");
+            assert_eq!(
+                next.launch_session_strategy,
+                crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+            assert!(restored.next_launch_request(now).is_none());
+        }
     }
 
     #[test]
@@ -7107,6 +7474,7 @@ exit 1
                 ..IssueMonitorConfig::default()
             },
             crate::IssueMonitorPrefs {
+                enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -7125,7 +7493,7 @@ exit 1
 
         assert!(autonomous_eligibility_candidates(
             &monitor,
-            &[not_ready, held],
+            &[not_ready.clone(), held.clone()],
             "2026-08-05T10:00:01Z",
         )
         .is_empty());
@@ -7139,6 +7507,72 @@ exit 1
             monitor.inbox_item(51).map(|item| item.state),
             Some(MonitorInboxState::HoldExcluded)
         );
+
+        // Eligibility precedes claim acquisition. A fresh exclusion must also
+        // retire that provisional phase, without spending a retry attempt.
+        let now = "2026-08-05T10:00:02Z";
+        let protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        monitor.terminal_queue_push(&[50, 51], "test", now);
+        for mut ready in [not_ready.clone(), held.clone()] {
+            ready.labels.retain(|label| label != "hold");
+            ready.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+            ready.body = Some("## Acceptance Criteria\n- [ ] AC-1: execute\n".to_string());
+            monitor.record_candidate(ready.clone());
+            assert_eq!(
+                monitor.prepare_autonomous_candidate(&ready, &protection, now),
+                crate::EligibilityDecision::Eligible
+            );
+            monitor.record_attempt(ready.number);
+        }
+        let mut running = monitor.clone();
+        assert!(running.apply_confirmed_claim(50, "claim", "host:1", "effect", now));
+        running.complete_active_launch(50, "tab-1::agent-50");
+        let mut resuming_review = monitor.clone();
+        resuming_review.begin_review(50, 500, "reviewed-head");
+        assert_eq!(
+            resuming_review.resume_inflight_reviews_after_restart(now),
+            vec![50]
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host:1", now, 2, |_| false),
+            2
+        );
+        crate::scan_issue_monitor_candidates(&mut monitor, &[not_ready.clone(), held], now);
+        assert!(monitor.pending_effects().is_empty());
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        for number in [50, 51] {
+            assert_eq!(
+                monitor.autonomous_record(number).unwrap().phase,
+                crate::AutonomousPhase::Idle
+            );
+            assert_eq!(monitor.attempt_count(number), 1);
+            assert!(monitor
+                .inbox_item(number)
+                .unwrap()
+                .exclusion_reason
+                .is_some());
+        }
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+
+        crate::scan_issue_monitor_candidates(&mut resuming_review, &[not_ready.clone()], now);
+        assert_eq!(
+            resuming_review.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "restart recovery must retain its pending review"
+        );
+        crate::scan_issue_monitor_candidates(&mut running, &[not_ready], now);
+        assert_eq!(
+            running.autonomous_record(50).unwrap().phase,
+            crate::AutonomousPhase::Implementing,
+            "fresh readiness does not revoke a running implementation"
+        );
+        assert_eq!(running.active_count(), 1);
     }
 
     #[test]

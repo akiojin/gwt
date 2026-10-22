@@ -166,26 +166,60 @@ test("live shared metadata renders one accepted revision in title, favicon, and 
   const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
   await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const burst = await page.evaluate(async () => {
+    const title = document.querySelector("title")!;
+    const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')!;
+    const before = document.title;
+    const renders = { title: 0, icon: 0 };
+    const titleObserver = new MutationObserver(records => { renders.title += records.length; });
+    const iconObserver = new MutationObserver(records => { renders.icon += records.length; });
+    titleObserver.observe(title, { childList: true });
+    iconObserver.observe(icon, { attributes: true, attributeFilter: ["href"] });
+    try {
+      // Exercise the app receiver after transport dispatch, in one browser turn.
+      for (let revision = 1; revision <= 50; revision++) {
+        window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+          kind: "project_agent_aggregate", aggregate: {
+            running_count: revision, block_count: 1, error_count: 1, unread: true, revision,
+          },
+        } }));
+      }
+      const unchanged = document.title === before;
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      return { unchanged, renders, title: document.title, state: icon.dataset.state, unread: icon.dataset.unread };
+    } finally {
+      titleObserver.disconnect();
+      iconObserver.disconnect();
+    }
+  });
+  expect(burst.unchanged).toBe(true);
+  expect(burst.renders).toEqual({ title: 1, icon: 1 });
+  expect(burst.title).toMatch(/^● .* — RUN 50 · BLOCK 1 — gwt$/);
+  expect(burst.state).toBe("error");
+  expect(burst.unread).toBe("true");
+  await testInfo.attach("metadata-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
   await page.evaluate(() => {
     (window as any).__metadataRestoreRaf = window.requestAnimationFrame;
     window.requestAnimationFrame = () => 0;
   });
   const update = (aggregate: object) => transport!.send(JSON.stringify({ kind: "project_agent_aggregate", aggregate }));
-  update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 });
-  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/);
+  const fallbackStarted = Date.now();
+  update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 51 });
+  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/, { timeout: 1000 });
+  expect(Date.now() - fallbackStarted).toBeLessThan(1000);
   const icon = page.locator('link[rel="icon"]');
   await expect(icon).toHaveAttribute("data-state", "error");
   await expect(icon).toHaveAttribute("data-unread", "true");
   expect(acknowledgements).toEqual([]);
-  update({ running_count: 99, block_count: 99, error_count: 0, unread: false, revision: 4 });
+  update({ running_count: 99, block_count: 99, error_count: 0, unread: false, revision: 49 });
   await page.evaluate(() => {
     (window as any).__metadataFocused = true;
     window.dispatchEvent(new Event("focus"));
   });
-  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(5);
+  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(51);
   await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/);
   await expect(icon).toHaveAttribute("data-state", "error");
-  update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 6 });
+  update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 52 });
   await expect(page).toHaveTitle(/ — RUN 1 · BLOCK 0 — gwt$/);
   await expect(page).not.toHaveTitle(/^●/);
   await expect(icon).toHaveAttribute("data-state", "running");

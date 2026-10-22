@@ -403,12 +403,12 @@ fn observe_idle_windows(status: &IssueMonitorAgentStatus) -> Vec<IdleWindowObser
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .idle_windows
         .iter()
         .map(|window| {
-            let since = chrono::DateTime::parse_from_rfc3339(&window.idle_since).ok();
+            let since = parse_observed_instant(&window.idle_since);
             let mut missing_inputs = Vec::new();
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -464,7 +464,7 @@ fn observe_retry_deadlines(status: &IssueMonitorAgentStatus) -> Vec<RetryDeadlin
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .inbox
         .iter()
@@ -474,7 +474,7 @@ fn observe_retry_deadlines(status: &IssueMonitorAgentStatus) -> Vec<RetryDeadlin
                 .map(|deadline| (row, deadline))
         })
         .map(|(row, deadline)| {
-            let expiry = chrono::DateTime::parse_from_rfc3339(deadline).ok();
+            let expiry = parse_observed_instant(deadline);
             let mut missing_inputs = vec!["retry_hold_started_at"];
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -525,7 +525,7 @@ fn observe_declared_waits(status: &IssueMonitorAgentStatus) -> Vec<DeclaredWaitO
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .inbox
         .iter()
@@ -537,8 +537,8 @@ fn observe_declared_waits(status: &IssueMonitorAgentStatus) -> Vec<DeclaredWaitO
         })
         .filter_map(|row| row.waiting.as_ref().map(|wait| (row, wait)))
         .map(|(row, wait)| {
-            let since = chrono::DateTime::parse_from_rfc3339(&wait.since).ok();
-            let expiry = chrono::DateTime::parse_from_rfc3339(&wait.expires_at).ok();
+            let since = parse_observed_instant(&wait.since);
+            let expiry = parse_observed_instant(&wait.expires_at);
             let mut missing_inputs = Vec::new();
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -600,7 +600,7 @@ fn observe_claim_blocks(status: &IssueMonitorAgentStatus) -> Vec<ClaimBlockObser
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .inbox
         .iter()
@@ -609,7 +609,7 @@ fn observe_claim_blocks(status: &IssueMonitorAgentStatus) -> Vec<ClaimBlockObser
             let expiry = row
                 .claim_expires_at
                 .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                .and_then(parse_observed_instant);
             let mut missing_inputs = vec!["claim_block_started_at"];
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -639,7 +639,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
     let scan = status
         .last_scan_at
         .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        .and_then(parse_observed_instant);
     status
         .inbox
         .iter()
@@ -653,7 +653,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
             let activity = row
                 .last_activity_at
                 .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+                .and_then(parse_observed_instant);
             let mut missing_inputs = Vec::new();
             if scan.is_none() {
                 missing_inputs.push("monitor_scan_time");
@@ -2624,7 +2624,7 @@ mod tests {
                 "same",
                 Some(9),
                 "stuck_unknown",
-                "2026-10-21T09:00:00.1+09:00",
+                "2026-10-21T09:00:00.000000001+09:00",
                 true,
                 true
             ),
@@ -2648,7 +2648,7 @@ mod tests {
                 "future",
                 Some(3),
                 "binding_dead",
-                "2026-10-21T00:01:00.1Z",
+                "2026-10-21T00:01:00.000000001Z",
                 false,
                 false
             ),
@@ -2659,6 +2659,14 @@ mod tests {
                 "2026-10-21T00:00:00Z",
                 true,
                 true
+            ),
+            window(
+                "unsupported precision",
+                Some(3),
+                "binding_dead",
+                "2026-10-21T00:01:00.0000000001Z",
+                false,
+                false
             )
         ]))
         .unwrap();
@@ -2677,7 +2685,8 @@ mod tests {
                 (&json!("same"), &json!(0)),
                 (&json!("orphan"), &Value::Null),
                 (&json!("future"), &Value::Null),
-                (&json!("review"), &json!(60))
+                (&json!("review"), &json!(60)),
+                (&json!("unsupported precision"), &Value::Null)
             ]
         );
         for (index, row) in rows.iter().enumerate() {
@@ -2691,10 +2700,12 @@ mod tests {
                 assert_eq!(row[key], before.1["idle_windows"][index][key], "{key}");
             }
         }
-        assert_eq!(rows[0]["idle_since"], "2026-10-21T09:00:00.100+09:00");
+        assert_eq!(rows[0]["idle_since"], "2026-10-21T09:00:00.000000001+09:00");
         assert_eq!(rows[2]["idle_since"], Value::Null);
         assert_eq!(rows[2]["missing_inputs"], json!(["idle_since"]));
         assert_eq!(rows[3]["missing_inputs"], json!(["idle_after_scan"]));
+        assert_eq!(rows[5]["idle_since"], Value::Null);
+        assert_eq!(rows[5]["missing_inputs"], json!(["idle_since"]));
         assert!(!report.to_string().contains("invalid private timestamp"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2709,7 +2720,13 @@ mod tests {
             report["capacity"]["idle_windows"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2026-10-21T00:01:00.0000000001Z"),
+        ]
+        .map(|value| value.map(str::to_owned))
+        {
             monitor.last_scan_at = scan;
             let untimed = evaluate(Some(&monitor));
             let first = &untimed["capacity"]["idle_windows"][0];
@@ -2735,6 +2752,8 @@ mod tests {
             {"issue_number":4,"state":"launched","attempts":0},
             {"issue_number":5,"state":"launched","attempts":0,"last_activity_at":"private invalid timestamp"},
             {"issue_number":6,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.100Z"},
+            {"issue_number":10,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.0000000001Z"},
+            {"issue_number":11,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.000000001Z"},
             {"issue_number":7,"state":"queued","attempts":0,"last_activity_at":"2026-10-21T00:00:00Z"},
             {"issue_number":8,"state":"needs_human","attempts":0,"error_message":"private reason"}
         ])).unwrap();
@@ -2760,11 +2779,14 @@ mod tests {
                 [9, "launched", 0, []],
                 [4, "launched", null, ["last_activity_at"]],
                 [5, "launched", null, ["last_activity_at"]],
-                [6, "launched", null, ["activity_after_scan"]]
+                [6, "launched", null, ["activity_after_scan"]],
+                [10, "launched", null, ["last_activity_at"]],
+                [11, "launched", null, ["activity_after_scan"]]
             ])
         );
         assert_eq!(rows[0]["last_activity_at"], "2026-10-21T09:00:00+09:00");
         assert_eq!(rows[4]["last_activity_at"], Value::Null);
+        assert_eq!(rows[6]["last_activity_at"], Value::Null);
         assert!(!report.to_string().contains("private"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2776,7 +2798,11 @@ mod tests {
             report["capacity"]["launch_activity"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid scan".into())] {
+        for scan in [
+            None,
+            Some("invalid scan".into()),
+            Some("2026-10-21T00:00:59.9999999999Z".into()),
+        ] {
             monitor.last_scan_at = scan;
             let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
             let row = &untimed["capacity"]["launch_activity"][0];
@@ -2792,13 +2818,14 @@ mod tests {
         monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
         monitor.inbox = serde_json::from_value(json!([
             {"issue_number":9,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T09:02:00+09:00","blocked_by_owner":"private owner"},
-            {"issue_number":3,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00.900Z"},
+            {"issue_number":3,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00.999999999Z"},
             {"issue_number":9,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00Z"},
             {"issue_number":4,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:00:59.900Z"},
             {"issue_number":5,"state":"blocked_by_claim","attempts":0},
             {"issue_number":6,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"private invalid timestamp","exclusion_reason":"private reason"},
             {"issue_number":7,"state":"queued","attempts":0,"claim_expires_at":"2026-10-21T00:02:00Z"},
-            {"issue_number":8,"state":"launched","attempts":0,"claim_expires_at":"2026-10-21T00:02:00Z"}
+            {"issue_number":8,"state":"launched","attempts":0,"claim_expires_at":"2026-10-21T00:02:00Z"},
+            {"issue_number":9,"state":"blocked_by_claim","attempts":0,"claim_expires_at":"2026-10-21T00:01:00.0000000001Z"}
         ])).unwrap();
         let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
         let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
@@ -2821,11 +2848,13 @@ mod tests {
                 [9, 0, ["claim_block_started_at"]],
                 [4, 0, ["claim_block_started_at"]],
                 [5, null, ["claim_block_started_at", "claim_expires_at"]],
-                [6, null, ["claim_block_started_at", "claim_expires_at"]]
+                [6, null, ["claim_block_started_at", "claim_expires_at"]],
+                [9, null, ["claim_block_started_at", "claim_expires_at"]]
             ])
         );
         assert_eq!(rows[0]["claim_expires_at"], "2026-10-21T09:02:00+09:00");
         assert_eq!(rows[5]["claim_expires_at"], Value::Null);
+        assert_eq!(rows[6]["claim_expires_at"], Value::Null);
         assert!(!report.to_string().contains("private"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2837,7 +2866,11 @@ mod tests {
             report["capacity"]["claim_blocks"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid scan".into())] {
+        for scan in [
+            None,
+            Some("invalid scan".into()),
+            Some("2026-10-21T00:01:00.0000000001Z".into()),
+        ] {
             monitor.last_scan_at = scan;
             let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
             assert_eq!(
@@ -2872,10 +2905,12 @@ mod tests {
             wait(9,"launched","2026-10-21T00:00:00Z","2026-10-21T00:00:59.900Z",true),
             wait(4,"launched","private invalid since","2026-10-21T00:02:00Z",false),
             wait(5,"launched","2026-10-21T00:00:00Z","private invalid expiry",false),
-            wait(6,"launched","2026-10-21T00:01:00.100Z","2026-10-21T00:02:00Z",true),
+            wait(6,"launched","2026-10-21T00:01:00.000000001Z","2026-10-21T00:02:00Z",true),
             wait(7,"launched","2026-10-21T00:00:00Z","2026-10-20T23:59:59Z",false),
             wait(8,"queued","2026-10-21T00:00:00Z","2026-10-21T00:02:00Z",true),
-            {"issue_number":10,"state":"launched","attempts":0}
+            {"issue_number":10,"state":"launched","attempts":0},
+            wait(11,"launched","2026-10-21T00:01:00.0000000001Z","2026-10-21T00:02:00Z",true),
+            wait(12,"launched","2026-10-21T00:00:00Z","2026-10-21T00:01:00.0000000001Z",true)
         ]))
         .unwrap();
         let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
@@ -2902,12 +2937,16 @@ mod tests {
                 [4, false, null, 60, ["wait_since"]],
                 [5, false, 60, null, ["wait_expires_at"]],
                 [6, true, null, 60, ["wait_after_scan"]],
-                [7, false, 60, null, ["wait_interval"]]
+                [7, false, 60, null, ["wait_interval"]],
+                [11, true, null, 60, ["wait_since"]],
+                [12, true, 60, null, ["wait_expires_at"]]
             ])
         );
         assert_eq!(rows[0]["since"], "2026-10-21T09:00:00+09:00");
         assert_eq!(rows[3]["since"], Value::Null);
         assert_eq!(rows[4]["expires_at"], Value::Null);
+        assert_eq!(rows[7]["since"], Value::Null);
+        assert_eq!(rows[8]["expires_at"], Value::Null);
         assert!(!report.to_string().contains("private"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2919,7 +2958,11 @@ mod tests {
             report["capacity"]["declared_waits"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid scan".into())] {
+        for scan in [
+            None,
+            Some("invalid scan".into()),
+            Some("2026-10-21T00:01:00.0000000001Z".into()),
+        ] {
             monitor.last_scan_at = scan;
             let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
             let first = &untimed["capacity"]["declared_waits"][0];
@@ -2941,12 +2984,14 @@ mod tests {
             {"issue_number":9,"state":"queued","attempts":0,
                 "retry_not_before":"2026-10-21T09:02:00+09:00","retry_hold_reason":"private reason"},
             {"issue_number":3,"state":"needs_human","attempts":0,
-                "retry_not_before":"2026-10-21T00:01:00.900Z"},
+                "retry_not_before":"2026-10-21T00:01:00.999999999Z"},
             {"issue_number":9,"state":"launched","attempts":0,
                 "retry_not_before":"2026-10-21T00:00:59.900Z"},
             {"issue_number":4,"state":"queued","attempts":0,"retry_not_before":"unknown"},
             {"issue_number":5,"state":"queued","attempts":0,"retry_not_before":"private invalid time"},
-            {"issue_number":6,"state":"queued","attempts":0}
+            {"issue_number":6,"state":"queued","attempts":0},
+            {"issue_number":7,"state":"queued","attempts":0,
+                "retry_not_before":"2026-10-21T00:01:00.0000000001Z"}
         ])).unwrap();
         let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
         let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
@@ -2979,11 +3024,18 @@ mod tests {
                     "queued",
                     null,
                     ["retry_hold_started_at", "retry_not_before"]
+                ],
+                [
+                    7,
+                    "queued",
+                    null,
+                    ["retry_hold_started_at", "retry_not_before"]
                 ]
             ])
         );
         assert_eq!(rows[0]["retry_not_before"], "2026-10-21T09:02:00+09:00");
         assert_eq!(rows[3]["retry_not_before"], Value::Null);
+        assert_eq!(rows[5]["retry_not_before"], Value::Null);
         assert!(!report.to_string().contains("private"));
         assert_eq!(state, before.0);
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
@@ -2995,7 +3047,11 @@ mod tests {
             report["capacity"]["retry_deadlines"]
         );
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
-        for scan in [None, Some("invalid scan".into())] {
+        for scan in [
+            None,
+            Some("invalid scan".into()),
+            Some("2026-10-21T00:01:00.0000000001Z".into()),
+        ] {
             monitor.last_scan_at = scan;
             let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
             assert_eq!(

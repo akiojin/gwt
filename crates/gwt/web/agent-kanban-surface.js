@@ -34,7 +34,6 @@ export function isAgentKanbanEligible(windowData) {
   return Boolean(
     windowData?.id &&
       isAgentWindow(windowData) &&
-      !windowData.tab_group_id &&
       isCanvasPlacement(windowData),
   );
 }
@@ -78,11 +77,10 @@ export function moveAgentKanbanCardMessage(id, boardId, laneId, order) {
   };
 }
 
-export function undockAgentWindowMessage(id, geometry) {
+export function undockAgentWindowMessage(id) {
   return {
     kind: "undock_agent_window",
     id,
-    geometry,
   };
 }
 
@@ -194,7 +192,6 @@ export function createAgentKanbanSurface({
   send,
   onLaunchAgent,
   onUndockAgent,
-  visibleBounds,
   windowDisplayTitle,
   windowRoleBadgeLabel,
 }) {
@@ -355,7 +352,7 @@ export function createAgentKanbanSurface({
         onUndockAgent?.(existing.id);
         return;
       }
-      send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
+      send?.(undockAgentWindowMessage(windowData.id));
       onUndockAgent?.(windowData.id);
     });
     actions.append(collapse, undock);
@@ -408,24 +405,6 @@ export function createAgentKanbanSurface({
     } else if (isAgentKanbanEligible(windowData)) {
       send?.(placeAgentWindowMessage(id, target.boardId, target.laneId, target.order));
     }
-  }
-
-  function undockGeometry(windowData) {
-    if (windowData?.geometry) {
-      return {
-        x: Number(windowData.geometry.x) || 0,
-        y: Number(windowData.geometry.y) || 0,
-        width: Number(windowData.geometry.width) || 720,
-        height: Number(windowData.geometry.height) || 420,
-      };
-    }
-    const bounds = visibleBounds?.() || { x: 0, y: 0 };
-    return {
-      x: (Number(bounds.x) || 0) + 32,
-      y: (Number(bounds.y) || 0) + 32,
-      width: 720,
-      height: 420,
-    };
   }
 
   return { mount };

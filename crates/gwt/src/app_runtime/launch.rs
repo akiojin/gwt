@@ -2748,28 +2748,45 @@ fn prepare_agent_launch_inner(
         cwd: process_launch.cwd,
     };
     let incarnation = next_window_runtime_incarnation();
-    let spawn = if let Some(expected) = expected_execution_identity.as_ref() {
-        gwt::project_runtime::spawn_bound_pane(
-            &input.window_id,
-            spawn_config,
-            process_launch.resource_policy,
-            pty_gate_launch_parts()?,
-            incarnation,
-            expected,
-            &mut handshake,
-        )
+    let monitor_admission = pm_root.is_none()
+        && input
+            .launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_issue_number.is_some());
+    let spawn_pane = || {
+        if let Some(expected) = expected_execution_identity.as_ref() {
+            gwt::project_runtime::spawn_bound_pane(
+                &input.window_id,
+                spawn_config,
+                process_launch.resource_policy,
+                pty_gate_launch_parts()?,
+                incarnation,
+                expected,
+                &mut handshake,
+            )
+        } else {
+            let policy_gate = process_launch
+                .resource_policy
+                .map(|policy| {
+                    pty_gate_launch_parts().map(|(program, args)| (policy, program, args))
+                })
+                .transpose()?;
+            gwt::project_runtime::spawn_unbound_pane(
+                &input.window_id,
+                spawn_config,
+                policy_gate,
+                incarnation,
+                Some((&input.sessions_dir, &session_id)),
+                monitor_admission,
+            )
+        }
+    };
+    // This function already runs on a blocking worker. Keep the file guard
+    // entirely within the physical spawn, never across a GUI event handoff.
+    let spawn = if monitor_admission {
+        gwt::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
-        let policy_gate = process_launch
-            .resource_policy
-            .map(|policy| pty_gate_launch_parts().map(|(program, args)| (policy, program, args)))
-            .transpose()?;
-        gwt::project_runtime::spawn_unbound_pane(
-            &input.window_id,
-            spawn_config,
-            policy_gate,
-            incarnation,
-            Some((&input.sessions_dir, &session_id)),
-        )
+        spawn_pane()
     };
     let pane = match spawn {
         Ok(pane) => pane,
@@ -3191,6 +3208,7 @@ pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
     let agent_id = session.agent_id.clone();
+    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
     builder = builder.working_dir(session.worktree_path.clone());
     if !session.branch.is_empty() {
@@ -3202,7 +3220,9 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(level) = session.reasoning_level.clone() {
         builder = builder.reasoning_level(level);
     }
-    if session.skip_permissions {
+    // FR-028 belongs to the PM role, including older Sessions whose saved
+    // skip_permissions field defaults to false.
+    if session.skip_permissions || pm_scratch.is_some() {
         builder = builder.skip_permissions(true);
     }
     if session.fast_mode_enabled() {
@@ -3230,7 +3250,6 @@ pub(super) fn launch_config_from_persisted_session(
     // from the same PM detection that already restores the scratch dir below —
     // unconditionally, because a persisted `launch_args` that still records the
     // prompt is not consulted by the builder and would otherwise lose it too.
-    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     if pm_scratch.is_some()
         && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
     {
@@ -3433,6 +3452,7 @@ impl IssueMonitorSpawnAdmissionInput {
             .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
             .collect::<std::collections::BTreeSet<_>>();
         paths.insert(gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json"));
+        paths.insert(gwt::machine_agent_settings::path());
         if let Some(cache_root) =
             gwt::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
         {
@@ -6374,6 +6394,7 @@ impl AppRuntime {
             policy_gate,
             incarnation,
             observation,
+            false,
         )?;
         self.install_process_window(
             id,
@@ -7178,6 +7199,7 @@ impl AppRuntime {
                 agent_capability_issuer,
                 prepared_manual_launch_claim,
                 issue_monitor_trust_candidate,
+                issue_monitor_launch,
             );
         });
         self.initial_launch_workers
@@ -7227,6 +7249,7 @@ impl AppRuntime {
             agent_capability_issuer,
             prepared_manual_launch_claim,
             None,
+            false,
         );
     }
 
@@ -7242,6 +7265,7 @@ impl AppRuntime {
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
         prepared_manual_launch_claim: Option<gwt_agent::SessionActiveLaunchHandshake>,
         issue_monitor_trust_candidate: Option<IssueMonitorTrustCandidate>,
+        issue_monitor_launch: bool,
     ) {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -7664,9 +7688,15 @@ impl AppRuntime {
                 .as_deref()
                 .or(config.working_dir.as_deref())
                 .and_then(|cwd| config.validated_codex_auth_root_for_cwd(cwd));
-            if let Err(error) =
-                persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
-            {
+            if let Err(error) = persist_finalized_launch_session(
+                &sessions_dir,
+                // Monitor's shared admission census must not mistake a
+                // prepared no-child runtime for an unknown live worker. Its
+                // physical spawn publishes exact identity under admission.
+                (!issue_monitor_launch).then_some(runtime_path.as_path()),
+                &mut session,
+                None,
+            ) {
                 let rollback = if is_fresh_execution_install {
                     Some(rollback_materialized_fresh_execution_launch(
                         &sessions_dir,
@@ -8552,7 +8582,7 @@ mod docker_session_persistence_tests {
 
         persist_finalized_launch_session(
             &sessions_dir,
-            &runtime_path,
+            Some(&runtime_path),
             &mut session,
             Some(&runtime_worktree),
         )
@@ -8744,7 +8774,7 @@ mod agent_endpoint_env_tests {
         session.linked_issue_number = Some(owner.number);
         session.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
-        persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
+        persist_finalized_launch_session(&sessions_dir, Some(&runtime_path), &mut session, None)
             .expect("persist finalized Session before authority");
         PersistedExecutionLaunch {
             project,
@@ -11012,7 +11042,7 @@ mod agent_endpoint_env_tests {
         successor.linked_issue_number = Some(owner.number);
         successor.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &successor.id);
-        persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut successor, None)
+        persist_finalized_launch_session(&sessions_dir, Some(&runtime_path), &mut successor, None)
             .expect("persist fresh launch Session before authority");
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45123/internal/hook-live",
@@ -11168,7 +11198,7 @@ mod agent_endpoint_env_tests {
         let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
         persist_finalized_launch_session(
             &predecessor.sessions_dir,
-            &runtime_path,
+            Some(&runtime_path),
             &mut successor,
             None,
         )

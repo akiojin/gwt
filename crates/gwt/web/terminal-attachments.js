@@ -707,6 +707,8 @@ export function createTerminalAttachments({
           document,
           window,
           terminalRoot,
+          hasSelection: () => terminal.hasSelection(),
+          copySelection: () => copyTerminalSelection(windowId),
           readClipboardText: readNavigatorClipboardText,
           readClipboardItems: readNavigatorClipboardItems,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,

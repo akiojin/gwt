@@ -41,7 +41,8 @@ test("Agent Kanban groups contained agent windows by stable lane order", () => {
       tab_group_id: "tabs-1",
       tab_group_active: true,
     }),
-    false,
+    true,
+    "legacy saved groups do not restrict the fixed Agents projection",
   );
 
   assert.deepEqual(
@@ -166,7 +167,7 @@ test("Issue #4804 Agent Kanban focuses an existing Issue window until it closes"
   assert.deepEqual(sent.map(message => message.id), ["agent-2", "agent-1", "agent-1"]);
 });
 
-test("Agent Kanban card messages preserve board, lane, order, and geometry", () => {
+test("Agent Kanban card messages preserve board, lane, and order without saved canvas geometry", () => {
   assert.deepEqual(placeAgentWindowMessage("agent-1", "kanban-1", "blocked", 2), {
     kind: "place_agent_window_in_kanban",
     id: "agent-1",
@@ -186,7 +187,6 @@ test("Agent Kanban card messages preserve board, lane, order, and geometry", () 
   assert.deepEqual(undockAgentWindowMessage("agent-1", { x: 20, y: 30, width: 720, height: 420 }), {
     kind: "undock_agent_window",
     id: "agent-1",
-    geometry: { x: 20, y: 30, width: 720, height: 420 },
   });
 });
 
