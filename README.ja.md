@@ -532,6 +532,11 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
 先頭群へ入り、保存済みの通常順序と `max_active` は変わりません。
 `issue.monitor.queue.urgent_limit` の `limit` で上限を変更できます（`0` は先頭群への昇格だけを無効化）。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`urgent_queue_limit` を含みます。不一致なら設定を保存せず、status を再読して変更を再評価します。
+応答は従来のキュー項目を保持し、同じ保存 snapshot の `saved_config` と `config_token` を含みます。
+guard 省略時は従来の挙動を保ちます。この値比較は ABA 履歴を検知しません。
 超過分は通常順序に従います。`issue.monitor.queue.demote` の `number` で指定した Issue は
 永続的に通常優先度へ戻り、scan・再起動後も urgent ラベルより降格が優先されます。
 カードと詳細では urgent・上限超過・降格を区別し、`issue.monitor.queue.list` と

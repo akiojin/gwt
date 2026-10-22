@@ -1373,6 +1373,7 @@ impl IssueMonitorPrefs {
             "launch_tiers": self.launch_tiers,
             "terminal_queue_auto_refill": self.terminal_queue_auto_refill,
             "terminal_queue_auto_refill_limit": self.terminal_queue_auto_refill_limit,
+            "urgent_queue_limit": self.urgent_queue.limit,
             "update_drain": self.update_drain.as_ref().map(|drain| serde_json::json!({
                 "version": drain.version,
                 "since": drain.since,
@@ -40542,6 +40543,7 @@ mod tests {
         assert!(observation["update_drain"].get("blocking").is_none());
         prefs.max_active_agents += 1;
         prefs.priority_order.push(42);
+        prefs.urgent_queue.demoted.insert(42);
         prefs.last_scan_at = Some("2026-10-22T00:01:00Z".to_string());
         prefs
             .update_drain
@@ -40575,6 +40577,13 @@ mod tests {
         assert_eq!(
             prefs.config_observation()["terminal_queue_auto_refill_limit"],
             serde_json::json!(prefs.terminal_queue_auto_refill_limit)
+        );
+        let token = prefs.config_token();
+        prefs.urgent_queue.limit += 1;
+        assert_ne!(prefs.config_token(), token);
+        assert_eq!(
+            prefs.config_observation()["urgent_queue_limit"],
+            serde_json::json!(prefs.urgent_queue.limit)
         );
     }
 
