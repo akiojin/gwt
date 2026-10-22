@@ -259,9 +259,11 @@ fn interrupt_exact_running_session_after_persistence_error(
     }
 }
 
+/// Persist the finalized Session, retaining its exact execution authority.
+/// `None` defers runtime observation until physical child identity publication.
 pub fn persist_finalized_launch_session(
     sessions_dir: &Path,
-    runtime_path: &Path,
+    runtime_path: Option<&Path>,
     session: &mut gwt_agent::Session,
     docker_runtime_worktree: Option<&str>,
 ) -> Result<(), String> {
@@ -320,6 +322,9 @@ pub fn persist_finalized_launch_session(
             ));
         }
     }
+    let Some(runtime_path) = runtime_path else {
+        return Ok(());
+    };
     if let Err(error) =
         gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running).save(runtime_path)
     {
@@ -354,6 +359,7 @@ mod tests {
         use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
         let client = FakeIssueClient::new();
         client.seed(IssueSnapshot {
+            author_login: None,
             number: IssueNumber(42),
             title: "work".into(),
             body: String::new(),
@@ -431,7 +437,7 @@ mod tests {
         assert_eq!(session.launch_command, "claude");
         let sessions = tmp.path().join("sessions");
         let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
-        persist_finalized_launch_session(&sessions, &runtime, &mut session, None)
+        persist_finalized_launch_session(&sessions, Some(&runtime), &mut session, None)
             .expect("persist launch");
         let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id)))
             .expect("load session");
@@ -446,6 +452,28 @@ mod tests {
         assert!(saved.tool_version_selector.is_none());
         assert!(saved.tool_runtime_provenance.is_none());
         assert!(runtime.exists());
+    }
+
+    #[test]
+    fn deferred_monitor_finalization_persists_session_without_blank_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        let mut candidate = initialize_launch_session(tmp.path(), tmp.path(), &config);
+        let sessions = tmp.path().join("sessions");
+        let runtime = gwt_agent::runtime_state_path(&sessions, &candidate.id);
+
+        persist_finalized_launch_session(&sessions, None, &mut candidate, None)
+            .expect("defer physical runtime publication");
+
+        let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", candidate.id)))
+            .expect("finalized Session remains durable before physical spawn");
+        assert_eq!(saved.id, candidate.id);
+        assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
+        assert!(
+            !runtime.exists(),
+            "Monitor finalization must not publish a no-child runtime"
+        );
     }
     #[test]
     fn finalized_bound_session_persistence_retains_same_id_replacement() {
@@ -489,9 +517,13 @@ mod tests {
         let replacement_before =
             std::fs::read(&session_path).expect("read replacement Session bytes");
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("final persistence must reject a same-id replacement");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("final persistence must reject a same-id replacement");
 
         assert!(
             error.contains("changed"),
@@ -530,9 +562,13 @@ mod tests {
             std::fs::read(&session_path).expect("read replacement Session bytes");
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &candidate.id);
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("final persistence must reject an unbound same-id replacement");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("final persistence must reject an unbound same-id replacement");
 
         assert!(error.contains("changed"), "{error}");
         assert_eq!(
@@ -560,9 +596,13 @@ mod tests {
         candidate.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = runtime_root.join(format!("{}.json", candidate.id));
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("blocked runtime root must fail final persistence");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("blocked runtime root must fail final persistence");
 
         assert!(error.contains("marked Interrupted"), "{error}");
         assert_eq!(
@@ -593,9 +633,13 @@ mod tests {
             ))
         }));
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("unknown Session save outcome must fail launch persistence");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("unknown Session save outcome must fail launch persistence");
 
         assert!(error.contains("marked Interrupted"), "{error}");
         assert_eq!(

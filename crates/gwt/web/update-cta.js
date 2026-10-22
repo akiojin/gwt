@@ -21,6 +21,7 @@ export function createUpdateCtaController({
   openReleaseNotes = null,
   // Issue #3906 AC-12: injectable clock so the draining minutes are testable.
   now = () => Date.now(),
+  scheduleFrame,
 }) {
   const shellId = "update-cta-shell";
   const modalId = "update-modal";
@@ -46,8 +47,8 @@ export function createUpdateCtaController({
       renderModalReady(staged.version);
     }
   });
-  const progressModel = createUiStateStore(null);
-  progressModel.subscribe(value => value, progress => {
+  const progressModel = createUiStateStore(null, { scheduleFrame });
+  progressModel.subscribeFrame(value => value, progress => {
     const modal = document.getElementById(modalId);
     if (progress && modal?.dataset.state === "downloading") {
       updateProgressDisplay(progress);

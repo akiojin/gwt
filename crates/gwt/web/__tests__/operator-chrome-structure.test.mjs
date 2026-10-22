@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
@@ -1674,40 +1674,14 @@ test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list 
   );
 });
 
-test("window close always routes through the Close Guard confirm modal (SPEC-3038 US-3)", () => {
-  // index.html ships the modal scaffold.
-  const modal = document.getElementById("window-close-confirm-modal");
-  assert.ok(modal, "expected #window-close-confirm-modal backdrop");
-  assert.ok(
-    modal.classList.contains("modal-backdrop"),
-    "close guard reuses the shared .modal-backdrop primitive",
-  );
-  assert.ok(
-    modal.querySelector(".modal-shell.window-close-confirm-shell"),
-    "close guard reuses the shared .modal-shell primitive",
-  );
-  // app.js wires both close paths through requestCloseWindow.
-  assert.match(
-    appSource,
-    /from\s+"\/window-close-confirm-modal\.js"/,
-    "app.js must import the close-confirm renderer module",
-  );
-  assert.match(
-    appSource,
-    /function\s+requestCloseWindow\(windowId\)/,
-    "expected a requestCloseWindow entrypoint",
-  );
-  assert.match(
-    appSource,
-    /closeButton\.addEventListener\("click",\s*\(event\)\s*=>\s*\{\s*event\.stopPropagation\(\);\s*requestCloseWindow\(windowData\.id\);/,
-    "titlebar × must route through requestCloseWindow",
-  );
-  assert.doesNotMatch(
-    appSource,
-    /closeButton\.addEventListener\("click",[\s\S]{0,120}?send\(\{\s*kind:\s*"close_window"/,
-    "titlebar × must not send close_window directly",
-  );
-
+test("fixed rail surfaces have no canvas close, minimize or saved-placement rendering (Issue #4777 AC13/14)", () => {
+  assert.equal(document.getElementById("window-close-confirm-modal"), null);
+  assert.doesNotMatch(appSource, /window-close-confirm-modal|requestCloseWindow|["'](?:close_window|dock_agent_window_to_issue)["']|data-action=["'](?:close|minimize-to-issue|ungroup)["']/);
+  for (const file of readdirSync(resolve(here, "..")).filter(name => name.endsWith(".js"))) {
+    const source = readFileSync(resolve(here, "..", file), "utf8");
+    assert.equal(/\.(?:geometry|tab_group_id|tab_group_active|minimized|maximized)\b/.test(source), false, `${file}: legacy saved placement must not drive the rail UI`);
+    assert.equal(/\b(?:createCamera|renderWindowTabs|startDrag|startResize|windowGeometryLabel)\b/.test(source), false, `${file}: canvas rendering must not return`);
+  }
 });
 
 test("surface changes preserve mounted terminal bodies without tab chrome", () => {
@@ -3296,24 +3270,10 @@ test("active work projection only upgrades live work to RUNNING telemetry", () =
   );
 });
 
-test("FR-044 (安心) / SPEC #3885 FR-015: window chrome carries RESTART, minimize and Issue popup — never STOP", () => {
-  // SPEC #3885 FR-015 (user ruling 2026-09-03): the agent-stop button left the
-  // titlebar; stopping an agent is offered only in the Issue row's ⋯ menu. The
-  // same slot now holds the minimize (return to the Issue row) and Issue popup
-  // controls, both hidden unless the window belongs to an Issue.
-  assert.doesNotMatch(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
-  assert.match(
-    appSource,
-    /data-action="minimize-to-issue"[^>]*aria-label="Return to Issue list"[^>]*hidden/,
-  );
+test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent RESTART and Issue navigation without canvas minimize", () => {
+  assert.doesNotMatch(appSource, /data-action="(?:stop|minimize-to-issue)"/);
   assert.match(appSource, /data-action="open-issue"[^>]*aria-label="Open Issue"[^>]*hidden/);
   assert.match(appSource, /data-action="restart"[^>]*aria-label="Restart agent"/);
-  // The titlebar minimize reuses the FR-012 fold-back path; the popup opens the
-  // owning Issue's detail.
-  assert.match(
-    appSource,
-    /minimizeToIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"return-to-list"/,
-  );
   assert.match(
     appSource,
     /openIssueButton\.addEventListener\("click"[\s\S]{0,320}runIssueWindowHeaderAction\(\s*"open-issue"/,
@@ -3841,7 +3801,7 @@ test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with la
   );
   assert.match(
     appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardStateEvent\(event\);/,
+    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?launchWizardStateModel\.update\(/,
     "backend wizard state must clear Kanban placement targets now owned by the launch session",
   );
 });
@@ -4135,16 +4095,6 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
     "agent_name",
     "agent_color",
     "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "minimized",
-    "maximized",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
   ]) {
     assert.match(
       keyBody,
@@ -4370,16 +4320,6 @@ test("Window List render key ignores viewport and includes row shell fields", ()
     "agent_id",
     "agent_color",
     "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "minimized",
-    "maximized",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
   ]) {
     assert.match(
       keyBody,
@@ -4683,11 +4623,6 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
   );
   assert.match(
     keyBody,
-    /windowGroupId\s*\(\s*windowData\s*\)/,
-    "per-window key must derive the tab group for tab strip inputs",
-  );
-  assert.match(
-    keyBody,
     /appendRenderKeyPart\s*\(/,
     "per-window key must append primitive key fields directly",
   );
@@ -4719,15 +4654,6 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     "agent_id",
     "agent_color",
     "status",
-    "geometry",
-    "x",
-    "y",
-    "width",
-    "height",
-    "z_index",
-    "tab_group_id",
-    "tab_group_active",
-    "tabs",
   ]) {
     assert.match(
       keyBody,
@@ -4763,25 +4689,13 @@ test("Per-window render key avoids JSON stringify and mapped tab allocation", ()
     /windowTabsFor\s*\(\s*windowData\s*\)/,
     "per-window key must avoid allocating a filtered tab array",
   );
-  assert.match(
-    keyBody,
-    /for\s*\(\s*const\s+tab\s+of\s+activeWorkspace\s*\(\s*\)\.windows\s*\|\|\s*\[\]\s*\)/,
-    "per-window key must iterate workspace tab candidates directly",
-  );
-  assert.match(
-    keyBody,
-    /windowGroupId\s*\(\s*tab\s*\)\s*!==\s*tabGroupId[\s\S]+continue\s*;/,
-    "per-window key must keep only tabs in the same group",
-  );
+  assert.doesNotMatch(keyBody, /windowGroupId|tabGroupId|activeWorkspace/);
   for (const field of [
     "runtime_state",
     "detail",
     "display_title",
     "title_tooltip",
     "role_badge",
-    "tabs",
-    "tab_group_id",
-    "tab_group_active",
   ]) {
     assert.match(
       keyBody,
@@ -4808,13 +4722,12 @@ test("fixed window template keeps actions without a resize handle", () => {
     /<div class="window-actions">[\s\S]*?<\/div>/,
   );
   assert.ok(windowActions, "window-actions block must exist");
-  assert.match(windowActions[0], /data-action="close"/, "close must remain");
+  assert.doesNotMatch(windowActions[0], /data-action="(?:close|minimize-to-issue)"/, "fixed surfaces have no canvas close or minimize");
   assert.doesNotMatch(
     windowActions[0],
     /data-action="stop"/,
     "the agent-STOP button moved to the Issue row menu (SPEC #3885 FR-015)",
   );
-  assert.match(windowActions[0], /data-action="minimize-to-issue"/, "minimize must be present");
   assert.match(windowActions[0], /data-action="open-issue"/, "the Issue popup must be present");
   assert.match(windowActions[0], /data-action="restart"/, "RESTART must be present");
   assert.doesNotMatch(

@@ -62,6 +62,15 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     fn repo_path(&self) -> &std::path::Path {
         self.inner.repo_path()
     }
+    fn deliver_feedback(
+        &mut self,
+        record: &gwt_core::feedback::PublicFeedback,
+    ) -> Result<u64, gwt_github::client::OwnerMutationError> {
+        self.inner.deliver_feedback(record)
+    }
+    fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
+        self.inner.spawn_feedback_worker(id)
+    }
 
     fn stdout(&mut self) -> &mut dyn io::Write {
         self.stdout

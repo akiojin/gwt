@@ -1,6 +1,156 @@
 use super::*;
 
 #[test]
+fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let mut tab = restore_fixture_tab(
+        "tab-1",
+        &repo,
+        &[
+            ("agent-1".into(), "session-1".into()),
+            ("agent-2".into(), "session-2".into()),
+        ],
+    );
+    for (id, name) in [("agent-1", "モナ"), ("agent-2", "モミジ")] {
+        tab.workspace.set_agent_name(id, Some(name.into()));
+    }
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (id, name) in [("session-1", "モナ"), ("session-2", "モミジ")] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            id,
+            &temp.path().join(id),
+            Some(id),
+            None,
+        );
+        let path = runtime.sessions_dir.join(format!("{id}.toml"));
+        let mut session = gwt_agent::Session::load(&path).unwrap();
+        session.agent_name = Some(name.into());
+        session.save(&runtime.sessions_dir).unwrap();
+    }
+
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    let events = runtime.startup_auto_resume_ready_events(canvas_bounds());
+
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 2);
+    assert_eq!(runtime.restore_launch_windows.len(), 2);
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert_eq!(windows.len(), 2);
+    let names: Vec<_> = windows
+        .iter()
+        .map(|window| window.agent_name.as_deref().expect("restored name"))
+        .collect();
+    assert_ne!(names[0].chars().next(), names[1].chars().next());
+    assert!(names.contains(&"モナ") || names.contains(&"モミジ"));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })));
+    // Exercise the real PTY-success boundary for both admitted windows, using
+    // the same harmless process as the existing startup restore fixture.
+    for window_id in runtime
+        .restore_launch_windows
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/d", "/c", "exit /b 0"])
+        } else {
+            ("/bin/sh", vec!["-c", "exit 0"])
+        };
+        runtime
+            .spawn_process_window_with_console_kind(
+                &window_id,
+                canvas_bounds(),
+                ProcessLaunch {
+                    initial_prompt_file: None,
+                    command: command.into(),
+                    args: args.into_iter().map(str::to_string).collect(),
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(repo.clone()),
+                    resource_policy: None,
+                },
+                None,
+            )
+            .expect("install restored PTY");
+    }
+    assert_eq!(runtime.runtimes.len(), 2);
+    assert!(runtime.restore_launch_windows.is_empty());
+}
+
+#[test]
+fn restore_name_allocation_failure_notifies_automatically_and_keeps_manual_errors() {
+    use super::super::startup::RestoreOrigin;
+
+    for origin in [RestoreOrigin::Automatic, RestoreOrigin::UserRequested] {
+        for placeholder in [false, true] {
+            let temp = tempdir().expect("tempdir");
+            let _gwt_home = ScopedGwtHome::set(temp.path());
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).unwrap();
+            let mut placeholders = vec![("occupied".into(), "other-session".into())];
+            if placeholder {
+                placeholders.push(("restoring".into(), "restore-session".into()));
+            }
+            let mut tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+            tab.workspace
+                .set_agent_name("occupied", Some("モミジ".into()));
+            if placeholder {
+                tab.workspace
+                    .set_agent_name("restoring", Some("モナ".into()));
+            }
+            let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+            let worktree = temp.path().join("restoring-worktree");
+            fs::create_dir_all(&worktree).unwrap();
+            let mut session = gwt_agent::Session::new(
+                &worktree,
+                "work/restore-fixture",
+                gwt_agent::AgentId::Codex,
+            );
+            session.id = "restore-session".into();
+            session.agent_session_id = Some("native-restore".into());
+            session.agent_name = Some("モナ".into());
+            // Make the existing allocator fail after detecting the collision.
+            fs::create_dir_all(
+                gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl"),
+            )
+            .unwrap();
+
+            let events = runtime.spawn_restored_agent_session(
+                "tab-1",
+                session,
+                None,
+                canvas_bounds(),
+                origin,
+            );
+            assert!(runtime.pending_auto_resume_sources.is_empty());
+            assert_eq!(
+                events.iter().any(|event| matches!(event.event,
+                    BackendEvent::IssueMonitorToast { ref level, .. } if level == "error")),
+                origin == RestoreOrigin::Automatic,
+                "automatic failures need a notification even when a placeholder exists"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
+                origin == RestoreOrigin::UserRequested && !placeholder
+            );
+            if placeholder {
+                assert_eq!(
+                    runtime.window_status(&combined_window_id("tab-1", "restoring")),
+                    Some(WindowProcessStatus::Error)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn restore_admits_worktree_with_unlanded_commits() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -734,7 +884,7 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
         );
     }
 
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     // The exact park `IssueMonitorState::stop_only` performs: it is what turns
     // an operator stop into a durable `failed_issues` entry.
     monitor.escalate_to_needs_human(
@@ -1036,7 +1186,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
     // AC-2: between the sweep and the drain the PM stops #4276 through the
     // Monitor. The queued restore is re-judged at the spawn boundary and
     // nothing spawns.
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.escalate_to_needs_human(
         4276,
         gwt::NeedsHumanKind::UserChoiceRequired,

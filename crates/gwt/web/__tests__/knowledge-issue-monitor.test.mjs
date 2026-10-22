@@ -22,7 +22,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -175,7 +175,10 @@ test("Issue #5287: a failed Issue renderer displays and reports the cause, then 
 for (const stage of ["load", "render"]) {
   test(`Issue #5287: detail-only ${stage} failure stays visible and reaches diagnostics`, async (t) => {
     const { body, surface, load, sent, reports, opened } = await makeFixture({
-      createKnowledgeMarkdownBody() { throw new Error("detail Markdown failed"); },
+      createNode(...args) {
+        if (args[1] === "knowledge-section") throw new Error("detail Markdown failed");
+        return createNode(globalThis.document, ...args);
+      },
     });
     t.after(() => surface.clearKnowledgeBridgeState("win-1"));
     surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
@@ -483,6 +486,16 @@ test("Issue #3620: capacity badges follow confirmed manual and automatic limits"
   assert.equal(badge.dataset.tone, "info");
   assert.match(notices.at(-1).message, /Lower Max active if slow/);
   assert.match(notices.at(-1).details, /Verification may not finish/);
+  const sharedManual = capacityStatus({ max_active_agents: 3, max_active_agents_override: 5 });
+  const noticeCount = notices.length;
+  surface.applyIssueMonitorStatus(sharedManual);
+  assert.equal(badge.textContent, "Capacity 3 · Details", "other-project consumption does not make the shared request excessive");
+  assert.equal(notices.length, noticeCount, "the request fits the machine worker recommendation of five");
+  surface.applyIssueMonitorStatus({ ...sharedManual,
+    agent_capacity: { ...sharedManual.agent_capacity, measurement_complete: false } });
+  assert.equal(badge.dataset.tone, "info", "Manual remains configured when the project receives fewer workers");
+  assert.equal(notices.at(-1).level, "info");
+  assert.match(notices.at(-1).message, /Capacity pending.*Manual limit 5.*no action needed/);
   surface.applyIssueMonitorStatus(capacityStatus());
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 0/3");
   surface.applyIssueMonitorStatus({ max_active_agents: 3, max_active_agents_override: null });

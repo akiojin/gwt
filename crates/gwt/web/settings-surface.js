@@ -285,7 +285,7 @@ function renderIssuesSettingsPanel(panel, options) {
   const max = field(launch, "Max active", "number", committedMax == null
     ? status?.max_active_agents ?? 0
     : panel.dataset.maxActiveDraft ?? committedMax);
-  const capacityExplanation = "Maximum number of issue agents the monitor may run at once. Auto uses the current recommended capacity; Manual sets a fixed maximum.";
+  const capacityExplanation = "Maximum number of issue agents across all projects on this machine. Auto uses the current recommended capacity; Manual requests a shared maximum. Each project's effective allocation may be lower.";
   setControlExplanation(max, capacityExplanation, "settings-max-active");
   launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
   max.min = "1";
@@ -293,7 +293,7 @@ function renderIssuesSettingsPanel(panel, options) {
   const mode = document.createElement("select");
   mode.className = "settings-select";
   mode.setAttribute("aria-label", "Max active mode");
-  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to set a fixed maximum.", "settings-max-active-mode");
+  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to request a shared maximum for all projects on this machine.", "settings-max-active-mode");
   for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
     const option = document.createElement("option");
     option.value = value;
@@ -318,6 +318,13 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   updateApply();
   capacity.append(mode, max, apply);
+  const scope = document.createElement("span");
+  scope.className = "settings-help";
+  scope.textContent = "All projects on this machine. Manual sets the shared requested maximum.";
+  const allocation = document.createElement("span");
+  allocation.className = "settings-help";
+  allocation.setAttribute("role", "status");
+  capacity.append(scope, allocation);
   const message = document.createElement("span");
   message.className = "settings-help";
   message.setAttribute("role", "status");
@@ -334,6 +341,9 @@ function renderIssuesSettingsPanel(panel, options) {
       max.value = String(committedMax ?? nextStatus?.max_active_agents ?? 0);
     }
     updateApply();
+    const otherWorkers = Math.max(0, (nextStatus?.agent_capacity?.other_live_agents ?? 0)
+      - (nextStatus?.agent_capacity?.other_pm_agents ?? 0));
+    allocation.textContent = `This project allocation: ${nextStatus?.max_active_agents ?? 0} · Other project workers: ${otherWorkers}`;
     message.textContent = max.disabled && !nextStatus?.agent_capacity?.measurement_complete
       ? "Measuring capacity…"
       : Number(nextStatus?.active_count) > Number(nextStatus?.max_active_agents)
@@ -343,13 +353,22 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   panel.updateMaxActiveStatus(status);
   mode.addEventListener("change", () => {
+    const wasAuto = max.disabled;
     delete panel.dataset.maxActiveDraft;
     max.disabled = mode.value === "auto";
+    if (!max.disabled && wasAuto) {
+      const capacity = latestStatus?.agent_capacity;
+      const machineWorkers = Number.isFinite(capacity?.machine_budget)
+        ? capacity.machine_budget - (capacity.other_pm_agents ?? 0) - Math.max(capacity.own_pm_agents ?? 0, 1)
+        : (latestStatus?.max_active_agents ?? 0)
+          + Math.max(0, (capacity?.other_live_agents ?? 0) - (capacity?.other_pm_agents ?? 0))
+          + (capacity?.own_untracked_workers ?? 0);
+      max.value = String(Math.max(1, machineWorkers));
+    }
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
     committedMax = max.disabled ? null : Number(max.value);
     updateApply();
-    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax,
-      max_active_agents: committedMax ?? latestStatus?.max_active_agents });
+    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax });
     send({ kind: "set_issue_monitor_max_active_agents",
       max_active_agents: committedMax });
   });
@@ -780,6 +799,7 @@ export function createSettingsSurface({
   getIndexStatus,
   pmSettingsPanel,
   mountIssues,
+  scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -908,11 +928,12 @@ export function createSettingsSurface({
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
+      let renderedCustomAgentsState = null;
       const customAgentsModel = createUiStateStore({
         catalog: { agents: [], loading: false, loaded: false },
         statusMessage: "",
         statusKind: "",
-      });
+      }, { scheduleFrame });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
       // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
@@ -920,7 +941,7 @@ export function createSettingsSurface({
       const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-      });
+      }, { scheduleFrame });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsModel = createUiStateStore({
@@ -967,7 +988,7 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
-      agentBackendsModel.subscribe(state => state, state => {
+      agentBackendsModel.subscribeFrame(state => state, state => {
         renderAgentBackendsPanelInAllSettingsWindows(state);
       });
       systemSettingsModel.subscribe(state => state, state => {
@@ -975,7 +996,20 @@ export function createSettingsSurface({
       });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
-      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
+      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
+      const renderedUpdateStatuses = new WeakMap();
+      function renderUpdateStatus(body, state) {
+        const panel = body.querySelector('[data-update-settings-status]');
+        if (!panel || !state.loaded) return;
+        const root = body.dataset.settingsProjectRoot || "";
+        const previous = renderedUpdateStatuses.get(panel);
+        if (previous && previous.auto_apply_updates === state.auto_apply_updates
+          && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.drains[root] === state.drains[root]) return;
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderedUpdateStatuses.set(panel, state);
+      }
+      // Preserve synchronous control reconciliation, including same-value save errors.
       globalUpdateModel.subscribe(state => state, state => {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
@@ -984,11 +1018,11 @@ export function createSettingsSurface({
             toggle.checked = state.auto_apply_updates_effective;
             toggle.disabled = !state.loaded;
           }
-          const panel = body.querySelector('[data-update-settings-status]');
-          if (panel && state.loaded) renderUpdateSettingsStatus(panel, {
-            ...state, update_drain: state.drains[body.dataset.settingsProjectRoot] || null,
-          });
         }
+      });
+      globalUpdateModel.subscribeFrame(state => state, state => {
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderUpdateStatus(body, state);
       });
       function applyGlobalUpdateSettings(event) {
         if (!event.status) {
@@ -1143,8 +1177,8 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
-      customAgentsModel.subscribe(state => state, state => {
-        renderSettingsAgentList(state);
+      customAgentsModel.subscribeFrame(state => state, state => {
+        if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
       });
       customAgentsModel.subscribe(state => state.catalog, catalog => {
         // Read recovery must not replace candidate inputs while awaiting a reply.
@@ -1400,6 +1434,7 @@ export function createSettingsSurface({
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+        renderUpdateStatus(body, globalUpdateModel.read());
         body.addEventListener("focusout", () => queueMicrotask(() => {
           if (body.dataset.issuesRenderDeferred === "true") {
             delete body.dataset.issuesRenderDeferred;
@@ -2463,6 +2498,7 @@ export function createSettingsSurface({
                   onSave: (updatedAgent) => {
                     editingCustomAgentId = null;
                     setSettingsStatus("Saving custom agent…", "info");
+                    renderSettingsAgentList();
                     send({ kind: "update_custom_agent", agent: updatedAgent });
                   },
                   onCancel: () => {
@@ -2475,6 +2511,8 @@ export function createSettingsSurface({
             scroll.appendChild(section);
           }
         }
+        // Local edits can render this snapshot before its scheduled frame.
+        renderedCustomAgentsState = state;
       }
 
 

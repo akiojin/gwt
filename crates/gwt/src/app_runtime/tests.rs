@@ -73,13 +73,14 @@ use super::{
     record_issue_monitor_scan_failures, reset_local_issue_monitor_fallback_commit_count,
     reset_local_issue_monitor_remote_scan_count, save_resumed_workspace_projection,
     save_start_work_workspace_projection, save_workspace_launch_projection,
-    set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
-    AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
-    BlockingTestTaskQueue, CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
-    IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchPaneDisposition, LaunchWizardMemoryCache,
-    LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
+    set_scheduled_scan_after_lease_before_commit_test_hook, test_monitor, test_monitor_with_prefs,
+    ActiveAgentSession, AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult,
+    AgentLaunchRuntimeContext, AppEventProxy, AppRuntime, ApprovalPromptLatch,
+    AttachmentProgressPhase, BlockingTaskSpawner, BlockingTestTaskQueue, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchPaneDisposition, LaunchWizardMemoryCache, LaunchWizardSession,
+    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
     ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenControlFailure,
     ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision, ReadinessPaneEvidence,
@@ -348,6 +349,7 @@ fn sample_issue_snapshot(
     updated_at: &str,
 ) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: body.to_string(),
@@ -1651,6 +1653,7 @@ fn sample_runtime_with_events(
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
         deferred_issue_monitor_launches: None,
+        startup_generation_reaper_pending: false,
         startup_worktree_inventories: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_launch_delivery_acks: HashMap::new(),
@@ -1729,6 +1732,7 @@ fn sample_runtime_with_events(
         provider_quota_holds: HashMap::new(),
         provider_quota_candidates: HashMap::new(),
         provider_api_error_holds: HashMap::new(),
+        provider_capacity_resumes: HashMap::new(),
         released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
@@ -2350,7 +2354,7 @@ fn legacy_issue_monitor_git_failure(project_root: &Path) -> String {
 
 // #4499: cache membership alone does not authorize monitor admission.
 fn queued_issue_monitor_prefs(issue_numbers: &[u64]) -> gwt::IssueMonitorPrefs {
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(issue_numbers, "operator", "2026-07-28T00:00:00Z");
     monitor.prefs()
 }
@@ -2447,6 +2451,30 @@ fn init_git_clone_with_default_branch(repo: &Path, default_branch: &str) -> Path
     run_git(repo, &["config", "user.email", "codex@example.com"]);
     run_git(repo, &["remote", "set-head", "origin", "-a"]);
     origin
+}
+
+// Monitor admission reads a real GitHub identity. Keep fixture pushes local
+// and refuse HTTPS transport so the identity cannot cause network access.
+fn bind_monitor_clone_identity(repo: &Path, origin: &Path) {
+    run_git(
+        repo,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let remote = format!(
+        "https://github.com/example/repo-{:x}.git",
+        remote_suffix(repo)
+    );
+    run_git(repo, &["remote", "set-url", "origin", &remote]);
+    run_git(
+        repo,
+        &["config", "--local", "protocol.https.allow", "never"],
+    );
 }
 
 fn init_managed_workspace_with_develop_worktree(workspace_home: &Path) -> (PathBuf, PathBuf) {
@@ -3182,6 +3210,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        gwt::machine_agent_settings::set(
+            Some(3),
+            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
         init_repo_with_initial_commit(&repo);
@@ -3197,7 +3231,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             "invalid = [",
         )
         .expect("stop admitted launches before provider preparation");
-        let mut monitor = gwt::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             Default::default(),
             gwt::IssueMonitorPrefs {
                 max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
@@ -3206,6 +3240,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             },
         );
         monitor.record_candidate(gwt::IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Waiting implementation".to_string(),
             labels: Vec::new(),
@@ -3319,7 +3354,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..Default::default()
@@ -3378,7 +3413,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
         snapshot.windows[0].window_id,
         combined_window_id("tab-2", &raw_id)
     );
-    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let monitor = test_monitor(gwt::IssueMonitorConfig {
         enabled: true,
         max_active: 1,
         ..Default::default()
@@ -3408,7 +3443,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     runtime.tabs[1]
         .workspace
         .set_status(&raw_id, WindowProcessStatus::Running);
-    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+    let monitor = test_monitor(gwt::IssueMonitorConfig {
         max_active: 3,
         ..Default::default()
     });
@@ -6924,7 +6959,8 @@ fn monitor_relaunch_fixture_with_settlement(
     let case_root = root.join(case_name);
     fs::create_dir_all(&case_root).expect("create monitor relaunch case root");
     let repo = case_root.join("repo");
-    init_git_clone_with_origin(&repo);
+    let origin = init_git_clone_with_origin(&repo);
+    bind_monitor_clone_identity(&repo, &origin);
     let (title, labels, owner_kind) = match linked_issue_kind {
         LinkedIssueKind::Spec => (
             "SPEC: monitor relaunch safety",
@@ -7109,7 +7145,7 @@ fn monitor_relaunch_fixture_with_settlement(
 
     let delivery_id = durable_delivery.then(|| format!("launch:effect-{case_name}"));
     let mut prefs = if let Some(delivery_id) = delivery_id.as_deref() {
-        let mut monitor = gwt::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             gwt::IssueMonitorConfig {
                 enabled: true,
                 ..gwt::IssueMonitorConfig::default()
@@ -7125,6 +7161,7 @@ fn monitor_relaunch_fixture_with_settlement(
         );
         monitor.terminal_queue_push(&[3165], "operator", "2026-07-28T00:00:00Z");
         monitor.record_candidate(gwt::IssueMonitorIssue {
+            author_login: None,
             number: 3165,
             title: title.to_string(),
             labels: labels.iter().map(|label| (*label).to_string()).collect(),
@@ -8743,6 +8780,7 @@ fn commit_pm_worktree_change(worktree: &Path, file: &str, contents: &str, messag
 fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueMonitorInboxItem {
     gwt::IssueMonitorInboxItem {
         issue: gwt::IssueMonitorIssue {
+            author_login: None,
             number,
             title: format!("Issue {number}"),
             labels: vec!["auto-merge".to_string()],
@@ -8963,7 +9001,7 @@ fn seed_open_escalation(repo: &std::path::Path, owner: &str, body: &str) -> Stri
 
 fn seed_quiet_standing_supervision(repo: &Path) {
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,

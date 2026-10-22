@@ -1,5 +1,6 @@
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { renderUiContent } from "./ui-content.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -16,8 +17,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
-//   app.js (the markdown body renderer is shared with the Board surface).
+// - createNode: shared DOM helper owned by app.js.
 // - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
 // - knowledgeKindForPreset(preset): Issue/SPEC kind mapping.
@@ -667,11 +667,6 @@ const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
 
 const ISSUE_WINDOW_HEADER_ACTIONS = Object.freeze([
   Object.freeze({
-    action: "return-to-list",
-    label: "Return to list",
-    aria: (number) => `Return the agent for Issue #${number} to the Issue list`,
-  }),
-  Object.freeze({
     action: "open-issue",
     label: "Open Issue",
     aria: (number) => `Open Issue #${number} in the Issue window`,
@@ -685,6 +680,7 @@ export function issueWindowHeaderModel({
   attention = null,
 } = {}) {
   // FR-013: a session with no Issue behind it stays a bare terminal window.
+  if (windowData?.is_pm || windowData?.preset === "shell") return null;
   const issueNumber = Number(windowData?.linked_issue_number);
   if (!Number.isFinite(issueNumber) || issueNumber <= 0) return null;
   // The header is the canvas face only; in the list the same agent is the row's
@@ -779,7 +775,6 @@ export function createKnowledgeKanbanSurface({
   // frame was written; a false result is owned by the retry lifecycle.
   sendKnowledgeSemanticSearchNow = () => false,
   createNode,
-  createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
   isKnowledgeWindowVisible = () => true,
@@ -1183,13 +1178,14 @@ export function createKnowledgeKanbanSurface({
         if (!capacity) return null;
         const override = status.max_active_agents_override;
         const manual = Number.isInteger(override) && override > 0;
-        const manualEffective = manual && status.max_active_agents === override;
         const autoRetained = !manual && Number.isInteger(status.max_active_agents) && status.max_active_agents > 0;
-        const excess = manual ? override - capacity.recommended_worker_limit : 0;
+        const machineWorkerLimit = Math.max(0, (capacity.machine_budget ?? 0)
+          - (capacity.other_pm_agents ?? 0) - Math.max(capacity.own_pm_agents ?? 0, 1));
+        const excess = manual ? override - machineWorkerLimit : 0;
         const incomplete = !capacity.measurement_complete;
         const attention = incomplete || excess > 0;
         const message = incomplete
-          ? manualEffective
+          ? manual
             ? `Capacity pending. Manual limit ${override}; no action needed.`
             : autoRetained
               ? `Capacity pending. Auto limit ${status.max_active_agents} retained while measurements refresh.`
@@ -1219,7 +1215,7 @@ export function createKnowledgeKanbanSurface({
         if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         return {
           key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issue Monitor capacity",
-          level: manualEffective || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
+          level: manual || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
           details: lines.filter(Boolean).join("\n"), attention,
           badge: incomplete ? "Capacity pending · Details"
             : excess > 0 ? "Over recommended · Details" : `Capacity ${capacity.recommended_worker_limit} · Details`,
@@ -1655,7 +1651,7 @@ export function createKnowledgeKanbanSurface({
             createNode("div", "kanban-drawer-section-title", section.title),
           );
           card.appendChild(
-            createKnowledgeMarkdownBody(section, "kanban-drawer-section-body"),
+            renderUiContent(document, section.content, "kanban-drawer-section-body"),
           );
           body.appendChild(card);
         }
@@ -4135,7 +4131,7 @@ export function createKnowledgeKanbanSurface({
           const card = createNode("details", "knowledge-section");
           card.open = index === 0;
           card.appendChild(createNode("summary", "knowledge-section-title", section.title));
-          card.appendChild(createKnowledgeMarkdownBody(section));
+          card.appendChild(renderUiContent(document, section.content, "knowledge-section-body"));
           scroll.appendChild(card);
         });
         const relatedWorks = renderKnowledgeRelatedWorks(detail);
@@ -4233,7 +4229,7 @@ export function createKnowledgeKanbanSurface({
           card.appendChild(
             createNode("div", "knowledge-section-title", section.title),
           );
-          card.appendChild(createKnowledgeMarkdownBody(section));
+          card.appendChild(renderUiContent(document, section.content, "knowledge-section-body"));
           scroll.appendChild(card);
         }
         const relatedWorks = renderKnowledgeRelatedWorks(detail);
@@ -5440,7 +5436,9 @@ export function createKnowledgeKanbanSurface({
             const previousNumber = state.selectedNumber;
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
-            state.detail = event.detail;
+            state.detail = event.detail ? { ...event.detail,
+              sections: (event.detail.sections || []).map(section => ({ ...section,
+                content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
             if (matchesLoadRequest) {
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
@@ -5464,7 +5462,7 @@ export function createKnowledgeKanbanSurface({
                 ...kanbanDrawerActiveContext,
                 number: event.detail?.number ?? kanbanDrawerActiveContext.number,
               };
-              renderKanbanDrawerBody();
+              knowledgeBoardViewModel.update(() => ({ windowId: event.id, drawer: true }));
             }
             break;
           }
@@ -5639,7 +5637,11 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
-      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly, drawer }) => {
+        if (drawer) {
+          renderKanbanDrawerBody();
+          return;
+        }
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!element || !state) return;

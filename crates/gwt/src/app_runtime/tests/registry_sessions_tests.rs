@@ -1431,10 +1431,10 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
         "a stale canvas cannot release the fresh #4258 launch"
     );
     assert!(runtime.tracked_window_exists(&window_id));
-    let mut monitor =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), persisted);
     monitor.set_gui_connected(true);
     monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
         number: 4328,
         title: "Next queued issue".to_string(),
         labels: vec!["auto-improve".to_string()],

@@ -74,6 +74,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/socket-receive-dispatcher.test.mjs \
   crates/gwt/web/__tests__/ui-state-store.test.mjs \
   crates/gwt/web/__tests__/ui-content.test.mjs \
+  crates/gwt/web/__tests__/pull-render-structure.test.mjs \
   crates/gwt/web/__tests__/pull-render-contract.test.mjs \
   crates/gwt/web/__tests__/issue-render-sync.test.mjs \
   crates/gwt/web/__tests__/render-degradation-banner.test.mjs \
@@ -98,5 +99,4 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
   crates/gwt/web/__tests__/logs-scope-facet.test.mjs \
   crates/gwt/web/__tests__/window-runtime-state.test.mjs \
-  crates/gwt/web/__tests__/window-list-model.test.mjs \
-  crates/gwt/web/__tests__/window-close-confirm-modal.test.mjs
+  crates/gwt/web/__tests__/window-list-model.test.mjs

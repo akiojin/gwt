@@ -98,6 +98,23 @@ impl AppEventQueue {
     }
 }
 
+#[cfg(test)]
+fn test_monitor(config: gwt::IssueMonitorConfig) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+
+#[cfg(test)]
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppEventPriority {
     Foreground,
@@ -1445,6 +1462,20 @@ impl IssueMonitorLaunchClaimInput {
     fn preflight_claim(&self, prefs: gwt::IssueMonitorPrefs, host_started_at: Option<u64>) -> bool {
         let mut preflight =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
+            &mut preflight,
+            &self.project_root,
+        );
+        if let Some(issue) = gwt::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
+            .and_then(|cache_root| {
+                gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                    &cache_root,
+                    self.issue_number,
+                )
+            })
+        {
+            preflight.record_candidate(issue);
+        }
         self.observe_canvas(&mut preflight, host_started_at);
         preflight.claim_launch_delivery(
             self.issue_number,
@@ -1535,10 +1566,20 @@ impl IssueMonitorLaunchClaimInput {
                 }
             }
             Err(error) if error.allows_local_fallback() => {
+                let source = gwt::issue_cache::issue_cache_root_for_repo_path(project_root)
+                    .and_then(|cache_root| {
+                        gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                            &cache_root,
+                            issue_number,
+                        )
+                    });
                 AppRuntime::commit_local_issue_monitor_control_with_timeout(
                     project_root,
                     self.fallback_timeout,
                     |monitor| {
+                        if let Some(source) = source {
+                            monitor.record_candidate(source);
+                        }
                         self.observe_canvas(monitor, host_started_at);
                         monitor.claim_launch_delivery(
                             issue_number,
@@ -1639,6 +1680,7 @@ pub(crate) struct PendingIssueMonitorMaxActive {
     client_id: ClientId,
     max_active_agents: Option<usize>,
     changed_at: String,
+    control_id: String,
 }
 
 #[derive(Default)]
@@ -2136,10 +2178,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
-    /// Issue #4378 AC-2: Issue Monitor launch deliveries held while the
-    /// startup generation reaper runs on the blocking worker. `Some` until the
-    /// reaper reports back; the held deliveries then replay in arrival order.
+    /// Issue #4378 / Issue #4804: hold deliveries until the generation reaper
+    /// finishes and canvas-ready registers the startup restore inventory.
     pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
+    pub(crate) startup_generation_reaper_pending: bool,
     /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
     /// until the startup index status probe takes the active project's one.
     pub(crate) startup_worktree_inventories:
@@ -2313,6 +2355,7 @@ pub struct AppRuntime {
     /// output has genuinely stopped — which is exactly the state being
     /// reported.
     pub(crate) provider_api_error_holds: HashMap<String, gwt_core::usage::ProviderApiError>,
+    pub(crate) provider_capacity_resumes: HashMap<String, runtime_events::ProviderCapacityResume>,
     /// Issue #3616: the newest account-level usage snapshot, used only to
     /// corroborate a screen notice. Never a trigger on its own: the poller is
     /// silent while no client is connected and Claude's account read is opt-in.
@@ -2699,8 +2742,10 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
         Err(error) => {
             let prefs = gwt::load_issue_monitor_prefs(prefs_path)
                 .unwrap_or_else(|_| recovery_baseline.clone());
-            *monitor =
+            let mut restored =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            restored.inherit_source_repository(monitor);
+            *monitor = restored;
             Err(error)
         }
     }
@@ -2732,8 +2777,10 @@ fn try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence<T>(
         Err(error) => {
             let prefs = gwt::load_issue_monitor_prefs(prefs_path)
                 .unwrap_or_else(|_| recovery_baseline.clone());
-            *monitor =
+            let mut restored =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            restored.inherit_source_repository(monitor);
+            *monitor = restored;
             Err(error)
         }
     }
@@ -2795,8 +2842,10 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
             Err(error) => {
                 let prefs = gwt::load_issue_monitor_prefs(prefs_path)
                     .unwrap_or_else(|_| recovery_baseline.clone());
-                *monitor =
+                let mut restored =
                     gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                restored.inherit_source_repository(monitor);
+                *monitor = restored;
                 let retryable = matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -2887,9 +2936,7 @@ fn begin_local_issue_monitor_effect_attempt(
             let effect = latest
                 .pending_effects()
                 .iter()
-                .filter(|effect| {
-                    eligible(effect) && latest.claim_renewal_attempt_is_ready(effect, &now)
-                })
+                .filter(|effect| eligible(effect) && latest.effect_attempt_is_ready(effect, &now))
                 .min_by_key(|effect| {
                     let priority = match effect.payload {
                         gwt::IssueMonitorEffectPayload::ReleaseClaim { .. } => 0,
@@ -3145,7 +3192,7 @@ mod claim_renewal_tests {
             ..Default::default()
         };
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs);
         let result = Ok(
             gwt_github::issue_auto_claim::ClaimRenewOutcome::NotRenewed {
                 reason: "the current execution holder ended".to_string(),
@@ -3176,7 +3223,7 @@ mod claim_renewal_tests {
         prefs.pending_effects = vec![effect];
         prefs.claim_diagnostics.clear();
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs);
         let deadline = start + std::time::Duration::from_secs(60);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         let mut expired_clock = None;
@@ -3228,7 +3275,7 @@ mod claim_renewal_tests {
         prefs.enabled = false;
         prefs.pending_effects = vec![release_effect.clone()];
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs);
         assert_eq!(
             commit_local_issue_monitor_effect_result(
                 &prefs_path,
@@ -3250,7 +3297,7 @@ mod claim_renewal_tests {
         );
         prefs.pending_effects = vec![release_effect.clone()];
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs);
         assert_eq!(
             commit_local_issue_monitor_effect_result(
                 &prefs_path,
@@ -3315,7 +3362,7 @@ mod claim_renewal_tests {
                     owner: "host/session".to_string(),
                 });
             gwt::save_issue_monitor_prefs(&prefs_path, &scenario).unwrap();
-            let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), scenario);
+            let mut monitor = test_monitor_with_prefs(Default::default(), scenario);
             let mut attempted = Vec::new();
             drive_local_issue_monitor_claim_effects_with(
                 &prefs_path,
@@ -3384,10 +3431,10 @@ mod claim_renewal_tests {
                     .unwrap(),
             )
             .unwrap();
-            assert!(!monitor.claim_renewal_attempt_is_ready(pending, &failure_at.to_rfc3339()));
+            assert!(!monitor.effect_attempt_is_ready(pending, &failure_at.to_rfc3339()));
             let next = failure_at
                 + chrono::Duration::seconds(monitor.claim_heartbeat_interval_secs() as i64);
-            assert!(monitor.claim_renewal_attempt_is_ready(pending, &next.to_rfc3339()));
+            assert!(monitor.effect_attempt_is_ready(pending, &next.to_rfc3339()));
             assert!(persisted.claim_diagnostics[&43].last_success_at.is_some());
             assert!(persisted.launching_issues.is_empty());
             assert!(persisted.pending_launch_deliveries.is_empty());
@@ -3519,6 +3566,7 @@ fn execute_local_issue_monitor_claim_effects(
     use gwt_github::issue_auto_claim::{
         acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
     };
+    monitor.set_source_repository(Some((owner, repo)));
 
     let mut execute = |effect: &gwt::PendingIssueMonitorEffect,
                        authority_current: bool,
@@ -3691,6 +3739,7 @@ fn run_local_issue_monitor_claim_renewals(
             return Err(error);
         }
     };
+    monitor.set_source_repository(Some((&owner, &repo)));
     execute_local_issue_monitor_claim_effects(
         prefs_path,
         project_root,
@@ -3841,6 +3890,13 @@ fn local_probe_batch<'a>(
 /// The monitor owner of one GUI-local scan and the completion outcomes it
 /// observed, keyed by Issue number (Issue #3528).
 type LocalClaimObservation = (String, std::collections::BTreeMap<u64, bool>);
+
+type LocalIssueMonitorFallbackProjection = (
+    Vec<gwt::IssueMonitorIssue>,
+    Option<String>,
+    String,
+    Option<(String, String)>,
+);
 
 /// Issue #3528 (SPEC #3200 FR-057..FR-059): observe merged-PR completion for
 /// the claim frontier of one GUI-local scan. Shared by the scheduled fallback
@@ -4276,6 +4332,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root) {
             Ok((owner, repo)) => {
+                monitor.set_source_repository(Some((&owner, &repo)));
                 local_repo_identity = Some((owner.clone(), repo.clone()));
                 if cleanup_only {
                     // Disabling the monitor revokes acquisition authority but does
@@ -4367,6 +4424,11 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     #[cfg(test)]
     run_scheduled_scan_after_lease_before_commit_test_hook();
     let prepare = |latest: &mut gwt::IssueMonitorState| {
+        latest.set_source_repository(
+            local_repo_identity
+                .as_ref()
+                .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+        );
         latest.refresh_agent_capacity(project_root);
         latest.expire_stale_unbound_launches(now);
         // Retire exact dead terminal holders before duplicate-binding repair
@@ -4519,6 +4581,7 @@ fn issue_monitor_issue_from_snapshot(
     snapshot: &gwt_github::IssueSnapshot,
 ) -> gwt::IssueMonitorIssue {
     gwt::IssueMonitorIssue {
+        author_login: snapshot.author_login.clone(),
         number: snapshot.number.0,
         title: snapshot.title.clone(),
         labels: snapshot.labels.clone(),
@@ -5086,6 +5149,7 @@ impl AppRuntime {
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
+            startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
             update_resume_tab_ids: HashSet::new(),
             update_drain_released_projects: Vec::new(),
@@ -5157,6 +5221,7 @@ impl AppRuntime {
             provider_quota_holds: HashMap::new(),
             provider_quota_candidates: HashMap::new(),
             provider_api_error_holds: HashMap::new(),
+            provider_capacity_resumes: HashMap::new(),
             released_provider_quota_notices: HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
@@ -5419,10 +5484,19 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #4378 AC-2: the startup generation reaper finished on the
-    /// blocking worker. Replay the Issue Monitor launch deliveries that arrived
-    /// while it ran, in arrival order.
+    /// Issue #4378 AC-2: the startup generation reaper finished on the worker.
     pub(crate) fn handle_startup_generation_reaper_completed(&mut self) -> Vec<OutboundEvent> {
+        self.startup_generation_reaper_pending = false;
+        self.drain_startup_issue_monitor_launches()
+    }
+
+    /// Issue #4804 AC-7: either startup event may arrive first. A current
+    /// canvas census is complete only after pending restores are registered
+    /// (or refused); waiting for their PTYs is unnecessary.
+    fn drain_startup_issue_monitor_launches(&mut self) -> Vec<OutboundEvent> {
+        if self.startup_generation_reaper_pending || self.pending_startup_restore_log.is_some() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         for launch in self
             .deferred_issue_monitor_launches
@@ -7184,8 +7258,7 @@ impl AppRuntime {
             project_root,
         ))
         .ok()?;
-        let mut monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         monitor
             .take_failed_window(issue_number)
             .filter(|stale| stale != fresh_window_id)
@@ -8322,10 +8395,8 @@ impl AppRuntime {
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
             match gwt::load_issue_monitor_prefs(&prefs_path) {
                 Ok(prefs) => {
-                    let monitor = gwt::IssueMonitorState::with_prefs(
-                        gwt::IssueMonitorConfig::default(),
-                        prefs,
-                    );
+                    let monitor =
+                        test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs);
                     window_ids
                         .iter()
                         .filter_map(|window_id| {
@@ -8429,7 +8500,7 @@ impl AppRuntime {
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let (cached_issues, projection_error, now) =
+        let (cached_issues, projection_error, now, source_repository) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + commit_timeout,
@@ -8438,6 +8509,11 @@ impl AppRuntime {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
                 gwt::IssueMonitorConfig::default(),
                 prefs.clone(),
+            );
+            monitor.set_source_repository(
+                source_repository
+                    .as_ref()
+                    .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
             );
             if monitor
                 .requeue_exact_window_classified(target, classification)
@@ -8716,6 +8792,7 @@ impl AppRuntime {
             client_id,
             max_active_agents,
             changed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            control_id: uuid::Uuid::new_v4().to_string(),
         });
         if lane.requests.len() > 1 {
             return Vec::new();
@@ -8746,13 +8823,17 @@ impl AppRuntime {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match Self::publish_issue_monitor_control_owned(
                     &worker_context.project_root,
-                    serde_json::json!({ "max_active_agents": request.max_active_agents }),
+                    serde_json::json!({
+                        "max_active_agents": request.max_active_agents,
+                        "control_id": request.control_id,
+                        "changed_at": request.changed_at,
+                    }),
                 ) {
                     Ok(()) => Ok(None),
                     Err(error) if error.allows_local_fallback() => {
                         // A durable user save belongs on the blocking lane, not
                         // inside the synchronous GUI thread's 250ms budget.
-                        Self::commit_local_issue_monitor_control_with_timeout(
+                        Self::try_commit_local_issue_monitor_control_with_timeout(
                             &worker_context.project_root,
                             ISSUE_MONITOR_COMMIT_BUDGET,
                             |monitor| {
@@ -8760,10 +8841,13 @@ impl AppRuntime {
                                     request.max_active_agents,
                                     gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
                                     &request.changed_at,
-                                )
+                                );
+                                monitor.persist_machine_max_active_change(&request.control_id)
                             },
                         )
                         .map(|(monitor, ())| Some(Box::new(monitor)))
+                        .map_err(|error| gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            format!("Max active save outcome is uncertain: {error}; reread the current machine setting before retrying")))
                     }
                     Err(error) => Err(error),
                 }
@@ -9021,8 +9105,23 @@ impl AppRuntime {
         (gwt::IssueMonitorState, T),
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
+        Self::try_commit_local_issue_monitor_control_with_timeout(
+            project_root,
+            fallback_timeout,
+            |monitor| Ok(mutation(monitor)),
+        )
+    }
+
+    fn try_commit_local_issue_monitor_control_with_timeout<T>(
+        project_root: &Path,
+        fallback_timeout: std::time::Duration,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> std::io::Result<T>,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let (cached_issues, projection_error, now) =
+        let (cached_issues, projection_error, now, source_repository) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + fallback_timeout,
@@ -9032,8 +9131,13 @@ impl AppRuntime {
                 gwt::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
+            monitor.set_source_repository(
+                source_repository
+                    .as_ref()
+                    .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
+            );
             monitor.refresh_agent_capacity(project_root);
-            let result = mutation(&mut monitor);
+            let result = mutation(&mut monitor)?;
             Self::apply_local_issue_monitor_fallback_projection(
                 &mut monitor,
                 &cached_issues,
@@ -9080,7 +9184,7 @@ impl AppRuntime {
         gwt::runtime_daemon_events::IssueMonitorControlPublishError,
     > {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let (cached_issues, projection_error, now) =
+        let (cached_issues, projection_error, now, source_repository) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             gwt_core::operation_deadline::now() + timeout,
@@ -9089,6 +9193,11 @@ impl AppRuntime {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
                 gwt::IssueMonitorConfig::default(),
                 prefs.clone(),
+            );
+            monitor.set_source_repository(
+                source_repository
+                    .as_ref()
+                    .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
             );
             let result = mutation(&mut monitor).map_err(std::io::Error::other)?;
             Self::apply_local_issue_monitor_fallback_projection(
@@ -9110,7 +9219,7 @@ impl AppRuntime {
 
     fn load_local_issue_monitor_fallback_projection(
         project_root: &Path,
-    ) -> (Vec<gwt::IssueMonitorIssue>, Option<String>, String) {
+    ) -> LocalIssueMonitorFallbackProjection {
         let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
         );
@@ -9120,13 +9229,14 @@ impl AppRuntime {
                 Ok(issues) => (issues, None),
                 Err(error) => (Vec::new(), Some(format!("issue cache failed: {error}"))),
             };
-        let origin_error = gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root)
-            .err()
-            .map(|error| error.to_string());
+        let source_repository =
+            gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root);
+        let origin_error = source_repository.as_ref().err().map(ToString::to_string);
         (
             cached_issues,
             cache_error.or(origin_error),
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            source_repository.ok(),
         )
     }
 
@@ -9348,6 +9458,7 @@ impl AppRuntime {
             .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        gwt::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, project_root);
         let mut issues =
             gwt::issue_monitor_worker::load_cached_issue_monitor_candidates(cache_root)
                 .unwrap_or_default();
@@ -9389,21 +9500,30 @@ impl AppRuntime {
         let project_root = project_root.to_path_buf();
         let expected_project_tab_id = self.issue_monitor_tab_id_for_project_root(&project_root);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let source_repository = {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            );
+            gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
+        };
+        let source = source_repository
+            .as_ref()
+            .ok()
+            .map(|(owner, repo)| (owner.as_str(), repo.as_str()));
         let (mut monitor, ()) =
             load_mutate_and_persist_issue_monitor_state(&prefs_path, |monitor| {
+                monitor.set_source_repository(source);
                 apply(monitor);
                 // #3223 follow-up: release claimed-but-never-acked launches whose
                 // claim anchor exceeded claim_ttl_secs so a crash cannot leak a slot.
                 monitor.expire_stale_unbound_launches(&now);
             });
+        monitor.set_source_repository(source);
         monitor.refresh_agent_capacity(&project_root);
         if policy == IssueMonitorScanPolicy::CacheOnly {
             let (cached_issues, cache_error, origin_error) = {
-                // Remote resolution performs `git rev-parse` followed by
-                // `git remote get-url`. Give both commands one shared,
-                // still-UI-bounded budget; 250ms could expire between them on
-                // a loaded machine and misreport a configured origin as an
-                // unstartable process.
+                // Repository identity was resolved before the prefs transaction;
+                // keep this cache-only projection bounded on the UI path too.
                 let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                     std::time::Instant::now() + std::time::Duration::from_secs(1),
                 );
@@ -9416,10 +9536,7 @@ impl AppRuntime {
                         Ok(issues) => (issues, None),
                         Err(error) => (Vec::new(), Some(format!("issue cache failed: {error}"))),
                     };
-                let origin_error =
-                    gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
-                        .err()
-                        .map(|error| error.to_string());
+                let origin_error = source_repository.as_ref().err().map(ToString::to_string);
                 (cached_issues, cache_error, origin_error)
             };
             let persisted = rebase_mutate_and_persist_issue_monitor_state(
@@ -9463,7 +9580,7 @@ impl AppRuntime {
         #[cfg(not(unix))]
         let mut local_claim_proposal = None;
 
-        match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+        match source_repository {
             Ok((owner, repo)) => {
                 #[cfg(not(unix))]
                 {
@@ -10009,6 +10126,14 @@ impl AppRuntime {
                             let (session_issue, monitor_owned) = window
                                 .session_id
                                 .as_deref()
+                                // Issue #4804: a restored pane has no new Session
+                                // until launch preparation applies, but its source
+                                // carries the Issue and autonomous launch route.
+                                .or_else(|| {
+                                    self.restore_launch_windows
+                                        .get(&window_id)
+                                        .and_then(Option::as_deref)
+                                })
                                 .map(session_metadata)
                                 .unwrap_or_default();
                             let issue_number = pending
@@ -11967,7 +12092,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12321,7 +12446,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -12642,9 +12767,11 @@ impl AppRuntime {
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
             }
-            FrontendEvent::LoadPmReports { id } => {
-                self.load_pm_reports_events(context, client_id, &id)
-            }
+            FrontendEvent::LoadPmReports {
+                id,
+                request_id,
+                version,
+            } => self.load_pm_reports_events(context, client_id, &id, request_id, version),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
@@ -13006,9 +13133,13 @@ impl AppRuntime {
                                 gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
                             let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
                                 .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
-                            let monitor = gwt::IssueMonitorState::with_prefs(
+                            let mut monitor = gwt::IssueMonitorState::with_prefs(
                                 gwt::IssueMonitorConfig::default(),
                                 prefs,
+                            );
+                            gwt::issue_monitor_worker::bind_issue_monitor_source_repository(
+                                &mut monitor,
+                                &project_root,
                             );
                             let mut status = monitor.status_view();
                             self.apply_issue_monitor_launch_profile_status(
@@ -15085,6 +15216,15 @@ impl AppRuntime {
             composed,
             self.provider_api_error_holds.contains_key(window_id),
         );
+        if self.window_approval_waiting.contains_key(window_id)
+            || self.provider_quota_holds.contains_key(window_id)
+            || matches!(
+                composed,
+                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+            )
+        {
+            self.cancel_provider_capacity_resume(window_id);
+        }
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -15095,6 +15235,7 @@ impl AppRuntime {
     }
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.cancel_provider_capacity_resume(window_id);
         self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
         self.pending_monitor_startups.remove(window_id);

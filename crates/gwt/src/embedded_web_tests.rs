@@ -1289,7 +1289,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
 }
 
 #[test]
-fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
+fn embedded_web_window_state_visualization_uses_runtime_state_without_canvas_geometry() {
     let js = app_js();
     // SPEC-3015: the pure runtime-state helpers moved to the extracted
     // window-runtime-state.js root module; app.js keeps the call sites.
@@ -1300,22 +1300,22 @@ fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separate
         "expected the extracted module to expose a runtime-state normalization helper",
     );
     assert!(
-        js.contains("function windowGeometryLabel(windowData)"),
-        "expected embedded js to expose a dedicated geometry label helper",
+        !js.contains("function windowGeometryLabel(windowData)"),
+        "fixed rail surfaces must not expose a saved canvas geometry label helper",
     );
     assert!(
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved to the
-    // project shell surface; the geometry/runtime label separation is pinned
-    // against the extracted module while windowGeometryLabel stays in app.js.
+    // The Window List preserves runtime labels while ignoring saved canvas
+    // geometry, including legacy states loaded after a restart or update.
     let shell_js = project_shell_surface_js();
     assert!(
-            shell_js.contains("const geometryLabel = windowGeometryLabel(entry);")
+            !shell_js.contains("windowGeometryLabel")
+                && !shell_js.contains("window-list-geometry")
                 && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
                 && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
-            "expected window list rendering to derive geometry and runtime labels through separate helpers",
+            "expected fixed surface window list rendering to display runtime labels without canvas geometry",
         );
     assert!(
         !js.contains("function windowStateLabel(windowData)")
@@ -2588,7 +2588,7 @@ fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
         "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
     );
     assert!(
-        html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+        html.contains("renderUiContent(document, entry.content, \"board-message-body\")"),
         "Board body must render via the shared Markdown renderer",
     );
     assert!(
@@ -2887,11 +2887,19 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     assert!(
-        wizard_state.is_match(html) && wizard_state_delegate.is_match(html),
+        wizard_state.is_match(html)
+            && wizard_state_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state updates to hydrate the shared wizard renderer",
     );
 }
@@ -3094,7 +3102,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // defer through `wizardInteractionGuard.defer(...)` before
     // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
     // mutation lives in the launch wizard surface appliers; the
-    // receive() updates the open-error model, whose subscriber delegates to
+    // receive() updates the state/error models, whose subscribers delegate to
     // the same guarded surface applier. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
@@ -3102,7 +3110,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?launchWizardStateModel\.update\([\s\S]{0,120}?\);\s*break;"#,
         )
         .expect("valid regex");
     let wizard_open_error_event = regex::Regex::new(
@@ -3151,7 +3159,15 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
-        wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
+        wizard_event.is_match(html)
+            && wizard_event_delegate.is_match(html)
+            && html.contains("const launchWizardStateModel = createUiStateStore(null);")
+            && js_braced_block_after(
+                html,
+                "launchWizardStateModel.subscribe(state => state, state => "
+            )
+            .expect("shared launch wizard state subscription")
+            .contains("if (state) applyLaunchWizardStateEvent(state);"),
         "expected launch wizard state events to render through the wizard surface unit",
     );
     assert!(
@@ -4050,7 +4066,7 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("requestPmReports(windowData.id, resync)"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(

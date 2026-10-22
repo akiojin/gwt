@@ -2333,6 +2333,9 @@ enum UserEvent {
         client_id: ClientId,
         window_id: String,
         session_id: String,
+        request_id: u64,
+        version: Option<gwt::protocol::PmReportsVersion>,
+        snapshot: bool,
         reports: Vec<gwt::protocol::PmReportView>,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
@@ -3283,6 +3286,7 @@ mod tests {
         assert_eq!(wire["notification_transition"], "needs_human");
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -4755,6 +4759,7 @@ mod tests {
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
+            startup_generation_reaper_pending: false,
             startup_worktree_inventories: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_restore_log: None,
@@ -4806,6 +4811,7 @@ mod tests {
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
             provider_api_error_holds: std::collections::HashMap::new(),
+            provider_capacity_resumes: std::collections::HashMap::new(),
             released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
@@ -5279,6 +5285,22 @@ mod tests {
             )
             .unwrap();
             super::record_update_available(&mut runtime, state.clone());
+            if !autonomous_mode || auto_apply_updates == Some(false) {
+                let log = fs::read_to_string(gwt_core::update::update_log_path())
+                    .expect("automatic download refusal must be observable");
+                let last: serde_json::Value =
+                    serde_json::from_str(log.lines().last().unwrap()).unwrap();
+                assert_eq!(last["stage"], "auto_apply_skipped");
+                assert_eq!(last["version"], "9.106.0");
+                assert_eq!(
+                    last["reason"],
+                    if !autonomous_mode {
+                        "no_autonomous_project"
+                    } else {
+                        "automatic_updates_disabled"
+                    }
+                );
+            }
             assert!(
                 runtime.update_download_in_flight.is_none(),
                 "queuing discovery must leave admission to the shared event-loop worker gate"
@@ -5353,6 +5375,13 @@ mod tests {
         assert!(requests.iter().any(|event| matches!(
             event, UserEvent::ApplyUpdateStart { state: discovered, .. } if discovered == &newer
         )));
+
+        fs::write(gwt_core::paths::gwt_config_path(), "[invalid").unwrap();
+        super::record_update_available(&mut runtime, newer);
+        assert!(user_events.lock().unwrap().is_empty());
+        let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap();
+        let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(last["reason"], "settings_unavailable");
     }
 
     #[test]
@@ -11568,6 +11597,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
                 let mut events = app.assign_missing_agent_names();
                 events.extend(app.terminal_convergence_tick_events());
+                app.sweep_provider_capacity_resumes(std::time::Instant::now());
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());
@@ -11825,8 +11855,17 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, current, error }) => {
-                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, current, error));
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, request_id, version, snapshot, reports, current, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, BackendEvent::PmReports {
+                    id: window_id,
+                    session_id: Some(session_id),
+                    request_id,
+                    version,
+                    snapshot,
+                    reports,
+                    current,
+                    error,
+                }));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 app.observe_notification_toasts(&events);

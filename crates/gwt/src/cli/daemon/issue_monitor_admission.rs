@@ -5,7 +5,7 @@ use crate::{IssueMonitorIssue, IssueMonitorPrefs, IssueMonitorState};
 
 pub(super) fn spawn(
     scope: gwt_core::daemon::RuntimeScope,
-    monitor: IssueMonitorState,
+    mut monitor: IssueMonitorState,
     gui_connected: bool,
     deadline: std::time::Instant,
     test_hooks: super::IssueMonitorWorkerTestHooks,
@@ -41,6 +41,7 @@ pub(super) fn spawn(
                         error.to_string(),
                     )
                 })?;
+        monitor.set_source_repository(Some((&owner, &repo)));
         prepare_with(
             monitor,
             &prefs,
@@ -92,9 +93,12 @@ fn prepare_with(
                 crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::CandidateLoad)?;
                 let Some(previous) = candidates.get(&number) else { return Ok(None); };
                 let current = refresh(previous)?;
-                // Only the full scan evaluates changed body/labels/readiness.
-                // A targeted read is authoritative for an unchanged revision.
-                if previous.updated_at.is_none() || current.updated_at != previous.updated_at {
+                // Match targeted refresh's canonical empty-body representation.
+                let mut expected = previous.clone();
+                expected.body = expected.body.filter(|body| !body.is_empty());
+                // Only the full scan evaluates changed launch prerequisites.
+                // Comment-resident artifacts can change at the same Issue revision.
+                if previous.updated_at.is_none() || current != expected {
                     return Ok(None);
                 }
                 completed(&current).map(Some)
@@ -134,8 +138,10 @@ mod tests {
                 ..IssueMonitorPrefs::default()
             },
         );
+        monitor.set_source_repository(Some(("example", "repo")));
         monitor.terminal_queue_push(&[42], "operator", "2026-10-16T00:00:00Z");
         monitor.record_candidate(IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "queued work".to_string(),
             labels: vec!["gwt-queued".to_string()],
@@ -218,6 +224,7 @@ mod tests {
             admission_override: Some(Arc::new(move |mut monitor| {
                 // Model an already observed queue row; remote refresh/probe are
                 // deterministic here, while control reception and commit are real.
+                monitor.set_source_repository(Some(("example", "repo")));
                 monitor.record_candidate(candidate.clone());
                 let prefs = monitor.prefs();
                 prepare_with(
@@ -376,6 +383,55 @@ mod tests {
         )
         .unwrap();
         assert!(proposal.pending_effects().is_empty());
+    }
+
+    #[test]
+    fn admission_defers_changed_readiness_at_the_same_issue_revision() {
+        let mut monitor = queued_monitor();
+        let mut issue = monitor.inbox_item(42).unwrap().issue.clone();
+        issue.labels.push("gwt-spec".into());
+        issue.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        issue.body = Some(String::new());
+        monitor.record_candidate(issue);
+        let mut probes = 0;
+        let proposal = prepare_with(
+            monitor.clone(),
+            &monitor.prefs(),
+            true,
+            "2026-10-16T00:00:01Z",
+            |issue| {
+                // Comment-resident artifacts can change without a new Issue timestamp.
+                Ok(IssueMonitorIssue {
+                    readiness: crate::IssueMonitorReadiness::NotReady,
+                    body: None,
+                    ..issue.clone()
+                })
+            },
+            |_| {
+                probes += 1;
+                Ok(false)
+            },
+        )
+        .unwrap();
+        assert!(proposal.pending_effects().is_empty());
+        assert_eq!(probes, 0, "changed prerequisites need a full scan first");
+
+        let unchanged = prepare_with(
+            monitor.clone(),
+            &monitor.prefs(),
+            true,
+            "2026-10-16T00:00:01Z",
+            // The live loader keeps Some(""); targeted refresh returns None.
+            |issue| {
+                Ok(IssueMonitorIssue {
+                    body: None,
+                    ..issue.clone()
+                })
+            },
+            |_| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(unchanged.pending_effects().len(), 1);
     }
 
     #[test]

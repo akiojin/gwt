@@ -15,9 +15,7 @@
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
-//   app.js (the markdown body renderer is shared with the knowledge
-//   surface).
+// - createNode: shared DOM helper owned by app.js.
 // - windowMap: workspace window element map owned by app.js.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
@@ -42,11 +40,11 @@ import {
   visibleBoardEntries,
 } from "/board-surface.js";
 import { createUiStateStore } from "/ui-state-store.js";
+import { renderUiContent } from "/ui-content.js";
 
 export function createBoardLogsSurface({
   send,
   createNode,
-  createKnowledgeMarkdownBody,
   windowMap,
   focusWindowLocally,
   pushAlertToast,
@@ -82,7 +80,7 @@ export function createBoardLogsSurface({
 
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
-          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .filter((windowData) => windowData.preset === "board")
           .map((windowData) => windowData.id);
       }
 
@@ -1290,8 +1288,8 @@ export function createBoardLogsSurface({
           }
           // SPEC-2963: the body is authored in Markdown; render the
           // server-sanitized `body_html` (falls back to plaintext when absent),
-          // reusing the Knowledge surface's markdown renderer.
-          card.appendChild(createKnowledgeMarkdownBody(entry, "board-message-body"));
+          // using the content type committed by the model.
+          card.appendChild(renderUiContent(document, entry.content, "board-message-body"));
           const messageActions = createNode("div", "board-message-actions");
           const replyButton = createNode("button", "board-reply-button", "Reply");
           replyButton.type = "button";
@@ -1779,7 +1777,8 @@ export function createBoardLogsSurface({
         switch (event.kind) {
           case "board_entries": {
             const state = ensureBoardState(event.id);
-            const incomingEntries = event.entries || [];
+            const incomingEntries = (event.entries || []).map(entry => ({ ...entry,
+              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } }));
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
             const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
             const retainedHistory = state.entries.some(
@@ -1864,7 +1863,8 @@ export function createBoardLogsSurface({
           case "board_history_page": {
             const state = ensureBoardState(event.id);
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
-            const olderEntries = (event.entries || []).filter(
+            const olderEntries = (event.entries || []).map(entry => ({ ...entry,
+              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })).filter(
               (entry) => !entry.id || !existingEntryIds.has(entry.id),
             );
             const merged = mergeBoardEntries(state.entries, olderEntries);

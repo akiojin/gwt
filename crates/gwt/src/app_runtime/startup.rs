@@ -1307,7 +1307,7 @@ impl AppRuntime {
     /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
     /// restore protection set is snapshotted here, so the worker judges exactly
     /// the sessions this startup is about to restore. Issue Monitor launch
-    /// deliveries are held until the worker reports back.
+    /// deliveries wait for both its result and canvas-ready restore registration.
     pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
         let (protected_exact_sessions, protected_unknown_session_ids) =
             self.startup_reaper_protection();
@@ -1315,6 +1315,7 @@ impl AppRuntime {
         let worktrees = startup_worktrees.to_vec();
         let proxy = self.proxy.clone();
         self.deferred_issue_monitor_launches = Some(Vec::new());
+        self.startup_generation_reaper_pending = true;
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             reap_defunct_active_generations(
                 &sessions_dir,
@@ -1329,8 +1330,8 @@ impl AppRuntime {
                 %error,
                 "startup generation reaper could not be scheduled; running it inline"
             );
-            self.deferred_issue_monitor_launches = None;
             self.reap_startup_defunct_active_generations(startup_worktrees);
+            self.startup_generation_reaper_pending = false;
         }
     }
 
@@ -1627,6 +1628,7 @@ impl AppRuntime {
 
         // Issue #4375 AC-4: the drain's internals, not just its total.
         log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
+        events.extend(self.drain_startup_issue_monitor_launches());
         events
     }
 
@@ -1743,7 +1745,7 @@ impl AppRuntime {
         // nobody asked for, so a terminal predecessor generation is left
         // alone instead of being continued into a new Active generation.
         config.automatic_restore = origin == RestoreOrigin::Automatic;
-        let agent_name = self
+        let mut agent_name = self
             .tab(tab_id)
             .and_then(|tab| {
                 tab.workspace
@@ -1763,40 +1765,27 @@ impl AppRuntime {
             .or_else(|| session.agent_name.clone());
         if let Some(name) = &agent_name {
             let (_, active) = self.agent_name_reservations(Some(&session.id));
-            if let Err(error) = gwt::agent_names::ensure_available_initial(name, &active) {
-                let placeholder = self.tab(tab_id).and_then(|tab| {
-                    tab.workspace
-                        .persisted()
-                        .windows
-                        .iter()
-                        .find(|window| {
-                            window.session_id.as_deref() == Some(session.id.as_str())
-                                && matches!(
-                                    window.status,
-                                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                                )
-                        })
-                        .map(|window| window.id.clone())
-                });
-                if let Some(raw_id) = placeholder {
-                    let window_id = combined_window_id(tab_id, &raw_id);
-                    self.set_window_status(tab_id, &raw_id, WindowProcessStatus::Error);
-                    self.window_details.insert(window_id.clone(), error.clone());
-                    let _ = self.persist();
-                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
+            if gwt::agent_names::ensure_available_initial(name, &active).is_err() {
+                // Issue #5866: a persisted identity must not prevent restore.
+                // Reserve a replacement before removing its diagnostic placeholder.
+                let replacement = self
+                    .tab(tab_id)
+                    .ok_or_else(|| "Project is closed".to_string())
+                    .and_then(|tab| self.allocate_agent_name(&tab.project_root, None));
+                match replacement {
+                    Ok(replacement) => {
+                        tracing::info!(
+                            session_id = %session.id,
+                            previous_name = %name,
+                            agent_name = %replacement,
+                            "reassigned restored Agent name with an occupied initial"
+                        );
+                        agent_name = Some(replacement);
+                    }
+                    Err(error) => {
+                        return self.restore_launch_error_events(tab_id, &session, origin, error);
+                    }
                 }
-                return self
-                    .project_context(tab_id)
-                    .map(|context| {
-                        vec![OutboundEvent::project(
-                            context.project_key,
-                            gwt::BackendEvent::LaunchWizardOpenError {
-                                title: "Agent restore".into(),
-                                message: error,
-                            },
-                        )]
-                    })
-                    .unwrap_or_default();
             }
         }
         let geometry = self
@@ -1859,15 +1848,67 @@ impl AppRuntime {
                 }
                 events
             }
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session.id,
-                    error = %error,
-                    "failed to spawn restored agent window"
-                );
-                Vec::new()
-            }
+            Err(error) => self.restore_launch_error_events(tab_id, &session, origin, error),
         }
+    }
+
+    fn restore_launch_error_events(
+        &mut self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+        origin: RestoreOrigin,
+        error: String,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(session_id = %session.id, %error, "failed to spawn restored agent window");
+        let placeholder = self.tab(tab_id).and_then(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| {
+                    window.session_id.as_deref() == Some(session.id.as_str())
+                        && matches!(
+                            window.status,
+                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                        )
+                })
+                .map(|window| window.id.clone())
+        });
+        let mut events = Vec::new();
+        if let Some(raw_id) = &placeholder {
+            let window_id = combined_window_id(tab_id, raw_id);
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+            self.window_details.insert(window_id.clone(), error.clone());
+            let _ = self.persist();
+            events.extend(self.status_events(
+                window_id,
+                WindowProcessStatus::Error,
+                Some(error.clone()),
+            ));
+        }
+        if let Some(context) = self.project_context(tab_id) {
+            let event = if origin == RestoreOrigin::Automatic {
+                gwt::BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "error".into(),
+                    message: format!("Agent restore failed: {error}"),
+                    issue_number: session.linked_issue_number,
+                }
+            } else if placeholder.is_none() {
+                gwt::BackendEvent::LaunchWizardOpenError {
+                    title: "Agent restore".into(),
+                    message: error,
+                }
+            } else {
+                return events;
+            };
+            events.push(
+                OutboundEvent::project(context.project_key, event)
+                    .with_error_project_root(&context.project_root),
+            );
+        }
+        events
     }
 
     /// Issue #3607 AC-3: refuse to restore a Session rooted in *another*

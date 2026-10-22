@@ -804,7 +804,7 @@ fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
 
     let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::HoldExcluded);
     held.exclusion_reason = Some("Excluded by label: hold".to_string());
-    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(&[42, 43], "operator", "2026-07-28T00:00:00Z");
     monitor.inbox = vec![
         pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued),

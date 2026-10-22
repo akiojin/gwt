@@ -163,7 +163,7 @@ fn resumed_pm_reconciles_fatal_only_monitor_work_after_restart() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _) = pm_wake_fixture(&temp);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap(),
     );
@@ -364,6 +364,97 @@ fn agent_idle_wake_is_immediate_and_rearms_only_after_running() {
         runtime.window_status(agent_id),
         Some(WindowProcessStatus::Idle)
     );
+}
+
+/// Issue #5876 T-9a: a native capacity turn-ender is actionable even without Stop.
+#[test]
+fn codex_capacity_wait_notifies_pm_once_with_its_reason() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_id) = pm_wake_fixture(&temp);
+    let id = "tab-1::other-window";
+    let screen = "■ Selected model is at capacity. Please try again later.\n› ";
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.observe_provider_api_error(id, Some(screen));
+    assert_eq!(
+        runtime.window_status(id),
+        Some(WindowProcessStatus::Waiting)
+    );
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-08-10T01:00:00Z")
+        .unwrap();
+    let pane = snapshot
+        .windows
+        .iter()
+        .find(|pane| pane.window_id == id)
+        .unwrap();
+    assert_eq!(pane.status, WindowProcessStatus::Waiting);
+    assert!(pane
+        .hold_reason
+        .as_deref()
+        .unwrap()
+        .contains("Selected model is at capacity"));
+    let wake = runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("capacity-ended turn must notify the PM");
+    assert_eq!(wake.window_id, pm_id);
+    assert!(
+        wake.prompt.contains("Selected model is at capacity"),
+        "{}",
+        wake.prompt
+    );
+    runtime.observe_provider_api_error(id, Some(screen));
+    runtime.recompute_window_state(id);
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_none());
+    assert!(
+        runtime.active_agent_sessions.contains_key(id),
+        "keep the same conversation"
+    );
+}
+
+#[test]
+fn codex_capacity_wake_waits_for_pm_but_drops_a_recovered_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let id = "tab-1::other-window";
+    let screen = "■ Selected model is at capacity";
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.observe_provider_api_error(id, Some(screen));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .is_none());
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    write_pm_pause_fixture(&repo, true);
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
+        .is_none());
+    write_pm_pause_fixture(&repo, false);
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:02:00Z")
+        .is_some());
+
+    runtime.observe_provider_api_error(id, Some("Resuming work\n› "));
+    assert_eq!(
+        runtime.window_status(id),
+        Some(WindowProcessStatus::Running)
+    );
+    runtime.observe_provider_api_error(id, Some(screen));
+    runtime.observe_provider_api_error(id, Some("Resuming work\n› "));
+    assert!(runtime
+        .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
+        .is_none());
 }
 
 /// AC-3: use the final composed status, including human/quota overlays.
@@ -1168,7 +1259,7 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
 
     // Standing supervision work: one launched issue in the durable prefs.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1320,7 +1411,7 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
     );
@@ -1391,7 +1482,7 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
     );
@@ -1548,7 +1639,7 @@ fn wake_prompts_ask_for_a_report_only_when_the_cycle_changed_something() {
 
     // Standing supervision work so the periodic wake is eligible on its own.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -1608,7 +1699,7 @@ fn delta_and_periodic_wakes_do_not_double_fire_in_one_window() {
 
     // Standing work so the periodic wake would be eligible on its own.
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut monitor = gwt::IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,
             max_active: 2,

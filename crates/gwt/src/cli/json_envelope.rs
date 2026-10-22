@@ -477,6 +477,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "feedback.create" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            let input = serde_json::from_value(Value::Object(params.clone()))
+                .map_err(|err| CliParseError::InvalidJson(err.to_string()))?;
+            CliCommand::Feedback(super::feedback::FeedbackCommand::Create(Box::new(input)))
+        }
+        "feedback.status" | "feedback.retry" | "feedback.process" => {
+            reject_unknown_params(params, &["id"], &envelope.operation)?;
+            let id = required_string(params, "id")?;
+            let command = match envelope.operation.as_str() {
+                "feedback.status" => super::feedback::FeedbackCommand::Status { id },
+                "feedback.retry" => super::feedback::FeedbackCommand::Retry { id },
+                _ => super::feedback::FeedbackCommand::Process { id },
+            };
+            CliCommand::Feedback(command)
+        }
         "concern.create" | "concern.update" | "concern.list" | "concern.measure"
         | "concern.resolve" => {
             // These decode the whole `params` object through serde with
@@ -721,6 +737,51 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.recovery.record" => {
+            let number = required_u64(params, "number")?;
+            let recovery_id = required_string(params, "recovery_id")?;
+            let body = required_string(params, "body")?;
+            let recovered_at = required_string(params, "recovered_at")?;
+            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+                .map_err(|_| {
+                    CliParseError::InvalidJson(
+                        "recovered_at must be an RFC3339 timestamp of the actual intervention"
+                            .into(),
+                    )
+                })?
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339();
+            if number == 0
+                || body.trim().is_empty()
+                || recovery_id.is_empty()
+                || recovery_id.len() > 128
+                || !recovery_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                return Err(CliParseError::InvalidJson(
+                    "recovery.record requires a positive Issue number, a nonempty body and a stable ASCII recovery_id (1–128 letters, digits, -, _, . or :)".into(),
+                ));
+            }
+            let key = format!("{number}:{recovery_id}");
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                intent_id: format!("manual-recovery:{key}"),
+                command: Box::new(BoardPostCommand {
+                    kind: "decision".into(),
+                    body: Some(body),
+                    topics: vec![
+                        format!("{}{key}", super::reliability::MANUAL_RECOVERY_TOPIC),
+                        format!(
+                            "{}{recovered_at}",
+                            super::reliability::MANUAL_RECOVERY_AT_TOPIC
+                        ),
+                    ],
+                    owners: vec![number.to_string()],
+                    broadcast: true,
+                    ..Default::default()
+                }),
+            })
+        }
         "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -733,6 +794,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 position: issue_monitor_priority_position(params)?,
@@ -742,6 +806,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
             })
         }
         "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
@@ -828,6 +895,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                expected_priority_order: lookup(params, "expected_priority_order")
+                    .map(|_| required_u64_vec(params, "expected_priority_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
@@ -844,10 +914,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.monitor.queue.remove" => CliCommand::Issue(IssueCommand::MonitorQueueRemove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             issue_numbers: required_u64_vec(params, "numbers")?,
         }),
         "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
             project_root: optional_path(params, "project_root")?,
+            expected_queue_order: lookup(params, "expected_queue_order")
+                .map(|_| required_u64_vec(params, "expected_queue_order"))
+                .transpose()?,
             number: required_u64(params, "number")?,
             position: required_usize(params, "position")?,
         }),
@@ -889,6 +965,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?)
         }
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let expected_config_token = lookup(params, "expected_config_token")
+                .map(|_| required_string(params, "expected_config_token"))
+                .transpose()?;
             if lookup(params, "auto_apply_updates").is_some() {
                 return Err(CliParseError::InvalidJson(
                     "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
@@ -944,6 +1023,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ));
             }
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
                 project_root: optional_path(params, "project_root")?,
                 allowed_labels,
                 enabled,
@@ -2753,6 +2833,23 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_create_accepts_structured_evidence() {
+        let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
+            "title":"Host bridge refusal", "kind":"bug", "operation":"workspace.update",
+            "refusal":"  exact\r\nrefusal  ", "reproduction":"unconfirmed", "workaround":null
+        }});
+        assert!(
+            super::parse(&input.to_string()).is_ok(),
+            "feedback.create must accept a structured report"
+        );
+        for forbidden in ["approved", "repo", "project_root"] {
+            let mut forged = input.clone();
+            forged["params"][forbidden] = serde_json::json!(true);
+            assert!(super::parse(&forged.to_string()).is_err());
+        }
+    }
+
     use super::{
         parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
         CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
@@ -2980,6 +3077,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new(repo.path().to_path_buf());
         env.client.seed(gwt_github::client::IssueSnapshot {
+            author_login: None,
             number: gwt_github::client::IssueNumber(42),
             title: "typed resource".into(),
             body: "".into(),
@@ -4953,6 +5051,7 @@ mod tests {
                 json!({"enabled": true, "max_active": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(true),
@@ -4967,6 +5066,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4984,6 +5084,7 @@ mod tests {
                 json!({"auto_close_merged_issues": false})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -4996,6 +5097,30 @@ mod tests {
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_guard_is_presence_aware() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            ok(operation, json!({"max_active": 3}));
+            let CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token,
+                ..
+            }) = ok(
+                operation,
+                json!({"max_active": 3, "expected_config_token": "observed-config"}),
+            )
+            else {
+                panic!("expected config command")
+            };
+            assert_eq!(expected_config_token.as_deref(), Some("observed-config"));
+            for invalid in [json!(null), json!(false), json!(2), json!([]), json!("")] {
+                err(
+                    operation,
+                    json!({"max_active": 3, "expected_config_token": invalid}),
+                );
+            }
+        }
     }
 
     #[test]
@@ -5083,6 +5208,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": true})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5097,6 +5223,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.config.set", json!({"update_drain": false})),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5122,6 +5249,7 @@ mod tests {
                 json!({"launch_agent": "claude"})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: None,
@@ -5184,6 +5312,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
             })
@@ -5194,6 +5323,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
             })
@@ -5568,6 +5698,35 @@ mod tests {
     }
 
     #[test]
+    fn manual_recovery_record_uses_the_exact_board_delivery_path() {
+        let command = ok(
+            "issue.monitor.recovery.record",
+            json!({
+                "number":5876, "recovery_id":"incident-a", "body":"停止窓を再投入した",
+                "recovered_at":"2026-10-20T10:00:00+09:00"
+            }),
+        );
+        assert!(matches!(command,
+            CliCommand::Board(BoardCommand::RecoveryPost { intent_id, command })
+            if intent_id == "manual-recovery:5876:incident-a"
+                && command.kind == "decision"
+                && command.owners == ["5876"]
+                && command.topics == ["gwt-manual-recovery:5876:incident-a", "gwt-manual-recovery-at:2026-10-20T01:00:00+00:00"]
+                && command.body.as_deref() == Some("停止窓を再投入した")
+        ));
+        for mut params in [
+            json!({"number":5876,"body":"recovered"}),
+            json!({"number":5876,"recovery_id":" ","body":"recovered"}),
+            json!({"number":0,"recovery_id":"incident","body":"recovered"}),
+            json!({"number":5876,"recovery_id":"incident","body":" "}),
+            json!({"number":5876,"recovery_id":"incident","body":"recovered","session_id":"fake"}),
+        ] {
+            params["recovered_at"] = json!("2026-10-20T01:00:00Z");
+            let _ = err("issue.monitor.recovery.record", params);
+        }
+    }
+
+    #[test]
     fn issue_monitor_queue_operations_parse() {
         assert_eq!(
             ok("issue.monitor.status", json!({})),
@@ -5585,6 +5744,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.priority.move", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: None,
                 number: 42,
                 position: IssueMonitorPriorityPosition::Head,
@@ -5596,6 +5756,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 42, "position": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 42,
                 position: IssueMonitorPriorityPosition::Index(3),
@@ -5607,6 +5768,7 @@ mod tests {
                 json!({"issue_numbers": [9, 4, 7]})
             ),
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                expected_priority_order: None,
                 project_root: None,
                 issue_numbers: vec![9, 4, 7],
             })
@@ -5617,6 +5779,7 @@ mod tests {
                 json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 project_root: None,
                 enabled: Some(false),
@@ -5628,6 +5791,49 @@ mod tests {
                 update_drain: None,
             })
         );
+    }
+
+    #[test]
+    fn issue_monitor_priority_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            ("issue.monitor.priority-move", json!({"number":42})),
+            ("issue.monitor.priority-set", json!({"issue_numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_priority_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            for invalid in [Value::Null, json!("1,2")] {
+                params["expected_priority_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_guard_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            (
+                "issue.monitor.queue.move",
+                json!({"number":42,"position":0}),
+            ),
+            ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+        ] {
+            let unconditional = ok(operation, params.clone());
+            params["expected_queue_order"] = json!([]);
+            assert_ne!(ok(operation, params.clone()), unconditional);
+            for invalid in [Value::Null, json!("1,2")] {
+                params["expected_queue_order"] = invalid;
+                assert!(matches!(
+                    err(operation, params.clone()),
+                    CliParseError::InvalidJson(_)
+                ));
+            }
+        }
     }
 
     #[test]

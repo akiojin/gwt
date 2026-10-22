@@ -6,9 +6,10 @@ export function createProjectPageMetadata({
   window: windowRef = globalThis.window,
   project = true,
   send = () => {},
+  scheduleFrame,
 } = {}) {
   let name = "Project";
-  const model = createUiStateStore({ running_count: 0, block_count: 0, error_count: 0, unread: false });
+  const model = createUiStateStore({ running_count: 0, block_count: 0, error_count: 0, unread: false }, { scheduleFrame });
   let latestRevision = -1;
   let attentionSyncPending = false;
   function render() {
@@ -87,8 +88,8 @@ export function createProjectPageMetadata({
       attributes: true, attributeFilter: ["data-theme"],
     });
   }
+  model.subscribeFrame(aggregate => aggregate, render);
   model.subscribe(aggregate => aggregate, () => {
-    render();
     if (attentionSyncPending) {
       attentionSyncPending = false;
       reportAttention();

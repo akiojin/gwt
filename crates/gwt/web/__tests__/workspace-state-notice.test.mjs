@@ -7,10 +7,16 @@ import { createWorkspaceStateNotice } from "../workspace-state-notice.js";
 test("load errors preserve file and cause as text and Retry requests a real reload", () => {
   const { document } = parseHTML('<html><body><div id="app"></div></body></html>');
   const sent = [];
-  const surface = createWorkspaceStateNotice({ document, send: message => sent.push(message) });
+  const frames = [];
+  const surface = createWorkspaceStateNotice({ document, send: message => sent.push(message),
+    scheduleFrame: callback => { frames.push(callback); return () => {}; },
+  });
   const notice = { kind: "load_error", path: '/state/<img src=x>/current.json', message: '<script>bad JSON</script>' };
+  for (let index = 0; index < 50; index++) surface.receive({ ...notice, message: `error-${index}` });
   surface.receive(notice);
-  surface.receive(notice);
+  assert.equal(document.querySelector(".workspace-state-notice") === null, true, "notifications wait for the frame");
+  assert.equal(frames.length, 1, "one scheduled render for the entire burst");
+  frames.shift()();
   assert.equal(document.querySelectorAll(".workspace-state-notice").length, 1);
   const banner = document.querySelector('[role="alert"]');
   assert.ok(banner.textContent.includes(notice.path));
@@ -20,6 +26,12 @@ test("load errors preserve file and cause as text and Retry requests a real relo
   assert.deepEqual(sent, [{ kind: "retry_workspace_state_load" }]);
   assert.ok(document.querySelector('[role="alert"]'), "retry must not hide an unresolved failure");
   surface.receive(null);
+  assert.equal(document.querySelector('[role="alert"]'), banner, "recovery waits for the frame too");
+  frames.shift()();
+  assert.equal(document.querySelector(".workspace-state-notice"), null);
+  surface.receive(notice);
+  surface.receive(null);
+  frames.shift()();
   assert.equal(document.querySelector(".workspace-state-notice"), null);
 });
 

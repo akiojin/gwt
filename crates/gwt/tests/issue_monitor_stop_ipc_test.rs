@@ -42,6 +42,7 @@ fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
 
 fn issue(number: u64) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number,
         title: format!("Issue {number}"),
         labels: vec!["auto-merge".to_string()],
@@ -56,7 +57,7 @@ fn issue(number: u64) -> IssueMonitorIssue {
 /// A monitor with one launched issue bound to `window-1`, as the daemon and
 /// the CLI would both observe it.
 fn launched_monitor() -> IssueMonitorState {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig {
             enabled: true,
             max_active: 2,
@@ -155,8 +156,7 @@ fn disk_stop_survives_daemon_commit_and_is_not_resurrected() {
     // The CLI stop, exactly as run_monitor_stop performs it: a durable
     // transaction on the prefs file.
     let (_, outcome) = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut monitor =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
         let outcome = monitor.stop_only(&stop_target(), "provider stuck", NOW);
         if !matches!(outcome, IssueMonitorStopOutcome::Mismatch(_)) {
             *prefs = monitor.prefs();
@@ -186,7 +186,7 @@ fn disk_stop_survives_daemon_commit_and_is_not_resurrected() {
         "a stopped launch must not be requeued by the daemon commit"
     );
     let disk_after = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-    let daemon_after = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk_after);
+    let daemon_after = test_monitor_with_prefs(IssueMonitorConfig::default(), disk_after);
     assert!(
         !daemon_after.active_issue_numbers().contains(&42),
         "the durable prefs must keep the stop after the daemon commit"
@@ -227,7 +227,7 @@ fn unwritable_prefs_fails_the_stop_closed_without_phantom_state() {
     std::fs::set_permissions(&state_dir, perms).expect("set read-only");
 
     let result = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut inner = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let mut inner = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
         let outcome = inner.stop_only(&stop_target(), "provider stuck", NOW);
         if !matches!(outcome, IssueMonitorStopOutcome::Mismatch(_)) {
             *prefs = inner.prefs();
@@ -245,7 +245,7 @@ fn unwritable_prefs_fails_the_stop_closed_without_phantom_state() {
     // running, and the next scan must treat it as running rather than
     // double-queueing or resurrecting it from a half-torn state.
     let reloaded = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-    let mut observed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded);
+    let mut observed = test_monitor_with_prefs(IssueMonitorConfig::default(), reloaded);
     assert!(
         observed.active_issue_numbers().contains(&42),
         "a failed stop must leave the launch observably running"
@@ -282,7 +282,7 @@ fn failover_requeue_is_durable_even_when_scan_publish_fails() {
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 
     let (_, outcome) = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut inner = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let mut inner = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
         let outcome = inner.failover_restart(&stop_target(), "rate limited", NOW);
         if !matches!(outcome, gwt::IssueMonitorFailoverOutcome::Mismatch(_)) {
             *prefs = inner.prefs();
@@ -310,7 +310,7 @@ fn failover_requeue_is_durable_even_when_scan_publish_fails() {
         Some(42),
         "failover must keep the issue at the priority head durably"
     );
-    let observed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded);
+    let observed = test_monitor_with_prefs(IssueMonitorConfig::default(), reloaded);
     assert!(
         !observed.active_issue_numbers().contains(&42),
         "the stopped launch must not be resurrected by the reload"
@@ -333,7 +333,7 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        let mut inner = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        let mut inner = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
         let outcome = inner.failover_restart(&stop_target(), "rate limited", NOW);
         assert!(matches!(
             outcome,
@@ -356,7 +356,7 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
     .expect("persist failover");
 
     let reloaded = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload queued failover");
-    let mut next_daemon = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), reloaded);
+    let mut next_daemon = test_monitor_with_prefs(IssueMonitorConfig::default(), reloaded);
     scan_issue_monitor_candidates(&mut next_daemon, &[issue(42)], "2026-08-09T05:00:01Z");
     assert!(next_daemon.apply_confirmed_claim(
         42,
@@ -373,7 +373,7 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
         delivery_prefs.pending_launch_deliveries[0].launch_session_strategy,
         IssueMonitorLaunchSessionStrategy::FreshRequired
     );
-    let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), delivery_prefs);
+    let mut replayed = test_monitor_with_prefs(IssueMonitorConfig::default(), delivery_prefs);
     let first = replayed.take_pending_launch_requests();
     let second = replayed.take_pending_launch_requests();
     assert_eq!(first, second, "delivery remains replayable until its ACK");
@@ -382,4 +382,14 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
         IssueMonitorLaunchSessionStrategy::FreshRequired,
         "disk reload and replay must not downgrade failover to ResumeIfSafe"
     );
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

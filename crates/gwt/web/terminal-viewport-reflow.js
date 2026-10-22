@@ -572,13 +572,12 @@ export function classifyProjectWindowVisibility({
 
 /**
  * Predicate used by both the host resize fan-out and the existing
- * `fitTerminal` short-circuit. Pulled out so a unit test can pin the
- * `.hidden` short-circuit ahead of the workspace `minimized` check.
+ * `fitTerminal` short-circuit. Only the current DOM layout controls refresh;
+ * saved canvas placement no longer represents a window's visibility.
  */
-export function viewportEligibleForRefresh({ element, workspaceWindow }) {
+export function viewportEligibleForRefresh({ element }) {
   if (element && element.isConnected === false) return false;
   if (element && element.hidden) return false;
-  if (workspaceWindow && workspaceWindow.minimized) return false;
   return true;
 }
 

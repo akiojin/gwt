@@ -84,8 +84,6 @@ root_js_modules! {
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",
     "project-page-metadata.js" => "createProjectPageMetadata",
-    // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
-    "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",
     "project-clone-modal.js" => "renderProjectCloneModal",
     "board-surface.js" => "boardEntryMentionsSelf",

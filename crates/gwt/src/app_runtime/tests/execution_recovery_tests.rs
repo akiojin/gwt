@@ -1161,6 +1161,7 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
         .runtime
         .sessions_dir
         .join(format!("{}.toml", fixture.candidate_session_id));
+    let original_session = gwt_agent::Session::load(&candidate_path).expect("original Session");
     fs::remove_file(&candidate_path).expect("observe missing startup candidate Session");
     let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
         &fixture.repo,
@@ -1169,22 +1170,28 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
     let work_before = tracked_workspace_work_store_snapshot(&fixture.repo);
     let sessions_dir = fixture.runtime.sessions_dir.clone();
     let repo = fixture.repo.clone();
+    let owner = fixture.owner;
     let expected_session_id = fixture.candidate_session_id.clone();
     set_missing_session_cleanup_hook_for_test(Box::new(move |session_id| {
         assert_eq!(session_id, expected_session_id);
-        let mut replacement =
-            gwt_agent::Session::new(&repo, "work/replacement", gwt_agent::AgentId::Codex);
-        replacement.id = session_id.to_string();
-        replacement
+        original_session
             .save(&sessions_dir)
-            .expect("materialize same-id Session after startup Missing observation");
+            .expect("materialize exact Session after startup Missing observation");
+        gwt::cli::execution_state::claim_prepared_session_launch(
+            &repo,
+            owner,
+            &sessions_dir,
+            &original_session,
+        )
+        .expect("claim materialized launch")
+        .expect("live Host launch handshake");
     }));
 
     fixture.runtime.reconcile_durable_fresh_execution_launches();
 
     assert!(
         candidate_path.exists(),
-        "replacement Session must be retained"
+        "exact live Session must be retained"
     );
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
@@ -2601,6 +2608,12 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let fake_gh = write_fake_gh_issue_list(temp.path());
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -2635,6 +2648,11 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
         WindowProcessStatus::Running,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-42".to_string();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist completed launch Session");
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_launch_feedback_contexts.insert(
         window_id.clone(),
@@ -2821,6 +2839,12 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-22T00:00:00Z",
+    )
+    .expect("seed machine Manual capacity");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
@@ -2852,6 +2876,11 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     );
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-42".to_string();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("persist completed launch Session");
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.pending_launch_feedback_contexts.insert(
         window_id.clone(),
@@ -4000,7 +4029,7 @@ fn runtime_hook_agent_failure_completion_preserves_replaced_session_and_pane() {
     runtime
         .pending_launch_feedback_contexts
         .insert(window_id.clone(), issue_monitor_feedback(43));
-    let monitor = gwt::IssueMonitorState::with_prefs(
+    let monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
             autonomous_mode: true,
@@ -4105,7 +4134,7 @@ fn runtime_hook_agent_failure_completion_survives_sibling_tab_close() {
 
     runtime.close_project_tab_events("tab-a");
     assert!(runtime.window_lookup.contains_key(&window_id));
-    let monitor = gwt::IssueMonitorState::with_prefs(
+    let monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::IssueMonitorPrefs {
             autonomous_mode: true,
@@ -4234,9 +4263,8 @@ fn runtime_hook_agent_failure_local_fallback_preserves_successor_launch() {
         launched_claims: std::collections::BTreeMap::from([(42, "claim-old".to_string())]),
         ..gwt::IssueMonitorPrefs::default()
     };
-    let source =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone())
-            .launch_identity(42);
+    let source = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone())
+        .launch_identity(42);
     // The same Issue and window now belong to a different launch. A GUI-only
     // completion check would be too late to protect this durable state.
     prefs
@@ -4287,8 +4315,7 @@ fn runtime_hook_agent_failure_local_fallback_preserves_successor_launch() {
 
     // Retirement during the scan must also be refused, after the initial
     // generation and launch checks succeeded.
-    let monitor =
-        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), actual.clone());
+    let monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), actual.clone());
     source.launch = Some((42, monitor.launch_identity(42)));
     let generations = source.generations.clone();
     let replacement_window = window_id.clone();

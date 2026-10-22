@@ -59,6 +59,23 @@ use super::transport::{
 #[path = "issue_monitor_admission.rs"]
 mod issue_monitor_admission;
 
+#[cfg(test)]
+fn test_monitor(config: crate::IssueMonitorConfig) -> crate::IssueMonitorState {
+    let mut monitor = crate::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+
+#[cfg(test)]
+fn test_monitor_with_prefs(
+    config: crate::IssueMonitorConfig,
+    prefs: crate::IssueMonitorPrefs,
+) -> crate::IssueMonitorState {
+    let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+
 const ACCEPT_BACKOFF_MS: u64 = 50;
 const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const ISSUE_MONITOR_SCAN_BUDGET_CEILING: Duration = Duration::from_secs(60);
@@ -1196,6 +1213,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     revision = next_revision;
                     let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
                     let immediate_admission = matches!(&accepted.control, IssueMonitorControl::ScanNow);
+                    let authority_epoch_before_retry = monitor.effect_authority_epoch();
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1236,17 +1254,28 @@ fn spawn_issue_monitor_worker_with_lease(
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
                         rejection @ (IssueMonitorControlCommit::Rejected
+                        | IssueMonitorControlCommit::ConfigConflict
                         | IssueMonitorControlCommit::WaitNotLaunched) => {
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
                                 .committed_front();
                             if let Some(completion) = completion {
-                                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
-                                    IssueMonitorControlQueueError::WaitNotLaunched
-                                } else {
-                                    IssueMonitorControlQueueError::Rejected
+                                completion.reject(match rejection {
+                                    IssueMonitorControlCommit::ConfigConflict => IssueMonitorControlQueueError::ConfigConflict,
+                                    IssueMonitorControlCommit::WaitNotLaunched => IssueMonitorControlQueueError::WaitNotLaunched,
+                                    _ => IssueMonitorControlQueueError::Rejected,
                                 });
+                            }
+                            if authorizing {
+                                let authority_changed = monitor.effect_authority_epoch() != authority_epoch_before_retry;
+                                reconcile_deferred_grant_after_authority_commit(
+                                    &prefs_path,
+                                    &mut monitor,
+                                    &mut deferred_grant_result,
+                                    authority_changed,
+                                    drained,
+                                );
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -1254,6 +1283,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                     effect_permit.reopen();
                                 }
                             }
+                            effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
                         IssueMonitorControlCommit::RetryableFailure => {
                             pending_authority_controls
@@ -1696,7 +1726,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     .iter()
                     .filter(|effect| {
                         issue_monitor_effect_permitted(effect, &current_permit)
-                            && monitor.claim_renewal_attempt_is_ready(effect, &selection_now)
+                            && monitor.effect_attempt_is_ready(effect, &selection_now)
                     })
                     .min_by_key(|effect| {
                         (
@@ -1707,7 +1737,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     .cloned();
                 let effect = next_effect.and_then(|effect| {
                     if effect.state == crate::IssueMonitorEffectState::Attempting {
-                        Some(effect)
+                        Some((effect, false))
                     } else {
                         fence_next_issue_monitor_effect_with_permit(
                             &prefs_path,
@@ -1715,9 +1745,10 @@ fn spawn_issue_monitor_worker_with_lease(
                             &current_permit,
                             &selection_now,
                         )
+                        .map(|effect| (effect, true))
                     }
                 });
-                if let Some(effect) = effect {
+                if let Some((effect, allow_submit)) = effect {
                     let authority_current = effect.authority_epoch
                         == monitor.effect_authority_epoch()
                         && match &effect.payload {
@@ -1727,7 +1758,8 @@ fn spawn_issue_monitor_worker_with_lease(
                             crate::IssueMonitorEffectPayload::RenewClaim { .. } => {
                                 monitor.claim_renewal_is_current(&effect.payload)
                             }
-                            crate::IssueMonitorEffectPayload::ArmAutoMerge { .. } => {
+                            crate::IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                            | crate::IssueMonitorEffectPayload::RerunFailedCi { .. } => {
                                 monitor.config.enabled && monitor.autonomous_mode()
                             }
                             // Issue #3917: a close needs the auto-close authority;
@@ -1752,6 +1784,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         scope.clone(),
                         effect,
                         authority_current,
+                        allow_submit,
                         current_permit,
                         deadline,
                         #[cfg(test)]
@@ -2202,6 +2235,11 @@ enum IssueMonitorControl {
         at: String,
     },
     MaxActiveAgents(Option<usize>),
+    IdentifiedMaxActiveAgents {
+        max_active_agents: Option<usize>,
+        control_id: String,
+        changed_at: String,
+    },
     PriorityOrder(Vec<u64>),
     /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
     /// the user's own act, so the entries are attributed to the operator.
@@ -2240,6 +2278,7 @@ enum IssueMonitorControl {
         expected_reset_at: String,
     },
     ConfigSet {
+        expected_config_token: Option<String>,
         allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -2349,6 +2388,18 @@ struct AcceptedIssueMonitorControl {
 
 impl AcceptedIssueMonitorControl {
     fn new(control: IssueMonitorControl) -> Self {
+        if let IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents,
+            control_id,
+            changed_at,
+        } = control
+        {
+            return Self {
+                control_id,
+                processed_at: changed_at,
+                control: IssueMonitorControl::MaxActiveAgents(max_active_agents),
+            };
+        }
         Self {
             control_id: uuid::Uuid::new_v4().to_string(),
             processed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2364,6 +2415,7 @@ enum IssueMonitorControlCommit {
         authority_changed: bool,
     },
     Rejected,
+    ConfigConflict,
     WaitNotLaunched,
     RetryableFailure,
     TerminalFailure,
@@ -2588,12 +2640,20 @@ fn apply_or_queue_issue_monitor_control(
             }
         }
         rejection @ (IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched) => {
+            if authorizing {
+                effect_permit.reopen();
+            }
             if let Some(completion) = completion {
-                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
-                    IssueMonitorControlQueueError::WaitNotLaunched
-                } else {
-                    IssueMonitorControlQueueError::Rejected
+                completion.reject(match rejection {
+                    IssueMonitorControlCommit::ConfigConflict => {
+                        IssueMonitorControlQueueError::ConfigConflict
+                    }
+                    IssueMonitorControlCommit::WaitNotLaunched => {
+                        IssueMonitorControlQueueError::WaitNotLaunched
+                    }
+                    _ => IssueMonitorControlQueueError::Rejected,
                 });
             }
         }
@@ -2679,6 +2739,7 @@ fn try_apply_issue_monitor_control(
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
         IssueMonitorControl::ConfigSet {
+            expected_config_token: _,
             allowed_labels,
             enabled,
             autonomous_mode,
@@ -3028,6 +3089,18 @@ fn apply_routine_issue_monitor_control(
             let _ = monitor.invalidate_autonomous_wait(issue_number, &by, &reason, &at);
             false
         }
+        IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents,
+            changed_at,
+            ..
+        } => {
+            monitor.set_max_active_agents_override_with_source(
+                max_active_agents,
+                crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                &changed_at,
+            );
+            true
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
@@ -3306,6 +3379,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     match try_apply_issue_monitor_control_with_disk_migration(prefs_path, monitor, control) {
         IssueMonitorControlCommit::Committed { should_scan, .. } => should_scan,
         IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::RetryableFailure
         | IssueMonitorControlCommit::TerminalFailure => false,
@@ -3390,9 +3464,10 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         .is_some_and(|receipt| receipt.control_id == accepted.control_id);
     let mut receipt_convergence_failed = false;
     let mut rejected = None;
+    let mut config_conflict = false;
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
-    let transaction = crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
+    let transaction = crate::issue_monitor::try_mutate_issue_monitor_prefs_recovering_observed(
         prefs_path,
         &recovery_baseline,
         on_first_contention,
@@ -3427,14 +3502,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                             &accepted.control,
                         );
                     }
-                    let authority_epoch_before = converged.effect_authority_epoch();
                     let converged_result = try_apply_issue_monitor_control(
                         &mut converged,
                         accepted.control.clone(),
                         &accepted.processed_at,
                     );
-                    let converged_authority_changed =
-                        converged.effect_authority_epoch() != authority_epoch_before;
                     if failure_control {
                         // Failure fences restore the committed retry snapshot,
                         // and exact-source failures consume their source. Apply
@@ -3443,18 +3515,78 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         converged.rebase_daemon_driver_prefs(disk);
                     }
                     converged.set_last_control_receipt(receipt.clone());
+                    // Authority change is historical receipt evidence; compare
+                    // project-owned fields independently of the shared policy.
                     if converged_result != Some(receipt.should_scan)
-                        || converged_authority_changed != receipt.authority_changed
-                        || converged.prefs() != *disk
+                        || !crate::issue_monitor::monitor_project_prefs_equal(
+                            prefs_path,
+                            &converged.prefs(),
+                            disk,
+                        )
                     {
                         receipt_convergence_failed = true;
-                        return;
+                        return Ok(());
                     }
                     candidate = converged;
                 }
+                if crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    crate::machine_agent_settings::load()?.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "shared machine agent policy is missing during receipt replay",
+                        )
+                    })?;
+                    let explicit_max_active = matches!(
+                        &accepted.control,
+                        IssueMonitorControl::MaxActiveAgents(_)
+                    ) || matches!(&accepted.control, IssueMonitorControl::ConfigSet { max_active_agents, max_active_auto, .. }
+                            if max_active_agents.is_some() || *max_active_auto);
+                    if explicit_max_active {
+                        // Project comparisons omit machine-owned fields. Bind
+                        // those fields to the original durable change as well.
+                        let mut intent = candidate.clone();
+                        if try_apply_issue_monitor_control(
+                            &mut intent,
+                            accepted.control.clone(),
+                            &accepted.processed_at,
+                        )
+                        .is_none()
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "invalid replayed Max active change",
+                            ));
+                        }
+                        intent.persist_machine_max_active_change(&accepted.control_id)?;
+                    }
+                    let policy = crate::machine_agent_settings::load()?.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "shared machine agent policy is missing during receipt replay",
+                        )
+                    })?;
+                    candidate.apply_machine_policy(&policy);
+                }
                 applied = Some(Some(receipt.should_scan));
                 authority_changed = receipt.authority_changed;
-                return;
+                return Ok(());
+            }
+            if let IssueMonitorControl::ConfigSet {
+                expected_config_token,
+                ..
+            } = &accepted.control
+            {
+                if !crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    if let Err(error) =
+                        crate::issue_monitor::check_expected_issue_monitor_config_token(
+                            disk,
+                            expected_config_token.as_deref(),
+                        )
+                    {
+                        config_conflict = true;
+                        return Err(error);
+                    }
+                }
             }
             if fenced_agent_failure {
                 // Only fresh admissions compare their source with canonical disk.
@@ -3466,7 +3598,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 );
                 if !issue_monitor_agent_failure_source_matches(&accepted.control, &canonical) {
                     rejected = Some(IssueMonitorControlCommit::Rejected);
-                    return;
+                    return Ok(());
                 }
             }
             let control = match &accepted.control {
@@ -3503,15 +3635,57 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 // An unrecorded wait is refused, not ACKed and not a terminal
                 // failure of the control lane (Issue #5066).
                 rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
-                return;
+                return Ok(());
             }
             if (typed_failure || fenced_agent_failure || refused_launch_binding)
                 && applied == Some(Some(false))
             {
                 rejected = Some(IssueMonitorControlCommit::Rejected);
-                return;
+                return Ok(());
             }
             if applied.is_some_and(|result| result.is_some()) {
+                let explicit_max_active =
+                    matches!(&accepted.control, IssueMonitorControl::MaxActiveAgents(_))
+                        || matches!(&accepted.control,
+                    IssueMonitorControl::ConfigSet { max_active_agents, max_active_auto, .. }
+                    if max_active_agents.is_some() || *max_active_auto);
+                if crate::issue_monitor::machine_managed_monitor_prefs(prefs_path) {
+                    if let IssueMonitorControl::ConfigSet {
+                        expected_config_token,
+                        ..
+                    } = &accepted.control
+                    {
+                        let requested = candidate
+                            .prefs()
+                            .max_active_last_change
+                            .filter(|_| explicit_max_active);
+                        let policy = crate::machine_agent_settings::checked_update(
+                            disk,
+                            expected_config_token.as_deref(),
+                            requested.as_ref(),
+                            &accepted.control_id,
+                        )
+                        .inspect_err(|error| {
+                            if error.to_string()
+                                == crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR
+                            {
+                                config_conflict = true;
+                                candidate = monitor.clone();
+                                rebase_issue_monitor_control_candidate(
+                                    &mut candidate,
+                                    disk,
+                                    &accepted.control,
+                                );
+                                if let Ok(Some(policy)) = crate::machine_agent_settings::load() {
+                                    candidate.apply_machine_policy(&policy);
+                                }
+                            }
+                        })?;
+                        candidate.apply_machine_policy(&policy);
+                    } else if explicit_max_active {
+                        candidate.persist_machine_max_active_change(&accepted.control_id)?;
+                    }
+                }
                 candidate.set_last_control_receipt(crate::IssueMonitorControlReceipt {
                     control_id: accepted.control_id.clone(),
                     should_scan: applied.flatten().unwrap_or(false),
@@ -3519,6 +3693,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 });
                 *disk = candidate.prefs();
             }
+            Ok(())
         },
     );
     match transaction {
@@ -3542,6 +3717,12 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 authority_changed,
             }
         }
+        Err(_) if config_conflict => {
+            // Refusing this write must still converge the driver's authority
+            // before its effect permit can reopen on a newer disk snapshot.
+            *monitor = candidate;
+            IssueMonitorControlCommit::ConfigConflict
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -3558,8 +3739,13 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 .last_control_receipt
                 .as_ref()
                 .is_some_and(|receipt| receipt.control_id == accepted.control_id)
-                && crate::load_issue_monitor_prefs(prefs_path)
-                    .is_ok_and(|visible| visible == candidate_prefs);
+                && crate::load_issue_monitor_prefs(prefs_path).is_ok_and(|visible| {
+                    crate::issue_monitor::monitor_project_prefs_equal(
+                        prefs_path,
+                        &visible,
+                        &candidate_prefs,
+                    )
+                });
             if renamed_snapshot_is_exact {
                 *monitor = candidate;
             }
@@ -3840,10 +4026,8 @@ mod issue_5694_tests {
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            prefs.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
         let outcome = apply_or_queue_issue_monitor_control(
             &BroadcastHub::new(),
             &prefs_path,
@@ -3960,10 +4144,8 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            before.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), before.clone());
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
@@ -4018,8 +4200,9 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
     let _prefs_budget = pin_prefs_hang_guard();
     let temp = tempfile::TempDir::new().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
-    let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+    let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
     let issue = crate::IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Restored agent".to_string(),
         labels: Vec::new(),
@@ -4066,8 +4249,7 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
         persisted.effect_authority_epoch,
         before.effect_authority_epoch
     );
-    let mut restored =
-        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
     restored.record_candidate(issue);
     let status = restored.agent_status_at("2026-06-29T02:00:00Z");
     assert_eq!(status.active_launches, vec![42]);
@@ -4114,10 +4296,27 @@ fn decode_issue_monitor_control_in_repo(
                     updated_at: updated_at.to_string(),
                 });
             }
-            if let Some(config) = payload
-                .get("config_set")
-                .and_then(serde_json::Value::as_object)
-            {
+            let guarded_config = payload.get("config_set_if_matches");
+            let legacy_config = payload.get("config_set");
+            if guarded_config.is_some() && legacy_config.is_some() {
+                return None;
+            }
+            if let Some(config) = guarded_config.or(legacy_config) {
+                let config = config.as_object()?;
+                // A separate discriminator makes old daemons reject guarded
+                // writes instead of silently applying them unconditionally.
+                let expected_config_token = if guarded_config.is_some() {
+                    let token = config.get("expected_config_token")?.as_str()?;
+                    if token.trim().is_empty() {
+                        return None;
+                    }
+                    Some(token.to_string())
+                } else {
+                    if config.contains_key("expected_config_token") {
+                        return None;
+                    }
+                    None
+                };
                 if config.contains_key("auto_apply_updates") {
                     return None;
                 }
@@ -4202,6 +4401,7 @@ fn decode_issue_monitor_control_in_repo(
                     return None;
                 }
                 return Some(IssueMonitorControl::ConfigSet {
+                    expected_config_token,
                     allowed_labels,
                     enabled,
                     autonomous_mode,
@@ -4404,6 +4604,17 @@ fn decode_issue_monitor_control_in_repo(
                             .filter(|value| *value > 0)?,
                     )
                 };
+                if payload.get("control_id").is_some() || payload.get("changed_at").is_some() {
+                    let control_id = payload.get("control_id")?.as_str()?;
+                    uuid::Uuid::parse_str(control_id).ok()?;
+                    let changed_at = payload.get("changed_at")?.as_str()?;
+                    chrono::DateTime::parse_from_rfc3339(changed_at).ok()?;
+                    return Some(IssueMonitorControl::IdentifiedMaxActiveAgents {
+                        max_active_agents,
+                        control_id: control_id.to_string(),
+                        changed_at: changed_at.to_string(),
+                    });
+                }
                 return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
             }
             if let Some(claim) = payload.get("claim_launch_delivery") {
@@ -5096,7 +5307,7 @@ fn fence_next_issue_monitor_effect_with_permit(
                 .filter(|effect| {
                     effect.state == crate::IssueMonitorEffectState::Prepared
                         && issue_monitor_effect_permitted(effect, permit)
-                        && candidate.claim_renewal_attempt_is_ready(effect, now)
+                        && candidate.effect_attempt_is_ready(effect, now)
                 })
                 .min_by_key(|effect| issue_monitor_effect_priority(effect))
                 .cloned();
@@ -5143,6 +5354,7 @@ enum IssueMonitorEffectOutcome {
     ),
     QueueLabelCleanup(gwt_github::client::OwnerMutationResult<bool>),
     AutoMerge(gwt_git::pr_status::AutoMergeMutationOutcome),
+    CiRerun(crate::issue_monitor_ci::CiRerunOutcome),
     /// Issue #3917: comment + optional verified close of a delivered Issue.
     MergedIssueSettlement(
         gwt_github::client::OwnerMutationResult<
@@ -5286,6 +5498,7 @@ fn spawn_issue_monitor_effect(
     scope: RuntimeScope,
     effect: crate::PendingIssueMonitorEffect,
     authority_current: bool,
+    allow_submit: bool,
     permit: IssueMonitorEffectPermitToken,
     deadline: Instant,
     #[cfg(test)] effect_override: Option<Arc<IssueMonitorEffectOverride>>,
@@ -5315,6 +5528,7 @@ fn spawn_issue_monitor_effect(
                 &scope,
                 &effect,
                 authority_current,
+                allow_submit,
                 &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
         };
@@ -5364,6 +5578,7 @@ fn execute_issue_monitor_effect(
     scope: &RuntimeScope,
     effect: &crate::PendingIssueMonitorEffect,
     authority_current: bool,
+    allow_submit: bool,
     execution_now: &str,
 ) -> IssueMonitorEffectOutcome {
     use gwt_github::client::OwnerMutationError;
@@ -5373,6 +5588,13 @@ fn execute_issue_monitor_effect(
     use gwt_github::IssueNumber;
 
     match &effect.payload {
+        crate::IssueMonitorEffectPayload::RerunFailedCi { target, .. } => {
+            IssueMonitorEffectOutcome::CiRerun(crate::issue_monitor_ci::execute_ci_rerun(
+                &scope.project_root,
+                target,
+                allow_submit && authority_current,
+            ))
+        }
         crate::IssueMonitorEffectPayload::RenewClaim { .. } => {
             IssueMonitorEffectOutcome::Renew(if authority_current {
                 match issue_monitor_http_client(scope) {
@@ -5752,6 +5974,26 @@ fn try_commit_issue_monitor_effect_result(
                 }
             }
             match (&completed.effect.payload, completed.outcome) {
+                (
+                    crate::IssueMonitorEffectPayload::RerunFailedCi { issue_number, .. },
+                    IssueMonitorEffectOutcome::CiRerun(outcome),
+                ) => {
+                    let _ = candidate.complete_pending_effect(&key);
+                    if current_authority {
+                        if let crate::issue_monitor_ci::CiRerunOutcome::Refused(reason)
+                        | crate::issue_monitor_ci::CiRerunOutcome::Unknown(reason) = outcome
+                        {
+                            candidate.request_autonomous_steering(
+                                *issue_number,
+                                reason,
+                                &completed.completed_at,
+                            );
+                        }
+                    }
+                    // Consumption is permanent even if submission was interrupted:
+                    // GitHub's run_attempt readback can lag an accepted POST.
+                    settled = true;
+                }
                 (
                     crate::IssueMonitorEffectPayload::RenewClaim { .. },
                     IssueMonitorEffectOutcome::Renew(result),
@@ -6155,6 +6397,7 @@ fn scan_issue_monitor_once_blocking(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
     )?;
+    monitor.set_source_repository(Some((&owner, &repo)));
     timing.next("candidate-load");
     let mut loaded = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::CandidateLoad,
@@ -7162,6 +7405,7 @@ fn config_error(message: impl Into<String>) -> SpecOpsError {
 #[cfg(test)]
 mod agent_failure_source_contract_tests {
     use super::{decode_issue_monitor_control, IssueMonitorControl};
+    use super::{test_monitor, test_monitor_with_prefs};
 
     use gwt_core::{operation_deadline::ScopedOperationClock, test_support::ScopedGwtHome};
     use std::time::Instant;
@@ -7174,7 +7418,7 @@ mod agent_failure_source_contract_tests {
     use crate::runtime_daemon_events::IssueMonitorAgentFailureSource;
 
     fn monitor_with_launch(claim_id: &str, window_id: &str) -> crate::IssueMonitorState {
-        let monitor = crate::IssueMonitorState::with_prefs(
+        let monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -7255,7 +7499,7 @@ mod agent_failure_source_contract_tests {
 
     #[test]
     fn newer_open_control_fences_a_delayed_first_close() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         super::try_apply_issue_monitor_control(
             &mut monitor,
             IssueMonitorControl::IssueState {
@@ -7470,6 +7714,7 @@ mod agent_failure_source_contract_tests {
 
 #[cfg(test)]
 mod authority_recovery_contract_tests {
+    use super::test_monitor_with_prefs;
     use std::fs;
 
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
@@ -7555,8 +7800,7 @@ mod authority_recovery_contract_tests {
         assert_eq!(prefs.effect_authority_epoch, 8);
         assert_eq!(prefs.launched_issues.len(), 1);
         assert_eq!(prefs.launched_issues[0].issue_number, 43);
-        let monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         assert_eq!(
             monitor.stop_only_reason(42).as_deref(),
             Some("authority recovery fallback")
@@ -7573,6 +7817,7 @@ mod authority_recovery_contract_tests {
 // `crate::daemon_subscriber::tests`.
 #[cfg(all(test, unix))]
 mod tests {
+    use super::{test_monitor, test_monitor_with_prefs};
     use std::{
         fs::{self, OpenOptions},
         path::{Path, PathBuf},
@@ -8926,7 +9171,7 @@ exit 0
         let hub = BroadcastHub::new();
         let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
         let mut premise_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
 
         for _ in 0..=super::super::broadcast::DEFAULT_CHANNEL_CAPACITY {
             super::publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -8967,7 +9212,7 @@ exit 0
             crate::runtime_daemon_events::ProjectStoreIdentity::from_runtime_scope(&scope);
         let expected_project_store =
             serde_json::to_value(&project_store).expect("serialize expected project store");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 3,
@@ -9039,7 +9284,7 @@ exit 0
         let project = TempDir::new().expect("project tempdir");
         let project_store =
             crate::runtime_daemon_events::ProjectStoreIdentity::from_project_root(project.path());
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -9127,7 +9372,7 @@ exit 0
             1,
             "observer must not drain NeedsHuman notices"
         );
-        let mut claim_monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut claim_monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -9531,8 +9776,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
@@ -9646,6 +9890,7 @@ exit 0
 
     fn sample_issue_monitor_issue(issue_number: u64) -> crate::IssueMonitorIssue {
         crate::IssueMonitorIssue {
+            author_login: None,
             number: issue_number,
             title: format!("Issue {issue_number}"),
             labels: Vec::new(),
@@ -9778,7 +10023,7 @@ exit 0
     ) {
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
@@ -10028,7 +10273,7 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
@@ -10138,7 +10383,7 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10228,13 +10473,189 @@ exit 0
     }
 
     #[test]
+    fn machine_max_active_receipt_replay_preserves_a_later_project_change() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let a = gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        let b = gwt_core::paths::gwt_projects_dir().join("b/project-state/issue-monitor.json");
+        for path in [&a, &b] {
+            crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
+        }
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&a).unwrap(),
+        );
+        let mut stale = monitor.clone();
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "max_active_agents": 5,
+                "control_id": uuid::Uuid::new_v4().to_string(),
+                "changed_at": "2026-10-22T00:00:00Z",
+            }),
+            std::process::id() + 1,
+        );
+        let first = super::AcceptedIssueMonitorControl::new(
+            decode_issue_monitor_control_for_test(payload.clone()).unwrap(),
+        );
+        let replay = super::AcceptedIssueMonitorControl::new(
+            decode_issue_monitor_control_for_test(payload).unwrap(),
+        );
+        assert_eq!(first, replay);
+        assert!(matches!(
+            apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        let mut other = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&b).unwrap(),
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(
+                &b,
+                &mut other,
+                super::AcceptedIssueMonitorControl {
+                    control_id: "project-b-shared-limit".into(),
+                    processed_at: "2026-10-22T00:01:00Z".into(),
+                    control: super::IssueMonitorControl::MaxActiveAgents(Some(3)),
+                }
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(matches!(
+            apply_accepted_control_for_test(&a, &mut stale, replay.clone()),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(stale.max_active_agents_override(), Some(3));
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(3)
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a)
+                .unwrap()
+                .max_active_last_change,
+            crate::load_issue_monitor_prefs(&b)
+                .unwrap()
+                .max_active_last_change
+        );
+        fs::remove_file(crate::machine_agent_settings::path()).unwrap();
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a, &mut stale, replay
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure,
+            "a durable project receipt cannot ACK a missing machine policy"
+        );
+    }
+
+    #[test]
+    fn machine_guarded_config_retry_preserves_a_later_project_change() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let a = gwt_core::paths::gwt_projects_dir().join("a/project-state/issue-monitor.json");
+        let b = gwt_core::paths::gwt_projects_dir().join("b/project-state/issue-monitor.json");
+        for path in [&a, &b] {
+            crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
+        }
+        let initial = crate::load_issue_monitor_prefs(&a).unwrap();
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": initial.config_token(),
+                    "max_active_agents": 5,
+                    "allowed_labels": ["guarded-a"],
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .unwrap();
+        let first = super::AcceptedIssueMonitorControl::new(control);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let _fault = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            crate::machine_agent_settings::path(),
+        );
+        fs::write(
+            crate::machine_agent_settings::path().with_extension("parent-sync-fail-once"),
+            "fail",
+        )
+        .unwrap();
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a,
+                &mut monitor,
+                first.clone()
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        );
+        assert!(crate::load_issue_monitor_prefs(&a)
+            .unwrap()
+            .last_control_receipt
+            .is_none());
+        let mut other = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&b).unwrap(),
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(
+                &b,
+                &mut other,
+                super::AcceptedIssueMonitorControl::new(IssueMonitorControl::MaxActiveAgents(
+                    Some(3)
+                ))
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(matches!(
+            apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(monitor.max_active_agents_override(), Some(3));
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a).unwrap().allowed_labels,
+            vec!["guarded-a"]
+        );
+        let before = fs::read(crate::machine_agent_settings::path()).unwrap();
+        let mut divergent = first;
+        if let IssueMonitorControl::ConfigSet {
+            max_active_agents, ..
+        } = &mut divergent.control
+        {
+            *max_active_agents = Some(6);
+        }
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &a,
+                &mut monitor,
+                divergent
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure
+        );
+        assert_eq!(
+            fs::read(crate::machine_agent_settings::path()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
     fn durable_receipt_converges_stale_volatile_state_before_commit_result() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
@@ -10476,7 +10897,7 @@ exit 0
     fn issue_monitor_autonomous_mode_control_toggles_kill_switch() {
         // SPEC #3200 T-046/FR-024: the autonomous_mode control arms/disarms the
         // kill switch, observable in the status view, and requests a rescan.
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -10513,7 +10934,7 @@ exit 0
     fn issue_monitor_review_verdict_control_records_daemon_judged_outcome() {
         // SPEC #3200 FR-015: a review agent's raw verdict is decoded and judged
         // by the daemon (SHA-bound), setting review_passed on the record.
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -10555,7 +10976,7 @@ exit 0
     fn issue_monitor_heartbeat_control_refreshes_liveness() {
         // SPEC #3200 T-045: a heartbeat control refreshes the stuck-detection
         // window for the issue.
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -10590,7 +11011,7 @@ exit 0
     /// touched.
     #[test]
     fn issue_monitor_requeue_control_releases_a_dead_hold_and_spares_a_live_launch() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10671,7 +11092,7 @@ exit 0
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10756,7 +11177,7 @@ exit 0
         // Issue #4286 AC-1/AC-2: `wait.invalidate:true` from the PM records
         // who / when / why on the declaration and hands the row back to
         // ordinary stuck detection without counting as agent liveness.
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10809,7 +11230,7 @@ exit 0
 
     #[test]
     fn window_closed_control_requeues_only_the_exact_durable_claim() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10863,7 +11284,7 @@ exit 0
     // legacy `window_closed` requeue contract untouched.
     #[test]
     fn terminal_delivered_control_settles_only_the_exact_live_launch() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -10947,10 +11368,8 @@ exit 0
             )]),
             ..crate::IssueMonitorPrefs::default()
         };
-        let mut stale_daemon = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            predecessor.clone(),
-        );
+        let mut stale_daemon =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), predecessor.clone());
         let successor = crate::IssueMonitorPrefs {
             launched_claims: std::collections::BTreeMap::from([(
                 42,
@@ -10995,7 +11414,7 @@ exit 0
 
     #[test]
     fn targetless_window_closed_control_is_a_fail_closed_noop() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -11099,10 +11518,8 @@ exit 0
         ];
 
         for (name, control, expected_scan) in cases {
-            let mut monitor = crate::IssueMonitorState::with_prefs(
-                crate::IssueMonitorConfig::default(),
-                base.clone(),
-            );
+            let mut monitor =
+                test_monitor_with_prefs(crate::IssueMonitorConfig::default(), base.clone());
             assert_eq!(
                 super::apply_issue_monitor_control(&mut monitor, control),
                 expected_scan,
@@ -11123,10 +11540,8 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(&prefs_path, &base).expect("seed prefs");
-        let mut canonical = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            base.clone(),
-        );
+        let mut canonical =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), base.clone());
         let stale_scan = canonical.clone();
         assert!(!super::accept_completed_issue_monitor_scan(
             prefs_path.parent().expect("fixture root"),
@@ -11196,10 +11611,8 @@ exit 0
         };
         let initial = scheduled_issue_monitor_prefs(initial, &[77]);
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed durable journal");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[]}"#;
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
@@ -11262,10 +11675,8 @@ exit 0
         };
         let initial = scheduled_issue_monitor_prefs(initial, &[77]);
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed durable journal");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
@@ -11312,7 +11723,7 @@ exit 0
 
     #[test]
     fn issue_monitor_launch_failed_control_marks_active_item_failed() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11320,6 +11731,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.record_claimed(
             crate::IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Issue 42".to_string(),
                 labels: Vec::new(),
@@ -11358,7 +11770,7 @@ exit 0
 
     #[test]
     fn nonretryable_startup_failure_consumes_only_its_exact_delivery() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..Default::default()
         });
@@ -11366,6 +11778,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.terminal_queue_push(&[42], "test", "2026-07-28T00:00:00Z");
         monitor.record_candidate(crate::IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "fresh launch".into(),
             labels: vec!["bug".into()],
@@ -11443,7 +11856,7 @@ exit 0
 
     #[test]
     fn issue_monitor_launched_control_marks_active_item_launched() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11451,6 +11864,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.record_claimed(
             crate::IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Issue 42".to_string(),
                 labels: Vec::new(),
@@ -11489,7 +11903,7 @@ exit 0
 
     #[test]
     fn issue_monitor_agent_failed_control_marks_launched_item_failed() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11497,6 +11911,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.record_claimed(
             crate::IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Issue 42".to_string(),
                 labels: Vec::new(),
@@ -11544,7 +11959,7 @@ exit 0
 
     #[test]
     fn termination_control_keeps_infrastructure_out_of_tier_input() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
@@ -11629,7 +12044,7 @@ exit 0
 
     #[test]
     fn codex_directory_trust_failure_decodes_and_escalates_only_the_exact_live_window() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11681,7 +12096,7 @@ exit 0
 
     #[test]
     fn codex_directory_trust_failure_rejects_stale_window_and_launch_failure_channels() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11725,7 +12140,7 @@ exit 0
 
         for (case, mut monitor, control) in [
             {
-                let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut monitor = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -11749,7 +12164,7 @@ exit 0
                 )
             },
             {
-                let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut monitor = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -11796,7 +12211,7 @@ exit 0
 
         for (case, mut monitor, control) in [
             {
-                let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut monitor = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -11820,7 +12235,7 @@ exit 0
                 )
             },
             {
-                let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut monitor = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -11877,7 +12292,7 @@ exit 0
         }
 
         let prefs_path = temp.path().join("typed-receipt-replay.json");
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -11947,7 +12362,7 @@ exit 0
     /// human handoff.
     #[test]
     fn a_provider_usage_limit_control_holds_the_issue_instead_of_failing_it() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 2,
@@ -12034,7 +12449,7 @@ exit 0
     fn a_provider_usage_limit_control_gates_claim_planning_until_reset() {
         let mut profile = sample_issue_monitor_profile();
         profile.agent_id = "codex".to_string();
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 1,
@@ -12088,7 +12503,7 @@ exit 0
         assert!(apply_issue_monitor_control(&mut monitor, control));
 
         let prefs = monitor.prefs();
-        let mut restored = crate::IssueMonitorState::with_prefs(
+        let mut restored = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 1,
@@ -12152,7 +12567,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_primary_path_preserves_the_reported_provider() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 1,
@@ -12220,7 +12635,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_routine_defense_preserves_the_reported_provider() {
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 max_active: 1,
@@ -12314,7 +12729,7 @@ exit 0
                 None,
             ),
         ] {
-            let mut monitor = crate::IssueMonitorState::with_prefs(
+            let mut monitor = test_monitor_with_prefs(
                 crate::IssueMonitorConfig {
                     enabled: true,
                     max_active: 2,
@@ -12489,7 +12904,7 @@ exit 0
         // in-flight autonomous issue this must route through the autonomous
         // retry machinery (attempt counted, re-queued) instead of marking the
         // inbox `LaunchFailed` and stranding the record in `Reviewing` forever.
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -12498,6 +12913,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.record_claimed(
             crate::IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Issue 42".to_string(),
                 labels: Vec::new(),
@@ -12569,7 +12985,7 @@ exit 0
 
     #[test]
     fn issue_monitor_agent_failed_control_uses_issue_number_hint_when_window_is_unmapped() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -12577,6 +12993,7 @@ exit 0
         monitor.set_gui_connected(true);
         monitor.record_claimed(
             crate::IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Issue 42".to_string(),
                 labels: Vec::new(),
@@ -12618,7 +13035,7 @@ exit 0
 
     #[test]
     fn issue_monitor_runtime_controls_request_immediate_scan_when_launch_order_changes() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
@@ -12672,7 +13089,7 @@ exit 0
         .expect("queue remove control decodes");
         assert_eq!(control, IssueMonitorControl::TerminalQueueRemove(vec![42]));
 
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         monitor.terminal_queue_push(&[42, 43], "operator", "2026-09-10T00:00:00Z");
         assert!(apply_issue_monitor_control(&mut monitor, control));
         let queue = monitor
@@ -12734,8 +13151,7 @@ exit 0
             priority_order: vec![9, 4],
             ..crate::IssueMonitorPrefs::default()
         };
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let before = monitor.status_view_at("2026-08-04T00:00:00Z");
 
         let should_scan = apply_issue_monitor_control(&mut monitor, control);
@@ -12746,6 +13162,242 @@ exit 0
             before,
             "scan_now must not mutate monitor state"
         );
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_config_set_if_matches_refuses_stale_observation_without_commit() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 2,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut saved = serde_json::to_value(&initial).expect("prefs value");
+        saved["future_extension"] = serde_json::json!({"must_survive_refusal": true});
+        let before = serde_json::to_vec(&saved).expect("noncanonical prefs bytes");
+        fs::write(&prefs_path, &before).expect("seed prefs");
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": "stale-config-token",
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                    "update_drain": true,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("guarded config frame must decode before its observation is compared");
+
+        let (should_scan, completion) =
+            apply_control_and_wait_for_completion(&prefs_path, &mut monitor, control).await;
+
+        let error = completion.expect_err("stale config observation must be refused");
+        assert!(error.message().contains("config"));
+        assert!(error.message().contains("re-read issue.monitor.status"));
+        assert!(!should_scan, "a conflict must not request a scan");
+        assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        assert_eq!(
+            monitor.prefs(),
+            initial,
+            "no volatile config or receipt change"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_if_matches_replays_receipt_before_comparing_token() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            max_active_agents: 2,
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let observed_token = initial.config_token();
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": observed_token,
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("fresh guarded frame");
+        let accepted = super::AcceptedIssueMonitorControl::new(control);
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
+        let mut stale = monitor.clone();
+
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut monitor, accepted.clone()),
+            super::IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
+        let committed = crate::load_issue_monitor_prefs(&prefs_path).expect("committed prefs");
+        assert_eq!(committed.max_active_agents, 4);
+        assert!(!committed.enabled && !committed.autonomous_mode);
+        assert_eq!(committed.effect_authority_epoch, 9);
+        let receipt = committed
+            .last_control_receipt
+            .as_ref()
+            .expect("durable receipt");
+        assert!(receipt.authority_changed);
+        assert_eq!(receipt.control_id, accepted.control_id);
+        assert_ne!(committed.config_token(), observed_token);
+        let before_replay = fs::read(&prefs_path).expect("receipt bytes");
+        let mut divergent = accepted.clone();
+        if let IssueMonitorControl::ConfigSet {
+            max_active_agents, ..
+        } = &mut divergent.control
+        {
+            *max_active_agents = Some(5);
+        }
+        assert_eq!(
+            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut stale.clone(),
+                divergent,
+            ),
+            super::IssueMonitorControlCommit::RetryableFailure,
+            "a matching receipt ID cannot acknowledge a divergent full snapshot"
+        );
+        assert_eq!(
+            fs::read(&prefs_path).expect("divergence bytes"),
+            before_replay
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut stale, accepted),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(stale.prefs(), committed);
+        assert_eq!(
+            fs::read(&prefs_path).expect("replayed bytes"),
+            before_replay
+        );
+    }
+
+    #[test]
+    fn issue_monitor_config_conflict_rebases_authority_and_reopens_only_new_permit() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let stale_prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let latest = crate::IssueMonitorPrefs {
+            enabled: false,
+            effect_authority_epoch: 8,
+            ..stale_prefs.clone()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &latest).expect("seed newer authority");
+        let before = fs::read(&prefs_path).expect("canonical bytes");
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), stale_prefs.clone());
+        let control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set_if_matches": {
+                    "expected_config_token": stale_prefs.config_token(),
+                    "enabled": false,
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("guarded OFF frame");
+        let mut permit = super::IssueMonitorEffectPermit::new();
+        let old_permit = permit.capture();
+        let mut pending = None;
+        let outcome = super::apply_or_queue_issue_monitor_control(
+            &BroadcastHub::new(),
+            &prefs_path,
+            &mut monitor,
+            control,
+            &mut permit,
+            &mut pending,
+            None,
+        );
+
+        assert_eq!(outcome, super::IssueMonitorControlCommit::ConfigConflict);
+        assert!(!outcome.should_scan());
+        assert!(
+            pending.is_none(),
+            "conflict must not block the control lane"
+        );
+        assert!(!old_permit.load(Ordering::Acquire));
+        assert!(permit.capture().load(Ordering::Acquire));
+        assert!(
+            !monitor.prefs().enabled,
+            "new permit must see canonical OFF"
+        );
+        assert_eq!(monitor.effect_authority_epoch(), 8);
+        assert_eq!(fs::read(&prefs_path).expect("unchanged bytes"), before);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decoder_refuses_missing_or_ignored_guards() {
+        for config in [
+            serde_json::json!({"max_active_agents": 4}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": null}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": ""}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": "  "}),
+            serde_json::json!({"max_active_agents": 4, "expected_config_token": 42}),
+        ] {
+            assert!(
+                decode_issue_monitor_control_for_test(
+                    crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"config_set_if_matches": config}),
+                        std::process::id() + 1,
+                    )
+                )
+                .is_none(),
+                "malformed guarded config must fail closed: {config}"
+            );
+        }
+        for payload in [
+            serde_json::json!({"config_set": {
+                "max_active_agents": 4, "expected_config_token": "stale-config-token",
+            }}),
+            serde_json::json!({
+                "config_set": {"max_active_agents": 4},
+                "config_set_if_matches": {
+                    "max_active_agents": 5, "expected_config_token": "stale-config-token",
+                },
+            }),
+        ] {
+            assert!(
+                decode_issue_monitor_control_for_test(
+                    crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        payload.clone(),
+                        std::process::id() + 1,
+                    )
+                )
+                .is_none(),
+                "a legacy or mixed frame must never discard its guard: {payload}"
+            );
+        }
     }
 
     #[test]
@@ -12759,8 +13411,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         for (labels, expected) in [
             (
                 serde_json::json!(["Server", "backend"]),
@@ -12816,6 +13467,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -12826,7 +13478,7 @@ exit 0
                 update_drain: None,
             }
         );
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
         // staged version through the same control.
         let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -12838,6 +13490,7 @@ exit 0
         assert_eq!(
             raise_control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -12877,8 +13530,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
 
         assert!(super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
@@ -12917,7 +13569,7 @@ exit 0
 
     #[test]
     fn agent_capacity_control_restores_auto_without_changing_running_work() {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             max_active: 7,
             ..Default::default()
         });
@@ -12943,7 +13595,7 @@ exit 0
                 std::process::id() + 1,
             )
         };
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             max_active: 7,
             ..Default::default()
         });
@@ -12988,6 +13640,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -13027,10 +13680,8 @@ exit 0
                 prefs.effect_authority_epoch,
             )
         };
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
 
         assert!(super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
@@ -13101,8 +13752,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
 
         assert!(super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
@@ -13230,6 +13880,7 @@ exit 0
         assert_eq!(
             control,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: None,
                 autonomous_mode: None,
@@ -13245,10 +13896,8 @@ exit 0
         let prefs_path = temp.path().join("issue-monitor.json");
         let unsaved = crate::IssueMonitorPrefs::default();
         crate::save_issue_monitor_prefs(&prefs_path, &unsaved).expect("seed prefs");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            unsaved.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), unsaved.clone());
         assert!(!super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
@@ -13274,8 +13923,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &saved).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), saved);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), saved);
         assert!(super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
@@ -13327,8 +13975,7 @@ exit 0
             ..Default::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &seed).unwrap();
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), seed);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), seed);
         for (expected, clears) in [("2026-10-04T00:00:00Z", false), (current, true)] {
             let control = decode_issue_monitor_control_for_test(
                 crate::runtime_daemon_events::issue_monitor_payload(
@@ -13394,8 +14041,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &seed).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), seed);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), seed);
         let now = "2026-09-05T01:26:00Z";
         assert!(
             monitor.agent_status_at(now).quota_hold.is_some(),
@@ -13484,15 +14130,14 @@ exit 0
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
 
         assert!(!super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
             IssueMonitorControl::ConfigSet {
+                expected_config_token: None,
                 allowed_labels: None,
                 enabled: Some(false),
                 autonomous_mode: Some(false),
@@ -13515,7 +14160,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed GUI migration result");
         let failure = legacy_git_failure(temp.path());
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(temp.path()),
         );
@@ -13551,7 +14196,7 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         init_git_repo(temp.path());
         let scope = sample_scope(&temp);
-        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let monitor = test_monitor(crate::IssueMonitorConfig::default());
 
         let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect_err("missing origin is a typed scan failure");
@@ -13574,7 +14219,7 @@ exit 0
         init_git_repo(temp.path());
         git_remote_add_origin(temp.path(), "https://example.com/owner/repo.git");
         let scope = sample_scope(&temp);
-        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let monitor = test_monitor(crate::IssueMonitorConfig::default());
 
         let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect_err("non-GitHub origin is a typed scan failure");
@@ -13601,6 +14246,12 @@ exit 0
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
+        crate::machine_agent_settings::set(
+            Some(2),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -13636,8 +14287,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
         let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
@@ -13764,8 +14414,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
         // Stands in for the production scan budget the worker installs. The
@@ -13897,8 +14546,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
         // Issue #4625: the contract here is the number of open-PR reads, not
@@ -14009,8 +14657,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14064,6 +14711,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(44),
                 title: "Previously loaded issue".to_string(),
                 body: "Queued body".to_string(),
@@ -14093,8 +14741,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14151,6 +14798,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(44),
                 title: "Previously loaded issue".to_string(),
                 body: "Queued body".to_string(),
@@ -14179,8 +14827,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14230,6 +14877,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(44),
                 title: "Previously loaded issue".to_string(),
                 body: "Queued body".to_string(),
@@ -14259,8 +14907,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14307,6 +14954,12 @@ exit 0
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create gwt home");
         let _home = ScopedGwtHome::set(&home);
+        crate::machine_agent_settings::set(
+            Some(2),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -14321,6 +14974,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(44),
                 title: "Previously loaded issue".to_string(),
                 body: "Queued body".to_string(),
@@ -14368,8 +15022,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14456,6 +15109,7 @@ exit 0
         for issue_number in &queued {
             cache
                 .write_snapshot(&gwt_github::IssueSnapshot {
+                    author_login: None,
                     number: gwt_github::IssueNumber(*issue_number),
                     title: format!("Previously loaded issue {issue_number}"),
                     body: "Queued body".to_string(),
@@ -14498,8 +15152,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut preserved =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut preserved = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
@@ -14612,8 +15265,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
@@ -14684,6 +15336,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(44),
                 title: "Previously loaded issue".to_string(),
                 body: "Queued body".to_string(),
@@ -14748,8 +15401,7 @@ exit 0
             &prefs,
         )
         .expect("seed issue monitor prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.set_gui_connected(true);
         monitor.record_scan_error(
             "2026-08-25T00:20:17Z",
@@ -14853,6 +15505,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(43),
                 title: "Live SPEC".to_string(),
                 body: "<!-- gwt-spec id=43 version=1 -->\n\
@@ -14878,7 +15531,7 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let mut preserved = crate::IssueMonitorState::with_prefs(
+        let mut preserved = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
@@ -14911,11 +15564,13 @@ exit 0
             .status_view()
             .last_error
             .expect("a degraded scan still reports why");
+        // Open-PR discovery can observe the quota first; the completion
+        // readback then reports the canonical local throttle diagnostic.
         for expected in [
             "claim-completion-readback",
             "continued_with_deferred_candidates",
             "#43",
-            "rate limit",
+            gwt_core::github_quota::RATE_LIMITED_ERROR_CODE,
         ] {
             assert!(last_error.contains(expected), "{expected}: {last_error}");
         }
@@ -14945,6 +15600,7 @@ exit 0
             crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
         gwt_github::Cache::new(cache_root)
             .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
                 number: gwt_github::IssueNumber(43),
                 title: "Live SPEC".to_string(),
                 body: "<!-- gwt-spec id=43 version=1 -->\n\
@@ -14970,7 +15626,7 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let mut preserved = crate::IssueMonitorState::with_prefs(
+        let mut preserved = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
@@ -15039,7 +15695,7 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let monitor = crate::IssueMonitorState::with_prefs(
+        let monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 launched_issues: vec![crate::IssueMonitorLaunchedIssue {
@@ -15117,8 +15773,7 @@ exit 0
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let monitor = super::scan_issue_monitor_once_blocking(scope.clone(), monitor, false)
             .expect("settlement scan succeeds");
         test(&scope, &prefs_path, monitor);
@@ -15530,8 +16185,7 @@ exit 0
         let legacy = legacy_failed_prefs(&scope.project_root);
         let legacy = scheduled_issue_monitor_prefs(legacy, &[43]);
         crate::save_issue_monitor_prefs(&prefs_path, &legacy).expect("seed legacy prefs");
-        let monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
+        let monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), legacy);
 
         let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect("live scan succeeds");
@@ -15601,8 +16255,7 @@ exit 0
             r#"{"enabled":true,"max_active_agents":1,"priority_order":[43],"merged_issues":[43]}"#,
         )
         .expect("legacy completion prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), legacy);
         monitor.terminal_queue_push(&[43], "test", "2026-07-02T00:00:00Z");
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
             .expect("seed legacy completion");
@@ -15672,8 +16325,7 @@ exit 0
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed completion");
-        let monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
             .expect("ScanNow negative control succeeds");
@@ -15843,6 +16495,12 @@ exit 0
         fs::create_dir_all(&home).expect("create isolated gwt home");
         // The scan's spawn_blocking thread must read the same seeded prefs.
         let _home = ScopedEnvVar::set("HOME", &home);
+        crate::machine_agent_settings::set(
+            Some(2),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let issue_list = temp.path().join("issues.json");
         fs::write(
@@ -15887,7 +16545,7 @@ exit 0
         )
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let mut seeded = crate::IssueMonitorState::with_prefs(
+        let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             scheduled_issue_monitor_prefs(
                 crate::IssueMonitorPrefs {
@@ -16025,6 +16683,12 @@ exit 0
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", &home);
+        crate::machine_agent_settings::set(
+            Some(3),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-10-22T00:00:00Z",
+        )
+        .expect("seed machine Manual capacity");
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let issue_list = temp.path().join("issues.json");
         fs::write(
@@ -16073,7 +16737,7 @@ exit 0
         )
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let mut seeded = crate::IssueMonitorState::with_prefs(
+        let mut seeded = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             scheduled_issue_monitor_prefs(
                 crate::IssueMonitorPrefs {
@@ -16433,7 +17097,7 @@ exit 0
         // Issue #5140: the independent poll must free an expired compatibility
         // launch even while the remote scan is still blocked.
         while status_rx.try_recv().is_ok() {}
-        let mut stalled = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut stalled = test_monitor(crate::IssueMonitorConfig::default());
         stalled.terminal_queue_push(&[42], "test", "2000-01-01T00:00:00Z");
         stalled.record_candidate(sample_issue_monitor_issue(42));
         stalled.set_gui_connected(true);
@@ -17913,7 +18577,7 @@ exit 1
         )
         .expect("scope");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let mut seeded = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut seeded = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -18498,8 +19162,7 @@ exit 1
         )
         .expect("seed prefs");
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let marker = super::issue_monitor_shutdown_revoke_marker_path(&prefs_path);
         fs::create_dir(&marker).expect("make marker replacement fail");
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
@@ -18560,8 +19223,7 @@ exit 1
         crate::persist_issue_monitor_authority_fence(&prefs_path, &authority_fence)
             .expect("persist lifetime authority fence");
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let lane_open = Arc::new(AtomicBool::new(true));
         let mut guard = super::IssueMonitorControlLaneGuard::new_with_authority_without_lease(
             BroadcastHub::new(),
@@ -18630,10 +19292,8 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let mut late = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut late =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         late.set_max_active_agents(9);
         let handle = tokio::task::spawn_blocking(move || {
             started_tx.send(()).expect("signal started scan");
@@ -18651,8 +19311,7 @@ exit 1
             deadline,
             watchdog_fired: false,
         });
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
 
         super::wait_for_issue_monitor_deadline(Some(deadline)).await;
         assert!(super::expire_issue_monitor_scan_at_watchdog(
@@ -18741,10 +19400,8 @@ exit 1
         };
         let initial = scheduled_issue_monitor_prefs(initial, &[42]);
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut canonical = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut canonical =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let mut scanned = canonical.clone();
         assert!(
             scanned.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
@@ -18790,10 +19447,8 @@ exit 1
         let initial = scheduled_issue_monitor_prefs(initial, &[42]);
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let mut canonical = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut canonical =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let mut scanned = canonical.clone();
         assert!(
             scanned.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
@@ -18852,7 +19507,7 @@ exit 1
                 owner: "host/session".to_string(),
             },
         );
-        let preserved = crate::IssueMonitorState::with_prefs(
+        let preserved = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -18895,7 +19550,7 @@ exit 1
                 reviewed_sha: "abc".to_string(),
             },
         };
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 effect_authority_epoch: 7,
@@ -19000,6 +19655,7 @@ exit 1
                 scope,
                 effect,
                 true,
+                true,
                 super::IssueMonitorEffectPermitToken::always_open(),
                 Instant::now() + Duration::from_secs(1),
                 None,
@@ -19086,10 +19742,11 @@ exit 1
         let _effect_release =
             ScopedEnvVar::set("GWT_TEST_EFFECT_BEFORE_PERMIT_RELEASE", &effect_release);
 
+        let project_root = scope.project_root.clone();
         runtime.block_on(async {
             let hub = BroadcastHub::new();
             let shutdown = Arc::new(DaemonShutdown::new());
-            let worker = spawn_issue_monitor_worker_with_config_and_timeout(
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
                 scope,
                 hub,
                 shutdown,
@@ -19098,6 +19755,19 @@ exit 1
                     ..crate::IssueMonitorConfig::default()
                 },
                 Duration::from_secs(2),
+                super::IssueMonitorWorkerTestHooks {
+                    scan_override: Some(Arc::new(move |mut monitor| {
+                        // Source authority is transient after prefs restore.
+                        // Resolve the actual fixture origin without coupling
+                        // this abort boundary to a live GitHub listing/cache.
+                        crate::issue_monitor_worker::bind_issue_monitor_source_repository(
+                            &mut monitor,
+                            &project_root,
+                        );
+                        Ok(monitor)
+                    })),
+                    ..Default::default()
+                },
             );
             assert!(
                 wait_for_path(&effect_started).await,
@@ -19163,8 +19833,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let prefs_lock = issue_monitor_prefs_lock_for_test(&prefs_path);
 
         runtime.block_on(async move {
@@ -19196,6 +19865,7 @@ exit 1
             let mut queued = super::spawn_issue_monitor_effect(
                 scope,
                 effect,
+                true,
                 true,
                 permit.capture(),
                 Instant::now() + Duration::from_secs(2),
@@ -19258,8 +19928,7 @@ exit 1
         };
         let prefs = scheduled_issue_monitor_prefs(prefs, &[42]);
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let permit = super::IssueMonitorEffectPermit::new();
         permit.deny();
 
@@ -19342,7 +20011,7 @@ exit 1
         };
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
         crate::save_issue_monitor_prefs(&prefs_path, &initial).unwrap();
-        let mut canonical = crate::IssueMonitorState::with_prefs(Default::default(), initial);
+        let mut canonical = test_monitor_with_prefs(Default::default(), initial);
         let mut scanned = canonical.clone();
         let now = chrono::Utc::now().to_rfc3339();
         scanned.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
@@ -19400,8 +20069,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         let stale_scan = canonical.clone();
         let latest = crate::agent_capacity::AgentCapacity {
             measurement_complete: true,
@@ -19455,8 +20123,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         let mut stale_scan = canonical.clone();
         stale_scan.prepare_effect(crate::PendingIssueMonitorEffect {
             effect_id: "arm:42:99:abc123:7".to_string(),
@@ -19497,7 +20164,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let launch = |claim: &str, effect: &str, created_at: &str| {
-            let mut state = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            let mut state = test_monitor(crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
             });
@@ -19517,10 +20184,7 @@ exit 1
                 if predecessor_compatibility {
                     let mut prefs = monitor.prefs();
                     prefs.pending_launch_deliveries.clear();
-                    monitor = crate::IssueMonitorState::with_prefs(
-                        crate::IssueMonitorConfig::default(),
-                        prefs,
-                    );
+                    monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
                     monitor.record_candidate(sample_issue_monitor_issue(42));
                 }
                 let scanned = monitor.clone();
@@ -19539,7 +20203,7 @@ exit 1
                 ));
                 let persisted =
                     crate::load_issue_monitor_prefs(&prefs_path).expect("reload scan commit");
-                let restarted = crate::IssueMonitorState::with_prefs(
+                let restarted = test_monitor_with_prefs(
                     crate::IssueMonitorConfig::default(),
                     persisted.clone(),
                 );
@@ -19587,8 +20251,7 @@ exit 1
             effect_authority_epoch: 7,
             ..crate::IssueMonitorPrefs::default()
         };
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         canonical.terminal_queue_push(&[42], "test", "2026-07-27T00:00:00Z");
         canonical.record_candidate(sample_issue_monitor_issue(42));
         canonical.set_gui_connected(true);
@@ -19649,8 +20312,7 @@ exit 1
             "the scan commit must not discard its new one-shot marker during rebase"
         );
 
-        let mut reloaded =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        let mut reloaded = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         reloaded.set_gui_connected(true);
         reloaded.terminal_queue_push(&[42], "test", "2026-07-27T00:00:00Z");
         reloaded.record_candidate(sample_issue_monitor_issue(42));
@@ -19727,8 +20389,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         canonical.record_candidate(sample_issue_monitor_issue(42));
         canonical.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         let mut stale_scan = canonical.clone();
@@ -19784,8 +20445,7 @@ exit 1
             effect_authority_epoch: 7,
             ..crate::IssueMonitorPrefs::default()
         };
-        let mut canonical =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut canonical = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         canonical.record_candidate(sample_issue_monitor_issue(42));
         canonical.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         crate::save_issue_monitor_prefs(&prefs_path, &canonical.prefs()).expect("seed prefs");
@@ -19861,10 +20521,8 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut canonical = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            initial.clone(),
-        );
+        let mut canonical =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial.clone());
         let stale_scan = canonical.clone();
 
         let profile = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
@@ -20110,8 +20768,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let fenced = super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor)
             .expect("Prepared effect receives a durable attempt fence");
@@ -20120,6 +20777,103 @@ exit 1
         assert_eq!(fenced.state, crate::IssueMonitorEffectState::Attempting);
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         assert_eq!(persisted.pending_effects, vec![fenced]);
+    }
+
+    #[test]
+    fn ci_rerun_executor_fence_persists_consumption_before_dispatch() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let effect: crate::PendingIssueMonitorEffect = serde_json::from_value(serde_json::json!({
+            "effect_id": "ci-rerun:99:abc123:701", "authority_epoch": 4,
+            "attempt": 0, "state": "prepared",
+            "payload": {"kind": "rerun_failed_ci", "issue_number": 42,
+                "target": {"pr_number": 99, "head_sha": "abc123", "run_id": 701}}
+        }))
+        .expect("CI rerun effect decodes");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 4,
+            pending_effects: vec![effect.clone()],
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let fenced = super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor)
+            .expect("rerun receives a durable fence");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload fence");
+        assert_eq!(persisted.pending_effects, vec![fenced]);
+        let saved = serde_json::to_value(persisted).expect("serialize fence");
+        assert_eq!(
+            saved["consumed_ci_reruns"],
+            serde_json::json!([effect.effect_id])
+        );
+    }
+
+    #[test]
+    fn ci_rerun_unknown_submission_settles_once_and_requests_steering() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let target = crate::issue_monitor_ci::CiRerunTarget {
+            pr_number: 99,
+            head_sha: "abc123".into(),
+            run_id: 701,
+        };
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        monitor
+            .prepare_pending_effect(
+                target.effect_id(),
+                crate::IssueMonitorEffectPayload::RerunFailedCi {
+                    issue_number: 42,
+                    target: target.clone(),
+                },
+            )
+            .expect("prepare rerun");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+        let effect =
+            super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor).expect("fence rerun");
+        let completed = super::CompletedIssueMonitorEffect {
+            effect: effect.clone(),
+            outcome: super::IssueMonitorEffectOutcome::CiRerun(
+                crate::issue_monitor_ci::CiRerunOutcome::Unknown("submission response lost".into()),
+            ),
+            completed_at: "2026-10-21T00:00:00Z".into(),
+        };
+        assert!(commit_effect_result_for_test(
+            &prefs_path,
+            &mut monitor,
+            completed
+        ));
+        assert!(monitor.pending_effects().is_empty());
+        assert!(monitor.ci_rerun_consumed(&target.effect_id()));
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .expect("owner record")
+                .steering
+                .as_ref()
+                .expect("steering requested")
+                .reason,
+            "submission response lost"
+        );
+        assert!(
+            !monitor.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                target.effect_id(),
+                monitor.effect_authority_epoch(),
+                effect.payload
+            ))
+        );
     }
 
     #[test]
@@ -20180,8 +20934,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(commit_effect_result_for_test(
             &prefs_path,
@@ -20250,8 +21003,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(commit_effect_result_for_test(
             &prefs_path,
@@ -20301,8 +21053,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let completed = || super::CompletedIssueMonitorEffect {
             effect: release.clone(),
             outcome: super::IssueMonitorEffectOutcome::Release(Ok(
@@ -20396,8 +21147,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let mut deferred = vec![monitor
             .autonomous_record(7)
             .expect("startup review record")
@@ -20468,8 +21218,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let mut deferred = vec![monitor
             .autonomous_record(7)
             .expect("startup review record")
@@ -20543,8 +21292,7 @@ exit 1
         };
         let prefs = scheduled_issue_monitor_prefs(prefs, &[42]);
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             commit_effect_result_for_test(
@@ -20597,8 +21345,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let result = Ok(gwt_github::issue_auto_claim::ClaimRenewOutcome::Renewed {
             claim: gwt_github::issue_auto_claim::ClaimComment {
                 comment_id: Some(gwt_github::CommentId(99)),
@@ -20665,7 +21412,7 @@ exit 1
                     owner: "host/session".to_string(),
                 });
             crate::save_issue_monitor_prefs(&prefs_path, &scenario).unwrap();
-            let mut monitor = crate::IssueMonitorState::with_prefs(Default::default(), scenario);
+            let mut monitor = test_monitor_with_prefs(Default::default(), scenario);
             let failed_at = chrono::Utc::now();
             let failed_text = failed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             let source = gwt_github::ApiError::Network("renewal failed".to_string());
@@ -20698,10 +21445,10 @@ exit 1
             } else {
                 assert_eq!(failed.state, crate::IssueMonitorEffectState::Prepared);
             }
-            assert!(!monitor.claim_renewal_attempt_is_ready(failed, &failed_text));
+            assert!(!monitor.effect_attempt_is_ready(failed, &failed_text));
             let next = failed_at
                 + chrono::Duration::seconds(monitor.claim_heartbeat_interval_secs() as i64);
-            assert!(monitor.claim_renewal_attempt_is_ready(failed, &next.to_rfc3339()));
+            assert!(monitor.effect_attempt_is_ready(failed, &next.to_rfc3339()));
             let mut claim = healthy_claim.clone();
             claim.issue_number = 43;
             claim.claim_id = "claim-43".to_string();
@@ -20735,7 +21482,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -20805,7 +21552,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let now = "2026-09-22T00:00:00Z";
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             max_active: 1,
             ..crate::IssueMonitorConfig::default()
@@ -20872,10 +21619,8 @@ exit 1
             crate::MonitorInboxState::Queued
         );
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-        let mut restored = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            persisted.clone(),
-        );
+        let mut restored =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted.clone());
         assert_eq!(restored.active_issue_numbers(), vec![43]);
         // Candidate rows are refreshed by the next scan, not stored in prefs.
         restored.terminal_queue_push(&[42], "test", "2026-07-27T00:00:00Z");
@@ -20902,7 +21647,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -20972,7 +21717,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -21048,7 +21793,7 @@ exit 1
         ] {
             let temp = TempDir::new().expect("tempdir");
             let prefs_path = temp.path().join("issue-monitor.json");
-            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            let mut monitor = test_monitor(crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
             });
@@ -21156,7 +21901,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -21362,11 +22107,10 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed replay journal");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         let arm_outcome =
-            super::execute_issue_monitor_effect(&scope, &arm, true, "2026-07-27T00:00:00Z");
+            super::execute_issue_monitor_effect(&scope, &arm, true, true, "2026-07-27T00:00:00Z");
         assert!(matches!(
             arm_outcome,
             super::IssueMonitorEffectOutcome::AutoMerge(
@@ -21393,8 +22137,13 @@ exit 1
                 ..
             } if compensates_effect_id == &arm.effect_id
         ));
-        let disarm_outcome =
-            super::execute_issue_monitor_effect(&scope, &disarm, true, "2026-07-27T00:00:01Z");
+        let disarm_outcome = super::execute_issue_monitor_effect(
+            &scope,
+            &disarm,
+            true,
+            true,
+            "2026-07-27T00:00:01Z",
+        );
         assert!(
             disarm_marker.exists(),
             "compensation must disable auto-merge"
@@ -21441,8 +22190,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(!commit_effect_result_for_test(
             &prefs_path,
@@ -21511,8 +22259,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(commit_effect_result_for_test(
             &prefs_path,
@@ -21575,8 +22322,7 @@ exit 1
         };
         let prefs = scheduled_issue_monitor_prefs(prefs, &[42]);
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(!commit_effect_result_for_test(
             &prefs_path,
@@ -21653,8 +22399,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
 
         assert!(commit_effect_result_for_test(
             &prefs_path,
@@ -21695,7 +22440,7 @@ exit 1
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed newer disk migration");
-        let monitor = crate::IssueMonitorState::with_prefs(
+        let monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(&scope.project_root),
         );
@@ -21730,7 +22475,7 @@ exit 1
         let scope = sample_scope(&temp);
         let prefs_path = temp.path().join("issue-monitor-prefs.json");
 
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         monitor.record_candidate(sample_closed_issue_monitor_issue(42));
         monitor.record_merged(42); // a scan-driven transition that must survive restart
         assert!(!prefs_path.exists(), "prefs not written before the scan");
@@ -21759,7 +22504,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed launched prefs");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
                 ..crate::IssueMonitorConfig::default()
@@ -21803,8 +22548,7 @@ exit 1
             }],
             ..crate::IssueMonitorPrefs::default()
         };
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         monitor.record_candidate(sample_issue_monitor_issue(42));
         monitor.record_attempt(42);
         let observe = |at: &str| crate::IssueMonitorWindowSnapshot {
@@ -21831,7 +22575,7 @@ exit 1
             scanned,
             epoch
         ));
-        let mut restarted = crate::IssueMonitorState::with_prefs(
+        let mut restarted = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&path).unwrap(),
         );
@@ -21853,7 +22597,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor-prefs.json");
 
-        let mut recovery = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut recovery = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -21873,7 +22617,7 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &recovery.prefs())
             .expect("persist successful requeue");
 
-        let mut stale_daemon = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut stale_daemon = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -21889,7 +22633,7 @@ exit 1
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut stale_daemon);
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted prefs");
         let mut restarted =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
 
         assert!(
             restarted
@@ -21914,7 +22658,7 @@ exit 1
         // `enabled=false` / empty merged_issues / empty autonomous records on a
         // transient panic — losing completion and re-launching finished work. The
         // fallback preserves the prior state and only records the scan error.
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
             ..crate::IssueMonitorConfig::default()
         });
@@ -21962,7 +22706,7 @@ exit 1
         on_disk.set_launch_profile_pool(vec![codex, sample_issue_monitor_profile()]);
         crate::save_issue_monitor_prefs(&prefs_path, &on_disk).expect("seed disk");
 
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         monitor.record_candidate(sample_closed_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert!(monitor.prefs().launch_profile_pool().is_empty());
@@ -22016,7 +22760,7 @@ exit 1
 
         // The daemon's in-memory monitor has NO launch_profile (stale startup)
         // but has a daemon-owned merge completion to persist.
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = test_monitor(crate::IssueMonitorConfig::default());
         monitor.record_candidate(sample_closed_issue_monitor_issue(42));
         monitor.record_merged(42);
         assert!(
@@ -22089,7 +22833,7 @@ exit 1
             },
         )
         .expect("seed latest disk state");
-        let mut daemon = crate::IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
@@ -22143,7 +22887,7 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &stale_prefs)
             .expect("seed stale daemon prefs");
         let mut stale_monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
         crate::scan_issue_monitor_candidates(
             &mut stale_monitor,
             &[
@@ -22316,7 +23060,7 @@ exit 1
             },
         )
         .expect("seed newer disk state");
-        let monitor = crate::IssueMonitorState::with_prefs(
+        let monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 legacy_git_launch_failure_migration_version: 0,
@@ -22363,7 +23107,7 @@ exit 1
         let stale_prefs = legacy_failed_prefs(temp.path());
         crate::save_issue_monitor_prefs(&prefs_path, &stale_prefs).expect("seed legacy prefs");
         let stale_monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
         let fresh_failure = legacy_git_failure(temp.path());
 
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
@@ -22443,7 +23187,7 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed prefs");
         let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
-        let mut monitor = crate::IssueMonitorState::with_prefs(
+        let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs::default(),
         );
@@ -22486,7 +23230,7 @@ exit 1
             },
         )
         .expect("seed canonical ON");
-        let mut stale_local = crate::IssueMonitorState::with_prefs(
+        let mut stale_local = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: false,
@@ -22559,7 +23303,7 @@ exit 1
             },
         )
         .expect("seed canonical ON");
-        let mut stale_local = crate::IssueMonitorState::with_prefs(
+        let mut stale_local = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: false,
@@ -22611,8 +23355,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), initial);
         let mut pending = super::PendingIssueMonitorAuthorityControls::after_failure(
             IssueMonitorControl::Enabled(false),
         );
@@ -22689,8 +23432,7 @@ exit 1
             ..crate::IssueMonitorPrefs::default()
         };
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
-        let mut monitor =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
         let mut deferred = Some(super::CompletedIssueMonitorEffect {
             effect: arm,
             outcome: super::IssueMonitorEffectOutcome::AutoMerge(
@@ -23460,7 +24202,7 @@ exit 1
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed newer disk migration");
-        let mut stale = crate::IssueMonitorState::with_prefs(
+        let mut stale = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(temp.path()),
         );
@@ -23485,7 +24227,7 @@ exit 1
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
             .expect("seed newer disk migration");
-        let mut daemon = crate::IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             legacy_failed_prefs(temp.path()),
         );
@@ -23517,8 +24259,7 @@ exit 1
             record.issue_number == 100 && record.phase == crate::AutonomousPhase::NeedsHuman
         }));
 
-        let mut restored =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         crate::scan_issue_monitor_candidates(
             &mut restored,
             &[sample_issue_monitor_issue(100)],
@@ -23543,8 +24284,7 @@ exit 1
             message: "local windowed failure".to_string(),
             window_id: Some("window-100".to_string()),
         });
-        let mut daemon =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), local);
+        let mut daemon = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), local);
 
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
 
@@ -23569,7 +24309,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         fs::write(&prefs_path, b"{").expect("seed malformed prefs");
-        let mut daemon = crate::IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -23609,7 +24349,7 @@ exit 1
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         fs::write(&prefs_path, b"{").expect("seed malformed prefs");
-        let mut daemon = crate::IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs::recovery_default(),
         );
@@ -23680,7 +24420,7 @@ exit 1
             },
         )
         .expect("seed newer NeedsHuman migration");
-        let mut daemon = crate::IssueMonitorState::with_prefs(
+        let mut daemon = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
@@ -23715,8 +24455,7 @@ exit 1
         assert_eq!(persisted.failed_issues, vec![failure]);
         assert_eq!(persisted.autonomous_records, vec![needs_human]);
 
-        let mut restored =
-            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         crate::scan_issue_monitor_candidates(
             &mut restored,
             &[sample_issue_monitor_issue(100)],
@@ -23738,7 +24477,7 @@ exit 1
         crate::save_issue_monitor_prefs(&equal_path, &crate::IssueMonitorPrefs::default())
             .expect("seed equal marker");
         let new_failure = legacy_git_failure(temp.path());
-        let mut equal_monitor = crate::IssueMonitorState::with_prefs(
+        let mut equal_monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 failed_issues: vec![crate::IssueMonitorFailedIssue {
@@ -23759,7 +24498,7 @@ exit 1
         let future_path = temp.path().join("future.json");
         crate::save_issue_monitor_prefs(&future_path, &crate::IssueMonitorPrefs::default())
             .expect("seed older disk marker");
-        let mut future_monitor = crate::IssueMonitorState::with_prefs(
+        let mut future_monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 legacy_git_launch_failure_migration_version:
@@ -23801,7 +24540,7 @@ exit 1
         };
         crate::save_issue_monitor_prefs(&prefs_path, &disk)
             .expect("seed equal-marker disk failures");
-        let mut stale = crate::IssueMonitorState::with_prefs(
+        let mut stale = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs::default(),
         );
@@ -23824,7 +24563,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let mut stale = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut stale = test_monitor(crate::IssueMonitorConfig::default());
         stale.record_candidate(sample_issue_monitor_issue(42));
         stale.complete_active_launch(42, "tab-1::duplicate");
         let mut canonical = stale.clone();
@@ -23868,7 +24607,7 @@ exit 1
             },
         )
         .expect("seed unrelated disk failure");
-        let mut launched = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut launched = test_monitor(crate::IssueMonitorConfig::default());
         super::apply_issue_monitor_control_with_disk_migration(
             &unrelated_path,
             &mut launched,
@@ -23903,7 +24642,7 @@ exit 1
             },
         )
         .expect("seed same-Issue disk failure");
-        let mut same_issue = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut same_issue = test_monitor(crate::IssueMonitorConfig::default());
         super::apply_issue_monitor_control_with_disk_migration(
             &same_issue_path,
             &mut same_issue,
@@ -23931,7 +24670,7 @@ exit 1
             },
         )
         .expect("seed disk launch");
-        let mut failed = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut failed = test_monitor(crate::IssueMonitorConfig::default());
         super::apply_issue_monitor_control_with_disk_migration(
             &failure_wins_path,
             &mut failed,
@@ -24053,7 +24792,7 @@ exit 1
 
         for (case, mut monitor, control) in [
             {
-                let mut seeded = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut seeded = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -24068,10 +24807,7 @@ exit 1
                 prefs.effect_authority_epoch = u64::MAX;
                 (
                     "agent_failed",
-                    crate::IssueMonitorState::with_prefs(
-                        crate::IssueMonitorConfig::default(),
-                        prefs,
-                    ),
+                    test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs),
                     IssueMonitorControl::AgentFailed {
                         issue_number: Some(42),
                         window_id: "tab-1::agent-max".to_string(),
@@ -24082,7 +24818,7 @@ exit 1
                 )
             },
             {
-                let mut seeded = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                let mut seeded = test_monitor(crate::IssueMonitorConfig {
                     enabled: true,
                     ..crate::IssueMonitorConfig::default()
                 });
@@ -24107,10 +24843,7 @@ exit 1
                 prefs.effect_authority_epoch = u64::MAX;
                 (
                     "launch_failed",
-                    crate::IssueMonitorState::with_prefs(
-                        crate::IssueMonitorConfig::default(),
-                        prefs,
-                    ),
+                    test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs),
                     IssueMonitorControl::LaunchFailed {
                         retryable: true,
                         issue_number: 42,

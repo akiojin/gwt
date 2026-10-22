@@ -1,5 +1,4 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
-import { markdownContent, renderUiContent } from "/ui-content.js";
 import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
@@ -65,7 +64,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       // SPEC-3038 US-3: Close Guard confirm modal renderer.
-      import { renderWindowCloseConfirmModal } from "/window-close-confirm-modal.js";
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (and its
       // index-settings-panel / custom-agent-env-editor imports) moved to
       // /settings-surface.js.
@@ -573,7 +571,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
         for (const windowData of windows) {
-          const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
           appendRenderKeyPart(parts, windowData?.id || "");
           appendRenderKeyPart(parts, "preset");
@@ -605,25 +602,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC #3885 T-020: a start-time-only broadcast must reach the elapsed label.
           appendRenderKeyPart(parts, "runtime_started_at_ms");
           appendRenderKeyPart(parts, windowData?.runtime_started_at_ms ?? "");
-          appendRenderKeyPart(parts, "geometry");
-          appendRenderKeyPart(parts, "x");
-          appendRenderKeyPart(parts, geometry.x ?? 0);
-          appendRenderKeyPart(parts, "y");
-          appendRenderKeyPart(parts, geometry.y ?? 0);
-          appendRenderKeyPart(parts, "width");
-          appendRenderKeyPart(parts, geometry.width ?? 0);
-          appendRenderKeyPart(parts, "height");
-          appendRenderKeyPart(parts, geometry.height ?? 0);
-          appendRenderKeyPart(parts, "minimized");
-          appendRenderKeyPart(parts, Boolean(windowData?.minimized));
-          appendRenderKeyPart(parts, "maximized");
-          appendRenderKeyPart(parts, Boolean(windowData?.maximized));
-          appendRenderKeyPart(parts, "z_index");
-          appendRenderKeyPart(parts, windowData?.z_index ?? 0);
-          appendRenderKeyPart(parts, "tab_group_id");
-          appendRenderKeyPart(parts, windowData?.tab_group_id || "");
-          appendRenderKeyPart(parts, "tab_group_active");
-          appendRenderKeyPart(parts, Boolean(windowData?.tab_group_active));
           appendWindowPlacementRenderKey(parts, windowData);
         }
         return parts.join("");
@@ -651,8 +629,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function windowElementRenderKey(windowData) {
-        const geometry = windowData.geometry || {};
-        const tabGroupId = windowGroupId(windowData);
         const parts = [];
         appendRenderKeyPart(parts, "id");
         appendRenderKeyPart(parts, windowData.id || "");
@@ -686,59 +662,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         appendRenderKeyPart(parts, windowTitleTooltip(windowData));
         appendRenderKeyPart(parts, "role_badge");
         appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
-        appendRenderKeyPart(parts, "geometry");
-        appendRenderKeyPart(parts, "x");
-        appendRenderKeyPart(parts, geometry.x ?? "");
-        appendRenderKeyPart(parts, "y");
-        appendRenderKeyPart(parts, geometry.y ?? "");
-        appendRenderKeyPart(parts, "width");
-        appendRenderKeyPart(parts, geometry.width ?? "");
-        appendRenderKeyPart(parts, "height");
-        appendRenderKeyPart(parts, geometry.height ?? "");
-        appendRenderKeyPart(parts, "minimized");
-        appendRenderKeyPart(parts, Boolean(windowData.minimized));
-        appendRenderKeyPart(parts, "maximized");
-        appendRenderKeyPart(parts, Boolean(windowData.maximized));
-        appendRenderKeyPart(parts, "z_index");
-        appendRenderKeyPart(parts, windowData.z_index ?? "");
-        appendRenderKeyPart(parts, "tab_group_id");
-        appendRenderKeyPart(parts, windowData.tab_group_id || "");
-        appendRenderKeyPart(parts, "tab_group_active");
-        appendRenderKeyPart(parts, Boolean(windowData.tab_group_active));
         appendWindowPlacementRenderKey(parts, windowData);
-        appendRenderKeyPart(parts, "tabs");
-        for (const tab of activeWorkspace().windows || []) {
-          if (windowGroupId(tab) !== tabGroupId) {
-            continue;
-          }
-          appendRenderKeyPart(parts, "id");
-          appendRenderKeyPart(parts, tab.id || "");
-          appendRenderKeyPart(parts, "preset");
-          appendRenderKeyPart(parts, tab.preset || "");
-          appendRenderKeyPart(parts, "title");
-          appendRenderKeyPart(parts, tab.title || "");
-          appendRenderKeyPart(parts, "dynamic_title");
-          appendRenderKeyPart(parts, tab.dynamic_title || "");
-          appendRenderKeyPart(parts, "dynamic_title_detail");
-          appendRenderKeyPart(parts, tab.dynamic_title_detail || "");
-          appendRenderKeyPart(parts, "purpose_title");
-          appendRenderKeyPart(parts, tab.purpose_title || "");
-          appendRenderKeyPart(parts, "agent_id");
-          appendRenderKeyPart(parts, tab.agent_id || "");
-          appendRenderKeyPart(parts, "agent_name");
-          appendRenderKeyPart(parts, tab.agent_name || "");
-          appendRenderKeyPart(parts, "agent_color");
-          appendRenderKeyPart(parts, tab.agent_color || "");
-          appendRenderKeyPart(parts, "worktree_form");
-          appendRenderKeyPart(parts, windowWorktreeForm(tab));
-          appendRenderKeyPart(parts, "status");
-          appendRenderKeyPart(parts, tab.status || "");
-          appendRenderKeyPart(parts, "tab_group_id");
-          appendRenderKeyPart(parts, tab.tab_group_id || "");
-          appendRenderKeyPart(parts, "tab_group_active");
-          appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
-          appendWindowPlacementRenderKey(parts, tab);
-        }
         return parts.join("");
       }
 
@@ -1329,7 +1253,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
         resyncSocketSurfaces();
-        if (socketProjectKey) requestVisiblePmReports();
+        if (socketProjectKey) requestVisiblePmReports(true);
       }
 
       function closeSocketInputHandoff() {
@@ -1389,7 +1313,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
         syncRunningBranchCleanups();
-        requestVisiblePmReports();
+        requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
       }
 
@@ -1637,10 +1561,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         return windowMap.get(windowId) || null;
       }
 
-      function windowGroupId(windowData) {
-        return windowData?.tab_group_id || windowData?.id || "";
-      }
-
       function visibleWindowData(windowData) {
         if (isOffCanvasPlacement(windowData)) {
           return false;
@@ -1766,16 +1686,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function shouldShowRuntimeStatus(windowData) {
         return presetSurface(windowData?.preset) === "terminal";
-      }
-
-      function windowGeometryLabel(windowData) {
-        if (windowData.minimized) {
-          return "Minimized";
-        }
-        if (windowData.maximized) {
-          return "Maximized";
-        }
-        return "Normal";
       }
 
       // SPEC-3431 FR-020. The PM runs Claude like any other agent pane, so
@@ -2405,6 +2315,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function activateTerminalOnReveal(windowId) {
+        requestVisiblePmReports(true, windowId);
         const activation = runTerminalRevealActivation({
           schedulePendingOutput: () => terminalOutputBatcher.schedulePending(windowId),
           consumePendingRefresh: () =>
@@ -2590,24 +2501,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       function sendGeometry(windowId, cols, rows) {
         send(updateTerminalGridMessage(windowId, cols, rows));
       }
-
-      // Issue #3364 — a window's live DOM geometry (drag/resize write the
-      // inline style before any commit reaches the model).
-
-      // Issue #3364 — write a locally-committed geometry into the workspace
-      // model (the Fleet Minimap and every render key read the MODEL, not the
-      // DOM). Tab-group members share geometry server-side, so they are kept
-      // in step here too.
-
-      // Issue #3364 — the single definitive commit point for pointer
-      // gestures (drag drop, resize finish, force-reset finalization). The
-      // drag and resize paths previously diverged: only resize armed the
-      // local edit guard, and neither updated the model, so the drop position
-      // waited for the server echo (minimap frozen) and any backlogged stale
-      // broadcast snapped the window back. Committing here (a) arms the
-      // content-matched guard, (b) optimistically syncs the model and
-      // re-renders the Fleet Minimap immediately, and (c) sends the geometry
-      // as an unconditional user placement.
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
       // Aggregates `data-agent-state` across all open windows and pushes the
@@ -2991,19 +2884,17 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function updateWindowKillSwitchControls(element, windowData, runtimeState) {
         const restartButton = element.querySelector("[data-action='restart']");
-        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
         const openIssueButton = element.querySelector("[data-action='open-issue']");
-        if (!restartButton || !minimizeToIssueButton || !openIssueButton) {
+        if (!restartButton || !openIssueButton) {
           return;
         }
         // SPEC #3885 FR-015: the Issue controls exist exactly when the window is
         // the canvas face of an Issue — the same condition that gives it an
         // Issue header. FR-013's bare terminal shows neither.
         const isIssueWindow = Boolean(issueWindowHeaderModelFor(windowData));
-        minimizeToIssueButton.hidden = !isIssueWindow;
         openIssueButton.hidden = !isIssueWindow;
         const isAgentWindow = shouldShowRuntimeStatus(windowData);
-        if (!isAgentWindow) {
+        if (!isAgentWindow || windowData.is_pm || windowData.preset === "shell") {
           restartButton.hidden = true;
           return;
         }
@@ -3130,56 +3021,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
       // tab x) confirms through one modal regardless of agent state
       // (user-confirmed decision, 2026-06-10).
-      let windowCloseConfirmState = { open: false, windowId: null };
-
-      function renderWindowCloseConfirm() {
-        const modalEl = document.getElementById("window-close-confirm-modal");
-        const dialogEl = modalEl?.querySelector(".window-close-confirm-shell");
-        if (!modalEl || !dialogEl) return;
-        renderWindowCloseConfirmModal({
-          modalEl,
-          dialogEl,
-          state: windowCloseConfirmState,
-          createNode,
-          onCancel: () => closeWindowCloseConfirm(),
-          onConfirm: () => {
-            const id = windowCloseConfirmState.windowId;
-            closeWindowCloseConfirm();
-            if (id) send({ kind: "close_window", id });
-          },
-        });
-      }
-
-      function closeWindowCloseConfirm() {
-        windowCloseConfirmState = { open: false, windowId: null };
-        renderWindowCloseConfirm();
-      }
-
-      function requestCloseWindow(windowId) {
-        const windowData = workspaceWindowById(windowId);
-        if (!windowData) {
-          // The window already left the workspace state; closing is pure
-          // housekeeping and needs no confirmation.
-          send({ kind: "close_window", id: windowId });
-          return;
-        }
-        const isAgentWindow = shouldShowRuntimeStatus(windowData);
-        const runtimeState = runtimeStateForWindow(windowData);
-        windowCloseConfirmState = {
-          open: true,
-          windowId,
-          windowTitle: windowDisplayTitle(windowData),
-          agentLabel: isAgentWindow
-            ? agentRoleLabel(windowData)
-            : presetRoleLabel(windowData.preset),
-          runtimeLabel: isAgentWindow ? windowRuntimeLabel(runtimeState) : "",
-          running: isAgentWindow && runtimeState === "running",
-          // SPEC-3431 FR-022: closing the PM means "stop it until next open".
-          isPm: Boolean(windowData.is_pm),
-        };
-        renderWindowCloseConfirm();
-      }
-
       // SPEC-2356 Anshin Addendum (FR-042): STOP ALL halts every live agent
       // runtime, leaving windows on the canvas. Count the live agent windows so
       // the confirm is specific, and no-op when nothing is running.
@@ -3591,7 +3432,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         // SPEC-2008 Phase 26.A / FR-057 (regression fix, Issue #2832): the
-        // visibility predicate above only checks `.hidden` / `.minimized`.
+        // The visibility predicate above checks the current mounted layout.
         // It does not catch the case where the element is structurally
         // visible but the parent has not yet been laid out (e.g. a freshly
         // appended workspace window whose CSS width/height has not
@@ -3860,28 +3701,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
       });
 
-      // SPEC-3671 FR-010: where a Windowized Issue preview lands. The window keeps
-      // its own persisted geometry when it has one; otherwise it opens inside the
-      // current view like any freshly placed window.
-      function issuePreviewWindowizeGeometry(windowData) {
-        const geometry = windowData?.geometry;
-        if (geometry && Number.isFinite(Number(geometry.width)) && Number(geometry.width) > 0) {
-          return {
-            x: Number(geometry.x) || 0,
-            y: Number(geometry.y) || 0,
-            width: Number(geometry.width) || 1280,
-            height: Number(geometry.height) || 800,
-          };
-        }
-        const bounds = visibleBounds() || { x: 0, y: 0, width: 1280, height: 800 };
-        return {
-          x: (Number(bounds.x) || 0) + 48,
-          y: (Number(bounds.y) || 0) + 48,
-          width: 1280,
-          height: 800,
-        };
-      }
-
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
       // surface (knowledge bridge state map, semantic search coalescing,
       // Kanban rendering, Kanban Drawer, Knowledge window mount, and the
@@ -3917,7 +3736,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
         sendKnowledgeSemanticSearchNow,
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
         isKnowledgeWindowVisible: (id) => !document.hidden &&
@@ -3945,7 +3763,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Windowize keeps the existing placement transport and opens the live Agents view.
         windowizeIssuePreviewWindow: (id) => {
           const windowData = workspaceWindowById(id);
-          send(undockAgentWindowMessage(id, issuePreviewWindowizeGeometry(windowData)));
+          send(undockAgentWindowMessage(id));
           requestWindowFrame(id);
         },
         // Issue #3884: the Issue row status row (agent name / state / last
@@ -4023,7 +3841,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
         },
         createNode,
-        createKnowledgeMarkdownBody,
         windowMap,
         focusWindowLocally,
         // SPEC #3206 — board-mention notices render through the shared alerts
@@ -4147,10 +3964,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (isStrongContinueWorkSuccess(exact)) {
           scheduleKnowledgeRelatedWorkRefresh(true);
         }
-      }
-
-      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
-        return renderUiContent(document, markdownContent(section), className);
       }
 
       // SPEC-2359 US-42 — Workspace Resume Picker controller. The
@@ -4289,6 +4102,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestWorkAdvisory,
       });
 
+      const launchWizardStateModel = createUiStateStore(null);
+      launchWizardStateModel.subscribe(state => state, state => {
+        if (state) applyLaunchWizardStateEvent(state);
+      });
+
       const launchWizardOpenErrorModel = createUiStateStore(null);
       launchWizardOpenErrorModel.subscribe(error => error, error => {
         if (error) applyLaunchWizardOpenErrorEvent(error);
@@ -4356,7 +4174,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         createTerminalRuntime: (id, terminalRoot) =>
           createTerminalRuntime(id, terminalRoot),
         send,
-        visibleBounds,
         windowDisplayTitle,
         windowRoleBadgeLabel,
         onLaunchAgent: ({ boardId, laneId }) => {
@@ -4423,7 +4240,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         windowDisplayTitle,
         windowTitleTooltip,
         windowRoleBadgeLabel,
-        windowGeometryLabel,
         shouldShowRuntimeStatus,
         visibleWindowData,
         presetSurface,
@@ -4458,14 +4274,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function runIssueWindowHeaderAction(action, windowData) {
         const issueNumber = Number(windowData?.linked_issue_number);
-        if (action === "return-to-list") {
-          // FR-012: the inverse of Windowize. The window already carries its Issue,
-          // so the frontend only names the window it wants folded back into the row;
-          // the shared terminal runtime is reparented into the row's status row by
-          // the same path the Issue Monitor auto-launch already uses.
-          send({ kind: "dock_agent_window_to_issue", id: windowData.id });
-          return;
-        }
         if (action === "open-issue" && Number.isFinite(issueNumber)) {
           const preset = "issue";
           const windowId = focusOrSpawnPreset(preset);
@@ -4485,9 +4293,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // SPEC #3885 FR-015: the titlebar's Issue controls appear on exactly the
         // windows that carry the header, so they follow placement changes
         // (Windowize / return to list) and not just runtime status events.
-        const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
         const openIssueButton = element.querySelector("[data-action='open-issue']");
-        if (minimizeToIssueButton) minimizeToIssueButton.hidden = !model;
         if (openIssueButton) openIssueButton.hidden = !model;
         const existing = body.querySelector(".issue-window-header");
         // The terminal fills the body absolutely; the class tells the stylesheet to
@@ -4526,7 +4332,12 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       const pmChatViews = new Map();
-      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      subscribePmWindowState(state => state.resyncRequest, recovery => {
+        if (!recovery) return;
+        const request = requestPmReports(recovery.windowId);
+        if (request) send(request);
+      });
       const renderedTerminalPackets = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
@@ -4584,7 +4395,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports();
+            if (!visible) requestVisiblePmReports(true);
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -4600,12 +4411,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestVisiblePmReports();
       }
 
-      function requestVisiblePmReports() {
+      function requestVisiblePmReports(resync = false, onlyWindowId = null) {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
+          if (onlyWindowId !== null && windowData.id !== onlyWindowId) continue;
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_reports", id: windowData.id });
+            const request = requestPmReports(windowData.id, resync);
+            if (request) send(request);
           }
         }
       }
@@ -4836,9 +4649,7 @@ import { createUiStateStore } from "/ui-state-store.js";
               </div>
               <div class="window-actions">
                 <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
-                <button class="icon-button" data-action="minimize-to-issue" aria-label="Return to Issue list" title="Return to Issue list" hidden>▁</button>
                 <button class="icon-button" data-action="open-issue" aria-label="Open Issue" title="Open Issue" hidden>⧉</button>
-                <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
             <div class="window-body"></div>
@@ -4847,10 +4658,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           windowMap.set(windowData.id, element);
 
           const titlebar = element.querySelector(".titlebar");
-          const closeButton = element.querySelector("[data-action='close']");
 
           const restartButton = element.querySelector("[data-action='restart']");
-          const minimizeToIssueButton = element.querySelector("[data-action='minimize-to-issue']");
           const openIssueButton = element.querySelector("[data-action='open-issue']");
 
           // SPEC-2356 Anshin Addendum (FR-044): RESTART relaunches the same
@@ -4861,32 +4670,18 @@ import { createUiStateStore } from "/ui-state-store.js";
           // per render from the runtime state by the status-apply path.
           restartButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            send({ kind: "restart_window", id: windowData.id });
+            const current = workspaceWindowById(windowData.id);
+            if (current && !current.is_pm && current.preset !== "shell") {
+              send({ kind: "restart_window", id: windowData.id });
+            }
           });
 
-          // SPEC #3885 FR-015: the freed slot carries the Issue controls —
-          // minimize folds the window back into its Issue row (the FR-012 path)
-          // and the popup opens the Issue this agent works on. Both read the
-          // live window so a window that gains its Issue after mount still acts
-          // on the current link.
-          minimizeToIssueButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            runIssueWindowHeaderAction(
-              "return-to-list",
-              workspaceWindowById(windowData.id) || windowData,
-            );
-          });
           openIssueButton.addEventListener("click", (event) => {
             event.stopPropagation();
             runIssueWindowHeaderAction(
               "open-issue",
               workspaceWindowById(windowData.id) || windowData,
             );
-          });
-
-          closeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            requestCloseWindow(windowData.id);
           });
 
           titlebar.addEventListener("pointerdown", (event) => {
@@ -5626,7 +5421,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             agentKanbanPendingPlacement.clear();
-            applyLaunchWizardStateEvent(event);
+            launchWizardStateModel.update(() => ({ wizard: event.wizard }));
             break;
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan
@@ -6112,10 +5907,12 @@ import { createUiStateStore } from "/ui-state-store.js";
           if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
           else if (socketProjectKey) connectSocket(true);
         }
+        requestVisiblePmReports(true);
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
       });
+      window.addEventListener("pageshow", () => requestVisiblePmReports(true));
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
           focusOrSpawnPreset(button.dataset.preset);

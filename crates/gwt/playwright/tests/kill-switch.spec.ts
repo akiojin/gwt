@@ -74,10 +74,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(win).toBeAttached({ timeout: 10_000 });
 
     await expect(win.locator('.titlebar [data-action="stop"]')).toHaveCount(0);
-    await expect(win.locator('.titlebar [data-action="close"]')).toBeAttached();
+    await expect(win.locator('.titlebar [data-action="close"]')).toHaveCount(0);
     await expect(win.locator('.titlebar [data-action="restart"]')).toHaveJSProperty("hidden", true);
     // A session with no Issue behind it (FR-013) shows neither Issue control.
-    await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toBeHidden();
+    await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toHaveCount(0);
     await expect(win.locator('.titlebar [data-action="open-issue"]')).toBeHidden();
     const sent = await page.evaluate(() => window.__sentKinds);
     expect(sent).not.toContain("stop_window");

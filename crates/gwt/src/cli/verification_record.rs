@@ -3277,6 +3277,16 @@ fn child_environment_contract() -> Vec<(String, Option<String>)> {
         // FR-008, Issue #3850): a `cargo test` child that inherits it spends
         // the real budget from every fixture-free test.
         (LIVE_GITHUB_OPT_IN_ENV.to_string(), None),
+        // Launch ownership belongs to the caller, not the command's fixtures.
+        // Legacy markers otherwise misclassify manual sessions (Issue #4878).
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+            None,
+        ),
+        (
+            crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+            None,
+        ),
     ];
     // Share the test defaults with both inherited and daemon-hosted children.
     // Terminal suppression alone does not disable credential helpers or GCM.
@@ -9600,7 +9610,8 @@ fn default_integration_test_builds_a_guarded_binary() {
     /// SPEC #4093 AC-11 (Issue #3850): the live GitHub opt-in set in the
     /// operator's shell must not reach the `cargo test` child, whose fixtures
     /// rely on the gh guard failing closed. The child re-enters this test
-    /// binary and checks its own environment.
+    /// binary and checks its own environment. Issue #4878: autonomous launch
+    /// markers must not misclassify a manual fixture in that child either.
     #[test]
     fn verify_run_strips_live_gh_opt_in_from_test_child_and_warns_once() {
         const CHILD_PROBE: &str = "GWT_VERIFY_LIVE_GH_CHILD_PROBE";
@@ -9613,6 +9624,10 @@ fn default_integration_test_builds_a_guarded_binary() {
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
             assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("never"));
+            for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+                assert!(std::env::var_os(key).is_none(), "inherited {key}");
+            }
+            assert!(autonomous_confirmation_refusal(None, "confirmed").is_none());
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9626,11 +9641,18 @@ fn default_integration_test_builds_a_guarded_binary() {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
         let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(
+            std::env::var("GWT_AUTONOMOUS_EXECUTION").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(std::env::var("GWT_AUTONOMOUS_ISSUE").as_deref(), Ok("4878"));
         assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
@@ -9654,6 +9676,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _parameters = ScopedEnvVar::unset("GIT_CONFIG_PARAMETERS");
+        let _autonomous = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _issue = ScopedEnvVar::set("GWT_AUTONOMOUS_ISSUE", "4878");
         assert_eq!(
             child_environment_contract()
                 .iter()
@@ -9661,6 +9685,8 @@ fn default_integration_test_builds_a_guarded_binary() {
                 .collect::<Vec<_>>(),
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
+                ("GWT_AUTONOMOUS_EXECUTION", None),
+                ("GWT_AUTONOMOUS_ISSUE", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
                 ("GIT_ASKPASS", Some("")),
                 ("GCM_INTERACTIVE", Some("never")),
@@ -9668,6 +9694,12 @@ fn default_integration_test_builds_a_guarded_binary() {
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
+        // The daemon gets a complete environment from the same contract.
+        for key in ["GWT_AUTONOMOUS_EXECUTION", "GWT_AUTONOMOUS_ISSUE"] {
+            assert!(!resolved_child_environment(false)
+                .iter()
+                .any(|(existing, _)| existing == key));
+        }
     }
 
     // #4182 AC-7: a test that fetches an unreachable remote makes Windows'
@@ -10383,6 +10415,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(diagnostics.contains("owner Issue #3755"));
 
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: IssueNumber(3755),
             title: "Flaky bounded sync".to_string(),
             body: String::new(),

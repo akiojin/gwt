@@ -824,21 +824,11 @@ fn audit_managed_git_hooks(
 
 /// The binary a config at `path` is expected to fall back to.
 ///
-/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
-/// config and the absolute install path into a machine-local one, so the
-/// auditor has to ask the same question. Auditing a tracked config against the
-/// running binary's absolute path reported "binary skew" forever, and startup
-/// self-heal answered it by rewriting the tracked file on every boot — the loop
-/// that kept every worktree permanently dirty.
-fn expected_hook_bin_for_config_path<'a>(
-    path: &Path,
-    configured: Option<&'a str>,
-) -> Option<&'a str> {
-    configured?;
-    if gwt_skills::managed_hook_config_is_git_tracked(path) {
-        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
-    }
-    configured
+/// Use the same destination policy as generation and trust registration.
+/// Otherwise a canonical shared-root config looks skewed against the writer's
+/// install pin, causing startup to self-heal it on every boot (#3567, #5270).
+fn expected_hook_bin_for_config_path(path: &Path, configured: Option<&str>) -> Option<String> {
+    configured.map(|bin| gwt_skills::settings_local::sanitize_hook_bin_for_config_path(path, bin))
 }
 
 fn audit_hook_json_config(
@@ -916,7 +906,7 @@ fn audit_hook_json_config(
                 );
             }
         }
-        if let Some(expected) = expected_hook_bin {
+        if let Some(expected) = expected_hook_bin.as_deref() {
             for command in commands {
                 if !is_managed_event_command(&command, event) {
                     continue;
@@ -953,7 +943,15 @@ fn audit_provider_hook_config(
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
-    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
+    // Provider generators keep explicit pins; only Claude/Codex JSON writers
+    // use the destination sanitizer. Preserve the provider audit contract.
+    let expected_hook_bin = expected_hook_bin.map(|bin| {
+        if gwt_skills::managed_hook_config_is_git_tracked(path) {
+            gwt_skills::CANONICAL_HOOK_BIN
+        } else {
+            bin
+        }
+    });
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -1323,6 +1321,18 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
 #[cfg(test)]
 mod tests {
     use super::hook_command_binary_fallback;
+
+    #[test]
+    fn shared_root_codex_health_expects_the_canonical_fallback() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let path = repo.path().join(".codex/hooks.json");
+        assert_eq!(
+            super::expected_hook_bin_for_config_path(&path, Some("/installed/gwtd")).as_deref(),
+            Some(gwt_skills::CANONICAL_HOOK_BIN)
+        );
+        assert!(super::expected_hook_bin_for_config_path(&path, None).is_none());
+    }
 
     #[test]
     fn posix_two_stage_runtime_fallback_decodes_embedded_apostrophes() {

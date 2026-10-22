@@ -254,6 +254,7 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -336,6 +337,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
 fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let item = IssueMonitorInboxItem {
         issue: IssueMonitorIssue {
+            author_login: None,
             number: 42,
             title: "Improve monitor".to_string(),
             labels: vec!["auto-improve".to_string()],
@@ -407,6 +409,7 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     ] {
         let item = IssueMonitorInboxItem {
             issue: IssueMonitorIssue {
+                author_login: None,
                 number: 42,
                 title: "Excluded issue".to_string(),
                 labels: vec!["hold".to_string()],

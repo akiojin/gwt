@@ -23,6 +23,7 @@ const SHA: &str = "abc123";
 
 fn auto_issue(number: u64) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number,
         title: format!("Issue {number}"),
         labels: vec!["auto-merge".to_string()],
@@ -52,7 +53,7 @@ fn pass_rollup() -> &'static str {
 }
 
 fn autonomous_monitor() -> IssueMonitorState {
-    IssueMonitorState::with_prefs(
+    test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             autonomous_mode: true,
@@ -317,7 +318,7 @@ fn gate_not_ready_until_verdict_returns() {
 fn default_off_never_enters_the_autonomous_loop() {
     // SPEC #3165 non-regression: with autonomous_mode OFF, an auto-merge-labelled
     // issue is NOT an autonomous candidate and no autonomous state is created.
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     let issue = auto_issue(42);
     let decision =
         monitor.prepare_autonomous_candidate(&issue, &verified(), "2026-06-29T00:00:00Z");
@@ -442,7 +443,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // human decision. It is requeued at the capped backoff, the PM is asked to
     // steer (warn notice + `steering` on the status view), and the row never
     // reads `needs_human`.
-    let mut escalated = IssueMonitorState::with_prefs(
+    let mut escalated = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             autonomous_mode: true,
@@ -534,6 +535,7 @@ mod idle_windows {
                         holder_host_dead: false,
                         dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
+                        exited_holder_session_id: None,
                     },
                 )
             })
@@ -541,7 +543,7 @@ mod idle_windows {
     }
 
     fn idle_monitor() -> IssueMonitorState {
-        IssueMonitorState::with_prefs(
+        test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 enabled: true,
@@ -844,4 +846,19 @@ mod idle_windows {
         assert!(monitor.next_launch_request(NOW).is_none());
         assert!(monitor.take_pending_idle_pane_closes().is_empty());
     }
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor(config: gwt::IssueMonitorConfig) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }
