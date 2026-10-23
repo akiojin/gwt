@@ -11781,6 +11781,10 @@ impl IssueMonitorState {
     /// Profile writers commit this compensation under the prefs lock, before
     /// publication can replay an unusable unowned delivery to a GUI.
     fn compensate_permission_blocked_launch_deliveries(&mut self) {
+        // These writers change only the manual pool; Auto's tiers are unchanged.
+        if self.launch_auto {
+            return;
+        }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let blocked = self
             .pending_launch_deliveries
