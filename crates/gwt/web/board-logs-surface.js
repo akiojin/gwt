@@ -61,6 +61,16 @@ export function createBoardLogsSurface({
       const maxBoardEntries = 1000;
       const logStateMap = new Map();
       const maxLogEntries = 1000;
+      // Retain only the latest plain-data receipt. Request settlement stays
+      // synchronous, including stale-scope reloads and equal-valued errors.
+      const logErrorModel = createUiStateStore(null);
+      logErrorModel.subscribe(error => error, error => {
+        if (!error || !finishLogRequest(error.windowId)) return;
+        const state = ensureLogState(error.windowId);
+        state.loading = false;
+        state.error = error.message;
+        renderLogs(error.windowId);
+      });
       let pendingBoardEntryFocusId = null;
       const boardModel = createUiStateStore(null);
       boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
@@ -1911,11 +1921,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_error": {
-            if (!finishLogRequest(event.id)) break;
-            const state = ensureLogState(event.id);
-            state.loading = false;
-            state.error = event.message;
-            renderLogs(event.id);
+            logErrorModel.update(() => ({ windowId: event.id, message: event.message }));
             break;
           }
           default:
