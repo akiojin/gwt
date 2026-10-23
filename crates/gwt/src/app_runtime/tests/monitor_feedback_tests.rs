@@ -523,11 +523,6 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Assert FIFO preparation independently of the native Git probe budget.
-    let _projection_timeout = ScopedEnvVar::set(
-        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
-        "10000",
-    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -549,7 +544,6 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     .expect("three canonical machine admission slots for FIFO prefetch");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read monitor prefs");
-    prefs.max_active_agents = 3;
     for issue_number in [3166, 3167] {
         prefs.queued_launch_session_strategies.insert(
             issue_number,
@@ -1078,12 +1072,10 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
     fixture.runtime.register_window("tab-1", &other.id);
-    gwt::try_mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
-        |prefs| {
-            prefs.max_active_agents = 3;
-            Ok(())
-        },
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
     )
     .expect("capacity for both issues");
     let (spawner, queued) = BlockingTaskSpawner::queued();
@@ -1160,6 +1152,12 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("capacity for both preclaim owners");
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "two-owner-preclaim",
@@ -1188,7 +1186,6 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
     fixture.runtime.register_window("tab-1", &foreign.id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        prefs.max_active_agents = 2;
         let delivery = prefs
             .pending_launch_deliveries
             .iter_mut()
@@ -1242,11 +1239,6 @@ fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Assert capacity renewal independently of the native Git probe budget.
-    let _projection_timeout = ScopedEnvVar::set(
-        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
-        "10000",
-    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1337,11 +1329,6 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Assert facts reuse independently of the native Git probe budget.
-    let _projection_timeout = ScopedEnvVar::set(
-        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
-        "10000",
-    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

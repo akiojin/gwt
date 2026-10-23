@@ -2468,7 +2468,9 @@ fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
     {
         return std::time::Duration::from_millis(timeout);
     }
-    std::time::Duration::from_secs(1)
+    // Functional launch tests share the fallback commit's allowance for native
+    // Git/fsync latency. Explicit budget tests keep the override above.
+    std::time::Duration::from_secs(if cfg!(test) { 10 } else { 1 })
 }
 
 /// Wall-clock budget for one GUI-thread local fallback commit of the Issue
