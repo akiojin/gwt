@@ -7,6 +7,8 @@
 //! skill state, so a plain-Issue `$gwt-fix-issue` session that never called
 //! `build.start` is covered by the same lifecycle as `$gwt-build-spec`
 //! (FR-034).
+//! A current Monitor wait permits idle without settling the active execution;
+//! the admission watchdog can then resume the same Session.
 //!
 //! Existing Stop contracts hold: `stop_hook_active` short-circuits (one
 //! forced continuation per cycle), parse/IO errors and missing records fail
@@ -35,13 +37,17 @@ pub fn handle_with_input(
         // Malformed record fails open for hooks.
         Err(_) => return HookOutput::Silent,
     };
-    // P9a (T-122): a record edited outside the canonical operations must not
-    // release the gate — block with the repair path instead of trusting the
-    // edited status.
+    // P9a (T-122): invalid integrity must not release the gate. The loader
+    // also uses this result for missing/stale generation authority, so the
+    // observation alone cannot prove that a record was manually edited.
     if !execution_state::integrity_ok(&record) {
         let repair = execution_state::integrity_repair_guidance(record.status);
         return HookOutput::stop_block(format!(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}",
+            "Execution control record failed integrity validation in this Stop observation. \
+             Run JSON operation `execution.status` for the canonical diagnosis and follow its \
+             `available_recoveries` / `recovery_probes`. Only use a recovery advertised there. \
+             If `execution.repair` returns `execution_repair_not_corrupt`, current authority is not corrupt: \
+             re-run `execution.status` and recheck Stop. When status advertises `execution.repair`: {repair}",
         ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
@@ -54,6 +60,9 @@ pub fn handle_with_input(
         return HookOutput::Silent;
     }
     if record.status != ExecutionControlStatus::Active {
+        return HookOutput::Silent;
+    }
+    if active_monitor_wait(&resolved, Some(current), Some(record.owner_number)) {
         return HookOutput::Silent;
     }
     // SPEC #3248 FR-243: a trusted No Action is a successful non-delivery
@@ -99,6 +108,62 @@ pub fn handle_with_input(
     ))
 }
 
+/// Temporarily release producing Stop gates for the owning Session's declared
+/// wait. Only a definitely absent daemon permits the durable prefs fallback;
+/// an unreadable/live projection must never revive a stale declaration.
+pub(super) fn active_monitor_wait(
+    worktree: &Path,
+    current_session: Option<&str>,
+    expected_owner: Option<u64>,
+) -> bool {
+    let Some(session) = current_session.map(str::trim).filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let Ok(Some(record)) = execution_state::load(&resolved) else {
+        return false;
+    };
+    if record.status != ExecutionControlStatus::Active
+        || record.primary_session_id != session
+        || expected_owner.is_some_and(|owner| owner != record.owner_number)
+        || !execution_state::integrity_ok(&record)
+    {
+        return false;
+    }
+    let owner = record.owner_number;
+    let now = chrono::Utc::now();
+    match crate::daemon_publisher::read_issue_monitor_status(&resolved) {
+        Ok(Some(value)) => {
+            let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(value) else {
+                return false;
+            };
+            status.active_launches.contains(&owner)
+                && status.inbox.iter().any(|row| {
+                    row.issue_number == owner
+                        && row.waiting.as_ref().is_some_and(|wait| {
+                            wait.in_force
+                                && wait.invalidated.is_none()
+                                && chrono::DateTime::parse_from_rfc3339(&wait.expires_at)
+                                    .is_ok_and(|expires| expires > now)
+                        })
+                })
+        }
+        Ok(None) => {
+            let path = crate::issue_monitor_prefs_path_for_repo_path(&resolved);
+            let Ok(prefs) = crate::load_issue_monitor_prefs(&path) else {
+                return false;
+            };
+            let monitor =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+            monitor.active_issue_numbers().contains(&owner)
+                && monitor.autonomous_wait(owner).is_some_and(|wait| {
+                    crate::issue_monitor::wait_declaration_in_force(wait, &now.to_rfc3339())
+                })
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +200,124 @@ mod tests {
         assert!(reason.contains("execution.complete"), "{reason}");
         assert!(reason.contains("execution.blocked"), "{reason}");
         assert!(reason.contains("build.complete"), "{reason}");
+    }
+
+    // SPEC #3590 AC-T2-1/2: waiting suspends every producing Stop path,
+    // including PR reminders, without settling any of their state.
+    #[test]
+    fn monitor_wait_preserves_stop_obligations_until_cleared_expired_or_invalidated() {
+        use crate::cli::action_obligation::{self, ObligationKind};
+        use gwt_core::skill_state::{self, SkillState};
+
+        let (_home_guard, _home, dir) = delivered_worktree();
+        let worktree = dir.path();
+        materialize_at_launch(
+            worktree,
+            ExecutionOwnerKind::Spec,
+            3590,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        skill_state::save(
+            worktree,
+            "build-spec",
+            &SkillState {
+                start_evidence: None,
+                active: true,
+                owner_spec: Some(3590),
+                started_at: chrono::Utc::now(),
+                phase: Some("verify".into()),
+                session_id: "sess-1".into(),
+            },
+        )
+        .unwrap();
+        for prompt in ["バグを修正して", "PR を作成して"] {
+            assert!(action_obligation::mark_from_prompt(worktree, "sess-1", prompt).unwrap());
+        }
+        assert_eq!(
+            action_obligation::open_kinds(worktree, "sess-1"),
+            vec![ObligationKind::Implementation, ObligationKind::Pr]
+        );
+
+        let check = |silent| {
+            let execution = execution_state::load(worktree).unwrap();
+            let build = skill_state::load(worktree, "build-spec").unwrap();
+            let obligations = action_obligation::load(worktree).unwrap();
+            for (name, output) in [
+                (
+                    "build",
+                    super::super::skill_build_spec_stop_check::handle_with_input(
+                        worktree,
+                        "{}",
+                        Some("sess-1"),
+                    ),
+                ),
+                (
+                    "execution",
+                    handle_with_input(worktree, "{}", Some("sess-1")),
+                ),
+                (
+                    "P11 / PR",
+                    super::super::action_obligation_stop_check::handle_with_input(
+                        worktree,
+                        "{}",
+                        Some("sess-1"),
+                    ),
+                ),
+            ] {
+                if silent {
+                    assert_eq!(output, HookOutput::Silent, "{name}");
+                } else {
+                    assert!(
+                        matches!(output, HookOutput::StopBlock { .. }),
+                        "{name}: {output:?}"
+                    );
+                }
+            }
+            assert_eq!(execution_state::load(worktree).unwrap(), execution);
+            assert_eq!(skill_state::load(worktree, "build-spec").unwrap(), build);
+            assert_eq!(action_obligation::load(worktree).unwrap(), obligations);
+        };
+        check(false);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.complete_active_launch(3590, "tab::sess-1");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree);
+        let now = chrono::Utc::now().to_rfc3339();
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(true);
+
+        // Isolate PR so an implementation obligation cannot mask a PR regression.
+        action_obligation::settle_kinds_best_effort(
+            worktree,
+            "sess-1",
+            &[ObligationKind::Implementation],
+            "verify.run acceptance fixture",
+        );
+        assert_eq!(
+            action_obligation::open_kinds(worktree, "sess-1"),
+            vec![ObligationKind::Pr]
+        );
+        check(true);
+        monitor.clear_autonomous_wait(3590, &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
+
+        // Advance the stored anchor instead of sleeping through the wait cap.
+        let expired = (chrono::Utc::now() - chrono::Duration::hours(4)).to_rfc3339();
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &expired);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
+
+        monitor.clear_autonomous_wait(3590, &now);
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(true);
+        monitor.invalidate_autonomous_wait(3590, "pm", "CI finished", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
     }
 
     // Settlement (completed or blocked) passes Stop.
@@ -256,6 +439,18 @@ mod tests {
             assert!(reason.contains("integrity validation"), "{reason}");
             assert!(reason.contains("execution.repair"), "{reason}");
             assert!(reason.contains("quarantines"), "{reason}");
+            assert!(reason.contains("execution.status"), "{reason}");
+            assert!(reason.contains("available_recoveries"), "{reason}");
+            assert!(reason.contains("recovery_probes"), "{reason}");
+            assert!(reason.contains("execution_repair_not_corrupt"), "{reason}");
+            assert!(
+                reason.contains("current authority is not corrupt"),
+                "{reason}"
+            );
+            assert!(
+                !reason.contains("edited outside the canonical operations"),
+                "{reason}"
+            );
             assert!(!reason.contains("Self-improvement"), "{reason}");
         }
     }

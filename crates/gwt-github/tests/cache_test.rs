@@ -8,7 +8,7 @@ use std::{
 };
 
 use gwt_github::{
-    body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    body::{SectionLocation, SectionsIndex, SpecBody, SpecMeta},
     cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
@@ -39,6 +39,7 @@ tasks=body\n\
 
 fn mk_snapshot(number: u64, body: String) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: format!("Spec {}", number),
         body,
@@ -47,6 +48,38 @@ fn mk_snapshot(number: u64, body: String) -> IssueSnapshot {
         updated_at: UpdatedAt::new("t1"),
         comments: Vec::new(),
     }
+}
+
+#[test]
+fn cache_revision_changes_only_with_persisted_content() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    assert_eq!(cache.revision().unwrap(), "");
+    let mut snapshot = mk_snapshot(42, "body".into());
+    cache.write_snapshot(&snapshot).unwrap();
+    let initial = cache.revision().unwrap();
+    assert!(!initial.is_empty());
+    cache.write_snapshot_with_receipt(&snapshot).unwrap();
+    assert_eq!(cache.revision().unwrap(), initial);
+    snapshot.body = "changed body".into();
+    let generation = cache.current_generation(snapshot.number).unwrap();
+    cache
+        .write_snapshot_if_generation(&snapshot, generation.as_ref())
+        .unwrap();
+    let changed = cache.revision().unwrap();
+    assert_ne!(changed, initial);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    let phase = cache.revision().unwrap();
+    assert_ne!(phase, changed);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
+    // The probe reads only the marker, even when a full entry is unreadable.
+    fs::remove_file(tmp.path().join("42/body.md")).unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
 }
 
 // RED-50: write_snapshot creates per-issue directory and files
@@ -104,6 +137,7 @@ fn red_53_meta_json_round_trips() {
     let cache = Cache::new(tmp.path().to_path_buf());
     let body = mk_body_with_spec_and_tasks_in_body("a", "b");
     let mut snapshot = mk_snapshot(99, body);
+    snapshot.author_login = Some("OriginalCreator".to_string());
     snapshot.updated_at = UpdatedAt::new("2026-04-08T12:34:56Z");
     snapshot.state = IssueState::Closed;
 
@@ -111,12 +145,25 @@ fn red_53_meta_json_round_trips() {
 
     let entry = cache.load_entry(IssueNumber(99)).unwrap();
     assert_eq!(entry.snapshot.number, IssueNumber(99));
+    assert_eq!(entry.snapshot.author_login, snapshot.author_login);
     assert_eq!(
         entry.snapshot.updated_at,
         UpdatedAt::new("2026-04-08T12:34:56Z")
     );
     assert_eq!(entry.snapshot.state, IssueState::Closed);
     assert_eq!(entry.snapshot.labels, vec!["gwt-spec", "phase/review"]);
+
+    let meta_path = tmp.path().join("99/meta.json");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("author_login");
+    fs::write(meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(cache
+        .load_entry(IssueNumber(99))
+        .unwrap()
+        .snapshot
+        .author_login
+        .is_none());
 }
 
 // RED-54: read_section returns the current cache for a body-resident section
@@ -217,6 +264,15 @@ fn validation_receipt_is_bound_to_the_snapshot_contents() {
         .renew_validation_receipt_if_current(&snapshot)
         .unwrap()
         .renewed());
+
+    let mut changed_author = snapshot.clone();
+    changed_author.author_login = Some("different-creator".into());
+    assert_eq!(
+        cache
+            .renew_validation_receipt_if_current(&changed_author)
+            .unwrap(),
+        ValidationReceiptRenewal::SnapshotMismatch
+    );
 
     let mut replacement = snapshot.clone();
     replacement.body = "concurrent replacement".to_string();
@@ -586,6 +642,7 @@ fn write_snapshot_prunes_stale_comment_files() {
     let cache = Cache::new(tmp.path().to_path_buf());
 
     let mk = |comment_ids: &[u64]| IssueSnapshot {
+        author_login: None,
         number: IssueNumber(7),
         title: "Spec 7".into(),
         body: mk_body_with_spec_and_tasks_in_body("s", "t"),
@@ -615,12 +672,6 @@ fn write_snapshot_prunes_stale_comment_files() {
         "v2 must prune the dropped 200.md"
     );
     assert!(comments_dir.join("300.md").exists());
-}
-
-// Keep Comment in use so the import is not a lint warning.
-#[allow(dead_code)]
-fn _ensure_comment_is_used(c: Comment) -> Comment {
-    c
 }
 
 // SPEC-2017 T-008: apply_phase_change rewrites the labels array on the cached
@@ -751,6 +802,7 @@ fn write_snapshot_falls_back_to_plain_when_sections_index_is_malformed() {
 Rest of the body is human prose, not a real SPEC.\n"
         .to_string();
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(123),
         title: "Plain Issue with SPEC-looking prose".into(),
         body: body.clone(),
@@ -829,6 +881,7 @@ fn load_entry_surfaces_plain_issue_with_empty_spec_body() {
 
     let body = "Just a plain bug report.\nNo gwt-spec markers here.\n".to_string();
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(456),
         title: "Plain bug".into(),
         body: body.clone(),

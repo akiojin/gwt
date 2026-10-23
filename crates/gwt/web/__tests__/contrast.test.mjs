@@ -8,7 +8,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const tokensPath = resolve(here, "../styles/tokens.css");
 
 const tokensCss = readFileSync(tokensPath, "utf8");
-const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const dark = extractTokens(tokensCss, "dark");
 const light = extractTokens(tokensCss, "light");
 
@@ -231,30 +230,11 @@ test("[light] active tint is visible on light surfaces", () => {
   }
 });
 
-// Issue #3104 — the active window tab must carry a theme-aware accent
-// (--color-state-active underline) rather than relying on a surface vs
-// surface-elevated background delta. On light surfaces #ffffff vs #f3f6f7 is a
-// ~3% luminance step (and elevated is the darker one, so the active tab even
-// reads as "recessed"), which makes the active tab in a tabbed agent-window
-// group nearly indistinguishable. Guard both the CSS contract and the accent
-// contrast so the regression is caught by unit tests, not only manual review.
-test("active window tab uses the --color-state-active accent (Issue #3104)", () => {
-  const bodies = windowTabActiveBodies(appCss);
-  assert.ok(bodies.length > 0, "no .window-tab.active rule found in app.css");
-  assert.ok(
-    bodies.some((b) => /var\(\s*--color-state-active\s*\)/.test(b)),
-    "the active window tab must use --color-state-active as an accent (underline) so it stays visible on light surfaces, not only a surface-elevated background delta",
-  );
-});
-
-// The accent underline is a UI component indicator, so WCAG 2.2 SC 1.4.11
-// (non-text contrast >= 3:1) applies against both the active tab background
-// (--color-surface-elevated) and the tab strip background (--color-surface),
-// in both themes.
+// Active-state indicators retain non-text contrast in both themes.
 for (const themeName of ["dark", "light"]) {
   const theme = themeName === "dark" ? dark : light;
   for (const bgToken of ["--color-surface", "--color-surface-elevated"]) {
-    test(`[${themeName}] WCAG SC 1.4.11 (3:1): active window tab accent on ${bgToken}`, () => {
+    test(`[${themeName}] WCAG SC 1.4.11 (3:1): active-state accent on ${bgToken}`, () => {
       const fg = theme["--color-state-active"];
       const bg = theme[bgToken];
       assert.ok(fg, `--color-state-active missing in ${themeName}`);
@@ -262,7 +242,7 @@ for (const themeName of ["dark", "light"]) {
       const ratio = contrastRatio(fg, bg);
       assert.ok(
         ratio >= LARGE_AA,
-        `active tab accent on ${bgToken}: ${ratio.toFixed(2)} < ${LARGE_AA} (fg=${fg}, bg=${bg})`,
+        `active-state accent on ${bgToken}: ${ratio.toFixed(2)} < ${LARGE_AA} (fg=${fg}, bg=${bg})`,
       );
     });
   }
@@ -341,27 +321,6 @@ test("token names are kebab-case CSS custom properties", () => {
     assert.match(name, /^--[a-z][a-z0-9-]*$/, `invalid token name: ${name}`);
   }
 });
-
-// Collect the bodies of every rule whose selector mentions `.window-tab.active`
-// (covers `.window-tab.active { ... }` and `.window-tab.active::after { ... }`).
-// `.window-tab:active` does not match because it carries `:active`, not
-// `.active`. These rules are flat (no nested braces), so first `{`/`}` after
-// each hit bounds the body.
-function windowTabActiveBodies(css) {
-  const bodies = [];
-  let from = 0;
-  while (true) {
-    const hit = css.indexOf(".window-tab.active", from);
-    if (hit < 0) break;
-    const open = css.indexOf("{", hit);
-    if (open < 0) break;
-    const close = css.indexOf("}", open + 1);
-    if (close < 0) break;
-    bodies.push(css.slice(open + 1, close));
-    from = close + 1;
-  }
-  return bodies;
-}
 
 function extractTokens(css, themeName) {
   const blockRegex = themeName === "dark"

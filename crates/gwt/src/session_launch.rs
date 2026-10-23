@@ -1,12 +1,356 @@
 //! Session launch preparation and persistence without a GUI dependency.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const DURABLE_LAUNCH_RECOVERY_DIR: &str = "execution-launch-recovery";
+
+/// Directory containing pending launch-recovery receipts.
+pub fn durable_launch_recovery_dir(sessions_dir: &Path) -> PathBuf {
+    sessions_dir.join(DURABLE_LAUNCH_RECOVERY_DIR)
+}
+
+/// Resolve an exact Session receipt after validating its path component.
+pub fn durable_launch_recovery_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
+}
+
+/// Whether an exact Session has a pending launch-recovery receipt.
+pub fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
+    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
+}
+
+/// Why a restored Session cannot be handed to the agent CLI as `--resume`
+/// (SPEC-3966 AC-4).
+///
+/// `None` means the Session does carry a usable handle. Every other answer is
+/// the reason the restore falls back to a brand-new conversation, so the
+/// fallback is never silent.
+pub fn resume_handle_unavailable_reason(session: &gwt_agent::Session) -> Option<&'static str> {
+    if session.exact_resume_session_id().is_some() {
+        return None;
+    }
+    match session.agent_session_id.as_deref().map(str::trim) {
+        None => Some(
+            "no agent_session_id was ever persisted for this Session \
+             (the SessionStart managed hook never reached persist_agent_session_id)",
+        ),
+        Some("") => Some("the persisted agent_session_id is empty"),
+        Some(_) => Some(
+            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
+        ),
+    }
+}
+
+/// Carry a restored launch's conversation identity onto the successor Session
+/// record (SPEC-3966 AC-5).
+///
+/// Without this the successor is written with no `agent_session_id`, so the
+/// *next* restore has nothing to resume from either and every restart leaves
+/// one more handle-less Session behind.
+pub fn launch_config_from_persisted_session(
+    session: &gwt_agent::Session,
+) -> gwt_agent::LaunchConfig {
+    let agent_id = session.agent_id.clone();
+    let pm_scratch = crate::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
+    let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+    builder = builder.working_dir(session.worktree_path.clone());
+    if !session.branch.is_empty() {
+        builder = builder.branch(session.branch.clone());
+    }
+    if let Some(model) = session.model.clone() {
+        builder = builder.model(model);
+    }
+    if let Some(level) = session.reasoning_level.clone() {
+        builder = builder.reasoning_level(level);
+    }
+    // FR-028 belongs to the PM role, including older Sessions whose saved
+    // skip_permissions field defaults to false.
+    if session.skip_permissions || pm_scratch.is_some() {
+        builder = builder.skip_permissions(true);
+    }
+    if session.fast_mode_enabled() {
+        builder = builder.fast_mode(true);
+    }
+    builder = builder.runtime_target(session.runtime_target);
+    if let Some(service) = session.docker_service.clone() {
+        builder = builder.docker_service(service);
+    }
+    builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
+    if let Some(shell) = session.windows_shell {
+        builder = builder.windows_shell(shell);
+    }
+    if let Some(linked) = session.linked_issue_number {
+        builder = builder.linked_issue_number(linked);
+    }
+    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
+    // originally stamped, so a restored or resumed monitor launch does not
+    // quietly become a human-driven one.
+    builder = builder.launch_route(session.launch_route);
+
+    // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
+    // any structured `Session` field, so rebuilding a config here used to drop
+    // it and restore the PM as a plain agent under no PM contract. Re-apply it
+    // from the same PM detection that already restores the scratch dir below —
+    // unconditionally, because a persisted `launch_args` that still records the
+    // prompt is not consulted by the builder and would otherwise lose it too.
+    if pm_scratch.is_some()
+        && crate::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
+    {
+        builder = builder.extra_arg(crate::pm_registry::PM_BOOTSTRAP_PROMPT);
+    }
+
+    if let Some(resume_id) = session.exact_resume_session_id() {
+        builder = builder
+            .session_mode(gwt_agent::SessionMode::Resume)
+            .resume_session_id(resume_id.to_string())
+            .predecessor_session_id(session.id.clone());
+    } else {
+        // SPEC-3966 AC-4: restoring without a resume handle silently started a
+        // brand-new conversation, which is how the resident PM lost its whole
+        // decision history on every gwt restart without anyone noticing. Say so
+        // instead, with the reason, so the next reader does not have to
+        // reverse-engineer it from an empty Session TOML.
+        tracing::warn!(
+            session_id = %session.id,
+            worktree = %session.worktree_path.display(),
+            agent = ?session.agent_id,
+            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
+            "restored Session has no resume handle; launching a new conversation instead of --resume"
+        );
+        builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+    }
+
+    let mut config = builder.build();
+    if !session.display_name.is_empty() {
+        config.display_name = session.display_name.clone();
+    }
+    if let Some(scratch) = pm_scratch {
+        config.env_vars.insert(
+            crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
+            scratch.to_string_lossy().into_owned(),
+        );
+        config.suppress_execution_control = true;
+    }
+    if session.review_dispatch {
+        // Restore the observation role without rematerializing its existing
+        // detached checkout or arming producing execution control.
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        config.suppress_execution_control = true;
+        config.is_ephemeral = true;
+        // The persisted branch can be the detached checkout's display fallback.
+        // Matching it would join a different review that shares that label.
+        config.branch = None;
+    }
+    config
+}
+
+#[cfg(test)]
+mod persisted_review_launch_tests {
+    use super::*;
+
+    #[test]
+    fn restored_review_retains_observation_contract_and_isolated_worktree() {
+        let mut session = gwt_agent::Session::new(
+            "/tmp/isolated-review-checkout",
+            "work",
+            gwt_agent::AgentId::Codex,
+        );
+        session.review_dispatch = true;
+        session.linked_issue_number = Some(5478);
+        session.agent_session_id = Some("review-provider-conversation".to_string());
+        let config = launch_config_from_persisted_session(&session);
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .map(String::as_str),
+            Some("1"),
+            "a restored reviewer must retain its read-only hook identity"
+        );
+        assert!(config.suppress_execution_control);
+        assert!(config.is_ephemeral);
+        assert!(
+            config.branch.is_none(),
+            "a detached review must not join another review via the shared fallback branch"
+        );
+        assert_eq!(config.working_dir.as_ref(), Some(&session.worktree_path));
+        assert!(config.ephemeral_base_ref.is_none());
+        assert_eq!(config.linked_issue_number, Some(5478));
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NamedIssueActivity {
+    PrCreated { number: u64 },
+    Completed,
+}
+
+const NAMED_ACTIVITY_PREFIX: &str = "<!-- gwt-agent-work ";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NamedIssueRecord {
+    name: String,
+    provider: String,
+    session_id: String,
+    phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+}
+
+fn named_record(
+    session: &gwt_agent::Session,
+    phase: &str,
+    pr_number: Option<u64>,
+) -> Option<NamedIssueRecord> {
+    if session.review_dispatch {
+        return None;
+    }
+    Some(NamedIssueRecord {
+        name: session.agent_name.as_deref()?.trim().to_string(),
+        provider: session.display_name.clone(),
+        session_id: session.id.clone(),
+        phase: phase.to_string(),
+        pr_number,
+    })
+    .filter(|record| !record.name.is_empty())
+}
+
+fn named_record_from_body(body: &str) -> Option<NamedIssueRecord> {
+    body.lines().rev().find_map(|line| {
+        let json = line
+            .strip_prefix(NAMED_ACTIVITY_PREFIX)?
+            .strip_suffix(" -->")?;
+        serde_json::from_str(json).ok()
+    })
+}
+
+fn record_named_comment<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    record: NamedIssueRecord,
+    narrative: &str,
+) -> Result<bool, gwt_github::ApiError> {
+    use gwt_github::{FetchResult, IssueNumber};
+    let Some(number) = session.linked_issue_number else {
+        return Ok(false);
+    };
+    let snapshot = match client.fetch(IssueNumber(number), None)? {
+        FetchResult::Updated(snapshot) => snapshot,
+        FetchResult::NotModified => {
+            return Err(gwt_github::ApiError::Unexpected(
+                "unconditional named Issue history fetch reported not modified".into(),
+            ))
+        }
+    };
+    if snapshot
+        .comments
+        .iter()
+        .filter_map(|comment| named_record_from_body(&comment.body))
+        .any(|existing| {
+            existing.name == record.name
+                && existing.phase == record.phase
+                && existing.pr_number == record.pr_number
+        })
+    {
+        return Ok(false);
+    }
+    let metadata = serde_json::to_string(&record).expect("named Issue metadata serializes");
+    client.create_comment(
+        IssueNumber(number),
+        &format!("{NAMED_ACTIVITY_PREFIX}{metadata} -->\n\n{narrative}\n"),
+    )?;
+    Ok(true)
+}
+
+/// Append a durable assignment after the named Session has successfully launched.
+/// Call from the launch worker, never from the GUI event loop.
+pub fn record_named_issue_assignment<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    previous_name: Option<&str>,
+) -> Result<bool, gwt_github::ApiError> {
+    let Some(record) = named_record(session, "assignment", None) else {
+        return Ok(false);
+    };
+    let previous_name = previous_name.map(str::trim).filter(|name| !name.is_empty());
+    if previous_name == Some(record.name.as_str()) {
+        return Ok(false);
+    }
+    let narrative = match previous_name {
+        Some(previous) => format!(
+            "{previous} から {} に引き継ぎ（{}）。",
+            record.name, record.provider
+        ),
+        None => format!("{}（{}）が担当を開始。", record.name, record.provider),
+    };
+    record_named_comment(client, session, record, &narrative)
+}
+
+/// Name the producing agent in the owner's append-only GitHub history.
+pub fn record_named_issue_activity<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    activity: NamedIssueActivity,
+) -> Result<bool, gwt_github::ApiError> {
+    let (phase, pr_number) = match activity {
+        NamedIssueActivity::PrCreated { number } => ("pr_created", Some(number)),
+        NamedIssueActivity::Completed => ("completed", None),
+    };
+    let Some(record) = named_record(session, phase, pr_number) else {
+        return Ok(false);
+    };
+    let narrative = match activity {
+        NamedIssueActivity::PrCreated { number } => format!(
+            "{} が対応し、PR #{number} を作成（{}）。",
+            record.name, record.provider
+        ),
+        NamedIssueActivity::Completed => {
+            format!("{} が対応を完了（{}）。", record.name, record.provider)
+        }
+    };
+    record_named_comment(client, session, record, &narrative)
+}
+
+/// Keep an immutable name/provider snapshot with the PR, independent of a live pane.
+pub fn with_named_pr_author(body: &str, session: Option<&gwt_agent::Session>) -> String {
+    let Some(record) = session.and_then(|session| named_record(session, "pr_author", None)) else {
+        return body.to_string();
+    };
+    append_named_pr_author(body, &record)
+}
+
+pub fn preserve_named_pr_author(body: &str, previous: &str) -> String {
+    let Some(record) =
+        named_record_from_body(previous).filter(|record| record.phase == "pr_author")
+    else {
+        return body.to_string();
+    };
+    append_named_pr_author(body, &record)
+}
+
+fn append_named_pr_author(body: &str, record: &NamedIssueRecord) -> String {
+    if named_record_from_body(body).is_some_and(|existing| existing.name == record.name) {
+        return body.to_string();
+    }
+    let metadata = serde_json::to_string(record).expect("named PR metadata serializes");
+    format!(
+        "{body}\n\n{NAMED_ACTIVITY_PREFIX}{metadata} -->\nAgent: {} ({})\n",
+        record.name, record.provider
+    )
+}
 
 pub fn initialize_launch_session(
     worktree: &Path,
     project_root: &Path,
     config: &gwt_agent::LaunchConfig,
-    durable_command: Option<String>,
 ) -> gwt_agent::Session {
     let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
     let mut session = gwt_agent::Session::new(worktree, branch_name, config.agent_id.clone());
@@ -25,11 +369,15 @@ pub fn initialize_launch_session(
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
     session.linked_issue_number = config.linked_issue_number;
+    session.review_dispatch =
+        crate::issue_monitor_review::review_dispatch_session_from_env(|name| {
+            config.env_vars.get(name).cloned()
+        });
     session.launch_route = config.launch_route;
-    session.launch_command = durable_command.unwrap_or_else(|| config.command.clone());
+    session.launch_command = config.command.clone();
     session.launch_args = config.args.clone();
+    session.codex_auth_root = config.validated_codex_auth_root_for_cwd(worktree);
     session.windows_shell = config.windows_shell;
-    session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
     apply_resume_identity_to_session(&mut session, config);
     session.update_status(gwt_agent::AgentStatus::Running);
     session
@@ -39,6 +387,13 @@ pub fn apply_resume_identity_to_session(
     session: &mut gwt_agent::Session,
     config: &gwt_agent::LaunchConfig,
 ) {
+    if session.agent_name.is_none() {
+        session.agent_name = config
+            .env_vars
+            .get("GWT_AGENT_NAME")
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+    }
     if config.session_mode == gwt_agent::SessionMode::Resume {
         session.agent_session_id = config.resume_session_id.clone();
     }
@@ -89,9 +444,11 @@ fn interrupt_exact_running_session_after_persistence_error(
     }
 }
 
+/// Persist the finalized Session, retaining its exact execution authority.
+/// `None` defers runtime observation until physical child identity publication.
 pub fn persist_finalized_launch_session(
     sessions_dir: &Path,
-    runtime_path: &Path,
+    runtime_path: Option<&Path>,
     session: &mut gwt_agent::Session,
     docker_runtime_worktree: Option<&str>,
 ) -> Result<(), String> {
@@ -150,6 +507,9 @@ pub fn persist_finalized_launch_session(
             ));
         }
     }
+    let Some(runtime_path) = runtime_path else {
+        return Ok(());
+    };
     if let Err(error) =
         gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running).save(runtime_path)
     {
@@ -180,33 +540,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn named_issue_history_records_start_handover_pr_and_completion_once() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+        let client = FakeIssueClient::new();
+        client.seed(IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(42),
+            title: "work".into(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
+        let mut session =
+            gwt_agent::Session::new("/tmp/work", "work/issue-42", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.agent_name = Some("ハヤテ".into());
+        assert!(record_named_issue_assignment(&client, &session, None).unwrap());
+        assert!(!record_named_issue_assignment(&client, &session, None).unwrap());
+        let mut successor = session.clone();
+        successor.id = "successor".into();
+        successor.agent_name = Some("ミオ".into());
+        assert!(record_named_issue_assignment(&client, &successor, Some("ハヤテ")).unwrap());
+        assert!(!record_named_issue_assignment(&client, &successor, Some("ミオ")).unwrap());
+        assert!(record_named_issue_activity(
+            &client,
+            &successor,
+            NamedIssueActivity::PrCreated { number: 43 }
+        )
+        .unwrap());
+        assert!(
+            record_named_issue_activity(&client, &successor, NamedIssueActivity::Completed)
+                .unwrap()
+        );
+        assert!(
+            !record_named_issue_activity(&client, &successor, NamedIssueActivity::Completed)
+                .unwrap()
+        );
+        let comments = client.comments(IssueNumber(42));
+        assert_eq!(comments.len(), 4);
+        assert!(comments[0].body.contains("ハヤテ（Codex）が担当を開始"));
+        assert!(comments[1].body.contains("ハヤテ から ミオ に引き継ぎ"));
+        assert!(comments[2].body.contains("ミオ が対応し、PR #43 を作成"));
+        assert!(comments[3].body.contains("ミオ が対応を完了"));
+    }
+
+    #[test]
+    fn named_pr_body_keeps_the_assigned_name_and_provider_snapshot() {
+        let mut session =
+            gwt_agent::Session::new("/tmp/work", "work/issue-42", gwt_agent::AgentId::Codex);
+        session.agent_name = Some("Maya".into());
+        let body = with_named_pr_author("Existing body", Some(&session));
+        assert!(body.starts_with("Existing body"));
+        assert!(body.contains("Agent: Maya (Codex)"));
+        assert_eq!(with_named_pr_author(&body, Some(&session)), body);
+        assert_eq!(with_named_pr_author("legacy", None), "legacy");
+    }
+
+    #[test]
     fn launch_session_initializes_and_persists_without_gui() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+        config.tool_version = Some("2.1.156".into());
         config.session_mode = gwt_agent::SessionMode::Resume;
         config.resume_session_id = Some("conversation".to_string());
         config.branch = Some("work/example".to_string());
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        config
+            .env_vars
+            .insert("GWT_AGENT_NAME".into(), "ミオ".into());
         let project = tmp.path().join("project");
         let worktree = tmp.path().join("worktree");
-        let mut session = initialize_launch_session(
-            &worktree,
-            &project,
-            &config,
-            Some("durable-command".to_string()),
-        );
+        let mut session = initialize_launch_session(&worktree, &project, &config);
         assert_eq!(session.project_state_root.as_ref(), Some(&project));
+        assert_eq!(session.agent_name.as_deref(), Some("ミオ"));
         assert_eq!(session.exact_resume_session_id(), Some("conversation"));
-        assert_eq!(session.launch_command, "durable-command");
+        assert_eq!(session.launch_command, "claude");
         let sessions = tmp.path().join("sessions");
         let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
-        persist_finalized_launch_session(&sessions, &runtime, &mut session, None)
+        persist_finalized_launch_session(&sessions, Some(&runtime), &mut session, None)
             .expect("persist launch");
         let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id)))
             .expect("load session");
         assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(saved.agent_name.as_deref(), Some("ミオ"));
         assert_eq!(saved.exact_resume_session_id(), Some("conversation"));
+        assert_eq!(saved.tool_version.as_deref(), Some("2.1.156"));
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["review_dispatch"],
+            true
+        );
+        assert!(saved.tool_version_selector.is_none());
+        assert!(saved.tool_runtime_provenance.is_none());
         assert!(runtime.exists());
+    }
+
+    #[test]
+    fn deferred_monitor_finalization_persists_session_without_blank_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        let mut candidate = initialize_launch_session(tmp.path(), tmp.path(), &config);
+        let sessions = tmp.path().join("sessions");
+        let runtime = gwt_agent::runtime_state_path(&sessions, &candidate.id);
+
+        persist_finalized_launch_session(&sessions, None, &mut candidate, None)
+            .expect("defer physical runtime publication");
+
+        let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", candidate.id)))
+            .expect("finalized Session remains durable before physical spawn");
+        assert_eq!(saved.id, candidate.id);
+        assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
+        assert!(
+            !runtime.exists(),
+            "Monitor finalization must not publish a no-child runtime"
+        );
     }
     #[test]
     fn finalized_bound_session_persistence_retains_same_id_replacement() {
@@ -250,9 +702,13 @@ mod tests {
         let replacement_before =
             std::fs::read(&session_path).expect("read replacement Session bytes");
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("final persistence must reject a same-id replacement");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("final persistence must reject a same-id replacement");
 
         assert!(
             error.contains("changed"),
@@ -291,9 +747,13 @@ mod tests {
             std::fs::read(&session_path).expect("read replacement Session bytes");
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &candidate.id);
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("final persistence must reject an unbound same-id replacement");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("final persistence must reject an unbound same-id replacement");
 
         assert!(error.contains("changed"), "{error}");
         assert_eq!(
@@ -321,9 +781,13 @@ mod tests {
         candidate.update_status(gwt_agent::AgentStatus::Running);
         let runtime_path = runtime_root.join(format!("{}.json", candidate.id));
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("blocked runtime root must fail final persistence");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("blocked runtime root must fail final persistence");
 
         assert!(error.contains("marked Interrupted"), "{error}");
         assert_eq!(
@@ -354,9 +818,13 @@ mod tests {
             ))
         }));
 
-        let error =
-            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
-                .expect_err("unknown Session save outcome must fail launch persistence");
+        let error = persist_finalized_launch_session(
+            &sessions_dir,
+            Some(&runtime_path),
+            &mut candidate,
+            None,
+        )
+        .expect_err("unknown Session save outcome must fail launch persistence");
 
         assert!(error.contains("marked Interrupted"), "{error}");
         assert_eq!(

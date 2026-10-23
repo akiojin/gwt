@@ -17,16 +17,17 @@ import {
 
 
 const CODEX_MODEL_OPTIONS = [
+  { value: "gpt-6.1-sol", label: "gpt-6.1-sol", description: "Latest workhorse model for coding and everyday work." },
   { value: "gpt-6-astra", label: "gpt-6-astra", description: "Frontier intelligence for the most demanding work." },
-  { value: "gpt-6-sol", label: "gpt-6-sol", description: "Workhorse model for coding and everyday work." },
+  { value: "gpt-6-sol", label: "gpt-6-sol", description: "Previous generation workhorse model." },
   { value: "gpt-6-luna", label: "gpt-6-luna", description: "Fast and affordable model for easier tasks." },
-  { value: "gpt-5.6-sol", label: "gpt-5.6-sol", description: "Older coding model for complex work." },
+  { value: "gpt-5.6-sol", label: "gpt-5.6-sol", description: "Older generation workhorse model." },
   { value: "gpt-5.6-terra", label: "gpt-5.6-terra", description: "Older balanced model for straightforward work." },
   { value: "gpt-5.6-luna", label: "gpt-5.6-luna", description: "Older fast and efficient model." },
   { value: "gpt-5.5", label: "gpt-5.5", description: "Legacy coding model." },
 ];
 
-const FALLBACK_NOTICE = "Codex no longer offers gpt-5.4-mini; using gpt-6-astra instead.";
+const FALLBACK_NOTICE = "Codex no longer offers gpt-5.4-mini; using gpt-6.1-sol instead.";
 
 const CODEX_WIZARD = {
   title: "Launch Agent",
@@ -53,7 +54,7 @@ const CODEX_WIZARD = {
   agent_options: [{ value: "codex", label: "Codex", description: "Detected · 0.153.4" }],
   selected_agent_id: "codex",
   model_options: CODEX_MODEL_OPTIONS,
-  selected_model: "gpt-6-astra",
+  selected_model: "gpt-6.1-sol",
   model_fallback_notice: FALLBACK_NOTICE,
 };
 
@@ -71,14 +72,14 @@ test.describe("Launch Wizard — retired model fallback notice", () => {
       await keepLaunchWizardModalVisible(page);
       await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
-      const notice = `Codex no longer offers ${retired}; using gpt-6-astra instead.`;
+      const notice = `Codex no longer offers ${retired}; using gpt-6.1-sol instead.`;
       await injectWizard(page, { ...CODEX_WIZARD, model_fallback_notice: notice });
       const modal = page.locator("#wizard-modal");
       await expect(modal).toHaveClass(/open/);
 
       // The Model select already shows the fallback row.
       const model = modal.getByRole("combobox", { name: "Model", exact: true });
-      await expect(model).toHaveValue("gpt-6-astra");
+      await expect(model).toHaveValue("gpt-6.1-sol");
 
       // AC-4: the swap is visible, and it is a hint — not the error banner, which
       // would read as a failed launch.
@@ -117,7 +118,7 @@ test.describe("Launch Wizard — retired model fallback notice", () => {
     await expect(modal).toHaveClass(/open/);
 
     await expect(modal.getByRole("combobox", { name: "Model", exact: true })).toHaveValue(
-      "gpt-6-astra",
+      "gpt-6.1-sol",
     );
     await expect(modal.getByText("no longer offers")).toHaveCount(0);
     expect(browserErrors).toEqual([]);
@@ -256,6 +257,13 @@ test("live Codex picker exposes the current visible snapshot", async ({ page }, 
     await openLiveGwtProject(page);
     await clearLiveLaunchWizard(page);
     cleanup = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    // Opening and hydration are asynchronous. Hydration resets the selected
+    // launch path, so wait for its final state before applying picker choices.
+    await page.waitForFunction(() => {
+      const states = (window as any).__gwtPlaywrightMessages
+        .filter((entry: any) => entry.payload?.kind === "launch_wizard_state");
+      return states.at(-1)?.payload.wizard?.is_hydrating === false;
+    }, undefined, { timeout: 30_000 });
     await sendLiveGwtEvent(page, {
       kind: "launch_wizard_action",
       action: { kind: "set_launch_path", path: "manual_setup" }, bounds: null,
@@ -266,12 +274,26 @@ test("live Codex picker exposes the current visible snapshot", async ({ page }, 
     });
     const model = page.locator("#wizard-modal").getByRole("combobox", { name: "Model", exact: true });
     await expect(model.locator("option")).toHaveText(CODEX_MODEL_OPTIONS.map(row => row.label));
-    await expect(model).toHaveValue("gpt-6-astra");
-    await model.selectOption("gpt-6-sol");
-    await expect(model).toHaveValue("gpt-6-sol");
+    await expect(model).toHaveValue("gpt-6.1-sol");
+    const wizard = page.locator("#wizard-modal");
+    const effort = wizard.locator(".launch-range__input");
+    const effortSummary = wizard.locator(".wizard-summary-item")
+      .filter({ has: page.locator(".wizard-summary-label", { hasText: /^Reasoning$/ }) })
+      .locator(".wizard-summary-value");
+    // Issue #4795 AC-2: the observed CLI default is Low, with six stops through Ultra.
+    await expect(effort).toHaveAttribute("max", "5");
+    await expect(effort).toHaveValue("0");
+    await expect(effortSummary).toHaveText("low");
+    await effort.press("End");
+    await effort.blur();
+    await expect(effort).toHaveValue("5");
+    await expect(effortSummary).toHaveText("ultra");
     await testInfo.attach(`codex-snapshot-${testInfo.project.name}`, {
-      body: await page.locator("#wizard-modal").screenshot(), contentType: "image/png",
+      body: await wizard.screenshot(), contentType: "image/png",
     });
+    await model.selectOption("gpt-6-sol");
+    await model.blur();
+    await expect(model).toHaveValue("gpt-6-sol");
     expect(errors).toEqual([]);
   } finally {
     try { await clearLiveLaunchWizard(page); }

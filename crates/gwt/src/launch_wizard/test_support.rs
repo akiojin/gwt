@@ -15,7 +15,6 @@ pub(super) fn sample_agent_options() -> Vec<AgentOption> {
             name: "Claude Code".to_string(),
             available: true,
             installed_version: Some("1.0.0".to_string()),
-            versions: vec!["0.9.0".to_string(), "1.0.0".to_string()],
             custom_agent: None,
         },
         AgentOption {
@@ -23,7 +22,6 @@ pub(super) fn sample_agent_options() -> Vec<AgentOption> {
             name: "Codex".to_string(),
             available: true,
             installed_version: Some("0.110.0".to_string()),
-            versions: vec!["0.109.0".to_string(), "0.110.0".to_string()],
             custom_agent: None,
         },
     ]
@@ -187,22 +185,10 @@ pub(super) fn quick_start_entry(
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     docker_service: Option<&str>,
 ) -> QuickStartEntry {
-    let (tool_label, model, reasoning, version, codex_fast_mode) = match agent_id {
-        "claude" => (
-            "Claude Code",
-            Some("sonnet"),
-            Some("medium"),
-            Some("latest"),
-            false,
-        ),
-        "codex" => (
-            "Codex",
-            Some("gpt-5.5"),
-            Some("high"),
-            Some("0.110.0"),
-            true,
-        ),
-        _ => ("Custom", None, None, None, false),
+    let (tool_label, model, reasoning, codex_fast_mode) = match agent_id {
+        "claude" => ("Claude Code", Some("sonnet"), Some("medium"), false),
+        "codex" => ("Codex", Some("gpt-5.5"), Some("high"), true),
+        _ => ("Custom", None, None, false),
     };
     QuickStartEntry {
         session_id: session_id.to_string(),
@@ -211,7 +197,6 @@ pub(super) fn quick_start_entry(
         tool_label: tool_label.to_string(),
         model: model.map(str::to_string),
         reasoning: reasoning.map(str::to_string),
-        version: version.map(str::to_string),
         resume_session_id: resume_session_id.map(str::to_string),
         live_window_id: live_window_id.map(str::to_string),
         skip_permissions: true,

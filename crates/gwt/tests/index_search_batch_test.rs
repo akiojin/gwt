@@ -20,7 +20,6 @@
 use std::{
     fs,
     path::Path,
-    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -28,9 +27,8 @@ use gwt::index_search::{IndexSearchError, INDEX_NOT_READY_EXIT_CODE};
 use gwt::protocol::{IndexSearchMatchMode, IndexSearchScope, IndexSearchTarget};
 use gwt_core::test_support::ScopedEnvVar;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 struct SearchFixture {
@@ -488,6 +486,43 @@ fn mixed_batch_selects_file_view_and_preserves_public_result_shape() {
 }
 
 #[test]
+fn mixed_search_serves_healthy_results_and_reports_stopped_scope_without_repair() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = setup_search_fixture(
+        &serde_json::json!({
+            "ok": true,
+            "scopes": {
+                "issues": {"state": "corrupt", "reason": "repair_stopped"},
+                "specs": {"state": "fresh"},
+            },
+            "scope_results": {
+                "issues": {"issueResults": [{"number": 1, "title": "excluded"}]},
+                "specs": {"specResults": [{"spec_id": 5429, "title": "healthy"}]},
+            },
+        })
+        .to_string(),
+    );
+    let outcome = gwt::search_project_index(
+        &fixture.repo,
+        "healthy scope",
+        &[IndexSearchScope::Issues, IndexSearchScope::Specs],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect("a stopped scope must not fail the healthy scope's search");
+    assert_eq!(outcome.results.len(), 1);
+    assert_eq!(outcome.results[0].scope, IndexSearchScope::Specs);
+    assert_eq!(outcome.unavailable_scopes.len(), 1);
+    assert_eq!(outcome.unavailable_scopes[0].scope, "issues");
+    assert_eq!(outcome.unavailable_scopes[0].reason, "repair_stopped");
+    assert_eq!(search_invocations(&fixture.runner_log).len(), 1);
+    assert!(rebuild_invocations(&fixture.runner_log, "--action index-issues").is_empty());
+}
+
+#[test]
 fn stale_scopes_surface_on_success_payload_with_refresh_marker() {
     let _env_lock = env_lock()
         .lock()
@@ -843,7 +878,7 @@ fn non_blocking_corrupt_spec_scope_fails_promptly_and_queues_coordinated_repair(
 
     wait_for_rebuild_invocations(
         &fixture.runner_log,
-        "--action index-specs",
+        "--action index-issues",
         1,
         Duration::from_secs(15),
     );

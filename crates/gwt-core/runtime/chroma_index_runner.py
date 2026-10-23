@@ -15,14 +15,17 @@ import json
 import math
 import os
 import re
+import secrets
+import socket
 import stat
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 
 def emit(payload: dict) -> None:
@@ -53,14 +56,18 @@ def default_qos_for_action(action: str) -> str:
     return "background" if action.startswith("index") else "interactive"
 
 
-def configure_qos_threads(qos: str) -> None:
+def configure_qos_threads(qos: str, *, single_query: bool = False) -> None:
     """Apply the FR-385 QoS profile: embedding thread caps (background=2 /
     interactive=4), inter-op 1, tokenizer parallelism off, and a lowered
-    process priority for background work. Must run before the lazy model
-    import; it never imports torch itself."""
+    process priority for background work. Single-query searches use one
+    thread to avoid parallel overhead and Windows Normal priority rather
+    than inheriting the launching agent's BelowNormal class. Must run before
+    the lazy model import; it never imports torch itself."""
     caps = QOS_THREAD_CAPS.get(qos)
     if caps is None:
         raise ValueError(f"unknown qos profile: {qos}")
+    if single_query and qos == "interactive":
+        caps = "1"
     for key in QOS_THREAD_ENV_KEYS:
         os.environ[key] = caps
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -75,6 +82,18 @@ def configure_qos_threads(qos: str) -> None:
             pass
     if qos == "background":
         _lower_process_priority()
+    elif single_query and os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.SetPriorityClass.restype = wintypes.BOOL
+            kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00000020)  # Normal
+        except OSError:
+            pass
 
 
 def _lower_process_priority() -> None:
@@ -121,6 +140,8 @@ def _pending_higher_priority(than: str) -> bool:
     pending on the host-wide heavy lease (FR-389). Presence of the pending
     registration is the signal; stale files are swept by the Rust side, so
     the worst case is one unnecessary yield."""
+    if than == "background" and _refresh_budget_exhausted():
+        return True
     pending_dir = _coordinator_root() / "heavy.pending"
     try:
         entries = list(pending_dir.iterdir())
@@ -145,6 +166,15 @@ def _pending_higher_priority(than: str) -> bool:
     return False
 
 
+def _refresh_budget_exhausted() -> bool:
+    """A refresh quantum cooperatively ends at the existing batch checkpoint."""
+    try:
+        deadline_ms = int(os.environ["GWT_INDEX_REFRESH_YIELD_AT_MS"])
+    except (KeyError, ValueError):
+        return False
+    return int(time.time() * 1000) >= deadline_ms
+
+
 HEAVY_PROGRESS_FILENAME = "heavy.progress.json"
 
 
@@ -162,7 +192,8 @@ def _heavy_target_stem(repo_hash: str, scope: str, worktree_hash: Optional[str] 
 
 
 def _write_heavy_progress(
-    target: str, done: int, total: int, batch_size: int, batch_ms: int
+    target: str, done: int, total: int, batch_size: int, batch_ms: int,
+    *, model_revision: Optional[str] = None,
 ) -> None:
     """Publish batch progress next to the heavy ticket (Issue #4086 AC-4) so
     a refused verification claimant can estimate the remaining wait. Best
@@ -174,6 +205,12 @@ def _write_heavy_progress(
         "total": int(total),
         "batch_size": int(batch_size),
         "batch_ms": int(max(batch_ms, 0)),
+        # CAS hits do not load a model. Only the expected cached revision
+        # makes the current runner warm (Issue #5431).
+        "model_state": "warm" if (
+            _MODEL_CACHE is not None and model_revision in _MODEL_CACHE
+        ) else "warming",
+        "model_load_ms": _MODEL_LOAD_MS,
         "updated_at_ms": int(time.time() * 1000),
     }
     try:
@@ -1343,17 +1380,19 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "works", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "works", "reports", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
-V2_SPECS_COLLECTION = "specs"
+V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
+ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
 V2_WORKS_COLLECTION = "works"
+V2_REPORTS_COLLECTION = "reports"
 
 FILE_INDEX_V2_LAYOUT_VERSION = 2
 FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
@@ -1411,8 +1450,8 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "memory", "discussions", "board", "works"}:
-        return repo_dir / scope
+    if scope in {"issues", "specs", "memory", "discussions", "board", "works", "reports"}:
+        return repo_dir / ("issues" if scope == "specs" else scope)
 
     return repo_dir / "worktrees" / worktree_hash / scope
 
@@ -1610,7 +1649,7 @@ def file_embedding_cas_key(
 
 
 @contextlib.contextmanager
-def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
+def acquire_lock(db_path: Path, exclusive: bool = True, blocking: bool = True) -> Iterator[None]:
     """Cross-process file lock around a DB directory.
 
     Uses portalocker when available; falls back to fcntl on POSIX and
@@ -1624,8 +1663,14 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         import portalocker  # type: ignore
 
         flag = portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH
-        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag)
-        fh = lock.acquire()
+        if not blocking:
+            flag |= portalocker.LOCK_NB
+        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag,
+                                timeout=None if blocking else 0)
+        try:
+            fh = lock.acquire()
+        except portalocker.exceptions.LockException as error:
+            raise BlockingIOError(str(error)) from error
         try:
             yield
         finally:
@@ -1647,7 +1692,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
         fh = open(lock_path, "a+b")
         try:
-            mode = msvcrt.LK_LOCK  # always blocking; Windows lacks shared locks here
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), mode, 1)
             try:
                 yield
@@ -1665,7 +1711,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
     fh = open(lock_path, "a+b")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(fh, flags if blocking else flags | fcntl.LOCK_NB)
         try:
             yield
         finally:
@@ -1811,40 +1858,61 @@ class _FakeEmbeddingModel:
         return out
 
 
-_MODEL_CACHE: Optional[Any] = None
-_MODEL_CACHE_REVISION: Optional[str] = None
+_MODEL_CACHE: Optional[dict[Optional[str], Any]] = None
 # Issue #4698: milliseconds this process spent importing and constructing the
 # embedding model. The one-shot runner pays it on every search, so the caller
 # subtracts it to hold the warm remainder to its own budget.
 _MODEL_LOAD_MS = 0
 _model_load_clock = time.monotonic
+_SEARCH_WORKER_ENDPOINT: Optional[Path] = None
+
+
+def _publish_search_model_state(state: str) -> None:
+    """Expose model loading without probing or waking the resident worker."""
+    if _SEARCH_WORKER_ENDPOINT is None:
+        return
+    try:
+        endpoint = json.loads(_SEARCH_WORKER_ENDPOINT.read_text(encoding="utf-8"))
+        if isinstance(endpoint, dict) and endpoint.get("pid") == os.getpid():
+            endpoint.update(model_state=state, model_load_ms=_MODEL_LOAD_MS)
+            _write_json_atomic(_SEARCH_WORKER_ENDPOINT, endpoint)
+            _SEARCH_WORKER_ENDPOINT.chmod(0o600)
+    except (OSError, ValueError):
+        pass  # Diagnostics must never fail a query.
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
-    """Lazily load (and cache) the embedding model.
+    """Lazily load and retain each model revision for this process.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE, _MODEL_CACHE_REVISION, _MODEL_LOAD_MS
-    if _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == revision:
-        return _MODEL_CACHE
+    global _MODEL_CACHE, _MODEL_LOAD_MS
+    if _MODEL_CACHE is None:
+        _MODEL_CACHE = {}
+    if revision in _MODEL_CACHE:
+        _publish_search_model_state("warm")
+        return _MODEL_CACHE[revision]
 
-    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
-        _MODEL_CACHE = _FakeEmbeddingModel()
-        _MODEL_CACHE_REVISION = revision
-        return _MODEL_CACHE
+    _publish_search_model_state("warming")
+    try:
+        if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+            model = _FakeEmbeddingModel()
+        else:
+            started = _model_load_clock()
+            from sentence_transformers import SentenceTransformer  # type: ignore
 
-    started = _model_load_clock()
-    from sentence_transformers import SentenceTransformer  # type: ignore
-
-    if revision is None:
-        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
-    else:
-        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
-    _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
-    _MODEL_CACHE_REVISION = revision
-    return _MODEL_CACHE
+            if revision is None:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            else:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+            _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
+        _MODEL_CACHE[revision] = model
+    except Exception:
+        _publish_search_model_state("cold")
+        raise
+    _publish_search_model_state("warm")
+    return model
 
 
 class E5EmbeddingFunction:
@@ -2014,9 +2082,49 @@ def _reset_chroma_store(db_path: Path) -> None:
                 pass
 
 
+SEARCH_WORKER_READ_CLIENT_LIMIT = 16
+_SEARCH_WORKER_READ_CLIENTS: Optional[Dict[tuple[Path, str], tuple[Path, Any, Any]]] = None
+
+
+@contextlib.contextmanager
+def _search_worker_read_clients() -> Iterator[None]:
+    """Retain bounded immutable Issue-store readers for one worker lifetime."""
+    global _SEARCH_WORKER_READ_CLIENTS
+    previous = _SEARCH_WORKER_READ_CLIENTS
+    retained: Dict[tuple[Path, str], tuple[Path, Any, Any]] = {}
+    _SEARCH_WORKER_READ_CLIENTS = retained
+    try:
+        yield
+    finally:
+        _SEARCH_WORKER_READ_CLIENTS = previous
+        for _, client, _ in retained.values():
+            _close_chroma_client(client)
+
+
 def _open_chroma_collection(db_path: Path, collection_name: str):
     """Open an existing collection without silently creating a new one."""
     import chromadb  # type: ignore
+
+    db_path = Path(db_path)
+    retained = _SEARCH_WORKER_READ_CLIENTS
+    cache_key = None
+    # Closing the last Chroma client stops its System. Issue indexing always
+    # publishes a new generation. Other repo scopes update the active store
+    # in place, so retaining their readers would keep stale query vectors.
+    if (
+        retained is not None
+        and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
+        and db_path.name.startswith("gen-")
+        and collection_name == V2_ISSUES_COLLECTION
+    ):
+        db_path = db_path.resolve()
+        cache_key = (db_path.parent, collection_name)
+        cached = retained.pop(cache_key, None)
+        if cached is not None:
+            if cached[0] == db_path:
+                retained[cache_key] = cached
+                return cached[1], cached[2]
+            _close_chroma_client(cached[1])
 
     client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
@@ -2028,6 +2136,11 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     except Exception:
         _close_chroma_client(client)
         raise
+    if cache_key is not None:
+        retained[cache_key] = (db_path, client, collection)
+        while len(retained) > SEARCH_WORKER_READ_CLIENT_LIMIT:
+            _, oldest_client, _ = retained.pop(next(iter(retained)))
+            _close_chroma_client(oldest_client)
     return client, collection
 
 
@@ -2078,6 +2191,8 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
+    if scope == "specs":
+        scope = "issues"
     if worktree_dir.name in (
         "specs",
         "files",
@@ -2087,6 +2202,7 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
         "discussions",
         "board",
         "works",
+        "reports",
     ):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
@@ -2958,7 +3074,7 @@ def _durably_replace_file_index_v2_directory(staging: Path, target: Path) -> Non
                 os.fsync(artifact.fileno())
         _fsync_directory(current)
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staging, target)
+    _replace_staging_generation(staging, target)
     _fsync_directory(target.parent)
 
 
@@ -3395,11 +3511,12 @@ def _materialize_file_artifact_pair(
     heavy_target: Optional[str] = None,
     progress_offset: int = 0,
     progress_total: Optional[int] = None,
+    on_checkpoint: Optional[Callable[[int], None]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
     Returns `(computed, cache_hits, yielded)`. A background build checkpoints
-    every `FILE_INDEX_V2_VECTOR_BATCH` documents and hands the host-wide heavy
+    after each document and hands the host-wide heavy
     lease back when a higher-priority claimant queues behind it (FR-418). The
     repo-scoped Embedding CAS is the checkpoint: every vector computed before
     the yield is already durable, so the follow-up run resolves it as a cache
@@ -3409,6 +3526,8 @@ def _materialize_file_artifact_pair(
     if _artifact_pair_metadata_is_verified(
         artifact_dir, records, descriptor_identity
     ):
+        if on_checkpoint is not None:
+            on_checkpoint(len(records))
         return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
@@ -3416,6 +3535,8 @@ def _materialize_file_artifact_pair(
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
+            if on_checkpoint is not None:
+                on_checkpoint(len(records))
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
@@ -3441,8 +3562,18 @@ def _materialize_file_artifact_pair(
                 opened[bucket] = _make_file_index_v2_collection(
                     store, collection_name
                 )
-            for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
-                stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
+            # Issue #5431: a 16-document encode took 17.6 seconds on CPU,
+            # longer than a search can wait. Check priority after each
+            # non-interruptible encode; keep batching for foreground work.
+            checkpoint_batch = 1 if qos == "background" else FILE_INDEX_V2_VECTOR_BATCH
+            if heavy_target is not None:
+                _write_heavy_progress(
+                    heavy_target, progress_offset,
+                    progress_total if progress_total is not None else len(records),
+                    checkpoint_batch, 0, model_revision=FILE_INDEX_V2_MODEL_REVISION,
+                )
+            for start in range(0, len(records), checkpoint_batch):
+                stop = min(start + checkpoint_batch, len(records))
                 batch_records = records[start:stop]
                 batch_identities = identities[start:stop]
                 batch_started = time.monotonic()
@@ -3451,13 +3582,16 @@ def _materialize_file_artifact_pair(
                 )
                 computed += batch_computed
                 hits += batch_hits
+                if on_checkpoint is not None:
+                    on_checkpoint(stop)
                 if heavy_target is not None:
                     _write_heavy_progress(
                         heavy_target,
                         progress_offset + stop,
                         progress_total if progress_total is not None else len(records),
-                        FILE_INDEX_V2_VECTOR_BATCH,
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
+                        model_revision=FILE_INDEX_V2_MODEL_REVISION,
                     )
                 manifest_entries.extend(
                     _manifest_entry_with_vector(plan, vector)
@@ -4386,6 +4520,25 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
         return None
 
 
+def _replace_staging_generation(staging: Path, generation_dir: Path) -> None:
+    """Wait briefly for native SQLite workers to release a closed store.
+
+    Chroma closes its Rust bindings before SQLx's SQLite worker threads have
+    necessarily released their files. Windows cannot rename that directory
+    until those handles close; POSIX can. Retry only Windows access/sharing
+    violations, with at most 1.03 seconds of backoff, preserving the OS error.
+    """
+    for attempt in range(8):
+        try:
+            os.replace(staging, generation_dir)
+            return
+        except OSError as error:
+            if (os.name != "nt" or getattr(error, "winerror", None) not in (5, 32)
+                    or attempt == 7):
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.4))
+
+
 def _publish_generation(
     db_path: Path,
     staging: Path,
@@ -4432,7 +4585,7 @@ def _publish_generation(
                         "retryable": True,
                     }
             generation_dir = gen_root / generation_name
-            os.replace(staging, generation_dir)
+            _replace_staging_generation(staging, generation_dir)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
                 with contextlib.suppress(OSError):
                     (generation_dir / residue).unlink()
@@ -4537,7 +4690,13 @@ def _full_build_store(db_path: Path, mode: str) -> tuple:
     return staging, staging
 
 
-def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
+def _finish_full_build(
+    db_path: Path,
+    staging: Optional[Path],
+    scope: str,
+    expected_count: Optional[int] = None,
+    after_publish=None,
+):
     """Publish a staged full build; no-op for incremental builds.
 
     Returns the typed error payload when publishing failed, else None.
@@ -4549,7 +4708,11 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
             staging, _scope_collection_name(scope)
         )
         try:
-            document_count = _safe_collection_count(collection)
+            document_count = int(collection.count())
+            if expected_count is not None and document_count != expected_count:
+                raise ValueError(
+                    f"staged {scope} count {document_count} != source count {expected_count}"
+                )
         finally:
             _close_chroma_client(client)
     except Exception as error:
@@ -4563,7 +4726,11 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
             "retryable": True,
         }
     publish = _publish_generation(
-        db_path, staging, scope=scope, document_count=document_count
+        db_path,
+        staging,
+        scope=scope,
+        document_count=document_count,
+        **({"after_publish": after_publish} if after_publish is not None else {}),
     )
     return None if publish.get("ok") else publish
 
@@ -4645,6 +4812,9 @@ def _validated_file_index_v2_action_inputs(
     return root, descriptor
 
 
+_FILE_INDEX_V2_YIELDED = False
+
+
 def _file_index_v2_yielded_result(
     scope: str, requested: int, computed: int, cache_hits: int
 ) -> dict:
@@ -4652,6 +4822,8 @@ def _file_index_v2_yielded_result(
     (FR-418). No View is materialized and no head is replaced, so readers keep
     serving whatever was already published. `yielded` is the flag the Rust
     orchestrator reads to reschedule the continuation."""
+    global _FILE_INDEX_V2_YIELDED
+    _FILE_INDEX_V2_YIELDED = True
     emit_progress(
         {
             "phase": "yielded",
@@ -4664,6 +4836,7 @@ def _file_index_v2_yielded_result(
         "ok": True,
         "scope": scope,
         "yielded": True,
+        "budget_exhausted": _refresh_budget_exhausted(),
         "resumable": True,
         "published": False,
         "requested_embeddings": requested,
@@ -4672,6 +4845,23 @@ def _file_index_v2_yielded_result(
         "newly_embedded": computed,
         "total": requested,
     }
+
+
+def _read_file_index_v2_build_progress(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        progress = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(progress, dict)
+        or progress.get("schema_version") != 1
+        or type(progress.get("done")) is not int
+        or type(progress.get("total")) is not int
+        or not 0 <= progress["done"] <= progress["total"]
+        or progress.get("phase") not in ("base", "overlay")
+    ):
+        return None
+    return progress
 
 
 def _action_index_files_protocol_v2(
@@ -4810,6 +5000,34 @@ def _action_index_files_protocol_v2_pinned(
         "build_state": "verified",
     }
     requested = len(base_records) + len(overlay_records)
+    progress_path = (
+        v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
+    progress = {
+        "schema_version": 1,
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "done": 0,
+        "total": requested,
+        "phase": "base" if base_records else "overlay",
+        "resumable": True,
+    }
+    previous_progress = _read_file_index_v2_build_progress(progress_path)
+    if previous_progress is not None and all(
+        previous_progress.get(key) == progress[key]
+        for key in ("base_generation_id", "overlay_generation_id", "total")
+    ):
+        progress.update(previous_progress)
+
+    def checkpoint(done: int, phase: str) -> None:
+        # Cached batches are replayed into staging on resume. Do not make
+        # their already durable CAS progress appear to go backwards.
+        if done >= progress["done"]:
+            progress.update(done=done, phase=phase)
+        progress["updated_at"] = _file_index_timestamp()
+        _write_json_atomic(progress_path, progress)
+
+    checkpoint(0, progress["phase"])
     heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
     base_computed, base_hits, base_yielded = _materialize_file_artifact_pair(
         base_dir,
@@ -4823,6 +5041,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=0,
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(done, "base"),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -4856,6 +5075,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=len(base_records),
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -4913,6 +5133,9 @@ def _action_index_files_protocol_v2_pinned(
     }
     if not publication.get("ok"):
         return {**result, **publication, "ok": False}
+    if publication.get("published") or publication.get("already_active"):
+        with contextlib.suppress(OSError):
+            progress_path.unlink()
     result.update(publication)
     return result
 
@@ -4933,7 +5156,7 @@ def action_index_files_v2(
     Full mode builds into a resumable staging store and only replaces the
     active store after the staging build finished (Phase 70 FR-389/FR-390):
     the previous index keeps serving reads during the build, and a
-    background build yields at 16-document checkpoints when a
+    background build yields after the current document when a
     higher-priority claimant is pending on the heavy lease.
     """
     if file_index_protocol == "v2":
@@ -5164,8 +5387,12 @@ def _index_files_full_with_staging(
                     pending_paths.append(fpath)
 
             heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
-            for start in range(0, len(pending_paths), EMBED_CHECKPOINT_BATCH):
-                batch_paths = pending_paths[start : start + EMBED_CHECKPOINT_BATCH]
+            checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+            _write_heavy_progress(
+                heavy_target, len(staged_ids), total, checkpoint_batch, 0,
+            )
+            for start in range(0, len(pending_paths), checkpoint_batch):
+                batch_paths = pending_paths[start : start + checkpoint_batch]
                 batch_started = time.monotonic()
                 newly_embedded += embed_documents_for_paths(batch_paths, root, collection)
                 done = len(staged_ids) + newly_embedded
@@ -5173,7 +5400,7 @@ def _index_files_full_with_staging(
                     heavy_target,
                     done,
                     total,
-                    EMBED_CHECKPOINT_BATCH,
+                    len(batch_paths),
                     int((time.monotonic() - batch_started) * 1000),
                 )
                 _write_continuation(
@@ -5344,101 +5571,15 @@ def action_index_specs_v2(
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index cached `gwt-spec` Issues into ChromaDB under the v2 layout."""
-    db_path = resolve_db_path(repo_hash, worktree_hash, "specs", db_root=db_root)
-    spec_documents, new_entries = _load_cached_spec_documents(repo_hash)
-    new_entries.sort(key=lambda entry: entry["path"])
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "specs",
-            "mode": mode,
-            "done": 0,
-            "total": len(spec_documents),
-        }
+    """Compatibility entrypoint for the shared Issue/SPEC corpus."""
+    del worktree_hash
+    result = action_index_issues_v2(
+        repo_hash, project_root, db_root=db_root, mode=mode, qos=qos,
+        allow_empty=True,
     )
-
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_SPECS_COLLECTION)
-        try:
-            if mode == "incremental":
-                old_entries = read_manifest(db_path, scope="specs")
-                diff = compute_manifest_diff(old_entries, new_entries)
-                changed_spec_ids = set(diff["added"] + diff["changed"])
-                _delete_spec_records(collection, diff["changed"] + diff["removed"])
-                spec_records = _build_spec_records(
-                    [
-                        spec
-                        for spec in spec_documents
-                        if spec["spec_id"] in changed_spec_ids
-                    ]
-                )
-                emit_progress(
-                    {
-                        "phase": "diff",
-                        "scope": "specs",
-                        "added": len(diff["added"]),
-                        "changed": len(diff["changed"]),
-                        "removed": len(diff["removed"]),
-                    }
-                )
-            else:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                spec_records = _build_spec_records(spec_documents)
-
-            if spec_records:
-                ids = [r["id"] for r in spec_records]
-                documents = [r["document"] for r in spec_records]
-                metadatas = [r["metadata"] for r in spec_records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-
-            write_manifest(db_path, scope="specs", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=worktree_hash,
-                scope="specs",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": len(spec_records),
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="specs")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "specs",
-            "mode": mode,
-            "indexed": len(spec_records),
-            "total": len(spec_records),
-        }
-    )
-    return {"ok": True, "scope": "specs", "indexed": len(spec_records)}
+    return {**result, "scope": "specs"}
 
 
 # ---------------------------------------------------------------------
@@ -5509,6 +5650,10 @@ def _normalize_labels(labels: Any) -> List[str]:
     return []
 
 
+def _is_spec_issue(labels: Any) -> bool:
+    return any(label.casefold() == "gwt-spec" for label in _normalize_labels(labels))
+
+
 def _phase_label(labels: Sequence[str]) -> str:
     for label in labels:
         if label.startswith("phase/"):
@@ -5536,6 +5681,10 @@ def _build_cache_manifest_entry(name: str, paths: Sequence[Path]) -> Optional[Di
 
 
 def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
+    return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     root = _issue_cache_root(repo_hash)
     if not root.is_dir():
         return []
@@ -5611,17 +5760,83 @@ def _issue_source_fingerprint(issues: Sequence[Dict[str, Any]]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+_ISSUE_SOURCE_CACHE: Dict[tuple, tuple] = {}
+
+
+def _issue_source_revision(repo_hash: str) -> Optional[str]:
+    """Canonical IssueCache writers publish this only when source bytes change."""
+    try:
+        revision = (_issue_cache_root(repo_hash) / "source-revision").read_text(encoding="utf-8")
+        return str(uuid.UUID(revision))
+    except (OSError, ValueError, UnicodeDecodeError):
+        # Legacy/unversioned sources still use the complete read on every call.
+        return None
+
+
+def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> Any:
+    key = (str(_issue_cache_root(repo_hash)), kind)
+    revision = _issue_source_revision(repo_hash)
+    cached = _ISSUE_SOURCE_CACHE.get(key)
+    if revision is not None and cached is not None and cached[0] == revision:
+        return cached[1]
+    _ISSUE_SOURCE_CACHE.pop(key, None)
+    result = load()
+    # Do not retain a snapshot spanning a concurrent canonical mutation.
+    if revision is not None and revision == _issue_source_revision(repo_hash):
+        if len(_ISSUE_SOURCE_CACHE) >= 16:
+            _ISSUE_SOURCE_CACHE.pop(next(iter(_ISSUE_SOURCE_CACHE)))
+        _ISSUE_SOURCE_CACHE[key] = (revision, result)
+    return result
+
+
 def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
-    issues = _load_cached_issue_documents(repo_hash)
+    def load() -> Dict[str, Any]:
+        records = _load_issue_records(repo_hash)
+        return {"fingerprint": _record_source_fingerprint(records), "document_count": len(records)}
+
+    source = _cached_issue_source(repo_hash, "issues", load)
     refresh_meta = _issue_cache_refresh_meta(repo_hash)
     return {
-        "fingerprint": _issue_source_fingerprint(issues),
-        "document_count": len(issues),
+        **source,
         "cache_refresh_at": refresh_meta.get("last_full_refresh"),
     }
 
 
+def _record_source_fingerprint(records: Sequence[Dict[str, Any]]) -> str:
+    raw = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _load_issue_records(repo_hash: str) -> List[Dict[str, Any]]:
+    """Store ordinary Issues once and SPECs only as full section chunks."""
+    def load() -> List[Dict[str, Any]]:
+        records = []
+        for issue in _load_cached_issue_documents(repo_hash):
+            if _is_spec_issue(issue["labels"]):
+                continue
+            records.append({
+                "id": str(issue["number"]),
+                "document": f"{issue['title']}\n{issue['body']}",
+                "metadata": {
+                    "record_kind": "issue", "number": issue["number"],
+                    "title": issue["title"], "url": "", "state": issue["state"],
+                    "labels": ",".join(issue["labels"]),
+                },
+            })
+        specs, _ = _load_cached_spec_documents(repo_hash)
+        records.extend(_build_spec_records(specs))
+        return sorted(records, key=lambda record: record["id"])
+
+    return _cached_issue_source(repo_hash, "records", load)
+
+
 def _load_cached_spec_documents(
+    repo_hash: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    return _cached_issue_source(repo_hash, "specs", lambda: _read_cached_spec_documents(repo_hash))
+
+
+def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     root = _issue_cache_root(repo_hash)
@@ -5646,7 +5861,7 @@ def _load_cached_spec_documents(
             continue
 
         labels = _normalize_labels(meta.get("labels", []))
-        if "gwt-spec" not in labels:
+        if not _is_spec_issue(labels):
             continue
 
         spec_path = entry / "sections" / "spec.md"
@@ -5825,110 +6040,196 @@ def _build_memory_records(
     return records
 
 
+def _load_user_instruction_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read the canonical instruction corpus without masking corrupt source data."""
+    if not repo_hash:
+        return [], []
+    home = Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home())
+    source = home / ".gwt" / "projects" / repo_hash / "project-state" / "user-instructions.json"
+    try:
+        source_stat = source.stat()
+    except FileNotFoundError:
+        return [], []
+    try:
+        content = source.read_bytes()
+        instructions = json.loads(content, parse_constant=_reject_non_json_constant)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError(f"invalid user instruction corpus: {source}: {error}") from error
+    if not isinstance(instructions, list):
+        raise ValueError(f"user instruction corpus must be a JSON array: {source}")
+
+    records: List[Dict[str, Any]] = []
+    seen = set()
+    for instruction in instructions:
+        if (
+            not isinstance(instruction, dict)
+            or any(not isinstance(instruction.get(field), str) for field in (
+                "id", "created_at", "original", "summary", "answer", "kind"
+            ))
+            or not instruction["id"]
+            or instruction["id"] in seen
+            or instruction["kind"] not in {"standing", "one_off", "question"}
+            or not isinstance(instruction.get("actions"), list)
+            or any(not isinstance(action, str) for action in instruction["actions"])
+            or not isinstance(instruction.get("issue_numbers"), list)
+            or any(type(number) is not int or number < 0 for number in instruction["issue_numbers"])
+            or "superseded_by" not in instruction
+            or (instruction["superseded_by"] is not None and not isinstance(instruction["superseded_by"], str))
+        ):
+            raise ValueError(f"invalid record in user instruction corpus: {source}")
+        seen.add(instruction["id"])
+        title = instruction["summary"]
+        date = instruction["created_at"][:10]
+        metadata = {field: instruction[field] for field in (
+            "created_at", "original", "summary", "answer", "kind"
+        )}
+        metadata.update({
+            "source": "user_instruction",
+            "instruction_id": instruction["id"],
+            "date": date,
+            "title": title,
+            "heading": f"## {date} — {title}",
+            "actions": json.dumps(instruction["actions"], ensure_ascii=False),
+            "issue_numbers": json.dumps(instruction["issue_numbers"]),
+            "superseded_by": instruction["superseded_by"] or "",
+            "status": "superseded" if instruction["superseded_by"] else "active",
+        })
+        records.append({
+            "id": f"user-instruction-{instruction['id']}",
+            "document": "\n".join([
+                instruction["original"], title, instruction["answer"], *instruction["actions"]
+            ]),
+            "metadata": metadata,
+        })
+    # Empty arrays contribute no documents; omitting them from the manifest
+    # keeps the existing source-count health check valid. Future additions
+    # are still discovered by reading the corpus on every indexing pass.
+    entries = [{
+        "path": str(source), "mtime": int(source_stat.st_mtime),
+        "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
+    }] if records else []
+    return records, entries
+
+
 def action_index_memory_v2(
     project_root: str,
     repo_hash: str,
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index ``.gwt/work/memory.md`` into the repo-scoped memory Chroma store.
+    """Index work notes and saved instructions by document difference."""
+    del worktree_hash
+    memories, entries = _load_memory_documents(project_root, repo_hash)
+    instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+    entries.extend(instruction_entries)
+    return _index_repo_records_v2(
+        repo_hash, "memory", _build_memory_records(memories) + instructions,
+        entries, mode, db_root, project_root, qos,
+    )
 
-    `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — memory is repo-scoped. Manifest diff degenerates to a single
-    entry; when the file changes (mtime or size), all chunks are re-upserted
-    after deleting prior records for the file.
+
+def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read posted Reports and instruction-backed Q&A for this project only.
+
+    Peer-message projections are not PM report posts and are outside this
+    corpus. Reject incomplete/corrupt ledgers before changing the active index.
     """
-    del worktree_hash  # repo-scoped scope does not consume the worktree hash
-    db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
-    memories, new_entries = _load_memory_documents(project_root, repo_hash)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "memory",
-            "mode": mode,
-            "done": 0,
-            "total": len(memories),
-        }
-    )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_MEMORY_COLLECTION)
+    if not repo_hash:
+        return [], []
+    source = _gwt_home() / "projects" / repo_hash / "project-state" / "pm-reports.jsonl"
+    reports = []
+    entries = []
+    try:
+        content = source.read_bytes()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ValueError(f"invalid PM report corpus: {source}: {error}") from error
+    else:
         try:
-            old_entries = read_manifest(db_path, scope="memory")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+            text = content.decode("utf-8")
+            if text and not text.endswith("\n"):
+                raise ValueError("incomplete PM report record (missing newline)")
+            seen = set()
+            for line in text.split("\n"):
+                if not line.strip():
+                    continue
+                report = json.loads(line, parse_constant=_reject_non_json_constant)
+                if (
+                    not isinstance(report, dict)
+                    or any(not isinstance(report.get(field), str) for field in (
+                        "id", "kind", "body", "created_at"
+                    ))
+                    or not report["id"] or report["id"] in seen
+                    or report["kind"] not in {"progress", "decision", "blocker", "qa"}
+                    or (report.get("question") is not None and not isinstance(report["question"], str))
+                ):
+                    raise ValueError("invalid PM report record")
+                if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
+                    raise ValueError("PM report timestamp requires timezone")
+                seen.add(report["id"])
+                report["source"] = "pm_report"
+                report["issue_numbers"] = sorted({
+                    int(number) for prefix, number in re.findall(
+                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
+                        f"{report.get('question') or ''}\n{report['body']}",
+                        flags=re.IGNORECASE,
+                    ) if prefix.lower() in {"#", "/issues/"}
+                })
+                reports.append(report)
+            entries.append({
+                "path": str(source), "mtime": int(source.stat().st_mtime),
+                "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
+            })
+        except (OSError, UnicodeDecodeError, ValueError) as error:
+            raise ValueError(f"invalid PM report corpus: {source}: {error}") from error
 
-            if mode != "incremental" or file_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                memory_records = _build_memory_records(memories)
-            else:
-                memory_records = []
+    instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+    entries.extend(instruction_entries)
+    for instruction in instructions:
+        meta = instruction["metadata"]
+        reports.append({
+            "id": meta["instruction_id"], "source": "user_instruction", "kind": "qa",
+            "created_at": meta["created_at"], "question": meta["summary"], "body": meta["answer"],
+            "issue_numbers": json.loads(meta["issue_numbers"]),
+            "instruction_document": instruction["document"],
+        })
+    records = []
+    for report in reports:
+        question, body = report.get("question") or "", report["body"]
+        records.append({
+            "id": f"report-{report['source']}-{report['id']}",
+            "document": "\n".join([
+                report["kind"], report["created_at"], question, body,
+                " ".join(f"#{number}" for number in report["issue_numbers"]),
+                report.get("instruction_document", ""),
+            ]),
+            "metadata": {
+                "report_id": report["id"], "source": report["source"],
+                "kind": report["kind"], "report_type": "qa" if report["kind"] == "qa" else "digest",
+                "created_at": report["created_at"], "question": question, "body": body,
+                "title": question or next(iter(body.splitlines()), "")[:160],
+                "issue_numbers": json.dumps(report["issue_numbers"]),
+            },
+        })
+    entries.sort(key=lambda entry: entry["path"])
+    return records, entries
 
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "memory",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
 
-            if memory_records:
-                ids = [r["id"] for r in memory_records]
-                documents = [r["document"] for r in memory_records]
-                metadatas = [r["metadata"] for r in memory_records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(memory_records)
-
-            write_manifest(db_path, scope="memory", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="memory",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="memory")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "memory",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
+def action_index_reports_v2(
+    repo_hash: str,
+    project_root: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+    qos: str = "interactive",
+) -> dict:
+    """Index one document per posted report using the shared document diff."""
+    records, entries = _load_report_records(repo_hash)
+    return _index_repo_records_v2(
+        repo_hash, "reports", records, entries, mode, db_root, project_root, qos,
     )
-    return {"ok": True, "scope": "memory", "indexed": indexed}
 
 
 def _extract_discussion_field(body: str, field: str) -> str:
@@ -6067,104 +6368,137 @@ def _build_discussion_records(
     return records
 
 
+def _index_repo_records_v2(
+    repo_hash: str,
+    scope: str,
+    records: List[Dict[str, Any]],
+    new_entries: List[Dict[str, Any]],
+    mode: str,
+    db_root: Optional[Path],
+    project_root: Optional[str],
+    qos: str,
+) -> dict:
+    """Apply document differences and publish only a verified source count."""
+    db_path = resolve_db_path(repo_hash, None, scope, db_root=db_root)
+    by_id = {record["id"]: record for record in records}
+    expected_count = len(by_id)
+    emit_progress({
+        "phase": "indexing", "scope": scope, "mode": mode,
+        "done": 0, "total": expected_count,
+    })
+
+    def commit_metadata():
+        write_manifest(db_path, scope=scope, entries=new_entries)
+        _write_scope_meta(
+            repo_hash, None, scope, db_root,
+            updates={
+                "last_repair_at": _now_utc().isoformat(),
+                "document_count": expected_count,
+                "source_document_count": expected_count,
+                "source_project_root": project_root,
+            },
+        )
+
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
+        make_collection = (
+            _make_chroma_collection if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(build_store, _scope_collection_name(scope))
+        try:
+            diff = compute_manifest_diff(read_manifest(db_path, scope), new_entries)
+            emit_progress({
+                "phase": "diff", "scope": scope,
+                **{key: len(value) for key, value in diff.items()},
+            })
+            existing_by_id = {}
+            if mode == "incremental":
+                existing = collection.get(include=["documents", "metadatas"])
+                existing_by_id = {
+                    record_id: (document, metadata)
+                    for record_id, document, metadata in zip(
+                        existing["ids"], existing["documents"], existing["metadatas"]
+                    )
+                }
+                removed = sorted(set(existing_by_id) - set(by_id))
+                if removed:
+                    collection.delete(ids=removed)
+            changed = [
+                record for record_id, record in by_id.items()
+                if existing_by_id.get(record_id) != (record["document"], record["metadata"])
+            ]
+            checkpoint_batch = 1 if qos == "background" else 100
+            for offset in range(0, len(changed), checkpoint_batch):
+                batch = changed[offset:offset + checkpoint_batch]
+                batch_started = time.monotonic()
+                collection.upsert(
+                    ids=[record["id"] for record in batch],
+                    documents=[record["document"] for record in batch],
+                    metadatas=[record["metadata"] for record in batch],
+                )
+                embedded = offset + len(batch)
+                done = expected_count - len(changed) + embedded
+                _write_heavy_progress(
+                    _heavy_target_stem(repo_hash, scope), done, expected_count,
+                    len(batch), int((time.monotonic() - batch_started) * 1000),
+                )
+                emit_progress({"phase": "indexing", "scope": scope, "mode": mode,
+                               "done": done, "total": expected_count})
+                if (embedded < len(changed) and qos == "background"
+                        and _pending_higher_priority("background")):
+                    emit_progress({"phase": "yielded", "scope": scope,
+                                   "staged": done, "total": expected_count})
+                    return {"ok": True, "scope": scope, "yielded": True,
+                            "resumable": staging is None,
+                            "indexed": embedded, "total": expected_count}
+            actual_count = int(collection.count())
+            if actual_count != expected_count:
+                raise ValueError(
+                    f"{scope} count {actual_count} != source count {expected_count}"
+                )
+            if staging is None:
+                commit_metadata()
+        except Exception as error:
+            return {
+                "ok": False, "scope": scope, "error_code": "BUILD_VERIFY_FAILED",
+                "error": f"failed to verify {scope} build: {error}", "retryable": True,
+            }
+        finally:
+            _close_chroma_client(client)
+
+    publish_error = _finish_full_build(
+        db_path, staging, scope, expected_count=expected_count,
+        after_publish=commit_metadata,
+    )
+    if publish_error is not None:
+        return publish_error
+    indexed = len(changed)
+    emit_progress({
+        "phase": "complete", "scope": scope, "mode": mode,
+        "indexed": indexed, "total": expected_count,
+    })
+    return {
+        "ok": True, "scope": scope, "indexed": indexed,
+        "document_count": expected_count, "source_document_count": expected_count,
+    }
+
+
 def action_index_discussions_v2(
     project_root: str,
     repo_hash: str,
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index ``.gwt/work/discussions.md`` into the repo-scoped discussions store."""
+    """Index the discussion log into its repo-scoped store."""
     del worktree_hash
-    db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
-    discussions, new_entries = _load_discussion_documents(project_root, repo_hash)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "discussions",
-            "mode": mode,
-            "done": 0,
-            "total": len(discussions),
-        }
+    discussions, entries = _load_discussion_documents(project_root, repo_hash)
+    return _index_repo_records_v2(
+        repo_hash, "discussions", _build_discussion_records(discussions),
+        entries, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_DISCUSSIONS_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="discussions")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or file_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_discussion_records(discussions)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "discussions",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="discussions", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="discussions",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="discussions")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "discussions",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "discussions", "indexed": indexed}
 
 
 def _gwt_home() -> Path:
@@ -6294,102 +6628,14 @@ def action_index_board_v2(
     project_root: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
     """Index Board coordination history into the repo-scoped board store."""
-    db_path = resolve_db_path(repo_hash, None, "board", db_root=db_root)
-    entries, new_entries = _load_board_documents(repo_hash, project_root)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "board",
-            "mode": mode,
-            "done": 0,
-            "total": len(entries),
-        }
+    entries, manifest = _load_board_documents(repo_hash, project_root)
+    return _index_repo_records_v2(
+        repo_hash, "board", _build_board_records(entries),
+        manifest, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_BOARD_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="board")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            history_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or history_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_board_records(entries)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "board",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="board", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="board",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="board")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "board",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "board", "indexed": indexed}
-
-
-# ---------------------------------------------------------------------
-# v2 actions: index-works (SPEC-2359 US-80)
-# ---------------------------------------------------------------------
 
 
 def _work_project_state_dir(repo_hash: str) -> Path:
@@ -6960,118 +7206,30 @@ def action_index_works_v2(
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index past Work items into the repo-scoped works Chroma store.
-
-    `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — Work history is repo-scoped. On first build, every existing Work
-    item (including completed and discarded ones) is folded into a document so
-    work done weeks ago remains discoverable (SPEC-2359 US-80 backfill).
-    """
-    del worktree_hash  # repo-scoped scope does not consume the worktree hash
-    db_path = resolve_db_path(repo_hash, None, "works", db_root=db_root)
-    works, new_entries = _load_work_documents(repo_hash, project_root)
-    new_entries.sort(key=lambda entry: entry["path"])
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "works",
-            "mode": mode,
-            "done": 0,
-            "total": len(works),
-        }
+    """Index every past Work, including completed and discarded items."""
+    del worktree_hash
+    works, entries = _load_work_documents(repo_hash, project_root)
+    entries.sort(key=lambda entry: entry["path"])
+    return _index_repo_records_v2(
+        repo_hash, "works", _build_work_records(works),
+        entries, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_WORKS_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="works")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            source_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or source_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_work_records(works)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "works",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="works", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="works",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="works")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "works",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "works", "indexed": indexed}
 
 
 def _format_memory_results(
     items: List[Dict[str, Any]], n_results: int = 10
 ) -> List[Dict[str, Any]]:
-    """Collapse chunked memory results so each (date, title) appears once."""
+    """Collapse work-note chunks while preserving individual instructions."""
     formatted: List[Dict[str, Any]] = []
     seen: set = set()
     for it in items:
         meta = it.get("metadata") or {}
         date = meta.get("date", "")
         title = meta.get("title", "")
-        key = (date, title)
+        is_instruction = meta.get("source") == "user_instruction"
+        key = ("user_instruction", meta.get("instruction_id")) if is_instruction else (date, title)
         if key in seen:
             continue
         seen.add(key)
@@ -7087,6 +7245,15 @@ def _format_memory_results(
                 it,
             )
         )
+        if is_instruction:
+            formatted[-1].update({field: meta.get(field, "") for field in (
+                "source", "instruction_id", "created_at", "original", "summary", "answer", "kind", "status"
+            )})
+            formatted[-1].update({
+                "actions": json.loads(meta.get("actions", "[]")),
+                "issue_numbers": json.loads(meta.get("issue_numbers", "[]")),
+                "superseded_by": meta.get("superseded_by") or None,
+            })
         if len(formatted) >= n_results:
             break
     return formatted
@@ -7143,6 +7310,7 @@ def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "id": f"spec-{spec.get('spec_id', '')}:chunk-{idx}",
                     "document": document,
                     "metadata": {
+                        "record_kind": "spec",
                         "spec_id": spec.get("spec_id", ""),
                         "title": spec.get("title", ""),
                         "status": spec.get("status", ""),
@@ -7206,6 +7374,8 @@ def _scope_meta_path(
         return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
     if scope == "works":
         return resolve_db_path(repo_hash, None, "works", db_root=db_root) / META_FILENAME
+    if scope == "reports":
+        return resolve_db_path(repo_hash, None, "reports", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -7279,6 +7449,7 @@ def _scope_collection_name(scope: str) -> str:
         "discussions": V2_DISCUSSIONS_COLLECTION,
         "board": V2_BOARD_COLLECTION,
         "works": V2_WORKS_COLLECTION,
+        "reports": V2_REPORTS_COLLECTION,
     }[scope]
 
 
@@ -7294,6 +7465,10 @@ def _legacy_residue_detected(
 
 
 def _close_chroma_client(client) -> None:
+    if _SEARCH_WORKER_READ_CLIENTS is not None and any(
+        cached[1] is client for cached in _SEARCH_WORKER_READ_CLIENTS.values()
+    ):
+        return
     try:
         client.close()
     except Exception:
@@ -7310,7 +7485,7 @@ def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
             store = resolve_active_store(db_path)
             client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
             try:
-                return True, _safe_collection_count(collection)
+                return True, int(collection.count())
             finally:
                 _close_chroma_client(client)
     except Exception:
@@ -7323,6 +7498,13 @@ def _scope_status_v2(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    if scope == "specs":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+        if health.get("reason") == "empty_corpus":
+            # An explicitly built empty SPEC corpus remains searchable; the
+            # agent auto-build path reports unsynced caches separately.
+            health.update(healthy=True, repair_required=False, reason="ready")
+        return health
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
@@ -7332,10 +7514,55 @@ def _scope_status_v2(
     count_ok, document_count = _scope_document_count(db_path, scope)
     legacy_detected = _legacy_residue_detected(repo_hash, worktree_hash, db_root=db_root)
     scope_meta = _read_scope_meta(repo_hash, worktree_hash, scope, db_root=db_root)
+    saved_source_count = scope_meta.get("source_document_count")
+    source_document_count = (
+        saved_source_count if type(saved_source_count) is int and saved_source_count >= 0 else None
+    )
+    source_root = scope_meta.get("source_project_root")
+    if scope == "specs":
+        documents, source_entries = _load_cached_spec_documents(repo_hash)
+        if source_entries:
+            source_document_count = len({record["id"] for record in _build_spec_records(documents)})
+    elif scope == "memory":
+        documents, source_entries = _load_memory_documents(source_root or "", repo_hash)
+        try:
+            instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+        except ValueError:
+            # A corrupt source must not invalidate the last verified store.
+            # Builds and multi-scope search retain strict source validation.
+            pass
+        else:
+            if source_entries or instruction_entries:
+                records = _build_memory_records(documents) + instructions
+                source_document_count = len({record["id"] for record in records})
+    elif scope == "board":
+        documents, _ = _load_board_documents(repo_hash, source_root)
+        source_document_count = len({record["id"] for record in _build_board_records(documents)})
+    elif scope == "discussions":
+        documents, _ = _load_discussion_documents(source_root or "", repo_hash)
+        source_document_count = len({record["id"] for record in _build_discussion_records(documents)})
+    elif scope == "works":
+        documents, _ = _load_work_documents(repo_hash, source_root)
+        source_document_count = len({record["id"] for record in _build_work_records(documents)})
+    elif scope == "reports":
+        try:
+            records, _ = _load_report_records(repo_hash)
+        except ValueError:
+            # Preserve the last verified store; indexing and multi-scope
+            # freshness checks still validate corrupt source data strictly.
+            pass
+        else:
+            source_document_count = len({record["id"] for record in records})
 
     reason = "ready"
     healthy = True
     repair_required = False
+    source_drift = (
+        exists and count_ok and manifest_path.is_file()
+        and not pointer_corrupt and not legacy_detected
+        and source_document_count is not None and document_count != source_document_count
+        and type(saved_source_count) is int and document_count == saved_source_count
+    )
 
     if pointer_corrupt:
         # Phase 70 FR-390: an unreadable active pointer must classify for
@@ -7355,15 +7582,19 @@ def _scope_status_v2(
         reason = "legacy_residue"
         healthy = False
         repair_required = True
-    elif document_count == 0 and manifest_count > 0:
+    elif source_document_count is not None and document_count != source_document_count:
+        reason = "empty_collection" if document_count == 0 else "count_mismatch"
+        healthy = False
+        repair_required = not source_drift
+    elif source_document_count is None and document_count == 0 and manifest_count > 0:
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory", "discussions", "board", "works") and document_count < manifest_count:
+    elif source_document_count is None and scope in ("specs", "memory") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "memory", "discussions", "board", "works") and document_count != manifest_count:
+    elif scope not in ("specs", "memory", "discussions", "board", "works", "reports") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -7373,6 +7604,8 @@ def _scope_status_v2(
         "healthy": healthy,
         "repair_required": repair_required,
         "document_count": document_count,
+        **({"source_document_count": source_document_count} if source_document_count is not None else {}),
+        **({"source_drift": True} if source_drift else {}),
         "reason": reason,
         "legacy_residue_detected": legacy_detected,
         "last_repair_at": scope_meta.get("last_repair_at"),
@@ -7388,16 +7621,36 @@ def _read_issue_repair(db_path: Path) -> Dict[str, Any]:
 
 
 def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
-                         error_code: str, actual: int, expected: int) -> dict:
+                         error_code: str, actual: int, expected: int,
+                         error: Optional[str] = None) -> dict:
     payload = {
         "schema_version": 1, "fingerprint": fingerprint, "failures": 1,
         "last_error": error_code, "actual_document_count": actual,
         "expected_document_count": expected, "mode": mode,
     }
+    if error_code == "BUILD_INCOMPLETE" and os.environ.get("GWT_INDEX_REFRESH_RUN_ID"):
+        payload["refresh_run_id"] = os.environ["GWT_INDEX_REFRESH_RUN_ID"]
+    if error:
+        payload["error"] = error
     _write_json_atomic(db_path / "repair.json", payload)
     return {"ok": False, "scope": "issues", "error_code": error_code,
-            "error": f"issues rebuild failed: {error_code} ({actual}/{expected})",
+            "error": error or f"issues rebuild failed: {error_code} ({actual}/{expected})",
             "repair": payload, "mode": mode}
+
+
+def _recover_issue_build(db_path: Path) -> bool:
+    """Recover an orphan sentinel under the build lock; return whether it is live."""
+    if _read_issue_repair(db_path).get("last_error") != "BUILD_INCOMPLETE":
+        return False
+    try:
+        with acquire_lock(db_path / "build", blocking=False):
+            # Re-read after locking: never erase a newer build's real failure.
+            if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+                (db_path / "repair.json").unlink(missing_ok=True)
+        return False
+    except OSError:
+        # Contention or an unreadable lock cannot prove the builder died.
+        return True
 
 
 def _issue_status_v2(
@@ -7430,6 +7683,10 @@ def _issue_status_v2(
         repair_required = True
     elif not meta:
         reason = "metadata_missing"
+        healthy = False
+        repair_required = True
+    elif meta.get("record_layout") != ISSUE_RECORD_LAYOUT:
+        reason = "record_layout_changed"
         healthy = False
         repair_required = True
     else:
@@ -7495,10 +7752,15 @@ def _issue_status_v2(
             ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
             status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
     status["mode"] = meta.get("mode", "full")
+    if check_repair:
+        _recover_issue_build(db_path)
     repair_state = _read_issue_repair(db_path)
     if repair_state:
         status["repair"] = repair_state
-        if check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
+        # A builder can create its sentinel after the recovery probe.
+        if check_repair and repair_state.get("last_error") == "BUILD_INCOMPLETE":
+            status.update(reason="building", building=True)
+        elif check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
             status.update(reason="repair_stopped", healthy=False, repair_required=True, source_drift=False)
             status["mode"] = repair_state.get("mode", status["mode"])
     if (db_path / "cancel-requested").exists():
@@ -7515,11 +7777,33 @@ def action_index_issues_v2(
     qos: str = "interactive",
     mode: str = "full",
     repair: bool = False,
+    allow_empty: bool = False,
+) -> dict:
+    db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
+    # Separate from the publication lock so readers keep using the active
+    # generation while staging is built. OS ownership ends even on process kill.
+    with acquire_lock(db_path / "build"):
+        if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+            (db_path / "repair.json").unlink(missing_ok=True)
+        return _index_issues_v2_locked(repo_hash, project_root, db_root, respect_ttl,
+                                       ttl_minutes, qos, mode, repair, allow_empty)
+
+
+def _index_issues_v2_locked(
+    repo_hash: str,
+    project_root: str,
+    db_root: Optional[Path] = None,
+    respect_ttl: bool = False,
+    ttl_minutes: int = ISSUE_TTL_MINUTES_DEFAULT,
+    qos: str = "interactive",
+    mode: str = "full",
+    repair: bool = False,
+    allow_empty: bool = False,
 ) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
-    Issue #4086 AC-2: the build embeds in `EMBED_CHECKPOINT_BATCH` batches.
-    A background build yields at the batch boundary while a higher-priority
+    Issue #4086 AC-2 / Issue #5431: background builds checkpoint after each
+    document and yield while a higher-priority
     claimant (a verification reservation) is pending on the heavy lease and
     leaves a resumable staging continuation; the next run resumes without
     re-embedding staged issues. Progress is published for AC-4.
@@ -7532,13 +7816,18 @@ def action_index_issues_v2(
     if (db_path / "cancel-requested").exists():
         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
-    issues = _load_cached_issue_documents(repo_hash)
-    source = {"fingerprint": _issue_source_fingerprint(issues),
-              "document_count": len(issues),
+    source_revision = _issue_source_revision(repo_hash)
+    records = _load_issue_records(repo_hash)
+    issue_cache_fingerprint = _issue_source_fingerprint(_load_cached_issue_documents(repo_hash))
+    if source_revision != _issue_source_revision(repo_hash):
+        source_revision = None
+    source = {"fingerprint": _record_source_fingerprint(records),
+              "document_count": len(records),
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
-    if previous_failure.get("fingerprint") == fingerprint and previous_failure.get("failures", 0):
+    if (previous_failure.get("fingerprint") == fingerprint
+            and previous_failure.get("failures", 0)):
         return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
                 "error": "issues rebuild stopped after failure for the same source; use explicit repair",
                 "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
@@ -7552,7 +7841,7 @@ def action_index_issues_v2(
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
-    if not issues:
+    if not records and not allow_empty:
         return _issue_build_failure(db_path, fingerprint, mode, "EMPTY_CORPUS", 0, 0)
     old_entries = read_manifest(db_path, scope="issues")
     # Reuse only a self-consistent previous generation; source drift is expected.
@@ -7564,12 +7853,12 @@ def action_index_issues_v2(
     )
     if repair or not manifest_valid or not (health.get("healthy") or health.get("source_drift")):
         mode = "full"
-    new_entries = [{"path": str(issue["number"]),
-                    "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
+    new_entries = [{"path": record["id"],
+                    "content_hash": _record_source_fingerprint([record])} for record in records]
 
-    # Persist before touching staging so process death cannot restart the
-    # same source indefinitely. Normal yield and verified success clear it.
-    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
+    # Persist before staging. The held build lock distinguishes a live build
+    # from an orphan left by process death. Normal yield/success clear it.
+    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(records))
 
     emit_progress(
         {
@@ -7583,7 +7872,7 @@ def action_index_issues_v2(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(issues)
+    total = len(records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
@@ -7616,33 +7905,20 @@ def action_index_issues_v2(
                     except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
                 pending: List[Dict[str, Any]] = [
-                    issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
+                    record for record in records if record["id"] not in staged_ids
                 ]
-                for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
+                checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+                _write_heavy_progress(
+                    heavy_target, len(staged_ids), total, checkpoint_batch, 0,
+                )
+                for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
+                    batch_records = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
-                    ids: List[str] = []
-                    documents: List[str] = []
-                    metadatas: List[Dict[str, Any]] = []
-                    for issue in batch_issues:
-                        number = issue.get("number", 0)
-                        title = issue.get("title", "")
-                        body = issue.get("body", "")
-                        state = issue.get("state", "")
-                        labels = issue.get("labels", [])
-                        ids.append(str(number))
-                        documents.append(f"{title}\n{body}")
-                        metadatas.append(
-                            {
-                                "number": number,
-                                "title": title,
-                                "url": "",
-                                "state": state,
-                                "labels": ",".join(labels),
-                            }
-                        )
+                    ids = [record["id"] for record in batch_records]
+                    documents = [record["document"] for record in batch_records]
+                    metadatas = [record["metadata"] for record in batch_records]
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
                     newly_embedded += len(ids)
                     done = len(staged_ids) + newly_embedded
@@ -7657,7 +7933,7 @@ def action_index_issues_v2(
                         heavy_target,
                         done,
                         total,
-                        EMBED_CHECKPOINT_BATCH,
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                     emit_progress(
@@ -7670,7 +7946,7 @@ def action_index_issues_v2(
                     )
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    remaining = len(pending) - (start + len(batch_issues))
+                    remaining = len(pending) - (start + len(batch_records))
                     if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
                         yielded = True
                         break
@@ -7698,6 +7974,7 @@ def action_index_issues_v2(
             "ok": True,
             "scope": "issues",
             "yielded": True,
+            "budget_exhausted": _refresh_budget_exhausted(),
             "resumable": True,
             "mode": mode,
             "indexed": staged_count,
@@ -7725,11 +8002,14 @@ def action_index_issues_v2(
                 db_path,
                 {
                     "schema_version": INDEX_SCHEMA_VERSION,
+                    "record_layout": ISSUE_RECORD_LAYOUT,
                     "mode": mode,
                     "last_full_refresh": _now_utc().isoformat(),
                     "ttl_minutes": ttl_minutes,
-                    "document_count": len(issues),
+                    "document_count": len(records),
                     "source_cache_fingerprint": source["fingerprint"],
+                    "issue_cache_fingerprint": issue_cache_fingerprint,
+                    **({"source_cache_revision": source_revision} if source_revision is not None else {}),
                     "source_document_count": source["document_count"],
                     "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
@@ -7746,27 +8026,27 @@ def action_index_issues_v2(
             db_path,
             staging,
             scope="issues",
-            document_count=len(issues),
+            document_count=len(records),
             after_publish=_commit_issue_meta,
         )
         if publication_error is not None:
             raise publication_error
         if not publish.get("ok"):
-            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total)
+            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total, error=publish.get("error"))
 
         # Verify the published generation against the exact source we embedded.
         # A concurrent cache refresh must not turn this check into source drift.
         published_health = _issue_status_v2(repo_hash, db_root=db_root, source=source, check_repair=False)
         if published_health.get("reason") == "cancelled":
             return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-        if not published_health.get("healthy"):
+        if not published_health.get("healthy") and not (
+            allow_empty and published_health.get("reason") == "empty_corpus"
+        ):
             actual = published_health.get("document_count", 0)
             error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
             return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
     except Exception as error:
-        result = _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total)
-        result["error"] = str(error)
-        return result
+        return _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total, error=str(error))
 
     (db_path / "repair.json").unlink(missing_ok=True)
 
@@ -7775,14 +8055,14 @@ def action_index_issues_v2(
             "phase": "complete",
             "scope": "issues",
             "mode": mode,
-            "indexed": len(issues),
-            "total": len(issues),
+            "indexed": len(records),
+            "total": len(records),
         }
     )
     return {
         "ok": True,
         "scope": "issues",
-        "indexed": len(issues),
+        "indexed": len(records),
         "newly_embedded": newly_embedded,
         "mode": mode,
     }
@@ -7880,6 +8160,7 @@ def _search_collection_v2(
     query: str,
     n_results: int,
     query_embedding: Optional[List[float]] = None,
+    where: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
@@ -7888,6 +8169,7 @@ def _search_collection_v2(
     if count == 0:
         return []
     actual_n = min(n_results, count)
+    filters = {"where": where} if where is not None else {}
     if query_embedding is not None:
         # Phase 70 AS-2: reuse one query embedding across every scope in a
         # batch request instead of re-encoding per scope.
@@ -7895,12 +8177,14 @@ def _search_collection_v2(
             query_embeddings=[query_embedding],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     else:
         results = collection.query(
             query_texts=[query],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
@@ -7916,6 +8200,10 @@ def _search_collection_v2(
                 }
             )
     return items
+
+
+def _scope_record_filter(scope: str) -> Dict[str, Any]:
+    return {"where": {"record_kind": "spec" if scope == "specs" else "issue"}} if scope in {"issues", "specs"} else {}
 
 
 def _wire_distance(value: Any) -> Optional[float]:
@@ -8060,6 +8348,25 @@ def _format_work_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+def _format_report_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Preserve report identity, answer, and references in the search wire."""
+    formatted = []
+    for item in items:
+        meta = item.get("metadata") or {}
+        if not meta.get("report_id"):
+            continue
+        result = {field: meta.get(field, "") for field in (
+            "report_id", "source", "kind", "report_type", "created_at", "title", "body"
+        )}
+        result.update({
+            "question": meta.get("question") or None,
+            "issue_numbers": json.loads(meta.get("issue_numbers", "[]")),
+            "distance": _wire_distance(item.get("distance")),
+        })
+        formatted.append(_attach_match_fields(result, item))
+    return formatted
+
+
 def _scope_result_key(scope: str) -> str:
     return {
         "files": "results",
@@ -8070,6 +8377,7 @@ def _scope_result_key(scope: str) -> str:
         "discussions": "discussionResults",
         "board": "boardResults",
         "works": "workResults",
+        "reports": "reportResults",
     }[scope]
 
 
@@ -8090,6 +8398,8 @@ def _format_scope_results(
         return _format_board_results(items)[:n_results]
     if scope == "works":
         return _format_work_results(items)[:n_results]
+    if scope == "reports":
+        return _format_report_results(items)[:n_results]
     return _format_issue_results(items)[:n_results]
 
 
@@ -8145,6 +8455,7 @@ def action_search_v2(
         "search-discussions": "discussions",
         "search-board": "board",
         "search-works": "works",
+        "search-reports": "reports",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
@@ -8179,9 +8490,11 @@ def action_search_v2(
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     needs_build = not health["exists"] or health.get("repair_required", False)
-    needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
-
-    if needs_build or needs_spec_refresh:
+    if scope in {"issues", "specs"} and health.get("building") and (
+        health.get("healthy") or health.get("source_drift")
+    ):
+        needs_build = False
+    if needs_build:
         if no_auto_build and needs_build:
             error_code = "INDEX_UNHEALTHY" if health["exists"] else "INDEX_MISSING"
             return {
@@ -8200,6 +8513,12 @@ def action_search_v2(
                 "error_code": "BAD_ARGS",
                 "error": "project_root required for auto-build",
             }
+        if (
+            scope in {"issues", "specs"}
+            and not health["exists"]
+            and not _issue_cache_is_populated(repo_hash)
+        ):
+            return _empty_corpus_diagnostic(scope, repo_hash)
         emit_progress({"phase": "indexing", "scope": scope, "done": 0, "total": 0})
         if scope == "issues":
             build = action_index_issues_v2(
@@ -8247,6 +8566,13 @@ def action_search_v2(
                 mode="full",
                 db_root=db_root,
             )
+        elif scope == "reports":
+            build = action_index_reports_v2(
+                repo_hash=repo_hash,
+                project_root=project_root,
+                mode="full",
+                db_root=db_root,
+            )
         else:
             build = action_index_files_v2(
                 project_root=project_root,
@@ -8266,7 +8592,7 @@ def action_search_v2(
         try:
             collection_count = _safe_collection_count(collection)
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(collection, query, fetch_n)
+            items = _search_collection_v2(collection, query, fetch_n, **_scope_record_filter(scope))
         finally:
             _close_chroma_client(client)
 
@@ -8312,10 +8638,12 @@ def _classify_scope_for_search(
       or Issue-cache drift) — serve it and queue a refresh.
     - ``fresh``: healthy and current.
     """
-    if scope == "issues":
-        health = _issue_status_v2(repo_hash, db_root=db_root)
+    if scope in {"issues", "specs"}:
+        health = _issue_status_v2(repo_hash, db_root=db_root) if scope == "issues" else _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
         if not health.get("exists"):
             return "missing", health
+        if health.get("building") and (health.get("healthy") or health.get("source_drift")):
+            return "stale", health
         if health.get("healthy"):
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
@@ -8331,8 +8659,38 @@ def _classify_scope_for_search(
     health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
     if not health.get("exists"):
         return "missing", health
+    if health.get("source_drift"):
+        return "stale", health
     if health.get("repair_required"):
         return "corrupt", health
+    if scope == "memory":
+        # Instruction changes join the existing stale-scope rebuild queue.
+        # Validate the canonical source before serving any old active records.
+        _, instruction_entries = _load_user_instruction_records(repo_hash)
+        current_hashes = {entry["path"]: entry["content_hash"] for entry in instruction_entries}
+        db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
+        indexed_hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in read_manifest(db_path, scope="memory") if "content_hash" in entry
+        }
+        if current_hashes != indexed_hashes:
+            return "stale", health
+    if scope == "reports":
+        try:
+            _, entries = _load_report_records(repo_hash)
+        except ValueError:
+            # Invalid Reports must not abort healthy scopes in the same batch.
+            return "corrupt", {
+                **health, "healthy": False, "repair_required": True, "reason": "source_invalid",
+            }
+        current_hashes = {entry["path"]: entry["content_hash"] for entry in entries}
+        db_path = resolve_db_path(repo_hash, None, scope, db_root=db_root)
+        indexed_hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in read_manifest(db_path, scope=scope) if "content_hash" in entry
+        }
+        if current_hashes != indexed_hashes:
+            return "stale", health
     return "fresh", health
 
 
@@ -8939,7 +9297,8 @@ def _search_scope_collection(
         try:
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
             items = _search_collection_v2(
-                collection, query, fetch_n, query_embedding=query_embedding
+                collection, query, fetch_n, query_embedding=query_embedding,
+                **_scope_record_filter(scope),
             )
         finally:
             _close_chroma_client(client)
@@ -8990,7 +9349,40 @@ def _action_search_multi_v2_pinned(
     stores, broken scopes are reported in ``scopes`` instead of failing the
     whole batch or silently returning empty results (FR-387 / FR-388). The
     Rust caller owns repair scheduling and the stale refresh queue.
+
+    Timings separate View/health inspection, model loading, warm query encoding,
+    scope search and batch payload assembly. Scope search includes store open,
+    match filtering and per-scope formatting inside the existing search helpers;
+    assembly measures combining those results, not their JSON serialization.
     """
+    model_load_started = _MODEL_LOAD_MS
+    timings_ms = {
+        "index_read": 0.0,
+        "model_load": 0,
+        "query_encode": 0.0,
+        "query": 0.0,
+        "assemble": 0.0,
+    }
+
+    def timed(phase: str, action: Callable[[], Any]) -> Any:
+        started = time.monotonic()
+        model_load_before = _MODEL_LOAD_MS
+        try:
+            return action()
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if phase == "query_encode":
+                elapsed_ms -= _MODEL_LOAD_MS - model_load_before
+            timings_ms[phase] += max(0.0, elapsed_ms)
+
+    def finish(result: Dict[str, Any]) -> Dict[str, Any]:
+        started = time.monotonic()
+        result["model_load_ms"] = _MODEL_LOAD_MS - model_load_started
+        timings_ms["model_load"] = result["model_load_ms"]
+        result["timings_ms"] = timings_ms
+        timings_ms["assemble"] += (time.monotonic() - started) * 1000
+        return result
+
     valid_scopes = {
         "issues",
         "specs",
@@ -8998,6 +9390,7 @@ def _action_search_multi_v2_pinned(
         "discussions",
         "board",
         "works",
+        "reports",
         "files",
         "files-docs",
     }
@@ -9005,11 +9398,11 @@ def _action_search_multi_v2_pinned(
         raise ValueError(f"unknown file index protocol: {file_index_protocol}")
     invalid_scopes = [scope for scope in scopes if scope not in valid_scopes]
     if invalid_scopes:
-        return {
+        return finish({
             "ok": False,
             "error_code": "BAD_ARGS",
             "error": f"unsupported search scope {invalid_scopes[0]}",
-        }
+        })
     v2_file_scopes = [
         scope for scope in scopes if scope in {"files", "files-docs"}
     ]
@@ -9019,21 +9412,28 @@ def _action_search_multi_v2_pinned(
     if file_index_protocol == "v2" and v2_file_scopes:
         if not worktree_hash:
             raise ValueError("file-index-v2 search requires worktree_hash")
-        file_selection = _select_file_index_v2_view(
-            repo_hash,
-            worktree_hash,
-            db_root,
-            repair_corruption=True,
+        file_selection = timed(
+            "index_read",
+            lambda: _select_file_index_v2_view(
+                repo_hash,
+                worktree_hash,
+                db_root,
+                repair_corruption=True,
+            ),
         )
         pinned_file_view = file_selection["view"]
         if pinned_file_view is None:
             unresolved: List[str] = []
             for scope in dict.fromkeys(v2_file_scopes):
-                state, health = _classify_scope_for_search(
-                    repo_hash, worktree_hash, scope, db_root=db_root
+                state, health = timed(
+                    "index_read",
+                    lambda: _classify_scope_for_search(
+                        repo_hash, worktree_hash, scope, db_root=db_root
+                    ),
                 )
                 if state in ("missing", "corrupt"):
                     unresolved.append(scope)
+                    legacy_file_selections[scope] = {"state": state, **health}
                     continue
                 legacy_file_selections[scope] = {
                     "state": "stale",
@@ -9041,8 +9441,8 @@ def _action_search_multi_v2_pinned(
                     "fallback_source": "legacy",
                     "health": health,
                 }
-            if unresolved:
-                return {
+            if unresolved and all(scope in unresolved for scope in scopes):
+                return finish({
                     "ok": False,
                     "error_code": "INDEX_NOT_READY",
                     "retryable": True,
@@ -9050,7 +9450,7 @@ def _action_search_multi_v2_pinned(
                     "waited_ms": 0,
                     "affected_scopes": unresolved,
                     "error": "file index v2 has no compatible readable corpus",
-                }
+                })
     payload: Dict[str, Any] = {"ok": True}
     scope_states: Dict[str, Dict[str, Any]] = {}
     scope_results: Dict[str, Any] = {}
@@ -9069,8 +9469,11 @@ def _action_search_multi_v2_pinned(
                 health = legacy_file_selections[scope]
                 state = health["state"]
         else:
-            state, health = _classify_scope_for_search(
-                repo_hash, scope_worktree, scope, db_root=db_root
+            state, health = timed(
+                "index_read",
+                lambda: _classify_scope_for_search(
+                    repo_hash, scope_worktree, scope, db_root=db_root
+                ),
             )
         if state in ("missing", "corrupt"):
             scope_states[scope] = {
@@ -9081,33 +9484,56 @@ def _action_search_multi_v2_pinned(
         if query_embedding is None:
             try:
                 if pinned_file_view is not None:
-                    query_embedding = _encode_file_index_v2_query(
-                        pinned_file_view, query
+                    query_embedding = timed(
+                        "query_encode",
+                        lambda: _encode_file_index_v2_query(pinned_file_view, query),
                     )
                 else:
-                    query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+                    query_embedding = timed(
+                        "query_encode",
+                        lambda: E5EmbeddingFunction().embed_query([query])[0],
+                    )
             except Exception as error:
                 affected_scopes = [
                     candidate for candidate in scopes if candidate in valid_scopes
                 ]
-                return _search_failed_payload(
+                return finish(_search_failed_payload(
                     affected_scopes,
                     "query embedding",
                     error,
-                )
+                ))
         try:
             if is_v2_file_scope:
                 if pinned_file_view is not None:
-                    result = _search_file_index_v2_scope(
-                        pinned_file_view,
-                        scope,
-                        query,
-                        n_results,
-                        match_mode,
-                        query_embedding,
+                    result = timed(
+                        "query",
+                        lambda: _search_file_index_v2_scope(
+                            pinned_file_view,
+                            scope,
+                            query,
+                            n_results,
+                            match_mode,
+                            query_embedding,
+                        ),
                     )
                 else:
-                    result = _search_scope_collection(
+                    result = timed(
+                        "query",
+                        lambda: _search_scope_collection(
+                            repo_hash,
+                            scope_worktree,
+                            scope,
+                            query,
+                            n_results,
+                            match_mode,
+                            db_root,
+                            query_embedding,
+                        ),
+                    )
+            else:
+                result = timed(
+                    "query",
+                    lambda: _search_scope_collection(
                         repo_hash,
                         scope_worktree,
                         scope,
@@ -9116,28 +9542,21 @@ def _action_search_multi_v2_pinned(
                         match_mode,
                         db_root,
                         query_embedding,
-                    )
-            else:
-                result = _search_scope_collection(
-                    repo_hash,
-                    scope_worktree,
-                    scope,
-                    query,
-                    n_results,
-                    match_mode,
-                    db_root,
-                    query_embedding,
+                    ),
                 )
         except Exception as error:
             if is_v2_file_scope:
-                return _search_failed_payload([scope], "query", error)
+                return finish(_search_failed_payload([scope], "query", error))
             # Phase 70a FR-400: query-contract failures (for example an
             # unsupported embedding scalar type) do not prove the verified
             # store is corrupt. Re-check the same canonical health source used
             # by status; only an actually missing/corrupt store enters repair.
             try:
-                current_state, current_health = _classify_scope_for_search(
-                    repo_hash, scope_worktree, scope, db_root=db_root
+                current_state, current_health = timed(
+                    "index_read",
+                    lambda: _classify_scope_for_search(
+                        repo_hash, scope_worktree, scope, db_root=db_root
+                    ),
                 )
             except Exception:
                 current_state, current_health = state, health
@@ -9147,7 +9566,8 @@ def _action_search_multi_v2_pinned(
                     "reason": current_health.get("reason", current_state),
                 }
                 continue
-            return _search_failed_payload([scope], "query", error)
+            return finish(_search_failed_payload([scope], "query", error))
+        assembly_started = time.monotonic()
         scope_states[scope] = {"state": state}
         if is_v2_file_scope:
             if pinned_file_view is not None:
@@ -9165,12 +9585,14 @@ def _action_search_multi_v2_pinned(
                 payload.setdefault("suggestions", {})[scope] = value
             else:
                 payload[key] = value
+        timings_ms["assemble"] += (time.monotonic() - assembly_started) * 1000
+    assembly_started = time.monotonic()
     payload["scopes"] = scope_states
     payload["scope_results"] = scope_results
-    payload["model_load_ms"] = _MODEL_LOAD_MS
     if stale_scopes:
         payload["stale_scopes"] = stale_scopes
-    return payload
+    timings_ms["assemble"] += (time.monotonic() - assembly_started) * 1000
+    return finish(payload)
 
 
 def action_search_multi_v2(
@@ -9264,6 +9686,10 @@ def _explicit_file_index_v2_status_pinned(
         repair_corruption=False,
     )
     view = selection["view"]
+    progress = _read_file_index_v2_build_progress(
+        resolve_file_index_v2_root(repo_hash, db_root)
+        / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
     if view is not None:
         result: Dict[str, Dict[str, Any]] = {}
         for scope in ("files", "files-docs"):
@@ -9279,6 +9705,8 @@ def _explicit_file_index_v2_status_pinned(
             }
             if selection.get("fallback_source"):
                 status["fallback_source"] = selection["fallback_source"]
+            if progress is not None:
+                status["build_progress"] = progress
             result[scope] = status
         return result
 
@@ -9303,6 +9731,10 @@ def _explicit_file_index_v2_status_pinned(
                 "reason": selection["reason"],
             }
         result[scope] = legacy
+        if progress is not None:
+            result[scope]["build_progress"] = progress
+            if selection["reason"] == "view_head_missing":
+                result[scope]["reason"] = "build_incomplete"
     return result
 
 
@@ -9322,6 +9754,7 @@ def action_status_v2(
         "discussions": _scope_status_v2(repo_hash, None, "discussions", db_root=db_root),
         "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
         "works": _scope_status_v2(repo_hash, None, "works", db_root=db_root),
+        "reports": _scope_status_v2(repo_hash, None, "reports", db_root=db_root),
     }
     if worktree_hash:
         if file_index_protocol == "v2":
@@ -9368,6 +9801,172 @@ def action_status_v2(
 # =====================================================================
 
 
+def _read_search_worker_message(connection: socket.socket) -> Dict[str, Any]:
+    """Read one bounded ASCII/UTF-8 JSON line from the local transport."""
+    frame = bytearray()
+    while len(frame) <= 16 * 1024 * 1024:
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise ConnectionError("search worker connection closed")
+        frame.extend(chunk)
+        if len(frame) > 16 * 1024 * 1024:
+            break
+        if b"\n" in frame:
+            line, _, remainder = frame.partition(b"\n")
+            if remainder:
+                raise ValueError("unexpected data after search worker request")
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError("search worker message must be an object")
+            return payload
+    raise ValueError("search worker message is too large")
+
+
+def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
+    """Reuse one model process while Rust retains its normal search lease."""
+    qos = args.qos or "interactive"
+    identity = _sha256_json({
+        "script": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "python": str(Path(sys.executable).resolve()),
+        "prefix": str(Path(sys.prefix).resolve()),
+        "fake_embedding": os.environ.get("GWT_INDEX_FAKE_EMBEDDING", ""),
+        "qos": qos,
+    })
+    worker_dir = (Path(args.worker_dir) if getattr(args, "worker_dir", None) else
+                  _gwt_home() / "runtime" / "search-workers" / identity)
+    endpoint_path = worker_dir / "endpoint.json"
+
+    def connect():
+        endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
+        port, token = endpoint["port"], endpoint["token"]
+        if not isinstance(port, int) or not isinstance(token, str):
+            raise ValueError("invalid search worker endpoint")
+        connection = socket.create_connection(("127.0.0.1", port), timeout=1)
+        connection.settimeout(None)  # Rust owns the request deadline.
+        return connection, token
+
+    # Only startup is locked: the existing host-wide heavy lease serializes
+    # searches. Never replay a request after sending it to a worker.
+    with acquire_lock(worker_dir):
+        try:
+            connection, token = connect()
+        except (OSError, ValueError, KeyError, TypeError):
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
+                 "--qos", qos],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    connection, token = connect()
+                    break
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        if process.poll() is None:
+                            process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        raise RuntimeError("search worker failed to start") from error
+                    time.sleep(0.1)
+
+    with connection:
+        request = {"token": token, "args": vars(args)}
+        connection.sendall(json.dumps(request, ensure_ascii=True).encode("ascii") + b"\n")
+        return _read_search_worker_message(connection)
+
+
+def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
+    """Serve search-multi only; release model memory after idle expiry."""
+    global _SEARCH_WORKER_ENDPOINT
+    worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    worker_dir.chmod(0o700)
+    endpoint_path = worker_dir / "endpoint.json"
+    token = secrets.token_hex(32)
+    pid = os.getpid()
+    with _search_worker_read_clients(), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(idle_timeout)
+        _write_json_atomic(endpoint_path, {
+            "pid": pid, "port": server.getsockname()[1], "token": token,
+            "model_state": "cold", "model_load_ms": 0,
+        })
+        endpoint_path.chmod(0o600)
+        _SEARCH_WORKER_ENDPOINT = endpoint_path
+        try:
+            while True:
+                try:
+                    connection, _ = server.accept()
+                except socket.timeout:
+                    return 0
+                with connection:
+                    completed = threading.Event()
+                    try:
+                        connection.settimeout(10)
+                        request = _read_search_worker_message(connection)
+                        supplied_token = request.get("token")
+                        arguments = request.get("args")
+                        if (
+                            not isinstance(supplied_token, str)
+                            or not secrets.compare_digest(supplied_token, token)
+                            or not isinstance(arguments, dict)
+                            or arguments.get("action") != "search-multi"
+                            or not arguments.get("repo_hash")
+                            or not arguments.get("query")
+                        ):
+                            raise ValueError("invalid search worker request")
+                        connection.settimeout(None)
+
+                        def cancel_on_disconnect(connection=connection, completed=completed):
+                            try:
+                                connection.recv(1)
+                            except OSError:
+                                pass
+                            if not completed.is_set():
+                                # A killed/timed-out Rust caller has dropped its
+                                # heavy lease. No embedding may outlive it.
+                                os._exit(1)
+
+                        threading.Thread(target=cancel_on_disconnect, daemon=True).start()
+                        payload = action_search_multi_v2(
+                            repo_hash=arguments["repo_hash"],
+                            worktree_hash=arguments.get("worktree_hash") or None,
+                            project_root=arguments.get("project_root") or None,
+                            query=arguments["query"],
+                            n_results=arguments.get("n_results", 10),
+                            scopes=[scope.strip() for scope in arguments.get("scopes", "").split(",") if scope.strip()],
+                            match_mode=arguments.get("match_mode", "semantic"),
+                            db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
+                            file_index_protocol=arguments.get("file_index_protocol", "legacy"),
+                        )
+                    except ValueError as error:
+                        payload = {"ok": False, "error_code": "BAD_ARGS", "error": str(error)}
+                    except Exception as error:
+                        payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
+                    finally:
+                        completed.set()
+                    payload["worker_pid"] = pid
+                    try:
+                        connection.sendall(json.dumps(payload, ensure_ascii=True).encode("ascii") + b"\n")
+                    except OSError:
+                        pass
+        finally:
+            _SEARCH_WORKER_ENDPOINT = None
+            # A stale worker must never erase a replacement worker's endpoint.
+            with contextlib.suppress(OSError, ValueError):
+                if json.loads(endpoint_path.read_text(encoding="utf-8")).get("pid") == pid:
+                    endpoint_path.unlink()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="gwt ChromaDB index helper")
     parser.add_argument(
@@ -9394,10 +9993,14 @@ def parse_args() -> argparse.Namespace:
             "search-board",
             "index-works",
             "search-works",
+            "index-reports",
+            "search-reports",
             "search-multi",
+            "serve-search-worker",
         ],
     )
     parser.add_argument("--project-root", default="")
+    parser.add_argument("--worker-dir", default="")
     parser.add_argument("--db-path", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--n-results", type=int, default=10)
@@ -9407,7 +10010,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board", "works"],
+        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board", "works", "reports"],
     )
     parser.add_argument("--scopes", default="")
     parser.add_argument("--match-mode", default="semantic", choices=["semantic", "all_terms"])
@@ -9504,6 +10107,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=worktree_hash or "",
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9519,6 +10123,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9534,6 +10139,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9545,6 +10151,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     project_root=args.project_root or None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9557,6 +10164,19 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
+                )
+            )
+            return 0
+
+        if action == "index-reports":
+            emit(
+                action_index_reports_v2(
+                    repo_hash=repo_hash,
+                    project_root=args.project_root or None,
+                    mode=args.mode,
+                    db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9590,6 +10210,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             "search-discussions",
             "search-board",
             "search-works",
+            "search-reports",
         ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
@@ -9631,7 +10252,15 @@ def main() -> int:
 
         # Phase 70 FR-385: thread caps / priority must be in place before any
         # action can trigger the lazy model import.
-        configure_qos_threads(args.qos or default_qos_for_action(action))
+        configure_qos_threads(
+            args.qos or default_qos_for_action(action),
+            single_query=action in {"search-multi", "serve-search-worker"},
+        )
+
+        if action == "serve-search-worker":
+            if not args.worker_dir:
+                raise ValueError("--worker-dir is required")
+            return _serve_search_worker(Path(args.worker_dir))
 
         # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
         # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
@@ -9646,6 +10275,22 @@ def main() -> int:
 
         # Phase 8: when --repo-hash is supplied, dispatch the v2 action layer.
         if args.repo_hash:
+            if action == "search-multi":
+                if not args.query:
+                    emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                    return 2
+                try:
+                    payload = _search_worker_request(args)
+                except (OSError, ValueError, RuntimeError):
+                    payload = {
+                        "ok": False,
+                        "error_code": "SEARCH_UNAVAILABLE",
+                        "retryable": True,
+                        "reason": "search worker transport failed",
+                        "retry_after_ms": 250,
+                    }
+                emit(payload)
+                return 0 if payload.get("ok") else 1
             return _dispatch_v2(action, args)
 
         if action == "probe":
@@ -9738,4 +10383,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if exit_code == 0 and _FILE_INDEX_V2_YIELDED:
+        # Issue #5782: the yielded action has closed Chroma, persisted its CAS
+        # checkpoint and unwound its locks. Avoid seconds of unused PyTorch
+        # interpreter teardown; the parent still reaps us before releasing the
+        # heavy lease (FR-417). Other success/failure paths retain normal exit.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    raise SystemExit(exit_code)

@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
+const interruptedBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const interruptedAppUrl = interruptedBase ? new URL(new URL(APP_URL).pathname, interruptedBase).href : APP_URL;
+
 // SPEC #3340 T-014/T-015/T-018: `interrupted` is a first-class runtime state.
 // It must render as Interrupted (not fall back to Running), never project as
 // done, and leave no stale chip class once the window recovers.
@@ -45,7 +48,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                 windows: [{
                   id: "agent-1", title: "Codex", preset: "agent",
                   geometry: { x: 40, y: 80, width: 520, height: 300 },
-                  geometry_revision: 0, z_index: 1, status: "interrupted",
+                  geometry_revision: 0, z_index: 1, status: "interrupted", session_id: "fixture-session",
                   minimized: false, maximized: false, pre_maximize_geometry: null,
                   persist: true, purpose_title: null, dynamic_title: null,
                   dynamic_title_detail: null, agent_id: "codex", agent_color: "cyan",
@@ -61,8 +64,8 @@ test.beforeEach(async ({ page }, testInfo) => {
     }
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureSocket });
   });
-  await installEmbeddedRoutes(page);
-  await page.goto(APP_URL);
+  if (!interruptedBase) await installEmbeddedRoutes(page);
+  await page.goto(interruptedAppUrl);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 });
 
@@ -72,19 +75,46 @@ test.afterEach(({ page }) => {
 
 test("interrupted window renders Interrupted, never done, and recovers without a stale class", async ({ page }, testInfo) => {
   const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
-  await expect(agentWindow).toBeVisible({ timeout: 10_000 });
+  const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+  await expect(tile).toBeVisible({ timeout: 10_000 });
+  await expect(tile.locator(".agent-tile__mode")).toHaveText("Input unavailable");
   const chip = agentWindow.locator(".status-chip");
   await expect(agentWindow.locator(".status-label")).toHaveText("Interrupted");
   await expect(chip).toHaveClass(/\binterrupted\b/);
   await expect(agentWindow).not.toHaveAttribute("data-agent-state", "done");
-  await agentWindow.screenshot({ path: testInfo.outputPath("interrupted-window.png") });
+  await tile.screenshot({ path: testInfo.outputPath("interrupted-window.png") });
 
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
       detail: { kind: "window_state", window_id: "agent-1", state: "running" },
     }));
   });
+  await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(chip).toHaveClass(/\brunning\b/);
   await expect(chip).not.toHaveClass(/\binterrupted\b/);
+});
+
+test("capacity-ended turn renders Waiting with its reason and recovers", async ({ page }, testInfo) => {
+  const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
+  const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+  await expect(tile).toBeVisible();
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "terminal_status", id: "agent-1", status: "waiting",
+      detail: "Provider API error (codex): Selected model is at capacity — the turn ended and the pane is waiting for input; it resumes when told to continue.",
+    } }));
+  });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Waiting");
+  await expect(agentWindow.locator(".status-chip")).toHaveClass(/\bwaiting\b/);
+  await expect(agentWindow.locator(".status-chip")).toHaveAttribute("title", /Selected model is at capacity/);
+  await expect(agentWindow).not.toHaveAttribute("data-agent-state", "done");
+  await tile.screenshot({ path: testInfo.outputPath("capacity-waiting.png") });
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "terminal_status", id: "agent-1", status: "running", detail: null,
+    } }));
+  });
+  await expect(agentWindow.locator(".status-label")).toHaveText("Running");
+  await expect(agentWindow.locator(".status-chip")).not.toHaveAttribute("title", /Selected model is at capacity/);
 });

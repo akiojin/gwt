@@ -45,7 +45,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
+      # Issue #4897: lib fixtures invoke nextest even though this job uses
+      # cargo test to exercise in-process default parallelism.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       # Compiling inside the timed loop would charge the first iteration for the
@@ -54,6 +59,12 @@ jobs:
       - name: Build the default-parallel suites
         run: cargo test -p gwt --lib --bin gwt --all-features --no-run
         timeout-minutes: 45
+      # Native hook integration tests launch the companion executable, which
+      # the selected --lib / --bin gwt targets do not build. Build it without
+      # test-only features after compiling the suites, outside the timed loop.
+      - name: Build the checkout daemon for native hook tests
+        run: cargo build -p gwt --bin gwtd
+        timeout-minutes: 30
       # windows-latest gives 4 logical processors, and one pass over these
       # suites costs ~16 minutes for `--lib` and about as much again for
       # `--bin gwt` there, so three passes need a budget in the 100-minute
@@ -104,6 +115,136 @@ jobs:
           }
         timeout-minutes: 150
 
+  # Issue #4821: the ten-minute native tray measurement is outside the PR path.
+  # Select #4730 exactly; #4803's update-marker fixture is a dev-host budget.
+  test-windows-startup-tray:
+    name: Measure native startup tray (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
+        continue-on-error: true
+      - name: Build native tray measurement
+        run: cargo test -p gwt --test startup_tray_performance --no-run
+        timeout-minutes: 30
+      - name: Measure native tray readiness and dispatch
+        run: cargo test -p gwt --test startup_tray_performance startup_tray_under_large_stopped_session_load -- --exact --ignored --test-threads=1 --nocapture
+        timeout-minutes: 25
+      - name: Upload Windows startup tray measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-startup-tray-performance
+          path: target/startup-tray-performance.json
+          if-no-files-found: warn
+
+  # Issue #5437: real E5 coverage for every scope and build/search contention.
+  test-windows-index-e2e:
+    name: Test (real E5 index, Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      GWT_INDEX_FAKE_EMBEDDING: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Cache HuggingFace model (Windows E5)
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.HF_HOME }}
+          key: hf-cache-windows-multilingual-e5-base-v1
+      - name: Install index runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install -r crates/gwt-core/runtime/project_index_requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pythonPath = (Get-Command python).Source
+          "PYTHON=$pythonPath" >> $env:GITHUB_ENV
+        timeout-minutes: 10
+      - name: Prepare the real E5 model before offline measurements
+        shell: pwsh
+        run: |
+          @'
+          from sentence_transformers import SentenceTransformer
+          SentenceTransformer("intfloat/multilingual-e5-base")
+          SentenceTransformer("intfloat/multilingual-e5-base", revision="d128750597153bb5987e10b1c3493a34e5a4502a")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "HF_HUB_OFFLINE=1" >> $env:GITHUB_ENV
+          "TRANSFORMERS_OFFLINE=1" >> $env:GITHUB_ENV
+        timeout-minutes: 15
+      - name: Measure alternating scope searches with real E5
+        working-directory: crates/gwt-core/runtime
+        env:
+          GWT_INDEX_REAL_SEARCH_BENCHMARK: "1"
+          HF_HUB_CACHE: ${{ env.HF_HOME }}/hub
+        run: python -m unittest discover -s tests -p test_search_multi_contract.py -k test_cli_searches_reuse_worker_and_reopen_published_store -v
+        timeout-minutes: 5
+      - name: Build the real-model runtime harness
+        run: cargo test -p gwt --test runtime_tests --no-run
+        timeout-minutes: 45
+      - name: Build and search every index scope with real E5
+        run: cargo test -p gwt --test runtime_tests index_resource_harness_test::real_e5_all_scopes_build_and_search -- --exact --ignored --test-threads=1 --nocapture
+        timeout-minutes: 20
+      - name: Measure warm search during background index build and resume
+        run: cargo test -p gwt --test runtime_tests index_resource_harness_test::real_warm_search_finishes_during_background_build_and_build_resumes -- --exact --ignored --test-threads=1 --nocapture
+        timeout-minutes: 20
+
+  # Issue #5599: compare schedules once on develop, outside the PR critical
+  # path. Correctness remains covered by Test; preserve the paired raw evidence.
+  # Both schedules use the same complete gwt-lib selection (#4822); this is
+  # separate from the #4877 dev-host wall-clock measurement.
+  test-windows-verify-timings:
+    name: Windows derived verification timings (paired)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
+        continue-on-error: true
+      - name: Check paired evidence comparison
+        run: python -m unittest discover -s scripts -p test_ci_verify_timings.py
+      - name: Measure serial and grouped derived gwt-lib schedules
+        run: python scripts/ci_verify_timings.py --output target/verify-timings
+        timeout-minutes: 90
+      - name: Upload both measurements even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-verify-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/verify-timings/
+          if-no-files-found: error
+          retention-days: 14
+        timeout-minutes: 5
+
   # A scheduled run has no pull request to turn red, so a failure that only
   # lands in the Actions tab is a failure nobody sees. This is the named
   # notification target Issue #4134 AC-1 asks for: one open Issue assigned to
@@ -111,7 +252,7 @@ jobs:
   report-nightly-failure:
     name: Report nightly failure
     runs-on: ubuntu-latest
-    needs: [test-windows-default-parallel]
+    needs: [test-windows-default-parallel, test-windows-startup-tray, test-windows-index-e2e, test-windows-verify-timings]
     if: failure()
     steps:
       - name: File or update the nightly failure Issue
@@ -120,11 +261,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: 'fix(ci): nightly Windows default-parallel determinism run failed'
+          TITLE: 'fix(ci): nightly Windows verification failed'
           # The title carries `fix(ci):` for commitlint-shaped consistency, but
           # a colon and parentheses are search operators, so the lookup uses the
           # punctuation-free part of the same title.
-          SEARCH: 'nightly Windows default-parallel determinism in:title'
+          SEARCH: 'nightly Windows verification in:title'
         run: |
           set -euo pipefail
           existing=$(
@@ -133,8 +274,8 @@ jobs:
           )
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$REPO" \
-              --body "The nightly determinism run failed again: $RUN_URL"
+              --body "The nightly Windows verification failed again: $RUN_URL"
           else
             gh issue create --repo "$REPO" --title "$TITLE" --assignee akiojin \
-              --body "$(printf 'The nightly Windows default-parallel determinism job failed.\n\nRun: %s\n\nThis job left pull-request CI in Issue #4134 AC-1; this Issue is its notification target.\n' "$RUN_URL")"
+              --body "$(printf 'A nightly Windows determinism, native tray, real-model index measurement, or paired schedule measurement job failed.\n\nRun: %s\n\nThese jobs run outside pull-request CI (Issues #4134, #4821, #5437, and #5599); this Issue is their notification target.\n' "$RUN_URL")"
           fi

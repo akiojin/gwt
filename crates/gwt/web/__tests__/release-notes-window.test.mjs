@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createReleaseNotesWindow } from "../release-notes-window.js";
 
-function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
+function makeFixture({ entries = sampleEntries(), focusVersion = null,
+  scheduleFrame = callback => { callback(); return () => {}; },
+} = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><button id="trigger">Version</button></body></html>',
   );
@@ -18,6 +20,7 @@ function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
     send,
     generateId: () => "rn-test-1",
     beginUpdateDownloading,
+    scheduleFrame,
   });
   return {
     document,
@@ -41,10 +44,12 @@ function sampleEntries() {
             "**gui:** Keep tao::Window alive for the event_loop lifetime",
             "**installer:** Pin gwt.exe Name",
           ],
+          body_html: "<ul><li><strong>gui:</strong> Keep tao::Window alive for the event_loop lifetime</li><li><strong>installer:</strong> Pin gwt.exe Name</li></ul>",
         },
         {
           heading: "Features",
           items: ["**serve:** Open default browser unless --no-open is passed"],
+          body_html: "<ul><li><strong>serve:</strong> Open default browser unless --no-open is passed</li></ul>",
         },
       ],
     },
@@ -52,7 +57,11 @@ function sampleEntries() {
       version: "9.37.0",
       date: "2026-05-19",
       sections: [
-        { heading: "Bug Fixes", items: ["Stabilize terminal resize"] },
+        {
+          heading: "Bug Fixes",
+          items: ["Stabilize terminal resize"],
+          body_html: "<ul><li>Stabilize terminal resize</li></ul>",
+        },
       ],
     },
     {
@@ -62,6 +71,7 @@ function sampleEntries() {
         {
           heading: "Features",
           items: ["**file-tree:** Add file content read domain"],
+          body_html: "<ul><li><strong>file-tree:</strong> Add file content read domain</li></ul>",
         },
       ],
     },
@@ -217,6 +227,7 @@ test("does not interpret HTML-like text inside items", () => {
         {
           heading: "Notes",
           items: ["payload <script>alert(1)</script> end"],
+          body_html: "<ul><li>payload &lt;script&gt;alert(1)&lt;/script&gt; end</li></ul>",
         },
       ],
     },
@@ -226,6 +237,42 @@ test("does not interpret HTML-like text inside items", () => {
   const li = content.querySelector("li");
   assert.equal(li.querySelectorAll("script").length, 0);
   assert.ok(li.textContent.includes("<script>"));
+});
+
+test("renders backend Markdown through the shared content renderer", () => {
+  const { document, controller } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries: [{
+      version: "1.0.0",
+      sections: [{
+        heading: "Notes",
+        items: ["Use `gwt` and [docs](https://example.com)"],
+        body_html: '<ul><li>Use <code>gwt</code> and <a href="https://example.com" rel="noopener noreferrer">docs</a></li></ul>',
+      }],
+    }],
+  });
+
+  const body = document.querySelector(".release-notes-section .knowledge-markdown-body");
+  assert.ok(body, "release notes should use the shared Markdown content renderer");
+  assert.equal(body.querySelector("li code").textContent, "gwt");
+  assert.equal(body.querySelector("li a").getAttribute("href"), "https://example.com");
+  assert.equal(body.querySelectorAll("ul > li").length, 1);
+});
+
+test("payload without body_html keeps list items as plain text", () => {
+  const { document, controller } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries: [{
+      version: "1.0.0",
+      sections: [{ heading: "Notes", items: ["**literal** <script>text</script>"] }],
+    }],
+  });
+
+  const item = document.querySelector(".release-notes-section li");
+  assert.equal(item.textContent, "**literal** <script>text</script>");
+  assert.equal(item.children.length, 0);
 });
 
 test("sidebar click selects a different version", () => {
@@ -296,11 +343,73 @@ test("handleError shows the empty state with the CHANGELOG URL", () => {
   assert.ok(link.href.includes("CHANGELOG.md"));
 });
 
+test("sidebar and content keep the committed snapshot when a received payload changes", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({ entries });
+  entries[1].version = "mutated";
+  entries[1].sections[0].heading = "mutated";
+  controller._select("9.37.0");
+  assert.equal(controller.selectedVersion(), "9.37.0");
+  assert.equal(document.querySelector('.release-notes-sidebar-item.is-selected').dataset.version, "9.37.0");
+  assert.equal(document.querySelector('.release-notes-content h2').textContent, "v9.37.0");
+  assert.equal(document.querySelector('.release-notes-content h3').textContent, "Bug Fixes");
+});
+
 test("handlePayload with empty entries falls back to the empty state", () => {
   const { document, controller } = makeFixture();
   controller.handlePayload({ id: "rn-test-1", entries: [], focus_version: null });
   const empty = document.querySelector(".release-notes-empty");
   assert.ok(empty);
+});
+
+test("payload bursts keep synchronous lifecycle and render only the latest frame snapshot", () => {
+  const frames = [];
+  const { document, controller, entries, sent } = makeFixture({
+    scheduleFrame: callback => { frames.push(callback); return () => {}; },
+  });
+  controller.open();
+  assert.equal(sent[0].kind, "open_release_notes");
+  controller.handlePayload({ entries });
+  assert.equal(controller.isOpen(), true, "mount stays synchronous");
+  const content = document.querySelector(".release-notes-content");
+  assert.equal(content.childNodes.length, 0, "body waits for the frame");
+  let renders = 0;
+  const append = content.appendChild.bind(content);
+  content.appendChild = node => { renders++; return append(node); };
+  for (let index = 1; index <= 50; index++) {
+    controller.handlePayload({ entries: [{ version: `9.0.${index}`, sections: [] }] });
+  }
+  assert.equal(controller.selectedVersion(), "9.0.50", "model updates synchronously");
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(renders, 1);
+  assert.equal(content.querySelector("h2").textContent, "v9.0.50");
+  assert.equal(document.querySelector(".release-notes-sidebar-item.is-selected").dataset.version, "9.0.50");
+
+  controller.handleError("latest error");
+  assert.equal(renders, 1);
+  frames.shift()();
+  assert.match(content.textContent, /latest error/);
+  controller.handlePayload({ entries });
+  controller._select("9.37.0");
+  frames.shift()();
+  assert.equal(content.querySelector("h2").textContent, "v9.37.0");
+  assert.equal(content.querySelector(".release-notes-empty"), null);
+
+  controller.handleError("pending error");
+  controller.close();
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller._state.keydownHandler, null);
+  frames.shift()();
+  assert.equal(document.getElementById("release-notes-window"), null, "pending frame cannot reopen a closed window");
+  controller.handlePayload({ entries });
+  controller.close();
+  controller.handlePayload({ entries, focus_version: "9.36.0" });
+  assert.equal(controller.isOpen(), true);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(document.querySelector(".release-notes-content h2").textContent, "v9.36.0");
+  controller.close();
 });
 
 // SPEC #2780 v2 Amendment (FR-015): update action button states.

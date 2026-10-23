@@ -58,6 +58,37 @@ struct DurableWorkspaceRequest {
     path: PathBuf,
     workspace: gwt::PersistedWindowCanvasState,
     completion: mpsc::SyncSender<Result<(), String>>,
+    ready: mpsc::Receiver<()>,
+}
+
+/// Reserve FIFO ordering on the GUI thread; the ACK worker authorizes the
+/// write only after materialization. Dropping this handle cancels the gate.
+pub(crate) struct DurableWorkspaceBarrier {
+    ready: mpsc::Sender<()>,
+    completed: mpsc::Receiver<Result<(), String>>,
+}
+
+impl DurableWorkspaceBarrier {
+    pub(crate) fn allow_and_wait(&self) -> std::io::Result<()> {
+        self.ready.send(()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "persist dispatcher stopped before durable workspace authorization",
+            )
+        })?;
+        match self.completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(std::io::Error::other(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for durable workspace persistence",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "persist dispatcher stopped before durable workspace persistence completed",
+            )),
+        }
+    }
 }
 
 enum PersistWork {
@@ -73,6 +104,8 @@ struct DispatcherInner {
     cond: Condvar,
     #[cfg(test)]
     before_workspace_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    durable_writes: std::sync::atomic::AtomicU64,
 }
 
 /// Owner handle: enqueue snapshots and (in tests) wait until the worker drains.
@@ -159,6 +192,8 @@ impl PersistDispatcher {
             cond: Condvar::new(),
             #[cfg(test)]
             before_workspace_write: Mutex::new(None),
+            #[cfg(test)]
+            durable_writes: std::sync::atomic::AtomicU64::new(0),
         });
         let worker_inner = inner.clone();
         spawner.spawn(move || worker_loop(worker_inner));
@@ -187,14 +222,16 @@ impl PersistDispatcher {
         self.inner.cond.notify_one();
     }
 
-    /// Serialize an exact workspace state after every older dispatcher
-    /// generation and wait until its crash-durable atomic write succeeds.
-    pub(crate) fn flush_workspace_durable(
+    /// Assign the exact snapshot's generation while the GUI owns it, before
+    /// newer ordinary snapshots can enter the dispatcher. This does no disk I/O
+    /// and does not wait; a worker must authorize the durability gate.
+    pub(crate) fn reserve_workspace_durable(
         &self,
         path: PathBuf,
         workspace: gwt::PersistedWindowCanvasState,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<DurableWorkspaceBarrier> {
         let (completion, completed) = mpsc::sync_channel(1);
+        let (authorize, ready) = mpsc::channel();
         {
             let mut state = self
                 .inner
@@ -214,22 +251,31 @@ impl PersistDispatcher {
                 path,
                 workspace,
                 completion,
+                ready,
             });
         }
         self.inner.cond.notify_one();
+        Ok(DurableWorkspaceBarrier {
+            ready: authorize,
+            completed,
+        })
+    }
 
-        match completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(std::io::Error::other(error)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out waiting for durable workspace persistence",
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "persist dispatcher stopped before durable workspace persistence completed",
-            )),
-        }
+    #[cfg(test)]
+    pub(crate) fn flush_workspace_durable(
+        &self,
+        path: PathBuf,
+        workspace: gwt::PersistedWindowCanvasState,
+    ) -> std::io::Result<()> {
+        self.reserve_workspace_durable(path, workspace)?
+            .allow_and_wait()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_write_count(&self) -> u64 {
+        self.inner
+            .durable_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -379,9 +425,19 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
                 (generation, outcome, successful_snapshot, None)
             }
             PersistWork::DurableWorkspace(request) => {
-                let outcome = save_workspace_state_durable(&request.path, &request.workspace)
-                    .map_err(|error| error.to_string());
-                (request.generation, outcome, None, Some(request.completion))
+                // A failed/stale ACK drops the sender. Release its reserved
+                // generation without writing and continue to newer snapshots.
+                if request.ready.recv().is_err() {
+                    (request.generation, Ok(()), None, None)
+                } else {
+                    #[cfg(test)]
+                    inner
+                        .durable_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let outcome = save_workspace_state_durable(&request.path, &request.workspace)
+                        .map_err(|error| error.to_string());
+                    (request.generation, outcome, None, Some(request.completion))
+                }
             }
         };
 
@@ -488,6 +544,8 @@ mod tests {
                 state: Mutex::new(DispatcherState::default()),
                 cond: Condvar::new(),
                 before_workspace_write: Mutex::new(None),
+                #[cfg(test)]
+                durable_writes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }

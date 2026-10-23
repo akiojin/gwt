@@ -32,9 +32,6 @@ pub struct AgentSessionPrincipal {
 #[derive(Clone, PartialEq, Eq)]
 enum AgentExecutionAuthority {
     Inspection,
-    // Prepared issuance is consumed by the continuation coordinator in the
-    // next W-24 slice; this slice establishes its observation-only boundary.
-    #[allow(dead_code)]
     Prepared(Box<gwt_agent::SessionExecutionBinding>),
     Active(Box<gwt_agent::SessionExecutionBinding>),
 }
@@ -59,6 +56,7 @@ pub struct AgentCapabilityGrant {
 pub enum AgentDurableAuthority {
     ObservationOnly,
     Current,
+    PendingActivation,
     Stale,
     Unavailable,
 }
@@ -91,10 +89,26 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 pub enum AgentFrontendRequest {
     Ready,
     ListWindows,
+    ListFleetPanes,
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
+    Name {
+        candidate: String,
+        request_id: String,
+    },
     CloseWindow {
         id: String,
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
+    },
+    CloseFleetPane {
+        request_id: String,
+        id: String,
+        session_id: String,
+        child_pid: Option<u32>,
+        child_started_at: Option<u64>,
     },
     RecoverRestoredWindow {
         id: String,
@@ -121,8 +135,16 @@ impl std::fmt::Debug for AgentFrontendRequest {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
             Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
+            Self::ListFleetPanes => formatter.write_str("AgentFrontendRequest::ListFleetPanes"),
+            Self::CloseWork { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
+            }
+            Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
+            }
+            Self::CloseFleetPane { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseFleetPane(<redacted>)")
             }
             Self::RecoverRestoredWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
@@ -144,7 +166,10 @@ impl AgentFrontendRequest {
     pub fn mutates_host_state(&self) -> bool {
         matches!(
             self,
-            Self::CloseWindow { .. }
+            Self::Name { .. }
+                | Self::CloseWork { .. }
+                | Self::CloseWindow { .. }
+                | Self::CloseFleetPane { .. }
                 | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }
@@ -153,7 +178,7 @@ impl AgentFrontendRequest {
     }
 
     pub fn requires_producing_authority(&self) -> bool {
-        matches!(self, Self::SendInput { .. })
+        matches!(self, Self::Name { .. } | Self::SendInput { .. })
     }
 }
 
@@ -166,7 +191,6 @@ impl AgentSessionPrincipal {
         )
     }
 
-    #[allow(dead_code)]
     fn new_prepared(
         project_root: &Path,
         session_id: &str,
@@ -259,7 +283,6 @@ impl AgentSessionPrincipal {
         &self.canonical_project_root
     }
 
-    #[allow(dead_code)]
     pub fn execution_binding(&self) -> Option<&gwt_agent::SessionExecutionBinding> {
         self.execution_authority.binding()
     }
@@ -290,9 +313,7 @@ impl AgentSessionPrincipal {
         }
     }
 
-    /// Kept as the narrow project-observation check for the forthcoming
-    /// workspace-update route; hook-live only needs the canonical root value.
-    #[allow(dead_code)]
+    /// Whether this principal belongs to the supplied canonical project root.
     pub fn authorizes_project_root(&self, project_root: &Path) -> bool {
         dunce::canonicalize(project_root)
             .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
@@ -367,17 +388,41 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         kind: owner_kind,
         number: binding.owner_number,
     };
-    match crate::cli::execution_state::current_active_execution_binding_matches(
+    // Fresh launch promotion precedes the durable activation transaction.
+    // Probe Prepared first so activation between the two reads cannot look stale.
+    match crate::cli::execution_state::prepared_execution_binding_matches(
         &session.worktree_path,
         owner,
         principal.session_id(),
         &binding.identity,
     ) {
-        Ok(true) => {}
-        Ok(false) => return AgentDurableAuthority::Stale,
+        Ok(true) => return AgentDurableAuthority::PendingActivation,
+        Ok(false) => {}
         Err(_) => return AgentDurableAuthority::Unavailable,
     }
-    AgentDurableAuthority::Current
+    let current = crate::cli::execution_state::current_active_execution_binding_matches(
+        &session.worktree_path,
+        owner,
+        principal.session_id(),
+        &binding.identity,
+    );
+    // Activation publishes the ledger before the worktree projection/pointer.
+    // Only the unchanged, exact Active activation may wait for those mirrors.
+    if !matches!(current, Ok(true))
+        && crate::cli::execution_state::activated_continuation_binding_for_session(
+            &session.worktree_path,
+            owner,
+            principal.session_id(),
+        )
+        .is_ok_and(|activated| activated.as_ref() == Some(&binding.identity))
+    {
+        return AgentDurableAuthority::PendingActivation;
+    }
+    match current {
+        Ok(true) => AgentDurableAuthority::Current,
+        Ok(false) => AgentDurableAuthority::Stale,
+        Err(_) => AgentDurableAuthority::Unavailable,
+    }
 }
 
 pub async fn durable_agent_execution_authority_async(
@@ -386,9 +431,22 @@ pub async fn durable_agent_execution_authority_async(
     if !principal.authorizes_producing_mutation() {
         return AgentDurableAuthority::ObservationOnly;
     }
-    tokio::task::spawn_blocking(move || durable_agent_execution_authority(&principal))
-        .await
-        .unwrap_or(AgentDurableAuthority::Unavailable)
+    // Bound activation waiting independently of the subsequent mutation lease.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let current = principal.clone();
+            let authority =
+                tokio::task::spawn_blocking(move || durable_agent_execution_authority(&current))
+                    .await
+                    .unwrap_or(AgentDurableAuthority::Unavailable);
+            if authority != AgentDurableAuthority::PendingActivation {
+                return authority;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or(AgentDurableAuthority::Unavailable)
 }
 
 pub async fn durable_agent_execution_authority_with_lease_async(
@@ -397,11 +455,11 @@ pub async fn durable_agent_execution_authority_with_lease_async(
     let Some(binding) = principal.active_execution_binding().cloned() else {
         return AgentDurableAuthority::ObservationOnly;
     };
+    let authority = durable_agent_execution_authority_async(principal).await;
+    if authority != AgentDurableAuthority::Current {
+        return authority;
+    }
     tokio::task::spawn_blocking(move || {
-        let authority = durable_agent_execution_authority(&principal);
-        if authority != AgentDurableAuthority::Current {
-            return authority;
-        }
         match crate::cli::execution_state::with_current_active_execution_binding_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &binding,
@@ -487,7 +545,15 @@ impl std::fmt::Debug for ManualExecutionHandoffReservation {
 /// acceptance can neither be broadcast nor replayed to another connection.
 #[derive(Clone)]
 pub struct AgentSelfCloseResponder {
-    sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseDirectAcceptance>>>>,
+    sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseResponse>>>>,
+}
+
+pub type AgentSelfCloseResponse = Result<AgentSelfCloseDirectAcceptance, AgentSelfCloseRefusal>;
+
+#[derive(Debug)]
+pub struct AgentSelfCloseRefusal {
+    pub window_id: String,
+    pub reason: String,
 }
 
 /// Direct origin-socket response channel for one privileged PM send.
@@ -614,7 +680,7 @@ impl std::fmt::Debug for AgentSelfCloseResponder {
 }
 
 impl AgentSelfCloseResponder {
-    pub fn channel() -> (Self, oneshot::Receiver<AgentSelfCloseDirectAcceptance>) {
+    pub fn channel() -> (Self, oneshot::Receiver<AgentSelfCloseResponse>) {
         let (sender, receiver) = oneshot::channel();
         (
             Self {
@@ -636,7 +702,22 @@ impl AgentSelfCloseResponder {
         let Some(sender) = sender else {
             return Err(acceptance);
         };
-        sender.send(acceptance)
+        sender.send(Ok(acceptance)).map_err(|response| {
+            response.expect("the failed send returns the acceptance payload it was given")
+        })
+    }
+
+    pub fn refuse(&self, window_id: String, reason: String) -> bool {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        sender.is_some_and(|sender| {
+            sender
+                .send(Err(AgentSelfCloseRefusal { window_id, reason }))
+                .is_ok()
+        })
     }
 }
 
@@ -790,7 +871,6 @@ impl AgentCapabilityRegistry {
         self.issue_principal(principal)
     }
 
-    #[allow(dead_code)]
     pub fn issue_prepared(
         &self,
         project_root: &Path,
@@ -1648,7 +1728,6 @@ impl AgentCapabilityIssuer {
         })
     }
 
-    #[allow(dead_code)]
     pub fn issue_prepared(
         &self,
         project_root: &Path,

@@ -559,8 +559,8 @@ pub fn classify_runtime_generation(input: RuntimeGenerationInput) -> RuntimeGene
 fn stale_runtime_owner_action(branch: &str, head: Option<&str>) -> String {
     let head = head.unwrap_or(branch);
     format!(
-        "restart GWT.app on a build that contains {head} — apply the pending update in the GUI, \
-         or reinstall from a fresh {branch} build"
+        "download and reinstall GWT.app from a {branch} build containing {head}; \
+         restarting the existing installation does not install an update"
     )
 }
 
@@ -1335,6 +1335,8 @@ mod tests {
             .expect("a stale runtime asks for an owner action");
         assert!(action.contains(MEASURED_DEVELOP_HEAD), "{action}");
         assert!(action.contains("GWT.app"), "{action}");
+        assert!(!action.contains("apply the pending update"), "{action}");
+        assert!(action.contains("reinstall"), "{action}");
     }
 
     #[test]

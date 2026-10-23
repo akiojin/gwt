@@ -108,3 +108,41 @@ fn adversarial_prefix_does_not_smuggle_blocked_rebase() {
     case("git status; git rebase -i origin/main", Expected::Block);
     case("git pull || git branch -D scratch", Expected::Block);
 }
+
+/// Issue #4888: the rule keys off the git subcommand, so `checkout` or
+/// `switch` appearing anywhere else in the command is not a branch operation.
+///
+/// The repository's own `crates/gwt/playwright/tests/kill-switch.spec.ts`
+/// made every read-only `git` command naming it read as a branch switch — a
+/// hyphen is not a word character, so `\bswitch\b` matched inside the
+/// filename. Agents could not inspect their own change to that file.
+#[test]
+fn read_only_git_commands_naming_a_switch_path_are_allowed() {
+    case(
+        "git diff --stat -- crates/gwt/playwright/tests/kill-switch.spec.ts",
+        Expected::Allow,
+    );
+    case(
+        "git log -1 --oneline -- crates/gwt/playwright/tests/kill-switch.spec.ts",
+        Expected::Allow,
+    );
+    case("git show HEAD:src/checkout-flow.ts", Expected::Allow);
+    case("git blame src/kill-switch.ts", Expected::Allow);
+    case("git status -- switch/", Expected::Allow);
+}
+
+/// The same subcommand lookup must still find the real thing behind the global
+/// options agents actually use, and must not mistake an option's value for it.
+#[test]
+fn the_subcommand_is_found_past_global_options() {
+    case("git -C /tmp/repo checkout main", Expected::Block);
+    case("git -C /tmp/repo switch main", Expected::Block);
+    case("git --git-dir /tmp/r/.git checkout main", Expected::Block);
+    case("git -c core.pager=cat switch main", Expected::Block);
+    // The value of a global option is not the subcommand.
+    case("git -C /tmp/switch diff", Expected::Allow);
+    case("git -C /tmp/checkout log -1", Expected::Allow);
+    // A bare `git`, or one carrying no subcommand, blocks nothing.
+    case("git", Expected::Allow);
+    case("git --version", Expected::Allow);
+}

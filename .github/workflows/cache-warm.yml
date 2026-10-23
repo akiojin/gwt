@@ -12,7 +12,7 @@ name: Cache Warm
 #
 # The key is `{prefix-key}-{shared-key}-{os}-{arch}-{toolchain hash}-{lock
 # hash}`. Matching it is the whole contract, so the jobs below mirror the PR
-# jobs' `shared-key`, `runs-on`, and `dtolnay/rust-toolchain@stable`. The
+# jobs' `shared-key`, `runs-on`, and `dtolnay/rust-toolchain@1.99.1`. The
 # pairing is pinned by crates/gwt/tests/ci_cache_warm_contract_test.rs, because
 # a drifted key produces a cache nobody restores and no CI run reports that as
 # a failure.
@@ -25,11 +25,10 @@ name: Cache Warm
 # reason there are three.
 #
 # When the cache legitimately misses (AC-4): the key changes whenever Cargo.lock
-# or a manifest changes, or when the stable toolchain moves — `rustc -vV` is
-# hashed into it. The first case is a push this workflow reacts to; the second
-# has no commit behind it, which is what the weekly schedule is for. GitHub also
-# evicts a cache that goes 7 days unrestored, and the schedule re-warms that
-# too. A miss only costs the old full compile: the PR jobs still build from
+# or a manifest changes, or when the pinned toolchain changes — `rustc -vV` is
+# hashed into it. Those changes trigger this workflow on push. GitHub also
+# evicts a cache that goes 7 days unrestored, and the weekly schedule re-warms
+# that scope. A miss only costs the old full compile: the PR jobs still build from
 # source and stay correct, which is why every rust-cache step remains
 # `continue-on-error: true`.
 
@@ -50,8 +49,7 @@ on:
       - '.github/workflows/build.yml'
       - '.github/workflows/lint.yml'
   schedule:
-    # Monday 03:00 UTC. Covers a stable-toolchain bump and the 7-day eviction of
-    # a scope no PR happened to restore.
+    # Monday 03:00 UTC. Covers the 7-day eviction of a scope no PR restored.
     - cron: '0 3 * * 1'
   workflow_dispatch:
 
@@ -98,9 +96,9 @@ jobs:
       # is only the outer net and must stay above it so the script, not GitHub,
       # reports a dependency-install failure.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
@@ -120,7 +118,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-workspace
@@ -153,7 +151,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-workspace

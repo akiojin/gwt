@@ -23,6 +23,10 @@
 //!   process integration contracts need a reason; pure tests inject the probe.
 //!   This lexical rule covers that known entrypoint, not aliases or indirect
 //!   calls through arbitrary helpers.
+//! * **(D) unchecked socket paths** — test binds must pass their path through
+//!   `test_support::checked_socket_path`. This detects TMPDIR-dependent fixtures
+//!   on Linux before they exceed the shorter macOS/BSD limit. Use the shared
+//!   `socket_tempdir` root instead of fixing each test with its own `/tmp` path.
 //!
 //! Existing violations are grandfathered in `test_hygiene_baseline.txt`, one
 //! line per `<rule>|<file>|<context>`. The baseline only shrinks: a violation
@@ -38,8 +42,14 @@
 //! ```
 //!
 //! The reason text is mandatory; a bare marker does not silence the gate.
+//!
+//! Issue #5669 also inventories explicit deadline constructs of any duration
+//! in `coverage_time_dependencies.txt`. That separate list records existing
+//! migration debt, not approval that the waits are sound. Coverage runs this
+//! workspace target, so an unclassified addition or a stale inventory row
+//! fails CI without changing the older, shrinking hygiene baseline.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -145,6 +155,32 @@ fn an_externally_declared_cfg_test_module_is_scanned_as_whole_file_test_code() {
     assert_eq!(production.kind, SourceKind::CfgTestBlocksOnly);
 }
 
+#[test]
+fn runtime_behavior_modules_are_scanned_as_whole_file_test_code() {
+    let sources = target_sources(&workspace_root());
+    let runtime_tests: Vec<_> = sources
+        .iter()
+        .filter(|source| {
+            source
+                .relative_path
+                .starts_with("crates/gwt/src/app_runtime/tests/")
+                && source.relative_path.ends_with("_tests.rs")
+        })
+        .collect();
+    assert!(
+        !runtime_tests.is_empty(),
+        "runtime behavior tests must live in externally declared test modules"
+    );
+    for source in runtime_tests {
+        assert_eq!(
+            source.kind,
+            SourceKind::WholeFileIsTest,
+            "{} must keep the hygiene gate over every test and fixture",
+            source.relative_path
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scanner unit tests — fixtures, so the rules themselves are covered without
 // depending on whatever the workspace happens to contain today.
@@ -156,6 +192,49 @@ fn scan_fixture(text: &str) -> Vec<hygiene::Finding> {
         text,
         SourceKind::WholeFileIsTest,
     )
+}
+
+#[test]
+fn socket_fixtures_reject_ambient_tempdirs_even_when_bind_is_in_a_helper() {
+    let findings = scan_fixture(
+        r#"
+fn fixture() {
+    let root = TempDir::new().unwrap();
+    start_server(root.path());
+}
+fn start_server(root: &Path) {
+    UnixListener::bind(root.join("daemon.sock")).unwrap();
+}
+fn another_fixture() {
+    let root = tempfile::tempdir().unwrap();
+    tokio::net::UnixListener::bind(root.path().join("daemon.sock")).unwrap();
+}
+"#,
+    );
+    assert_eq!(findings.len(), 2, "unexpected findings: {findings:?}");
+    assert!(findings
+        .iter()
+        .all(|finding| finding.rule.id() == "unchecked-socket-bind"));
+}
+
+#[test]
+fn socket_bind_rule_preserves_checked_paths_and_reasoned_path_limit_probes() {
+    assert!(scan_fixture(
+        r#"
+fn fixture() {
+    let root = gwt_core::test_support::socket_tempdir();
+    IpcListener::bind(gwt_core::test_support::checked_socket_path(&root.path().join("daemon.sock")));
+}
+fn long_path_probe() {
+    // test-hygiene: allow-unchecked-socket-bind Verify rejection by the OS at its real limit.
+    UnixListener::bind(&one_too_long);
+}
+"#,
+    )
+    .is_empty());
+    assert!(
+        scan_fixture("fn ordinary_fixture() { let root = TempDir::new().unwrap(); }").is_empty()
+    );
 }
 
 #[test]
@@ -312,6 +391,86 @@ fn uses_a_constant() {
     );
 
     assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+}
+
+#[test]
+fn coverage_dependencies_find_deadlines_and_elapsed_verdicts() {
+    let findings = hygiene::scan_time_dependencies(
+        "crates/demo/tests/demo.rs",
+        r#"
+fn clock_based_verdicts() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    assert!(Instant::now() < deadline);
+    assert!((started.elapsed()).as_millis() < 500);
+    let elapsed = started.elapsed();
+    assert!(Duration::from_secs(1) > elapsed);
+    receiver
+        .recv_timeout(LIMIT).unwrap();
+    tokio::time::timeout_at(
+        deadline, work()).await.unwrap();
+    wait_for_recorded_event_with_timeout(label, events, LIMIT, predicate);
+}
+"#,
+        SourceKind::WholeFileIsTest,
+    );
+    assert_eq!(findings.len(), 7, "unexpected dependencies: {findings:?}");
+    assert!(findings
+        .iter()
+        .all(|finding| finding.context == "clock_based_verdicts" && finding.line > 0));
+}
+
+#[test]
+fn coverage_dependencies_require_a_local_reason_for_an_exception() {
+    let findings = hygiene::scan_time_dependencies(
+        "crates/demo/tests/demo.rs",
+        r#"
+fn classified() {
+    // test-hygiene: allow-wall-clock-deadline Exercise the actual timeout contract.
+    receiver.recv_timeout(LIMIT).unwrap();
+    receiver.recv_timeout(OTHER_LIMIT).unwrap();
+    // test-hygiene: allow-wall-clock-deadline
+    timeout(LIMIT, work());
+    // test-hygiene: allow-wall-clock-deadline-extra not the marker
+    timeout_at(deadline, work());
+    let text = "// test-hygiene: allow-wall-clock-deadline forged reason";
+    wait_for_recorded_event(label, events, predicate);
+}
+"#,
+        SourceKind::WholeFileIsTest,
+    );
+    assert_eq!(findings.len(), 4, "unexpected dependencies: {findings:?}");
+}
+
+#[test]
+fn coverage_dependencies_ignore_production_literals_and_diagnostic_clock_reads() {
+    let findings = hygiene::scan_time_dependencies(
+        "crates/demo/src/lib.rs",
+        r##"
+fn production() {
+    timeout(LIMIT, work());
+}
+#[cfg(test)]
+mod tests {
+    fn diagnostic_only() {
+        let started = Instant::now();
+        let elapsed = started.elapsed();
+        eprintln!("elapsed: {elapsed:?}");
+        let source = r#"receiver.recv_timeout(LIMIT); Instant::now() + LIMIT"#;
+        let bytes = br#"
+            timeout(LIMIT, work());
+        "#;
+        let multiline = "
+            timeout_at(deadline, work());
+        ";
+        // assert!(started.elapsed() < LIMIT);
+        let ordinary_elapsed = 4;
+        assert!(ordinary_elapsed < 5);
+    }
+}
+"##,
+        SourceKind::CfgTestBlocksOnly,
+    );
+    assert!(findings.is_empty(), "unexpected dependencies: {findings:?}");
 }
 
 #[test]
@@ -553,6 +712,141 @@ fn no_undeclared_production_probe_deadlines() {
 }
 
 #[test]
+fn no_unchecked_socket_binds_in_test_code() {
+    assert_no_new_violations(Rule::UncheckedSocketBind);
+}
+
+fn time_dependency_inventory(findings: &[hygiene::TimeDependency]) -> BTreeSet<String> {
+    let mut counts = BTreeMap::new();
+    for finding in findings {
+        let key = format!("{}|{}|{}", finding.file, finding.context, finding.signature);
+        *counts.entry(key).or_insert(0_usize) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(key, count)| format!("{key}|{count}"))
+        .collect()
+}
+
+fn recorded_time_dependencies() -> BTreeSet<String> {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/coverage_time_dependencies.txt");
+    let text = fs::read_to_string(path).expect("read coverage time dependency inventory");
+    let entries: Vec<_> = text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    for entry in &entries {
+        let (identity, count) = entry.rsplit_once('|').expect("inventory count");
+        let fields: Vec<_> = identity.splitn(3, '|').collect();
+        assert!(
+            fields.len() == 3
+                && fields.iter().all(|field| !field.is_empty())
+                && count.parse::<usize>().is_ok_and(|count| count > 0),
+            "inventory row must be <file>|<context>|<normalized statement>|<count>: {entry}"
+        );
+    }
+    let recorded: BTreeSet<_> = entries.iter().map(|entry| (*entry).to_string()).collect();
+    assert_eq!(entries.len(), recorded.len(), "duplicate inventory rows");
+    assert!(
+        entries.windows(2).all(|pair| pair[0] < pair[1]),
+        "coverage time dependency inventory must stay sorted"
+    );
+    recorded
+}
+
+#[test]
+fn coverage_time_dependencies_match_recorded_debt() {
+    let root = workspace_root();
+    let findings: Vec<_> = target_sources(&root)
+        .into_iter()
+        .flat_map(|source| {
+            let text = fs::read_to_string(root.join(&source.relative_path)).expect("read source");
+            hygiene::scan_time_dependencies(&source.relative_path, &text, source.kind)
+        })
+        .collect();
+    let actual = time_dependency_inventory(&findings);
+    let recorded = recorded_time_dependencies();
+    let new: Vec<_> = actual.difference(&recorded).cloned().collect();
+    let stale: Vec<_> = recorded.difference(&actual).cloned().collect();
+    assert!(
+        new.is_empty() && stale.is_empty(),
+        "Unclassified coverage time dependencies (use an event/clock seam, or a local \
+         // test-hygiene: allow-wall-clock-deadline <reason> for a necessary contract):\n{}\n\n\
+         Stale migration-debt rows (remove or reduce them):\n{}\n\n\
+         The inventory is existing debt, not a new-exception approval path.",
+        new.join("\n"),
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn coverage_inventory_rejects_a_new_deadline_in_each_regression_test() {
+    let root = workspace_root();
+    let recorded = recorded_time_dependencies();
+    for (file, name) in [
+        (
+            "crates/gwt/src/app_runtime/tests/pane_control_tests.rs",
+            "agent_pane_close_bypasses_a_contended_pane_lock",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs",
+            "manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs",
+            "manual_successor_async_failure_after_prepare_replays_the_exact_operation",
+        ),
+        (
+            "crates/gwt/tests/perf_regression_test.rs",
+            "session_census_with_six_thousand_dead_namespaces_stays_within_read_budget",
+        ),
+    ] {
+        let mut text = fs::read_to_string(root.join(file)).expect("read regression test");
+        let start = text
+            .find(&format!("fn {name}("))
+            .expect("regression function");
+        let body = start + text[start..].find('{').expect("function body") + 1;
+        text.insert_str(
+            body,
+            "\nlet reintroduced_deadline = Instant::now() + Duration::from_secs(1);\n",
+        );
+        let actual = time_dependency_inventory(&hygiene::scan_time_dependencies(
+            file,
+            &text,
+            SourceKind::WholeFileIsTest,
+        ));
+        assert!(
+            actual
+                .difference(&recorded)
+                .any(|key| key.contains(&format!("|{name}|"))),
+            "the inventory must reject a new deadline in {file}::{name}"
+        );
+    }
+}
+
+#[test]
+fn coverage_inventory_counts_additions_inside_an_existing_statement_context() {
+    let source = "fn old_test() { receiver.recv_timeout(LIMIT); }";
+    let before = time_dependency_inventory(&hygiene::scan_time_dependencies(
+        "demo.rs",
+        source,
+        SourceKind::WholeFileIsTest,
+    ));
+    let after = time_dependency_inventory(&hygiene::scan_time_dependencies(
+        "demo.rs",
+        &source.replace(" }", " receiver.recv_timeout(LIMIT); }"),
+        SourceKind::WholeFileIsTest,
+    ));
+    assert_eq!(before.len(), 1);
+    assert_eq!(after.len(), 1);
+    assert_ne!(
+        before, after,
+        "an existing context cannot allow another wait"
+    );
+}
+
+#[test]
 fn the_baseline_only_shrinks() {
     let baseline = read_baseline();
     let live: BTreeSet<String> = scan_workspace()
@@ -675,6 +969,7 @@ mod hygiene {
         UnlockedProcessEnv,
         NativeWatcherDeadline,
         ProductionProbeDeadline,
+        UncheckedSocketBind,
     }
 
     impl Rule {
@@ -684,6 +979,7 @@ mod hygiene {
                 Rule::UnlockedProcessEnv => "unlocked-process-env",
                 Rule::NativeWatcherDeadline => "native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "production-probe-deadline",
+                Rule::UncheckedSocketBind => "unchecked-socket-bind",
             }
         }
 
@@ -693,6 +989,7 @@ mod hygiene {
                 "unlocked-process-env" => Some(Rule::UnlockedProcessEnv),
                 "native-watcher-deadline" => Some(Rule::NativeWatcherDeadline),
                 "production-probe-deadline" => Some(Rule::ProductionProbeDeadline),
+                "unchecked-socket-bind" => Some(Rule::UncheckedSocketBind),
                 _ => None,
             }
         }
@@ -703,6 +1000,7 @@ mod hygiene {
                 Rule::UnlockedProcessEnv => "test-hygiene: allow-unlocked-env",
                 Rule::NativeWatcherDeadline => "test-hygiene: allow-native-watcher-deadline",
                 Rule::ProductionProbeDeadline => "test-hygiene: allow-production-probe-deadline",
+                Rule::UncheckedSocketBind => "test-hygiene: allow-unchecked-socket-bind",
             }
         }
 
@@ -739,6 +1037,12 @@ mod hygiene {
                     "wrapper is essential to this test, declare why:\n",
                     "    // test-hygiene: allow-production-probe-deadline <reason>"
                 ),
+                Rule::UncheckedSocketBind => concat!(
+                    "Socket fixtures must use test_support::socket_tempdir() and bind\n",
+                    "through test_support::checked_socket_path(&path), so nested TMPDIR\n",
+                    "cannot silently break macOS/BSD. A test of the OS path boundary\n",
+                    "itself may declare // test-hygiene: allow-unchecked-socket-bind <reason>"
+                ),
             }
         }
     }
@@ -770,6 +1074,181 @@ mod hygiene {
     pub struct Source {
         pub relative_path: String,
         pub kind: SourceKind,
+    }
+
+    #[derive(Debug)]
+    pub struct TimeDependency {
+        pub file: String,
+        pub line: usize,
+        pub context: String,
+        pub signature: String,
+    }
+
+    pub fn scan_time_dependencies(file: &str, text: &str, kind: SourceKind) -> Vec<TimeDependency> {
+        let raw: Vec<_> = text.lines().collect();
+        let lexical = lex_source(&raw);
+        let code: Vec<_> = lexical.iter().map(|(line, _)| line.clone()).collect();
+        let depths = brace_depths(&code);
+        let functions = function_ranges(&code, &depths);
+        let scannable = scannable_lines(&code, &depths, kind);
+        let test_code = code
+            .iter()
+            .zip(&scannable)
+            .map(|(line, scan)| if *scan { line.as_str() } else { "" })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line_offsets: Vec<_> = std::iter::once(0)
+            .chain(test_code.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect();
+        let line_at = |offset| line_offsets.partition_point(|start| *start <= offset) - 1;
+        let mut anchors = std::collections::BTreeSet::new();
+        for found in time_call_regex().find_iter(&test_code) {
+            // A declaration is not an invocation of a deadline helper.
+            if !test_code[..found.start()].trim_end().ends_with("fn") {
+                anchors.insert(found.start());
+            }
+        }
+        for found in instant_now_regex().find_iter(&test_code) {
+            if clock_is_verdict(&test_code, found.start(), found.end(), true) {
+                anchors.insert(found.start());
+            }
+        }
+        for found in elapsed_regex().find_iter(&test_code) {
+            let prefix = &test_code[..found.start()];
+            let start = prefix
+                .trim_end()
+                .rfind(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                .map_or(0, |at| at + 1);
+            if clock_is_verdict(&test_code, start, found.end(), false) {
+                anchors.insert(found.start());
+            }
+        }
+        // Follow only the obvious local `elapsed = start.elapsed()` shape.
+        // Imports/aliases, arbitrary data flow and indirect helper calls are
+        // intentionally outside this lexical inventory's contract.
+        let aliases: Vec<_> = elapsed_assignment_regex()
+            .captures_iter(&test_code)
+            .filter_map(|capture| {
+                let line = line_at(capture.get(0)?.start());
+                enclosing_function(&functions, line)
+                    .map(|function| (capture[1].to_string(), function))
+            })
+            .collect();
+        if !aliases.is_empty() {
+            for found in identifier_regex().find_iter(&test_code) {
+                let line = line_at(found.start());
+                if aliases.iter().any(|(name, function)| {
+                    name == found.as_str()
+                        && enclosing_function(&functions, line)
+                            .is_some_and(|enclosing| enclosing.start == function.start)
+                }) && clock_is_verdict(&test_code, found.start(), found.end(), false)
+                {
+                    anchors.insert(found.start());
+                }
+            }
+        }
+        anchors
+            .into_iter()
+            .filter_map(|anchor| {
+                let index = line_at(anchor);
+                let allowed = [Some(index), index.checked_sub(1)]
+                    .into_iter()
+                    .flatten()
+                    .any(|line| {
+                        lexical[line].1.is_some_and(|at| {
+                            raw[line][at..]
+                                .strip_prefix("//")
+                                .unwrap()
+                                .trim()
+                                .strip_prefix("test-hygiene: allow-wall-clock-deadline")
+                                .is_some_and(|reason| {
+                                    reason.starts_with(char::is_whitespace)
+                                        && !reason.trim().is_empty()
+                                })
+                        })
+                    });
+                if allowed {
+                    return None;
+                }
+                // Keep the complete lexical statement span and its multiplicity.
+                // Line numbers and whitespace changes must not churn the inventory;
+                // another wait in the same function must still be a new dependency.
+                let start = test_code[..anchor]
+                    .rfind([';', '{', '}'])
+                    .map_or(0, |at| at + 1);
+                let end = test_code[anchor..]
+                    .find([';', '{', '}'])
+                    .map_or(test_code.len(), |at| anchor + at);
+                Some(TimeDependency {
+                    file: file.to_string(),
+                    line: index + 1,
+                    context: enclosing_function(&functions, index).map_or_else(
+                        || MODULE_CONTEXT.to_string(),
+                        |function| function.name.clone(),
+                    ),
+                    signature: test_code[start..end]
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    fn clock_is_verdict(code: &str, start: usize, end: usize, arithmetic: bool) -> bool {
+        let before = code[..start].trim_end_matches(|ch: char| ch.is_whitespace() || ch == '(');
+        let mut after = code[end..].trim_start();
+        loop {
+            if let Some(rest) = after.strip_prefix(')') {
+                after = rest.trim_start();
+            } else if let Some(found) = clock_conversion_regex()
+                .find(after)
+                .filter(|found| found.start() == 0)
+            {
+                after = after[found.end()..].trim_start();
+            } else {
+                break;
+            }
+        }
+        before.ends_with(['<', '>'])
+            || after.starts_with(['<', '>'])
+            || (arithmetic
+                && (after.starts_with(['+', '-'])
+                    || after.starts_with(".checked_add")
+                    || after.starts_with(".checked_sub")))
+    }
+
+    fn time_call_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\b(?:recv_timeout|timeout|timeout_at|wait_for_recorded_event(?:_with_timeout)?)\s*\(").unwrap())
+    }
+
+    fn instant_now_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\bInstant\s*::\s*now\s*\(\s*\)").unwrap())
+    }
+
+    fn elapsed_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\.\s*elapsed\s*\(\s*\)").unwrap())
+    }
+
+    fn elapsed_assignment_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^=;{}][^;{}]*\.\s*elapsed\s*\(\s*\)")
+                .unwrap()
+        })
+    }
+
+    fn identifier_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\b[A-Za-z_][A-Za-z0-9_]*\b").unwrap())
+    }
+
+    fn clock_conversion_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"^\.\s*as_[A-Za-z_]+\s*\(\s*\)").unwrap())
     }
 
     /// Files a `#[cfg(test)] mod <name>;` declaration pulls in.
@@ -900,6 +1379,19 @@ mod hygiene {
         let functions = function_ranges(&code, &depths);
         let scannable = scannable_lines(&code, &depths, kind);
 
+        // Inspect complete calls so formatting a bind across lines cannot
+        // bypass the rule. As with the other lexical rules, renamed imports
+        // and arbitrary aliases are outside this scanner's contract.
+        let joined = code.join("\n");
+        let line_offsets: Vec<_> = std::iter::once(0)
+            .chain(joined.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect();
+        let unchecked_binds: std::collections::BTreeSet<_> = socket_bind_regex()
+            .find_iter(&joined)
+            .filter(|bind| !checked_socket_path_regex().is_match(&joined[bind.end()..]))
+            .map(|bind| line_offsets.partition_point(|start| *start <= bind.start()) - 1)
+            .collect();
+
         let mut findings = Vec::new();
         for (index, line) in code.iter().enumerate() {
             if !scannable[index] {
@@ -911,8 +1403,14 @@ mod hygiene {
                 Rule::UnlockedProcessEnv,
                 Rule::NativeWatcherDeadline,
                 Rule::ProductionProbeDeadline,
+                Rule::UncheckedSocketBind,
             ] {
-                if !line_violates(rule, line) {
+                let violates = if rule == Rule::UncheckedSocketBind {
+                    unchecked_binds.contains(&index)
+                } else {
+                    line_violates(rule, line)
+                };
+                if !violates {
                     continue;
                 }
                 if declared_allowed(rule, &raw, index) {
@@ -969,6 +1467,7 @@ mod hygiene {
             Rule::UnlockedProcessEnv => env_mutation_regex().is_match(code),
             Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
             Rule::ProductionProbeDeadline => production_probe_regex().is_match(code),
+            Rule::UncheckedSocketBind => false, // Complete calls are checked in scan_source.
         }
     }
 
@@ -1094,10 +1593,22 @@ mod hygiene {
     /// comment is not mistaken for test code. Braces and quotes inside those
     /// spans would otherwise also desynchronise the depth tracking.
     fn strip_literals_and_comments(raw: &[&str]) -> Vec<String> {
+        lex_source(raw).into_iter().map(|(code, _)| code).collect()
+    }
+
+    fn lex_source(raw: &[&str]) -> Vec<(String, Option<usize>)> {
         let mut block_comment_depth = 0_usize;
         let mut raw_string_hashes: Option<usize> = None;
+        let mut quoted_string = false;
         raw.iter()
-            .map(|line| strip_line(line, &mut block_comment_depth, &mut raw_string_hashes))
+            .map(|line| {
+                strip_line(
+                    line,
+                    &mut block_comment_depth,
+                    &mut raw_string_hashes,
+                    &mut quoted_string,
+                )
+            })
             .collect()
     }
 
@@ -1105,10 +1616,12 @@ mod hygiene {
         line: &str,
         block_comment_depth: &mut usize,
         raw_string_hashes: &mut Option<usize>,
-    ) -> String {
+        quoted_string: &mut bool,
+    ) -> (String, Option<usize>) {
         let chars: Vec<char> = line.chars().collect();
         let mut out = String::with_capacity(line.len());
         let mut index = 0;
+        let mut comment = None;
 
         while index < chars.len() {
             if let Some(hashes) = *raw_string_hashes {
@@ -1134,7 +1647,20 @@ mod hygiene {
                 continue;
             }
 
+            if *quoted_string {
+                if chars[index] == '\\' {
+                    index += 2;
+                } else {
+                    if chars[index] == '"' {
+                        *quoted_string = false;
+                    }
+                    index += 1;
+                }
+                continue;
+            }
+
             if starts_with(&chars, index, "//") {
+                comment = line.char_indices().nth(index).map(|(offset, _)| offset);
                 break;
             }
             if starts_with(&chars, index, "/*") {
@@ -1143,28 +1669,25 @@ mod hygiene {
                 continue;
             }
 
-            if chars[index] == 'r' && !is_ident_char(chars.get(index.wrapping_sub(1)).copied()) {
-                let hashes = trailing_hashes(&chars, index + 1);
-                if chars.get(index + 1 + hashes) == Some(&'"') {
+            let raw_start = if starts_with(&chars, index, "br") {
+                index + 1
+            } else {
+                index
+            };
+            if chars.get(raw_start) == Some(&'r')
+                && !is_ident_char(chars.get(index.wrapping_sub(1)).copied())
+            {
+                let hashes = trailing_hashes(&chars, raw_start + 1);
+                if chars.get(raw_start + 1 + hashes) == Some(&'"') {
                     *raw_string_hashes = Some(hashes);
-                    index += 1 + hashes + 1;
+                    index = raw_start + 1 + hashes + 1;
                     continue;
                 }
             }
 
             if chars[index] == '"' {
+                *quoted_string = true;
                 index += 1;
-                while index < chars.len() {
-                    if chars[index] == '\\' {
-                        index += 2;
-                        continue;
-                    }
-                    if chars[index] == '"' {
-                        index += 1;
-                        break;
-                    }
-                    index += 1;
-                }
                 continue;
             }
 
@@ -1185,7 +1708,7 @@ mod hygiene {
             index += 1;
         }
 
-        out
+        (out, comment)
     }
 
     fn trailing_hashes(chars: &[char], from: usize) -> usize {
@@ -1222,6 +1745,22 @@ mod hygiene {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
             Regex::new(r"\bResolvedContainerRuntime\s*::\s*resolve\s*\(").expect("valid regex")
+        })
+    }
+
+    fn socket_bind_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"\b(?:UnixListener|UnixDatagram|IpcListener)\s*::\s*bind\s*\(")
+                .expect("valid regex")
+        })
+    }
+
+    fn checked_socket_path_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"^\s*(?:(?:gwt_core|crate)::test_support::)?checked_socket_path\s*\(")
+                .expect("valid regex")
         })
     }
 

@@ -11,6 +11,22 @@ fn forbid_real_gh_in_tests() {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str)
+        == Some(gwt::cli::verification_record::interruption::WATCHDOG_ARG)
+    {
+        return match argv.as_slice() {
+            [_, _, worktree, record_id] => {
+                match gwt::cli::verification_record::interruption::run_watchdog(
+                    std::path::Path::new(worktree),
+                    record_id,
+                ) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::FAILURE,
+                }
+            }
+            _ => ExitCode::FAILURE,
+        };
+    }
     // Issue #3631: bound launches host their PTY start gate here rather than in
     // the GUI front door, because only a console subsystem image is attached to
     // the pane's pseudoconsole. Handle it before anything else touches stdio.
@@ -98,7 +114,7 @@ fn print_help() {
     println!("Commands:");
     println!("  issue       Manage GitHub Issues and SPEC sections");
     println!("  pr          Manage pull requests, reviews, checks, threads");
-    println!("  actions     Fetch GitHub Actions run/job logs");
+    println!("  actions     Read logs, re-run failures, and cancel GitHub Actions runs");
     println!("  board       Read/write the coordination Board (SPEC-1974)");
     println!("  hook        Dispatch Claude Code / Codex hook events");
     println!("  index       Manage the local search index");
@@ -112,6 +128,7 @@ fn print_help() {
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
     println!("  pm          PM agent diagnostics (SPEC-3431)");
+    println!("  provider    Free quota reset proposals and native user consent");
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
@@ -140,6 +157,7 @@ fn family_help(family: &str) -> Option<String> {
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
         "pm" => Some(format_pm_help()),
+        "provider" => Some(format_provider_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
@@ -194,6 +212,8 @@ fn format_workspace_help() -> String {
         "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
         "                                         discard orphaned placeholders, detach container",
         "                                         refs owned by another canonical Work",
+        "  workspace.work_repair                  Refold one Work's portable container aliases",
+        "                                         from accepted source evidence (dry-run default)",
         "  workspace.projection_list              List Workspace projections (--stale/--all)",
         "  workspace.projection_prune             Archive/delete stale Workspace projections",
         "  workspace.store_consolidate            Move durable Workspace state to the split root",
@@ -203,7 +223,8 @@ fn format_workspace_help() -> String {
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
         "  ids                                    Scope work_prune/projection_prune to these ids",
-        "  dry_run                                Both prune operations default to dry-run;",
+        "  work_id                                Existing Work for work_repair",
+        "  dry_run                                work_prune/work_repair default to dry-run;",
         "                                         pass false to apply",
         "",
         "Resolving an ambiguous execution container:",
@@ -233,6 +254,7 @@ fn format_errors_help() -> String {
         "  project_root                            Match project rows only; excludes host/unknown",
         "",
         "Notes:",
+        "  - Scope project selects the current project (default).",
         "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
         "  - Live rows are also published on the daemon `errors` channel.",
         "",
@@ -367,11 +389,16 @@ fn format_pr_help() -> String {
         "",
         "Operations:",
         "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
-        "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
+        "  pr.create | pr.edit | pr.ready | pr.draft | pr.close | pr.comment",
         "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
-        "  number, base, head, title, body, labels, add_labels, draft",
+        "  number, base, head, title, body, labels, add_labels, draft, comment",
+        "  pr.edit: base alone is a valid update; existing edit authority applies.",
+        "  pr.close: number and optional comment; preserves the branch.",
+        "  pr.review_threads.reply_and_resolve: number, body (plain text), optional thread_id.",
+        "  thread_id selects one thread; omitted, processes all unresolved threads.",
+        "  Unknown thread_id and JSON array bodies are rejected before mutations.",
         "",
     ]
     .join("\n")
@@ -379,7 +406,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
+        "actions.* — Read GitHub Actions logs and manage runs via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -388,8 +415,10 @@ fn format_actions_help() -> String {
         "",
         "Operations:",
         "  actions.logs                            Print raw run logs",
-        "  actions.job_logs                        Print raw job logs",
+        "  actions.job_logs                        Print job logs (ANSI stripped; failed_only, context_lines)",
         "  actions.rerun                           Re-run a failed run or a single failed job",
+        "  actions.cancel                          Request cancellation of a queued or in-progress run",
+        "  actions.queued                          List queued runs without jobs, with elapsed age_seconds",
         "",
         "Key params:",
         "  run_id, job_id",
@@ -397,6 +426,8 @@ fn format_actions_help() -> String {
         "",
         "Notes:",
         "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  actions.cancel refuses completed runs and a run_id the current repository does not own.",
+        "  actions.queued takes no params.",
         "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
@@ -638,7 +669,11 @@ fn format_verify_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run | verify.adjudicate",
+        "  verify.plan | verify.run | verify.status | verify.cancel | verify.adjudicate",
+        "  verify.status inspects the latest caller attempt, or params.attempt_id.",
+        "  verify.cancel requires params.attempt_id and params.reason; only the",
+        "  same session/worktree/execution authority can cancel its own attempt.",
+        "  Cancellation retains Interrupted state and clears its reservation immediately.",
         "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
         "  verify.lease.status",
         "",
@@ -696,6 +731,30 @@ fn format_register_help() -> String {
     .join("\n")
 }
 
+fn format_provider_help() -> String {
+    [
+        "provider.* — Free provider resets; never purchase credits or enable paid usage.",
+        "",
+        "Operations:",
+        "  provider.reset.proposals  Read holds and propose checking a free Codex reset",
+        "                            or switching away from a held Claude provider.",
+        "    min_reset_wait_secs     Optional wait threshold (default: 86400 seconds).",
+        "  provider.reset            Verify a free Codex credit, ask through an OS dialog,",
+        "                            redeem once and release the hold only after recovery.",
+        "    provider, window_id     Required. Use the exact id returned by pane.list.",
+        "",
+        "The native decision is mandatory even in autonomous mode. JSON approval flags",
+        "and saved approvals are not accepted. Cancel is the default. Only Host windows",
+        "using a directly installed Codex and its default provider are supported.",
+        "The target Session must contain launch-time authentication root/source proof.",
+        "The prompt shows that root; the helper uses it. Relaunch legacy windows.",
+        "Claude extra usage is paid and is never executed by gwt; switch providers instead.",
+        "Audit: ~/.gwt/provider-resets/<request_id>.jsonl (not an approval token).",
+        "",
+    ]
+    .join("\n")
+}
+
 fn format_pm_help() -> String {
     [
         "pm.* — PM agent diagnostics and control via JSON envelope (SPEC-3431).",
@@ -706,18 +765,38 @@ fn format_pm_help() -> String {
         "  JSON",
         "",
         "Operations:",
+        "  pm.peer.send Send request/reply/notice to another live project's PM.",
+        "               Requires this project's registered PM. Params: project (absolute path),",
+        "               kind, text, reply_to (required for reply), timeout_seconds (1..86400; default 900).",
+        "               Unavailable peers return status=unavailable; Reports retain the attempt.",
+        "               Unread messages reach the peer's next prompt; a successful reply acknowledges.",
+        "  pm.plan.status Read the stored typed planning snapshot (read-only, ownerless-safe).",
+        "                 Params must be empty; no derived health or WIP projections.",
+        "  pm.plan.apply Upsert one typed planning record (registered PM only).",
+        "                Required: action {kind, value}, expected_revision, reason, idempotency_key.",
+        "                kind: goal|milestone|risk|decision|policy|recurring|link; link uses RoadmapItem.",
+        "                reason and idempotency_key must be nonempty. Exact retries return the receipt.",
+        "                No project_root, path, or actor override; the current PM supplies authority.",
         "  pm.status    Report the per-project PM registration, auto-start setting,",
         "               a stale hint from the durable session store, and every PM",
         "               registration in this repository including other project",
-        "               stores (read-only, ownerless-safe).",
+        "               stores, plus current_status and status_history",
+        "               (read-only, ownerless-safe).",
+        "  pm.status.set Save the PM's current explanation and retain history.",
+        "               Requires a registered PM or a direct user CLI call.",
+        "               Identical content and Monitor state do not renew it.",
         "  pm.stop      Clear a PM registration in this repository and mark its",
         "               Session unrestorable. Only a registered PM of the same",
         "               repository may call it; `session_id` defaults to the",
         "               caller's own registration (Issue #3607).",
         "",
         "Key params:",
-        "  project_root (optional; defaults to the current repository path)",
+        "  project_root (where supported; optional; defaults to the current repository path)",
         "  session_id   (pm.stop; defaults to the calling PM's own Session)",
+        "  items        (pm.status.set; 1-3 {kind: working|waiting, text, started_at})",
+        "  next_trigger (pm.status.set; required, nonempty)",
+        "  user_action  (pm.status.set; optional, nonempty when provided)",
+        "  stale_after_minutes (pm.status.set; positive integer, default 15)",
         "",
         "Notes:",
         "  - pm.stop ends PM authority and the resident loop; it does not close",
@@ -851,14 +930,38 @@ fn format_update_help() -> String {
 }
 
 fn run_json_envelope_cli(argv: &[String]) -> i32 {
+    let prog = argv
+        .first()
+        .and_then(|raw| std::path::Path::new(raw).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("gwt");
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        eprintln!("{prog}: failed to read JSON envelope: {error}");
+        return 1;
+    }
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut env = json_envelope_env(repo_path, &input);
+    gwt::cli::dispatch_json_input(&mut env, prog, &input)
+}
+
+fn json_envelope_env(repo_path: PathBuf, input: &str) -> gwt::cli::DefaultCliEnv {
+    // Local search needs only the resolved worktree. The canonical dispatcher
+    // still validates the full envelope and preserves its governance path.
+    if serde_json::from_str::<serde_json::Value>(input).is_ok_and(|envelope| {
+        envelope
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            == Some("search")
+    }) {
+        return gwt::cli::DefaultCliEnv::new_for_hooks_at(repo_path);
+    }
     if let Some((owner, repo)) = resolve_repo_coordinates(&repo_path) {
-        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
-        return gwt::cli::dispatch(&mut env, argv);
+        return gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
     }
 
-    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
-    gwt::cli::dispatch(&mut env, argv)
+    gwt::cli::DefaultCliEnv::new_for_hooks()
 }
 
 fn is_allowed_argv_exception(argv: &[String]) -> bool {
@@ -992,7 +1095,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_json_uses_local_env_without_eager_repository_cache_resolution() {
+        use gwt::cli::CliEnv;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _repo = ScopedEnvVar::set("GWT_GITHUB_REPO", "fixture/local-search");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "bound-search-session");
+        let project = tempfile::tempdir().unwrap();
+        let env = json_envelope_env(
+            project.path().to_path_buf(),
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission"}}"#,
+        );
+
+        assert_eq!(env.repo_path(), project.path());
+        assert_eq!(
+            env.cache_root(),
+            gwt::issue_cache::detached_issue_cache_root(),
+            "local search must not resolve the repository Issue cache before dispatch"
+        );
+    }
+
+    #[test]
     fn pm_runtime_remote_discovery_uses_explicit_project_directory() {
+        use gwt::cli::CliEnv;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _repo = ScopedEnvVar::unset("GWT_GITHUB_REPO");
+        let _remote = ScopedEnvVar::unset("GWT_REMOTE");
         let project = tempfile::tempdir().unwrap();
         assert!(gwt_core::process::hidden_command("git")
             .arg("init")
@@ -1020,6 +1159,18 @@ mod tests {
                 "https://github.com/fixture/pm-runtime.git".into()
             )]
         );
+        for input in [
+            r#"{"schema_version":1,"operation":"issue.view","params":{"number":42}}"#,
+            "{",
+        ] {
+            let env = json_envelope_env(project.path().to_path_buf(), input);
+            assert_eq!(env.repo_path(), project.path());
+            assert_eq!(
+                env.cache_root(),
+                gwt::issue_cache::issue_cache_root_for_repo_path(project.path()).unwrap(),
+                "non-search and malformed envelopes retain repository initialization"
+            );
+        }
     }
 
     #[test]
@@ -1030,6 +1181,20 @@ mod tests {
         assert_eq!(did_you_mean("baord"), Some("board"));
     }
 
+    #[test]
+    fn issue_3789_pr_help_documents_targeted_and_bulk_replies() {
+        let help = family_help("pr").expect("pr family help");
+        for expected in [
+            "thread_id",
+            "omitted",
+            "all unresolved",
+            "plain text",
+            "JSON array",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
     /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
     /// and both of its target params, so an agent blocked on `gh run rerun`
     /// can discover the sanctioned replacement from the help alone.
@@ -1037,6 +1202,17 @@ mod tests {
     fn actions_family_help_documents_rerun() {
         let help = family_help("actions").expect("actions family help");
         for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4188_actions_family_help_lists_cancel_and_queued() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.cancel", "actions.queued", "run_id", "age_seconds"] {
             assert!(
                 help.contains(expected),
                 "actions help must mention {expected}, got:\n{help}"
@@ -1059,6 +1235,7 @@ mod tests {
             "workspace.join",
             "workspace.candidates",
             "workspace.work_prune",
+            "workspace.work_repair",
             "workspace.projection_list",
             "workspace.projection_prune",
             "workspace.store_consolidate",
@@ -1147,6 +1324,7 @@ mod tests {
         assert!(help.contains("errors.list"));
         assert!(help.contains("since"));
         assert!(help.contains("errors"));
+        assert!(help.contains("current project (default)"));
     }
 
     #[test]
@@ -1244,6 +1422,25 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected}. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_pm_help_documents_planning_authority_and_request() {
+        let help = format_pm_help();
+        for expected in [
+            "pm.plan.status",
+            "pm.plan.apply",
+            "expected_revision",
+            "idempotency_key",
+            "goal|milestone|risk|decision|policy|recurring|link",
+            "registered PM only",
+            "No project_root, path, or actor override",
+        ] {
+            assert!(
+                help.contains(expected),
+                "PM help must document {expected}: {help}"
             );
         }
     }

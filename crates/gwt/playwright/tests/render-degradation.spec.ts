@@ -1,24 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-// Issue #3365 — renderWorkspace exception safety.
-//
-// A window whose `geometry` is null passes `workspaceWindowsRenderKey`
-// (which guards with `windowData?.geometry || {}`) but throws inside
-// `ensureWindow` when the update path dereferences `windowData.geometry`.
-// Before the fix, that exception escaped `renderWorkspace` AFTER the render
-// key was already committed, so every following identical workspace_state
-// short-circuited on the key diff: the Fleet Minimap, the window list, and
-// the telemetry counts froze until reload, and the only trace was a console
-// warn from the WebSocket dispatcher.
-//
-// The spec drives the real frontend (embedded routes + fixture WebSocket)
-// through poison -> recovery:
-// - the poisoned window is isolated (a healthy window in the same state
-//   still mounts),
-// - the degradation banner becomes visible instead of a console-only warn,
-// - the NEXT workspace_state still renders windows and minimap cells (the
-//   render key was not committed by the failed sync).
+// Issue #5595: legacy canvas geometry no longer participates in rendering.
+// Missing geometry must not degrade the Agents surface or freeze later state.
 
 declare global {
   interface Window {
@@ -117,7 +101,7 @@ test.describe("Render degradation isolation and recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
-  test("a poisoned window degrades visibly and the next workspace_state still renders", async ({
+  test("legacy missing geometry is ignored and later workspace state still renders", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -134,50 +118,35 @@ test.describe("Render degradation isolation and recovery", () => {
       window.__gwtRenderDegradationFixtureSocket!.emit(state);
     }, workspaceState([fixtureWindow("agent-1", 200)]));
     await expect(
-      page.locator(".workspace-window[data-id='agent-1']"),
+      page.locator(".agent-tile[data-agent-id='agent-1']"),
     ).toBeVisible({ timeout: 10_000 });
-    await expect(
-      page.locator(".fleet-minimap__cell[data-window-id='agent-1']"),
-    ).toBeAttached();
     await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
 
-    // Poisoned state: geometry:null throws inside ensureWindow. The healthy
-    // window listed AFTER the poison must still mount (per-window isolation)
-    // and the degradation banner must become visible.
+    // Canvas geometry is no longer a frontend dependency. Both entries must
+    // mount in the fixed Agents surface even when old geometry is missing.
     await page.evaluate((state) => {
       window.__gwtRenderDegradationFixtureSocket!.emit(state);
     }, workspaceState([fixtureWindow("poison", 640, null), fixtureWindow("agent-2", 1040)]));
 
     await expect(
-      page.locator(".workspace-window[data-id='agent-2']"),
+      page.locator(".agent-tile[data-agent-id='agent-2']"),
     ).toBeVisible({ timeout: 10_000 });
     const banner = page.locator(".render-degradation-banner");
-    await expect(banner).toBeVisible();
-    await expect(banner).toContainText(/failed to render/);
-    await expect(
-      page.locator(".fleet-minimap__cell[data-window-id='agent-2']"),
-    ).toBeAttached();
+    await expect(banner).toHaveCount(0);
+    await expect(page.locator(".agent-tile[data-agent-id='poison']")).toBeVisible();
 
-    // Recovery: the failed sync must NOT have committed the render key, so
-    // the next workspace_state re-syncs — new windows and minimap cells keep
-    // appearing instead of freezing until reload.
+    // A following workspace state still replaces the rendered agent catalog.
     await page.evaluate((state) => {
       window.__gwtRenderDegradationFixtureSocket!.emit(state);
     }, workspaceState([fixtureWindow("agent-2", 1040), fixtureWindow("agent-3", 200)]));
 
     await expect(
-      page.locator(".workspace-window[data-id='agent-3']"),
+      page.locator(".agent-tile[data-agent-id='agent-3']"),
     ).toBeVisible({ timeout: 10_000 });
-    await expect(
-      page.locator(".fleet-minimap__cell[data-window-id='agent-3']"),
-    ).toBeAttached();
     await expect(
       page.locator(".workspace-window[data-id='poison']"),
     ).toHaveCount(0);
 
-    // The banner persists until dismissed.
-    await expect(banner).toBeVisible();
-    await banner.locator(".render-degradation-banner__dismiss").click();
-    await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
+    await expect(banner).toHaveCount(0);
   });
 });

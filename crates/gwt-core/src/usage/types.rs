@@ -47,6 +47,8 @@ pub enum WindowKind {
     OpusWeekly,
     /// Claude Sonnet-specific weekly sub-limit (`seven_day_sonnet`).
     SonnetWeekly,
+    /// Claude Fable-specific weekly sub-limit.
+    FableWeekly,
     /// Codex code-review weekly sub-limit.
     CodeReviewWeekly,
     /// A window whose length is missing or matches no known kind. The value is
@@ -66,6 +68,7 @@ impl WindowKind {
             WindowKind::Weekly => "weekly",
             WindowKind::OpusWeekly => "opus_weekly",
             WindowKind::SonnetWeekly => "sonnet_weekly",
+            WindowKind::FableWeekly => "fable_weekly",
             WindowKind::CodeReviewWeekly => "code_review_weekly",
             WindowKind::Unknown => "unknown",
         }
@@ -146,6 +149,18 @@ pub enum UsageState {
     Stale { age_secs: u64 },
 }
 
+/// Optional Claude usage credits, in the units reported by the provider.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtraUsage {
+    pub is_enabled: bool,
+    pub monthly_limit: Option<f64>,
+    pub used_credits: Option<f64>,
+    pub utilization: Option<f32>,
+    pub currency: Option<String>,
+    pub disabled_reason: Option<String>,
+}
+
 /// Account-level usage for one provider (shared pool).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
@@ -157,6 +172,8 @@ pub struct ProviderUsage {
     pub account_label: Option<String>,
     pub plan: Option<String>,
     pub windows: Vec<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<ExtraUsage>,
     pub limit_reached: bool,
     pub state: UsageState,
     pub fetched_at: Option<DateTime<Utc>>,
@@ -171,6 +188,7 @@ impl ProviderUsage {
             account_label: None,
             plan: None,
             windows: Vec::new(),
+            extra_usage: None,
             limit_reached: false,
             state,
             fetched_at: None,
@@ -313,6 +331,27 @@ mod tests {
     }
 
     #[test]
+    fn extra_usage_survives_serde_and_old_snapshots_still_load() {
+        let mut account = serde_json::json!({
+            "provider":"claude_code", "plan":null, "windows":[],
+            "limit_reached":false, "state":{"kind":"ok"}, "fetched_at":null
+        });
+        let legacy: ProviderUsage = serde_json::from_value(account.clone()).unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("extra_usage")
+            .is_none());
+        let credits = serde_json::json!({"is_enabled":true,"monthly_limit":100.0,
+            "used_credits":25.0,"utilization":25.0,"currency":"USD","disabled_reason":null});
+        account["extra_usage"] = credits.clone();
+        let parsed: ProviderUsage = serde_json::from_value(account).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["extra_usage"],
+            credits
+        );
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
@@ -320,6 +359,7 @@ mod tests {
                 account_id: None,
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
+                extra_usage: None,
                 windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
                 limit_reached: false,
                 state: UsageState::Ok,

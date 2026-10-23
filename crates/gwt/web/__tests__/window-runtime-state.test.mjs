@@ -111,7 +111,7 @@ test("telemetry mapping projects runtime states to status strip states", () => {
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });
 
-test("agent focus candidates include Canvas presets or non-empty agent ids, including hidden tabs", () => {
+test("agent focus candidates match Agents view, including off-canvas and hidden tabs but excluding PM", () => {
   const windows = [
     {
       id: "idle-agent-id",
@@ -128,6 +128,7 @@ test("agent focus candidates include Canvas presets or non-empty agent ids, incl
       tab_group_active: false,
     },
     { id: "running-codex", preset: "codex", status: "running" },
+    { id: "pm", preset: "codex", status: "running", is_pm: true },
     { id: "plain-shell", preset: "shell", status: "running" },
     {
       id: "blank-agent-id",
@@ -153,7 +154,23 @@ test("agent focus candidates include Canvas presets or non-empty agent ids, incl
   );
   assert.equal(
     selectNextAgentFocusWindowId(windows, "running-codex", "forward"),
+    "plain-shell",
+  );
+  assert.equal(
+    selectNextAgentFocusWindowId(windows, "plain-shell", "forward"),
+    "blank-agent-id",
+  );
+  assert.equal(
+    selectNextAgentFocusWindowId(windows, "blank-agent-id", "forward"),
+    "kanban-agent",
+  );
+  assert.equal(
+    selectNextAgentFocusWindowId(windows, "kanban-agent", "forward"),
     "idle-agent-id",
+  );
+  assert.equal(
+    selectNextAgentFocusWindowId(windows, "idle-agent-id", "forward"),
+    "starting-hidden-tab",
   );
 });
 
@@ -270,7 +287,7 @@ test("agent focus cycling starts at the directional edge when focus is not a can
   const windows = [
     { id: "idle", preset: "agent", status: "idle" },
     { id: "running", preset: "agent", status: "running" },
-    { id: "non-agent", preset: "shell", status: "running" },
+    { id: "non-agent", preset: "settings", status: "running" },
     { id: "error", preset: "agent", status: "error" },
   ];
 
@@ -296,15 +313,15 @@ test("agent focus cycling returns null for no candidates and the same id for one
   assert.equal(
     selectNextAgentFocusWindowId(
       [
-        { id: "shell", preset: "shell", status: "running" },
+        { id: "console", preset: "console", status: "running" },
         {
-          id: "kanban-agent",
+          id: "pm",
           preset: "agent",
           status: "running",
-          placement: { kind: "agent_kanban" },
+          is_pm: true,
         },
       ],
-      "shell",
+      "console",
       "forward",
     ),
     null,

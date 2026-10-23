@@ -427,7 +427,14 @@ fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {
     ))
 }
 
-fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+/// Raw repository-local identity for consent decisions. Unlike normal project
+/// routing, this must not honor environment overrides, includes, or URL rewrites.
+pub fn repository_local_origin(repo_root: &Path) -> Option<String> {
+    let common = repository_common_dir(repo_root)?;
+    parse_origin_url_from_git_config(&fs::read_to_string(common.join("config")).ok()?)
+}
+
+pub(crate) fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
     let dot_git = repo_root.join(".git");
     if dot_git.is_dir() {
         return Some(dot_git);

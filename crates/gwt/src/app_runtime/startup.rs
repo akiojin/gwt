@@ -19,7 +19,7 @@
 //! `PendingStartupAutoResumeSession` stay in `mod.rs`.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     thread::JoinHandle,
     time::Instant,
@@ -129,6 +129,13 @@ pub(super) enum RestoreRefusal {
     DiagnosticWindow,
     WorktreeAlreadyRestoring,
     ClosedWorkDiagnostic,
+    /// Issue #4802 (AC-4): the linked execution reached Completed. The Work
+    /// is finished even while a settlement obligation is open, so its agent
+    /// is not restarted; the placeholder is kept as the diagnostic.
+    CompletedWork,
+    /// Canonical terminal Work cannot resume in the old Session. Keep its
+    /// placeholder for the Monitor's existing fresh-launch recovery.
+    FreshSessionRequired,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -161,6 +168,8 @@ impl RestoreRefusal {
             Self::DiagnosticWindow => "diagnostic_window_retained".to_string(),
             Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
             Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
+            Self::CompletedWork => "completed_work_retained".to_string(),
+            Self::FreshSessionRequired => "fresh_session_required".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
@@ -730,11 +739,16 @@ pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>)
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
-    let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
-        session.update_status(gwt_agent::AgentStatus::Stopped);
-        session.restore_window_on_startup = false;
-        Ok(())
-    });
+    let _ = gwt_agent::update_session_with_wait(
+        sessions_dir,
+        session_id,
+        std::time::Duration::from_secs(2),
+        |session| {
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.restore_window_on_startup = false;
+            Ok(())
+        },
+    );
 }
 
 impl AppRuntime {
@@ -754,6 +768,13 @@ impl AppRuntime {
             .flat_map(|tab| {
                 match gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None) {
                     Ok(entries) => {
+                        // The inventory already resolved this root. Reuse it
+                        // when restored Sessions are associated with the tab.
+                        if let Some(main) = entries.iter().find(|entry| {
+                            entry.kind == gwt::worktree_inventory::WorktreeEntryKind::BareMain
+                        }) {
+                            let _ = tab.main_worktree_root_cache.set(main.path.clone());
+                        }
                         let paths: Vec<PathBuf> =
                             entries.iter().map(|entry| entry.path.clone()).collect();
                         startup_worktree_inventories
@@ -811,48 +832,60 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut orphan_intake_prune_plans = Vec::new();
         for tab in &self.tabs {
-            let _ =
-                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
-            // SPEC-2359 US-39 / FR-142..145: backfill Phase U-6 schema
-            // additions (`summary`, `created_at`, `creator`,
-            // `lifecycle_stage`) on legacy `workspace.json` files. Runs
-            // alongside the auto-done scan above with independent helpers
-            // and an independent `workspace.migration.json` marker, so the
-            // two migrations are exactly-once each and never duplicate work.
-            // Errors are silently dropped (`let _ = ...`) so a corrupt or
-            // unreadable Workspace cannot block daemon startup.
-            let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
-                &tab.project_root,
-            );
-            // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
-            // (pre-W-12 records keyed to one projection UUID fusing dozens of
-            // branches) into canonical branch-keyed items so each branch row
-            // shows its real title / sessions. Idempotent; must run before
-            // the intake/reconcile chain so decomposed branches are not
-            // redundantly backfilled.
-            let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
-                &tab.project_root,
-            );
+            let Some(context) = self.project_context_for_root(&tab.project_root) else {
+                continue;
+            };
+            let proxy = self.proxy.for_project(context);
+            let inventory = startup_inventories.get(&tab.project_root).cloned();
+            // Stop the writer chain on a load failure. Legacy layouts require
+            // an intermediate upgrade; malformed Works may still recover through
+            // the complete-source intake below (Issue #4925).
+            let prepared = (|| {
+                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now)?;
+                // SPEC-2359 US-39 and W-16: schema backfill and legacy mega-item
+                // decomposition precede intake/reconcile, preserving their order.
+                gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
+                    &tab.project_root,
+                )?;
+                gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
+                    &tab.project_root,
+                )?;
+                Ok::<_, gwt_core::GwtError>(())
+            })();
+            match prepared {
+                Ok(()) => {}
+                Err(error) => {
+                    let error = crate::workspace_state_load_error(&tab.project_root, error);
+                    let can_rebuild = error.kind
+                        == gwt_core::WorkspaceStateLoadErrorKind::Malformed
+                        && error.path
+                            == gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                                &tab.project_root,
+                            );
+                    proxy.send(crate::UserEvent::WorkspaceStateLoadFailed {
+                        project_root: tab.project_root.clone(),
+                        error,
+                    });
+                    if can_rebuild {
+                        self.spawn_work_events_ingest_with_inventory(
+                            tab.project_root.clone(),
+                            true,
+                            inventory,
+                        );
+                    }
+                    continue;
+                }
+            }
             // SPEC-2359 W-16 (FR-387): cross-machine work events intake.
             // Supersedes the one-shot `rebuild_work_items_from_events_for_repo`
             // migration gate — the intake is a permanently-installed idempotent
             // consumer over the same (and more) sources. Runs on a background
             // thread; its completion event then runs the worktree reconcile
             // (intake → reconcile order) and the merge scan.
-            let inventory = startup_inventories.get(&tab.project_root).cloned();
             self.spawn_work_events_ingest_with_inventory(
                 tab.project_root.clone(),
                 true,
                 inventory.clone(),
-            );
-            // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
-            // clear of legacy prompt-derived title_summary / current_focus so
-            // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
-            // display fallback and agent re-authoring. Idempotent via
-            // `agent_identity.migration.json`; never re-clears agent-authored
-            // values written after the marker.
-            let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
-                &tab.project_root,
             );
             // Snapshot candidates before the GUI becomes interactive, then
             // inspect/remove only that fixed set on a recovery worker. A new
@@ -935,6 +968,7 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         let mut restored_owner_issues = std::collections::HashSet::new();
+        let mut resume_tabs = HashMap::new();
         let mut admission = RestoreAdmissionLog::default();
         for session in sessions {
             // The startup prune plan is the authoritative fixed snapshot of
@@ -953,9 +987,11 @@ impl AppRuntime {
             // update apply began resume regardless of age — the gap was the
             // update, not the operator walking away.
             let resumes_after_update = !self.update_resume_tab_ids.is_empty()
-                && self
-                    .auto_resume_tab_id_for_session(&session)
-                    .is_some_and(|tab_id| self.update_resume_tab_ids.contains(&tab_id));
+                && resume_tabs
+                    .entry((session.worktree_path.clone(), session.repo_hash.clone()))
+                    .or_insert_with(|| self.auto_resume_tab_id_for_session(&session))
+                    .as_ref()
+                    .is_some_and(|tab_id| self.update_resume_tab_ids.contains(tab_id));
             let native_session_id = session.exact_resume_session_id().map(str::to_string);
             let already_running = self
                 .active_agent_sessions
@@ -1083,19 +1119,7 @@ impl AppRuntime {
             return Err(RestoreRefusal::DiagnosticWindow);
         }
         // Preserve terminal cleanup before applying spawn-only refusals.
-        match self.restore_work_terminality(session, project_root, window_id) {
-            RestoreAdmission::RefuseTerminal(reason) => {
-                return Err(RestoreRefusal::TerminalWork(reason))
-            }
-            RestoreAdmission::RefuseUnprovable(cause) => {
-                return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
-            }
-            RestoreAdmission::RefuseRetainedTerminal => {
-                return Err(RestoreRefusal::ClosedWorkDiagnostic)
-            }
-            RestoreAdmission::RefuseHeld(cause) => return Err(RestoreRefusal::MonitorHold(cause)),
-            RestoreAdmission::Admit => {}
-        }
+        let completed_work = self.work_terminality_refusal(session, project_root, window_id)?;
         // Reopened #4143 AC-6: queued and in-flight restores reserve their
         // worktree before a PTY attaches and enters active_agent_sessions.
         let worktree = &session.worktree_path;
@@ -1145,12 +1169,72 @@ impl AppRuntime {
             }
             return Err(RestoreRefusal::LandedWorktree);
         }
+        if completed_work {
+            return Err(RestoreRefusal::CompletedWork);
+        }
         if launch_config_from_persisted_session(session).session_mode
             != gwt_agent::SessionMode::Resume
         {
             return Err(RestoreRefusal::NoResumeSession);
         }
         Ok(())
+    }
+
+    /// The Work-terminality half of [`Self::restore_admission`]. `Ok(true)`
+    /// is the spawn-only `CompletedWork` refusal of Issue #4802 (AC-4), which
+    /// the caller reports after the more specific worktree answers.
+    fn work_terminality_refusal(
+        &self,
+        session: &gwt_agent::Session,
+        project_root: &Path,
+        window_id: Option<&str>,
+    ) -> Result<bool, RestoreRefusal> {
+        match self.restore_work_terminality(session, project_root, window_id) {
+            RestoreAdmission::RefuseTerminal(reason) => Err(RestoreRefusal::TerminalWork(reason)),
+            RestoreAdmission::RefuseUnprovable(cause) => {
+                Err(RestoreRefusal::TerminalFactsUnreadable(cause))
+            }
+            RestoreAdmission::RefuseRetainedTerminal => Err(RestoreRefusal::ClosedWorkDiagnostic),
+            RestoreAdmission::RefuseHeld(cause) => Err(RestoreRefusal::MonitorHold(cause)),
+            RestoreAdmission::RefuseCompletedWork => Ok(true),
+            RestoreAdmission::RefuseFreshSession => Err(RestoreRefusal::FreshSessionRequired),
+            RestoreAdmission::Admit => Ok(false),
+        }
+    }
+
+    /// Issue #4783 AC-2: the admission decision, re-read at the spawn
+    /// boundary of an automatic restore.
+    ///
+    /// Admission runs once, at the startup sweep or the Open Project sweep;
+    /// the PTY spawn that restores the window happens later, after the canvas
+    /// round trip (and, for a PM worktree, an asynchronous preparation). The
+    /// spawn used to re-check only the cwd and the PM guards, so Work that
+    /// became terminal in between — or was admitted on facts a concurrent
+    /// Monitor scan has since settled — still came back as an agent. Reading
+    /// the same facts again immediately before the spawn is what keeps the
+    /// restore honest to the decision it was granted.
+    fn late_restore_refusal(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> Option<RestoreRefusal> {
+        let tab = self.tab(tab_id)?;
+        let placeholder_window_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
+            .map(|window| combined_window_id(tab_id, &window.id));
+        match self.work_terminality_refusal(
+            session,
+            &tab.project_root,
+            placeholder_window_id.as_deref(),
+        ) {
+            Err(refusal) => Some(refusal),
+            Ok(true) => Some(RestoreRefusal::CompletedWork),
+            Ok(false) => None,
+        }
     }
 
     /// Only discard a provably empty placeholder. An unknown execution,
@@ -1223,7 +1307,7 @@ impl AppRuntime {
     /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
     /// restore protection set is snapshotted here, so the worker judges exactly
     /// the sessions this startup is about to restore. Issue Monitor launch
-    /// deliveries are held until the worker reports back.
+    /// deliveries wait for both its result and canvas-ready restore registration.
     pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
         let (protected_exact_sessions, protected_unknown_session_ids) =
             self.startup_reaper_protection();
@@ -1231,6 +1315,7 @@ impl AppRuntime {
         let worktrees = startup_worktrees.to_vec();
         let proxy = self.proxy.clone();
         self.deferred_issue_monitor_launches = Some(Vec::new());
+        self.startup_generation_reaper_pending = true;
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             reap_defunct_active_generations(
                 &sessions_dir,
@@ -1245,8 +1330,8 @@ impl AppRuntime {
                 %error,
                 "startup generation reaper could not be scheduled; running it inline"
             );
-            self.deferred_issue_monitor_launches = None;
             self.reap_startup_defunct_active_generations(startup_worktrees);
+            self.startup_generation_reaper_pending = false;
         }
     }
 
@@ -1543,6 +1628,7 @@ impl AppRuntime {
 
         // Issue #4375 AC-4: the drain's internals, not just its total.
         log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
+        events.extend(self.drain_startup_issue_monitor_launches());
         events
     }
 
@@ -1638,9 +1724,83 @@ impl AppRuntime {
         fallback_geometry: WindowGeometry,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
+        // Issue #4783 AC-2: re-evaluate the admission immediately before the
+        // spawn. A refusal here is logged like the sweep's, and a terminal
+        // one removes its placeholder the same way; the caller then counts
+        // the missing spawn as `launch_not_started`.
+        if origin == RestoreOrigin::Automatic {
+            if let Some(refusal) = self.late_restore_refusal(tab_id, &session) {
+                RestoreAdmissionLog::default().refuse(&session.id, refusal);
+                if let Some(reason) = refusal.removal_reason() {
+                    self.remove_refused_session_restore(tab_id, &session.id, None, reason);
+                }
+                return Vec::new();
+            }
+        }
         let mut config = launch_config_from_persisted_session(&session);
         if origin == RestoreOrigin::UserRequested {
             config.launch_route = gwt_agent::LaunchRoute::Manual;
+        }
+        // Issue #4783 AC-2: tell the launch worker this Resume is a restore
+        // nobody asked for, so a terminal predecessor generation is left
+        // alone instead of being continued into a new Active generation.
+        config.automatic_restore = origin == RestoreOrigin::Automatic;
+        let mut agent_name = self
+            .tab(tab_id)
+            .and_then(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .find(|window| {
+                        crate::runtime_support::window_is_agent_pane(window)
+                            && matches!(
+                                window.status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                            && window.session_id.as_deref() == Some(session.id.as_str())
+                    })
+                    .and_then(|window| window.agent_name.clone())
+            })
+            .or_else(|| session.agent_name.clone());
+        let fresh_issue_restart =
+            origin == RestoreOrigin::UserRequested && session.linked_issue_number.is_some();
+        let (mut known, active) = self.agent_name_reservations(Some(&session.id));
+        if fresh_issue_restart
+            || agent_name.as_ref().is_some_and(|name| {
+                gwt::agent_names::ensure_available_initial(name, &active).is_err()
+            })
+        {
+            // Reserve the replacement before removing the diagnostic placeholder.
+            // A legacy identity may exist only in the saved Session, so remember
+            // both sources before assigning a new lifetime's name (Issue #3824).
+            known.extend(session.agent_name.iter().chain(agent_name.iter()).cloned());
+            let replacement = self
+                .tab(tab_id)
+                .ok_or_else(|| "Project is closed".to_string())
+                .and_then(|tab| {
+                    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root)
+                        .join("agent-names.jsonl");
+                    let language = gwt_config::Settings::load()
+                        .map(|settings| settings.ai.effective_language())
+                        .unwrap_or("en");
+                    gwt::agent_names::allocate(&history, language, &active, &known)
+                });
+            match replacement {
+                Ok(replacement) => {
+                    tracing::info!(
+                        session_id = %session.id,
+                        previous_name = ?agent_name,
+                        agent_name = %replacement,
+                        fresh_issue_restart,
+                        "assigned a fresh restored Agent name"
+                    );
+                    agent_name = Some(replacement);
+                }
+                Err(error) => {
+                    return self.restore_launch_error_events(tab_id, &session, origin, error);
+                }
+            }
         }
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id, None)
@@ -1659,14 +1819,34 @@ impl AppRuntime {
             config,
             geometry,
             workspace_resume_context,
+            agent_name.clone(),
         ) {
-            Ok(events) => {
+            Ok(mut events) => {
                 if let Some(window_id) = self
                     .window_lookup
                     .keys()
                     .find(|window_id| !existing_windows.contains(*window_id))
                     .cloned()
                 {
+                    if let Some(name) = agent_name {
+                        if let Some(address) = self.window_lookup.get(&window_id).cloned() {
+                            if let Some(tab) = self.tab_mut(&address.tab_id) {
+                                tab.workspace.set_agent_name(&address.raw_id, Some(name));
+                            }
+                            if let Some(context) = self.project_context(&address.tab_id) {
+                                let named_state = self.workspace_state_broadcast(&context);
+                                for event in &mut events {
+                                    if matches!(
+                                        event.event,
+                                        gwt::BackendEvent::WindowCanvasState { .. }
+                                    ) {
+                                        *event = named_state.clone();
+                                    }
+                                }
+                            }
+                            let _ = self.persist();
+                        }
+                    }
                     // Issue #4143 (AC-3): mark the in-flight automatic restore
                     // so a failure before PTY start closes the empty pane
                     // instead of persisting it into the next generation. A
@@ -1682,15 +1862,67 @@ impl AppRuntime {
                 }
                 events
             }
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session.id,
-                    error = %error,
-                    "failed to spawn restored agent window"
-                );
-                Vec::new()
-            }
+            Err(error) => self.restore_launch_error_events(tab_id, &session, origin, error),
         }
+    }
+
+    fn restore_launch_error_events(
+        &mut self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+        origin: RestoreOrigin,
+        error: String,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(session_id = %session.id, %error, "failed to spawn restored agent window");
+        let placeholder = self.tab(tab_id).and_then(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| {
+                    window.session_id.as_deref() == Some(session.id.as_str())
+                        && matches!(
+                            window.status,
+                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                        )
+                })
+                .map(|window| window.id.clone())
+        });
+        let mut events = Vec::new();
+        if let Some(raw_id) = &placeholder {
+            let window_id = combined_window_id(tab_id, raw_id);
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+            self.window_details.insert(window_id.clone(), error.clone());
+            let _ = self.persist();
+            events.extend(self.status_events(
+                window_id,
+                WindowProcessStatus::Error,
+                Some(error.clone()),
+            ));
+        }
+        if let Some(context) = self.project_context(tab_id) {
+            let event = if origin == RestoreOrigin::Automatic {
+                gwt::BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "error".into(),
+                    message: format!("Agent restore failed: {error}"),
+                    issue_number: session.linked_issue_number,
+                }
+            } else if placeholder.is_none() {
+                gwt::BackendEvent::LaunchWizardOpenError {
+                    title: "Agent restore".into(),
+                    message: error,
+                }
+            } else {
+                return events;
+            };
+            events.push(
+                OutboundEvent::project(context.project_key, event)
+                    .with_error_project_root(&context.project_root),
+            );
+        }
+        events
     }
 
     /// Issue #3607 AC-3: refuse to restore a Session rooted in *another*
@@ -1986,7 +2218,10 @@ impl AppRuntime {
             .iter()
             .find(|w| {
                 crate::runtime_support::window_is_agent_pane(w)
-                    && w.status == WindowProcessStatus::Stopped
+                    && matches!(
+                        w.status,
+                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    )
                     && w.session_id.as_deref() == Some(session_id)
                     && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
             })
@@ -2202,10 +2437,33 @@ impl AppRuntime {
             }
         }
 
-        let sessions = candidates
-            .iter()
-            .filter_map(|session_id| Self::load_recovery_session(&self.sessions_dir, session_id))
-            .collect();
+        // Update restart may read the entire ledger. Files have independent
+        // locks, so bound parallel parsing while retaining the recovery barrier
+        // before restore selection and the generation reaper.
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(4)
+            .min(candidates.len().div_ceil(64).max(1));
+        let sessions_dir = &self.sessions_dir;
+        let load = |ids: &[String]| {
+            ids.iter()
+                .filter_map(|id| Self::load_recovery_session(sessions_dir, id))
+                .collect::<Vec<_>>()
+        };
+        let sessions = if workers == 1 {
+            load(&candidates)
+        } else {
+            std::thread::scope(|scope| {
+                let handles = candidates
+                    .chunks(candidates.len().div_ceil(workers))
+                    .map(|ids| scope.spawn(move || load(ids)))
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("Session recovery worker panicked"))
+                    .collect()
+            })
+        };
         gwt::perf::startup::session_load(started, candidates.len());
         if !deferred.is_empty() {
             let sessions_dir = self.sessions_dir.clone();
@@ -2221,6 +2479,17 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
+        let session = gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)?;
+        // Historical stopped Sessions need no writer lease or serialization.
+        // A real mutation still re-reads and checks lifecycle under the lock below.
+        let needs_interruption = session.status != gwt_agent::AgentStatus::Interrupted
+            && session.should_mark_interrupted_from_lifecycle()
+            && session.worktree_path.exists();
+        if session.schema_version >= gwt_agent::Session::CURRENT_SCHEMA_VERSION
+            && !needs_interruption
+        {
+            return Some(session);
+        }
         gwt_agent::update_session_if_changed(sessions_dir, session_id, |session| {
             if session.status != gwt_agent::AgentStatus::Interrupted
                 && session.worktree_path.exists()

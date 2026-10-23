@@ -17,6 +17,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use gwt_agent::{AgentId, AgentLaunchBuilder, LaunchConfig, SessionMode};
@@ -25,11 +27,14 @@ use gwt_core::{
     workspace_projection,
 };
 
-use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
+use gwt::{
+    board_audience::{gui_default_board_scope, post_audience_for_gui},
+    pm_registry,
+};
 
 use super::{
     combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -191,13 +196,25 @@ impl AppRuntime {
             }
         }
 
+        let posted_id = entry.id.clone();
         match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
-                let mut entries = snapshot.board.entries;
                 // Capture the milestone entry before attaching the serialize-only
                 // `body_html`, so workspace milestone persistence stays clean.
-                let latest_entry = entries.last().cloned();
+                let latest_entry = snapshot.board.entries.last().cloned();
+                // A future-dated or concurrent post may be last in the snapshot.
+                // Remote providers may replace the draft ID: retain their prior
+                // snapshot acknowledgement when no exact identity is available.
+                let mut entries = match snapshot
+                    .board
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == posted_id)
+                {
+                    Some(entry) => vec![entry.clone()],
+                    None => snapshot.board.entries,
+                };
                 attach_board_body_html(&mut entries);
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
@@ -307,9 +324,6 @@ impl AppRuntime {
         if let Some(model) = non_empty(session.model.as_deref()) {
             builder = builder.model(model.to_string());
         }
-        if let Some(tool_version) = non_empty(session.tool_version.as_deref()) {
-            builder = builder.version(tool_version.to_string());
-        }
         if let Some(reasoning_level) = non_empty(session.reasoning_level.as_deref()) {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
@@ -328,10 +342,6 @@ impl AppRuntime {
         if let Some(windows_shell) = session.windows_shell {
             builder = builder.windows_shell(windows_shell);
         }
-        if let Some(provenance) = session.tool_runtime_provenance.clone() {
-            builder = builder.tool_runtime_provenance(provenance);
-        }
-        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         let mut config = builder.build();
         if !session.display_name.trim().is_empty() {
@@ -458,8 +468,45 @@ fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) 
 /// the web UI renders server-sanitized HTML, while the JSONL event log (which
 /// `skip_serializing`s a `None` `body_html`) never stores it.
 pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BoardBodyHtmlCache>> =
+        std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for entry in entries.iter_mut() {
-        entry.body_html = Some(gwt::board_remote::markdown::markdown_to_html(&entry.body));
+        entry.body_html =
+            Some(cache.html_for(entry, gwt::board_remote::markdown::markdown_to_html));
+    }
+}
+
+/// Bound the display-only memo independently of the persisted Board history.
+/// Keep the source too: remote providers can reuse IDs in different channels.
+#[derive(Default)]
+struct BoardBodyHtmlCache {
+    entries: HashMap<String, (chrono::DateTime<chrono::Utc>, String, String)>,
+}
+
+impl BoardBodyHtmlCache {
+    fn html_for(
+        &mut self,
+        entry: &coordination::BoardEntry,
+        render: impl FnOnce(&str) -> String,
+    ) -> String {
+        if let Some((updated_at, body, html)) = self.entries.get(&entry.id) {
+            if *updated_at == entry.updated_at && *body == entry.body {
+                return html.clone();
+            }
+        }
+        let html = render(&entry.body);
+        if self.entries.len() >= coordination::HOT_PROJECTION_ENTRY_LIMIT * 4 {
+            self.entries.clear();
+        }
+        self.entries.insert(
+            entry.id.clone(),
+            (entry.updated_at, entry.body.clone(), html.clone()),
+        );
+        html
     }
 }
 
@@ -710,6 +757,7 @@ impl AppRuntime {
             context,
             mut events,
             milestone,
+            decision_notifications,
         } = refreshed;
         if !context
             .as_ref()
@@ -717,10 +765,13 @@ impl AppRuntime {
         {
             return Vec::new();
         }
+        let context = context.as_ref().expect("current Board project context");
+        for notification in decision_notifications {
+            self.notify_board_decision(context, notification);
+        }
         events.retain(|event| match &event.event {
             BackendEvent::BoardEntries { id, .. } => {
-                self.project_key_for_window(id)
-                    == context.as_ref().map(|context| &context.project_key)
+                self.project_key_for_window(id) == Some(&context.project_key)
             }
             _ => false,
         });
@@ -730,6 +781,203 @@ impl AppRuntime {
             );
         }
         events
+    }
+
+    /// Board notifications have internal authority to send only this fixed
+    /// pointer to a saved decision. They never grant an agent PM input rights
+    /// or turn the decision's untrusted body into a privileged prompt.
+    fn notify_board_decision(
+        &self,
+        context: &super::ProjectContext,
+        notification: BoardDecisionNotification,
+    ) {
+        let Some((window_id, max_submit_attempts)) =
+            self.active_agent_sessions.iter().find_map(|(id, session)| {
+                if session.session_id != notification.session_id
+                    || session.window_id != *id
+                    || self.project_key_for_window(id) != Some(&context.project_key)
+                {
+                    return None;
+                }
+                let address = self.window_lookup.get(id)?;
+                let window = self
+                    .tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?;
+                (session.tab_id == address.tab_id
+                    && window.status == WindowProcessStatus::Idle
+                    && window.session_id.as_deref() == Some(notification.session_id.as_str())
+                    && window.preset.is_agent_terminal())
+                .then(|| {
+                    // Known hook providers can acknowledge a successful submit,
+                    // so reuse the existing CR-only recovery without staging a
+                    // second body. Other providers receive only one submit.
+                    let attempts =
+                        if matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
+                            || matches!(session.agent_id.as_str(), "claude" | "codex")
+                        {
+                            2
+                        } else {
+                            1
+                        };
+                    (id.clone(), attempts)
+                })
+            })
+        else {
+            return;
+        };
+        let Some(expected) = self
+            .pty_writers
+            .read()
+            .ok()
+            .and_then(|writers| writers.get(&window_id).cloned())
+            .filter(|entry| entry.project_key == context.project_key)
+        else {
+            return;
+        };
+        let Some(ordinary_revision) = expected.handle.ordinary_input_revision() else {
+            return;
+        };
+        if expected.handle.has_unsent_user_input() {
+            return;
+        }
+        let writers = Arc::clone(&self.pty_writers);
+        let receipt_path =
+            pm_registry::pm_delivery_receipts_path_for_repo_path(&context.project_root);
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _deadline =
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+            let operation_id = board_notification_operation_id(&notification);
+            let short_id = notification
+                .entry_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(12)
+                .collect::<String>();
+            let body = format!(
+                "[gwt Board notification — not an owner message] Board decision {short_id} mentions this session; run board.show before continuing."
+            );
+            // Hash the complete Board source label too. The shared exact
+            // UserPromptSubmit ACK already accepts this protected marker.
+            let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
+            let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
+            let prepared = pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.clone(),
+                recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: format!("gwt-board:{}", notification.entry_id),
+                target_window_id: window_id.clone(),
+                target_session_id: notification.session_id.clone(),
+                body_sha256: body_sha256.clone(),
+                reason: None,
+            };
+            match pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared) {
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Prepared) => {}
+                // Watcher/daemon duplicates and restarts never stage a second
+                // body, including when a prior attempt was unconfirmed.
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(_)) => return,
+                Err(error) => {
+                    tracing::warn!(%error, operation_id, "Board notification receipt prepare failed");
+                    return;
+                }
+            }
+            let mut attempted = false;
+            let mut lost = false;
+            let result = (|| {
+                if !writers
+                    .read()
+                    .map_err(|error| error.to_string())?
+                    .get(&window_id)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &expected))
+                {
+                    lost = true;
+                    return Err("Board notification target generation changed".to_string());
+                }
+                let reservation = Arc::clone(&expected.handle)
+                    .reserve_input_transaction()
+                    .map_err(|error| error.to_string())?;
+                super::pty_io::drive_verified_pane_submit(
+                    &prompt,
+                    reservation.bracketed_paste_enabled(),
+                    max_submit_attempts,
+                    |bytes| {
+                        reservation
+                            .write_input_authorized(bytes, |commit| {
+                                let current = writers.read().map_err(|error| {
+                                    gwt_terminal::TerminalError::PtyIoError {
+                                        details: error.to_string(),
+                                    }
+                                })?;
+                                if !current
+                                    .get(&window_id)
+                                    .is_some_and(|entry| Arc::ptr_eq(entry, &expected))
+                                {
+                                    lost = true;
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification target generation changed".into(),
+                                    });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification delivery deadline expired".into(),
+                                    });
+                                }
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut || attempted = true)
+                                })
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                    |settle| {
+                        std::thread::sleep(
+                            settle.min(deadline.saturating_duration_since(Instant::now())),
+                        )
+                    },
+                    || {
+                        pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                            .map(|receipt| {
+                                receipt.is_some_and(|receipt| {
+                                    receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+                                })
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                )
+            })();
+            let (status, reason) = match result {
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified { .. }) => {
+                    (pm_registry::PmDeliveryReceiptStatus::Verified, None)
+                }
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { .. }) => (
+                    pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+                    Some("Board notification has no exact Session acknowledgement".to_string()),
+                ),
+                Err(error) => (
+                    if lost {
+                        pm_registry::PmDeliveryReceiptStatus::Lost
+                    } else if attempted {
+                        pm_registry::PmDeliveryReceiptStatus::Unconfirmed
+                    } else {
+                        pm_registry::PmDeliveryReceiptStatus::Refused
+                    },
+                    Some(error),
+                ),
+            };
+            if let Err(error) = pm_registry::finish_pm_delivery_receipt(
+                &receipt_path,
+                &operation_id,
+                &notification.session_id,
+                &body_sha256,
+                status,
+                reason.as_deref(),
+            ) {
+                tracing::warn!(%error, operation_id, "Board notification receipt finish failed");
+            }
+        });
+        if let Err(error) = spawn {
+            tracing::warn!(%error, "Board notification worker unavailable");
+        }
     }
 
     #[cfg(test)]
@@ -771,6 +1019,30 @@ pub(crate) struct BoardProjectionRefreshed {
     /// The Workspace projection after the latest post was recorded as a Work
     /// milestone, when it resolved to one.
     pub(crate) milestone: Option<(PathBuf, workspace_projection::WorkspaceProjection)>,
+    /// Saved decision pointers, independent of whether any Board window is open.
+    pub(crate) decision_notifications: Vec<BoardDecisionNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoardDecisionNotification {
+    entry_id: String,
+    session_id: String,
+}
+
+fn board_notification_operation_id(notification: &BoardDecisionNotification) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"gwt-board-notification-v1");
+    for value in [&notification.entry_id, &notification.session_id] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.finalize()[..16]);
+    // UUIDv8: this is an application-defined deterministic identity.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 /// Scoped Board views of one project, by Board window, kept between refreshes
@@ -792,39 +1064,129 @@ pub(crate) fn run_board_projection_refresh(
         return (refreshed, retained);
     };
     let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
-        return (refreshed, retained);
+        return (refreshed, views);
     };
+    refreshed.decision_notifications = snapshot
+        .board
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == BoardEntryKind::Decision)
+        .flat_map(|entry| {
+            entry
+                .mentions
+                .iter()
+                .filter(|mention| {
+                    mention.target_kind == coordination::BoardMentionTargetKind::Session
+                })
+                .map(|mention| BoardDecisionNotification {
+                    entry_id: entry.id.clone(),
+                    session_id: mention.target.clone(),
+                })
+        })
+        .collect();
     for window in job.windows {
         let scope = if window.all_view {
             coordination::BoardAudienceScope::All
         } else {
-            gui_default_board_scope_for_project(&window.tab_project_root)
-                .unwrap_or(coordination::BoardAudienceScope::All)
-        };
-        let board = if matches!(scope, coordination::BoardAudienceScope::All) {
-            snapshot.board.clone()
-        } else {
-            match gwt::board_provider::refresh_scoped_board_view(
-                &window.tab_project_root,
-                &scope,
-                views.remove(&window.window_id),
-            ) {
-                Ok((view, _)) => {
-                    let board = view.board.clone();
-                    retained.insert(window.window_id.clone(), view);
-                    board
+            let Ok(scope) = gui_default_board_scope_for_project(&window.tab_project_root) else {
+                if let Some(previous) = views.remove(&window.window_id) {
+                    retained.insert(window.window_id, previous);
                 }
-                Err(_) => snapshot.board.clone(),
-            }
+                continue;
+            };
+            scope
         };
-        let mut entries = board.entries;
+        let previous = views
+            .remove(&window.window_id)
+            .filter(|view| view.scope == scope);
+        let known = previous.as_ref().map(|view| {
+            view.board
+                .entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry))
+                .collect::<HashMap<_, _>>()
+        });
+        let previous_total = previous.as_ref().map(|view| view.board.total_entries);
+        let since = previous.as_ref().map(|view| {
+            view.board
+                .entries
+                .iter()
+                .map(|entry| entry.updated_at)
+                .max()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        });
+        // All uses the same bounded cache as Workspace/Broadcast. The core
+        // hot cursor handles ordinary appends without rereading event segments.
+        let Ok((view, _)) = gwt::board_provider::refresh_scoped_board_view(
+            &window.tab_project_root,
+            &scope,
+            previous.clone(),
+        ) else {
+            if let Some(previous) = previous {
+                retained.insert(window.window_id, previous);
+            }
+            continue;
+        };
+        let changed = |entry: &coordination::BoardEntry| {
+            // Some remote providers keep their creation timestamp on edits.
+            !known
+                .as_ref()
+                .and_then(|known| known.get(entry.id.as_str()))
+                .is_some_and(|known| *known == entry)
+        };
+        let mut entries = view
+            .board
+            .entries
+            .iter()
+            .filter(|entry| changed(entry))
+            .cloned()
+            .collect::<Vec<_>>();
+        // A coalesced burst may exceed the hot window. Recover those new posts
+        // via the timestamp-indexed segments, without adding I/O to normal posts.
+        // Include the boundary timestamp; the ID/version comparison deduplicates
+        // it, while the view difference also catches backdated entries.
+        if previous_total.is_some_and(|total| {
+            view.board.total_entries.saturating_sub(total) > view.board.entries.len()
+        }) {
+            if let Some(since) = since {
+                let since = since
+                    .checked_sub_signed(chrono::Duration::nanoseconds(1))
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                match gwt::board_provider::load_entries_since(&window.tab_project_root, since) {
+                    Ok(recent) => {
+                        let mut ids = entries
+                            .iter()
+                            .map(|entry| entry.id.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        entries.extend(recent.into_iter().filter(|entry| {
+                            coordination::board_entry_visible_for_scope(entry, &scope)
+                                && changed(entry)
+                                && ids.insert(entry.id.clone())
+                        }));
+                        entries.sort_by_key(|entry| entry.created_at);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to load Board catch-up entries");
+                        if let Some(previous) = previous {
+                            retained.insert(window.window_id, previous);
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        let has_more_before = view.board.has_more_before;
+        retained.insert(window.window_id.clone(), view);
+        if entries.is_empty() {
+            continue;
+        }
         attach_board_body_html(&mut entries);
         refreshed.events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::BoardEntries {
                 id: window.window_id,
                 entries,
-                has_more_before: board.has_more_before,
+                has_more_before,
             },
         ));
     }
@@ -849,9 +1211,33 @@ fn persist_workspace_board_milestone(
     project_root: &Path,
     entry: &coordination::BoardEntry,
 ) -> gwt_core::Result<(workspace_projection::WorkspaceProjection, bool)> {
-    workspace_projection::transact_workspace_state(
+    let projection = workspace_projection::load_or_default_workspace_projection(project_root)?;
+    let work_items = workspace_projection::load_or_synthesize_workspace_work_items(project_root)?;
+    let work_event_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+        &projection,
+        &work_items,
+        entry,
+    )
+    .and_then(|event| event.execution_container?.worktree_path)
+    .unwrap_or_else(|| project_root.to_path_buf());
+    workspace_projection::transact_workspace_state_for_work_event_root_with_preflight(
         project_root,
+        &work_event_root,
         |projection, work_items, _work_items_persisted| {
+            let current_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+                projection, work_items, entry,
+            )
+            .and_then(|event| event.execution_container?.worktree_path)
+            .unwrap_or_else(|| project_root.to_path_buf());
+            if current_root != work_event_root {
+                return Err(gwt_core::error::GwtError::Other(
+                    "Board milestone Worktree assignment changed; retry with current state".into(),
+                ));
+            }
+            Ok(())
+        },
+        |projection, work_items, _work_items_persisted| {
+            // The locked preflight rejects changed roots before migration writes.
             let Some(event) = workspace_projection::resolve_workspace_work_event_from_board_entry(
                 projection, work_items, entry,
             ) else {
@@ -868,4 +1254,36 @@ fn persist_workspace_board_milestone(
             Ok(((projection.clone(), true), vec![event]))
         },
     )
+}
+
+#[cfg(test)]
+mod body_html_tests {
+    use super::*;
+
+    #[test]
+    fn board_body_html_memo_reuses_versions_and_invalidates_changed_bodies() {
+        let mut cache = BoardBodyHtmlCache::default();
+        let mut entry = coordination::BoardEntry::new(
+            coordination::AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            "**old**",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let first = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
+        assert_eq!(
+            cache.html_for(&entry, |_| panic!("unchanged body rendered again")),
+            first
+        );
+        entry.updated_at += chrono::Duration::seconds(1);
+        entry.body = "**new**".into();
+        let next = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
+        assert!(next.contains("<strong>new</strong>"));
+        // The display cache is shared across providers: guard reused channel IDs.
+        entry.body = "other channel".into();
+        assert_eq!(cache.html_for(&entry, str::to_string), "other channel");
+    }
 }

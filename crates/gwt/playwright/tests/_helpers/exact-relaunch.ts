@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -64,6 +64,10 @@ const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-V')) {
   console.log('codex-cli 0.116.0'); process.exit(0);
 }
+// Configuration preflight is not an interactive provider session.
+if (args.at(-2) === 'features' && args.at(-1) === 'list') {
+  process.exit(0);
+}
 const option = name => {
   const index = args.indexOf(name);
   return index < 0 ? (args.find(a => a.startsWith(name + '='))?.slice(name.length + 1) ?? null)
@@ -92,19 +96,48 @@ try {
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
   if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
+  if (line.trim() === 'GWT_FIXTURE_DONE') {
+    const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000,
+      input:JSON.stringify({schema_version:1,operation:'workspace.update',params:{status:'done'}}),
+    });
+    let done = false;
+    try { done = result.status === 0 && JSON.parse(result.stdout).ok; } catch {}
+    console.log(done ? 'GWT_FAKE_PROVIDER_DONE' : 'GWT_FAKE_PROVIDER_DONE_FAILED');
+    return;
+  }
+  if (line.trim() === 'GWT_FIXTURE_BLOCK') {
+    // Exercise the provider's real authenticated execution boundary. Never
+    // copy its launch capability into the test runner or print the envelope.
+    const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000,
+      input:JSON.stringify({schema_version:1,operation:'execution.blocked',params:{reason:'Fixture execution intentionally blocked'}}),
+    });
+    let blocked = false;
+    try { blocked = result.status === 0 && JSON.parse(result.stdout).ok; } catch {}
+    console.log(blocked ? 'GWT_FAKE_PROVIDER_BLOCKED' : 'GWT_FAKE_PROVIDER_BLOCK_FAILED');
+    return;
+  }
   console.log('GWT_FAKE_PROVIDER_READY ' + native);
 });
 `;
-  await writeFile(join(bin, "codex"), provider);
-  await chmod(join(bin, "codex"), 0o755);
+  // Only the child holds writable fixture FDs, and exits before any spawn.
+  // Issue #5028: awaiting writeFile cannot prevent sibling fork inheritance.
+  const writeExecutable = (file: string, contents: string) => {
+    const result = spawnSync(process.execPath, ["-e",
+      "const fs = require('node:fs'); fs.writeFileSync(process.argv[1], fs.readFileSync(0)); fs.chmodSync(process.argv[1], 0o755);",
+      file], { input: contents, encoding: "utf8" });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Fixture executable writer failed: ${result.stderr}`);
+  };
+  writeExecutable(join(bin, "codex"), provider);
   // Hooks resolve `gwtd` through PATH when GWT_BIN_PATH is absent; it must be
   // the checkout build under test, never an installed binary.
   await symlink(gwtd, join(bin, "gwtd"));
   // An accidentally selected package runner must never contact a registry or
   // bypass the fixture's provider. Installed Codex is the intended test route.
   for (const runner of ["bunx", "npx", "npm"]) {
-    await writeFile(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
-    await chmod(join(bin, runner), 0o755);
+    writeExecutable(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
   }
   try {
     const runtime = join(homedir(), ".gwt/runtime");
@@ -125,6 +158,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: project,
+    GWT_DISABLE_BACKGROUND_INDEX: "1",
   });
   await setup.prepare?.({ home, bin, project, env });
   const status = spawnSync(gwtd, [], {
@@ -155,12 +189,17 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
   async function stop() {
+    const ownedPid = child?.pid;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+      if (current.exitCode === null && current.signalCode === null) {
+        current.kill("SIGKILL");
+        const forcedDeadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+      }
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
@@ -170,13 +209,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
     }
-    // Detached helpers of the fixture instance (for example the index runner)
-    // outlive gwt; they are identified by the fixture's unique HOME path.
-    for (const line of spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" }).stdout.split("\n")) {
-      const [pid, ...command] = line.trim().split(/\s+/);
-      if (command.join(" ").includes(home) && Number(pid) !== process.pid) {
-        try { process.kill(Number(pid), "SIGTERM"); } catch { /* exited */ }
-      }
+    if (ownedPid) {
+      const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });
+      if (remaining.status !== 1) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
   }
@@ -184,39 +220,43 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const urlFile = join(home, `url-${++incarnation}.txt`);
     const logFile = join(home, `gwt-${incarnation}.log`);
     const stream = createWriteStream(logFile);
-    child = spawn(gwt, ["--no-tray", "--no-open"], {
-      cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, stdio: ["ignore", "pipe", "pipe"],
-    });
-    const current = child;
-    let failure: Error | undefined;
-    current.on("error", error => { failure = error; });
-    current.stdout?.pipe(stream, { end: false });
-    current.stderr?.pipe(stream, { end: false });
-    current.on("close", () => stream.end());
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      if (failure) throw failure;
-      if (current.exitCode !== null || current.signalCode !== null) throw new Error(`Fresh gwt exited; see ${logFile}`);
-      try {
-        const candidate = (await readFile(urlFile, "utf8")).trim();
-        if (candidate && (await fetch(candidate, { method: "HEAD", signal: AbortSignal.timeout(2_000) })).ok) {
-          url = candidate;
+    try {
+      child = spawn(gwt, ["--no-tray", "--no-open"], {
+        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      const current = child;
+      let failure: Error | undefined;
+      current.on("error", error => { failure = error; });
+      current.stdout?.pipe(stream, { end: false });
+      current.stderr?.pipe(stream, { end: false });
+      current.on("close", () => stream.end());
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        if (failure) throw failure;
+        if (current.exitCode !== null || current.signalCode !== null) throw new Error(`Fresh gwt exited; see ${logFile}`);
+        let readyUrl: string | undefined;
+        try {
+          const candidate = (await readFile(urlFile, "utf8")).trim();
+          if (candidate && (await fetch(candidate, { method: "HEAD", signal: AbortSignal.timeout(2_000) })).ok) {
+            readyUrl = candidate;
+          }
+        } catch { /* Fresh process has not published its URL yet. */ }
+        if (readyUrl) {
+          url = readyUrl;
+          await testInfo.attach("exact-relaunch-fixture", {
+            body: JSON.stringify({ home, argvLog, checkout: root, project, url, pid: current.pid }), contentType: "application/json",
+          });
           return url;
         }
-      } catch { /* Fresh process has not published its URL yet. */ }
-      await delay(100);
+        await delay(100);
+      }
+      throw new Error(`Fresh gwt readiness timed out; see ${logFile}`);
+    } catch (error) {
+      await stop();
+      throw error;
     }
-    throw new Error(`Fresh gwt readiness timed out; see ${logFile}`);
   }
-  try {
-    await start();
-    await testInfo.attach("exact-relaunch-fixture", {
-      body: JSON.stringify({ home, argvLog, checkout: root, project, url }), contentType: "application/json",
-    });
-    return { get url() { return url; }, home, project, branch, argvLog, launches, stop,
-      async restart() { await stop(); return start(); } };
-  } catch (error) {
-    await stop();
-    throw error;
-  }
+  await start();
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
+    async restart() { await stop(); return start(); } };
 }

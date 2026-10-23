@@ -1,9 +1,6 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use gwt::cli::{
@@ -26,9 +23,8 @@ use gwt_core::{
 use serde_json::json;
 use tempfile::TempDir;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn root() -> PathBuf {
@@ -69,6 +65,8 @@ fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Opt
 fn semantic_classifier_distinguishes_json_operation_effects() {
     let cases = [
         ("issue.view", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.status", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.apply", json!({}), GovernanceEffect::Protected),
         (
             "pr.create",
             json!({ "draft": true }),
@@ -87,6 +85,11 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        (
+            "pr.close",
+            json!({"number": 42}),
+            GovernanceEffect::Reversible,
+        ),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
         (
             "issue.label",
@@ -684,6 +687,7 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
         // linked (ownerless-safe, read-only).
         ("pm.status", json!({})),
+        ("pm.plan.status", json!({})),
     ] {
         let event = event(
             "Bash",
@@ -1265,6 +1269,12 @@ fn pm_registration_is_denied_until_the_spec_survey_has_run() {
             rendered.contains("issue.spec.list"),
             "{operation} denial should name the remedy: {rendered}"
         );
+        for recovery_step in ["all addenda", "current develop", "owner_check"] {
+            assert!(
+                rendered.contains(recovery_step),
+                "missing recovery step: {rendered}"
+            );
+        }
     }
 }
 

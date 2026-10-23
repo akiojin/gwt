@@ -660,7 +660,7 @@ test("applyVisibilityTransition fires onReveal only on hidden -> visible with te
   assert.equal(becomingHidden.hidden, true);
 });
 
-test("viewportEligibleForRefresh skips display:none and minimised windows (T-186)", () => {
+test("viewportEligibleForRefresh follows DOM visibility and ignores saved minimization (Issue #4777 AC15)", () => {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   const visibleEl = document.createElement("section");
   visibleEl.hidden = false;
@@ -676,11 +676,11 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
     ".hidden element must skip refresh",
   );
 
-  // Visible + minimised: the existing minimised short-circuit still wins.
+  // Fixed rail layout ignores the retired saved canvas minimization state.
   assert.equal(
     viewportEligibleForRefresh({ element: visibleEl, workspaceWindow: { minimized: true } }),
-    false,
-    "minimised workspace state must skip refresh",
+    true,
+    "legacy minimization must not suppress a visible terminal refresh",
   );
 
   // Visible + not minimised: refresh allowed.
@@ -2333,8 +2333,8 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /scheduleTerminalFit\(windowData\.id,\s*shouldPersistTerminalGeometry\)/,
-    "workspace render geometry changes must route terminal fits through the shared scheduler",
+    /scheduleTerminalFit\(windowData\.id,\s*true\)/,
+    "surface render must route terminal fits through the shared scheduler",
   );
   assert.match(
     appSource,
@@ -2422,11 +2422,6 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /runTerminalActivationSequence\(\{/,
     "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
-  );
-  assert.match(
-    appSource,
-    /scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"topmost_focus"[\s\S]*?\}\)/,
-    "topmost focus activation must not persist geometry unconditionally on every workspace render",
   );
   assert.match(
     appSource,

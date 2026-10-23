@@ -876,6 +876,15 @@ mod tests {
     #[test]
     fn every_bridged_authority_request_preflights_the_host_contract() {
         let bridge = include_str!("../daemon_runtime.rs");
+        let contract_guard = bridge
+            .split("fn require_contract(")
+            .nth(1)
+            .expect("bridge observation retains the Host contract guard");
+        assert!(contract_guard
+            .split("pub fn send_execution_adoption")
+            .next()
+            .unwrap()
+            .contains("crate::cli::host_contract::preflight(stage)"));
         for (sender, stage) in [
             (
                 "fn send_execution_continuation_via_agent_bridge_detailed(",
@@ -891,11 +900,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{sender} no longer exists in daemon_runtime.rs"));
             let body = &bridge[start..];
             let guard = body
-                .find("crate::cli::host_contract::require(")
+                .find(".require_contract(")
                 .unwrap_or_else(|| panic!("{sender} does not preflight the Host contract"));
             assert!(
-                body[guard..]
-                    .starts_with(&format!("crate::cli::host_contract::require(\"{stage}\")")),
+                body[guard..].starts_with(&format!(".require_contract(\"{stage}\")")),
                 "{sender} preflights with the wrong stage"
             );
             // The guard has to precede the request itself.

@@ -1,6 +1,6 @@
 //! Atomic file write utilities.
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 #[cfg(unix)]
 use tracing::warn;
@@ -9,6 +9,7 @@ use crate::error::{ConfigError, Result};
 
 /// Write content to a file atomically via temp file + rename.
 pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    crate::home::assert_test_path(path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -30,9 +31,20 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     );
     let temp_path = path.with_file_name(temp_name);
 
-    std::fs::write(&temp_path, content).map_err(|e| ConfigError::WriteError {
-        reason: format!("failed to write temp file: {e}"),
-    })?;
+    // Never follow a preexisting sibling symlink, even in temporary storage.
+    let mut temp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| ConfigError::WriteError {
+            reason: format!("failed to create temp file: {e}"),
+        })?;
+    temp_file
+        .write_all(content.as_bytes())
+        .map_err(|e| ConfigError::WriteError {
+            reason: format!("failed to write temp file: {e}"),
+        })?;
+    drop(temp_file);
 
     #[cfg(unix)]
     {

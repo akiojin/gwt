@@ -1,0 +1,20 @@
+{
+  "created_at": "2026-10-20T03:18:04.021841+00:00",
+  "product_path": "crates/gwt-core/src/work_events_intake.rs",
+  "product_file_sha256_utf8_lf": "18cdfcb813301119d7fd11e5d9ff843694627e0284ca631e22a62641296981b5",
+  "product_function_sha256_utf8_lf": "287e07fd11e0b69364eab38ad0a03e1c1561a415c71f53d21fa010899a0f58f1",
+  "restored_probe_function_sha256_utf8_lf": "287e07fd11e0b69364eab38ad0a03e1c1561a415c71f53d21fa010899a0f58f1",
+  "product_function_whitespace_normalized_sha256": "d1323f63c58fce1854f1f8f5c654ecc7708abd205c0606e3e5d4b62d4d3a00eb",
+  "restored_probe_function_whitespace_normalized_sha256": "d1323f63c58fce1854f1f8f5c654ecc7708abd205c0606e3e5d4b62d4d3a00eb",
+  "exact_function_match_after_removing_instrumentation": true,
+  "whitespace_normalized_function_match": true,
+  "old_function_unchanged": true,
+  "old_instrumented_function_sha256_utf8_lf": "3ab38b7e6cdca841240d8016c7268174fe5489d3569e4301305c5d837aa23fd1",
+  "instrumentation_only_changes": [
+    "Rename production collector to grouped",
+    "Increment SERIALIZES immediately before existing serde_json::to_string call",
+    "Increment CLONES immediately before existing accepted second-copy clone",
+    "capture() immediately before returning incoming"
+  ],
+  "scope": "Exact current candidate collector body. Existing local type/allocator harness retained; close/supersession helper remains kind-only, unreachable for these explicit-container start fixtures. Production tracing calls preserved; no subscriber, no invalid/opaque/container-less fixtures. The exact production for-source iterator lifetime is retained. No GUI, rescan, fold, persistence or real Agent claims."
+}

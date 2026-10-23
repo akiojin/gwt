@@ -1,5 +1,11 @@
-import { expect, test, type Page } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+
+const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const appUrl = liveBase
+  ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
+  : APP_URL;
 
 test.describe("Agent window scrollback lifecycle", () => {
   test.use({
@@ -7,70 +13,145 @@ test.describe("Agent window scrollback lifecycle", () => {
     viewport: { width: 1440, height: 900 },
   });
 
-  test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installAgentScrollBackend(page);
-    await page.goto(APP_URL);
+  test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
 
-    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalText(page, "agent-1", numberedLines("plan-cycle", 180));
     await emitTerminalStatus(page, "agent-1", "ready", "Plan mode input wait");
     await waitForScrollableTerminal(page, "agent-1");
 
     for (let index = 0; index < 5; index += 1) {
       await setActiveAgentTab(page, "agent-2");
-      await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeHidden();
+      await expect(agentTile(page, "agent-1")).toBeHidden();
       await emitTerminalText(page, "agent-1", numberedLines(`hidden-${index}`, 20));
       await expectPendingRefresh(page, "agent-1", true);
 
       await setActiveAgentTab(page, "agent-1");
-      await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+      await expect(agentTile(page, "agent-1")).toBeVisible();
       await expectPendingRefresh(page, "agent-1", false);
       await waitForScrollableTerminal(page, "agent-1");
       await expectWheelMovesScrollback(page, "agent-1");
     }
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
-  test("keeps wheel scrollback alive after a terminal_snapshot reset while hidden", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installAgentScrollBackend(page);
-    await page.goto(APP_URL);
+  test("keeps wheel scrollback alive after a terminal_snapshot reset while hidden", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
 
-    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalText(page, "agent-1", numberedLines("before-snapshot", 120));
     await waitForScrollableTerminal(page, "agent-1");
 
     await setActiveAgentTab(page, "agent-2");
-    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeHidden();
+    await expect(agentTile(page, "agent-1")).toBeHidden();
     await emitTerminalSnapshot(page, "agent-1", numberedLines("snapshot-replay", 220));
     await expectPendingRefresh(page, "agent-1", true);
 
     await setActiveAgentTab(page, "agent-1");
-    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
     await expectPendingRefresh(page, "agent-1", false);
     await waitForScrollableTerminal(page, "agent-1");
     await expectWheelMovesScrollback(page, "agent-1");
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
-  test("surfaces runtime error detail without covering the terminal with an overlay", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installAgentScrollBackend(page);
-    await page.goto(APP_URL);
+  test("surfaces runtime error detail without covering the terminal with an overlay", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
 
-    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
 
-    const window = page.locator(".workspace-window[data-id='agent-1']");
     // SPEC-2014 US-36 (FR-120/121): the raw TTY must never be covered by a
     // foreground status/error overlay. Error detail surfaces in the window
-    // chrome status chip and the attention toast instead of an xterm overlay.
-    const overlay = window.locator(".terminal-overlay");
+    // status strip and the attention toast instead of an xterm overlay.
+    const overlay = agentTile(page, "agent-1").locator(".terminal-overlay");
     await expect(overlay).toBeHidden();
-    await expect(window.locator(".status-chip")).toHaveAttribute("title", /Stop-block hit an error/);
+    await expect(page.locator("#op-strip-error")).toHaveText("1");
     // SPEC #3206: attention renders in the shared alerts stack.
     await expect(page.locator(".toast-alerts__item").first()).toContainText("Stop-block hit an error");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("drag selection follows rendered rows before and after scrollback and snapshot replay", async ({ page }, info) => {
+    if (liveBase) await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    else await page.addInitScript(() => {
+      (window as any).__selectionCopy = "";
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async (text: string) => { (window as any).__selectionCopy = text; },
+        readText: async () => (window as any).__selectionCopy,
+      } });
+    });
+    const errors = await openAgentsFixture(page, info.project.name);
+    await emitTerminalText(page, "agent-1", numberedLines("selection", 240));
+    await waitForScrollableTerminal(page, "agent-1");
+    await expectDragCopiesRenderedRows(page, info, "bottom");
+    await expectWheelMovesScrollback(page, "agent-1");
+    await expectDragCopiesRenderedRows(page, info, "scrollback");
+    await setActiveAgentTab(page, "agent-2");
+    await emitTerminalSnapshot(page, "agent-1", numberedLines("snapshot", 240));
+    await setActiveAgentTab(page, "agent-1");
+    await expect(agentTile(page, "agent-1").locator(".xterm-rows")).toContainText("snapshot");
+    await waitForScrollableTerminal(page, "agent-1");
+    await expectDragCopiesRenderedRows(page, info, "snapshot");
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 });
+
+async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: string): Promise<void> {
+  const selection = await agentTile(page, "agent-1").locator(".xterm-screen").evaluate(screen => {
+    const rows = [...screen.querySelectorAll<HTMLElement>(".xterm-rows > div")];
+    const start = rows[2].getBoundingClientRect();
+    const end = rows[7].getBoundingClientRect();
+    const cols = (window.__gwtTerminalTestApi!.metrics("agent-1") as any).cols;
+    const cellWidth = screen.getBoundingClientRect().width / cols;
+    return { x1: start.x + 1, y1: start.y + start.height / 2,
+      x2: end.x + (rows[7].textContent!.trimEnd().length + 0.1) * cellWidth,
+      y2: end.y + end.height / 2,
+      top: start.top, bottom: end.bottom,
+      text: rows.slice(2, 8).map(row => row.textContent!.trimEnd()).join("\n") };
+  });
+  await page.mouse.move(selection.x1, selection.y1);
+  await page.mouse.down();
+  await page.mouse.move(selection.x2, selection.y2, { steps: 12 });
+  await page.mouse.up();
+  const highlight = agentTile(page, "agent-1").locator(".xterm-selection div");
+  await expect(highlight.first()).toBeVisible();
+  const first = await highlight.first().boundingBox();
+  const last = await highlight.last().boundingBox();
+  expect(Math.abs(first!.y - selection.top), "selection starts on dragged row").toBeLessThan(1);
+  expect(Math.abs(last!.y + last!.height - selection.bottom), "selection ends on dragged row").toBeLessThan(1);
+  await agentTile(page, "agent-1").screenshot({ path: info.outputPath(`selection-${phase}.png`) });
+  await page.evaluate(() => navigator.clipboard.writeText("clipboard reset"));
+  await page.mouse.click(selection.x1, selection.y1, { button: "right" });
+  await page.getByRole("menuitem", { name: "Copy", exact: true }).click();
+  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
+    .toBe(selection.text);
+  await page.evaluate(() => navigator.clipboard.writeText("clipboard reset"));
+  // Windows copies the selection with Ctrl+C; Linux CI keeps Ctrl+C for the PTY.
+  await page.keyboard.press(process.platform === "win32" ? "Control+c" : "Control+Shift+c");
+  await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
+    .toBe(selection.text);
+}
+
+function agentTile(page: Page, windowId: string) {
+  return page.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='${windowId}']`);
+}
+
+async function openAgentsFixture(page: Page, projectName: string): Promise<string[]> {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = projectName.includes("light") ? "light" : "dark";
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installAgentScrollBackend(page);
+  await page.goto(appUrl);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await setActiveAgentTab(page, "agent-1");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  return errors;
+}
 
 async function waitForScrollableTerminal(page: Page, windowId: string): Promise<void> {
   await expect.poll(() => terminalScrollMetrics(page, windowId)).toMatchObject({
@@ -104,7 +185,7 @@ async function expectWheelMovesScrollback(page: Page, windowId: string): Promise
   const before = await terminalScrollMetrics(page, windowId);
   expect(before.hasScrollback).toBe(true);
 
-  const root = page.locator(`.workspace-window[data-id='${windowId}'] .terminal-root`);
+  const root = agentTile(page, windowId).locator(".terminal-root");
   const box = await root.boundingBox();
   expect(box).not.toBeNull();
   await page.mouse.move(Math.round(box!.x + box!.width / 2), Math.round(box!.y + box!.height / 2));
@@ -156,12 +237,12 @@ async function terminalScrollMetrics(page: Page, windowId: string): Promise<{
   viewportRefreshPending: boolean;
 }> {
   return page.evaluate((id) => {
-    const windowElement = document.querySelector<HTMLElement>(`.workspace-window[data-id='${id}']`);
+    const tile = document.querySelector<HTMLElement>(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='${id}']`);
     const metrics = window.__gwtTerminalTestApi?.metrics(id);
     const baseY = metrics?.baseY ?? 0;
     const rows = metrics?.rows ?? 0;
     return {
-      hidden: windowElement?.hidden ?? true,
+      hidden: tile?.hidden ?? true,
       viewportY: metrics?.viewportY ?? 0,
       baseY,
       rows,
@@ -209,9 +290,8 @@ async function emitTerminalStatus(
 }
 
 async function setActiveAgentTab(page: Page, windowId: "agent-1" | "agent-2"): Promise<void> {
-  await page.evaluate((id) => {
-    window.__agentScrollFixture?.setActiveWindow(id);
-  }, windowId);
+  await page.locator(`#agents-tab-${windowId}`).click();
+  await expect(page.locator(`#agents-tab-${windowId}`)).toHaveAttribute("aria-selected", "true");
 }
 
 async function emitBackendEvent(page: Page, payload: unknown): Promise<void> {
@@ -251,6 +331,8 @@ async function installAgentScrollBackend(page: Page): Promise<void> {
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: id,
+        agent_name: id === "agent-1" ? "Codex Plan" : "Claude Review",
+        session_id: `${id}-session`,
         agent_color: null,
         tab_group_id: "agent-scroll-group",
         tab_group_active: active,
@@ -325,9 +407,6 @@ async function installAgentScrollBackend(page: Page): Promise<void> {
       emit(payload) {
         this.instance?.emit(payload);
       },
-      setActiveWindow(id) {
-        this.instance?.emit(workspaceState(id));
-      },
     };
 
     Object.defineProperty(window, "WebSocket", {
@@ -342,7 +421,6 @@ declare global {
     __agentScrollFixture?: {
       instance: unknown;
       emit(payload: unknown): void;
-      setActiveWindow(id: "agent-1" | "agent-2"): void;
     };
     __gwtPlaywrightTestBridge?: boolean;
     __gwtTerminalTestApi?: {

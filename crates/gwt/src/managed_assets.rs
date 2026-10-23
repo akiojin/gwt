@@ -10,15 +10,13 @@ use std::{
 
 use crate::cli::gwtd_resolver::default_installed_candidates;
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
-use fs2::FileExt;
 use gwt_agent::AgentId;
 use gwt_skills::pm_guidance::{generate_pm_guidance_for_claude, generate_pm_guidance_for_codex};
 use gwt_skills::{
-    distribute_to_worktree_for_targets_with_policy, generate_codex_hooks_for_mode,
-    generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
-    generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
-    generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
-    CodexHookDiscoveryMode, ManagedAssetTarget,
+    generate_codex_hooks_for_mode, generate_coordination_guidance_for_claude,
+    generate_coordination_guidance_for_codex, generate_hermes_hooks, generate_openclaw_hooks,
+    generate_opencode_hooks, generate_settings_local, update_git_exclude,
+    update_git_exclude_for_targets, CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
 /// Which `.codex/hooks.json` copies a non-launch (re-)materialization owns.
@@ -56,12 +54,12 @@ pub fn managed_asset_lock_path(worktree: &Path) -> PathBuf {
 /// --git-path` resolves into the common directory, and the workspace-home
 /// `.codex/hooks.json`, which for a linked worktree resolves to the main
 /// checkout's copy. Both are single small files, so holding this lock costs a
-/// fraction of a full materialization.
+/// fraction of a full materialization. Keep the lock in Git's common directory
+/// so writers with different HOME values still exclude each other (#5270).
 pub fn shared_repo_asset_lock_path(worktree: &Path) -> PathBuf {
-    let root = gwt_git::worktree::main_worktree_root(worktree)
-        .unwrap_or_else(|_| canonical_lock_identity(worktree));
-    let identity = gwt_core::repo_hash::compute_path_hash(&root);
-    managed_asset_lock_dir().join(format!("repo-{identity}.lock"))
+    gwt_core::repo_hash::repository_common_dir(worktree)
+        .unwrap_or_else(|| canonical_lock_identity(worktree))
+        .join("gwt-managed-assets.lock")
 }
 
 fn canonical_lock_identity(worktree: &Path) -> PathBuf {
@@ -107,23 +105,18 @@ fn with_lock_at<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>) -> io
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
     let started = Instant::now();
-    gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    // Issue #4686 AC-2: take the named lock rather than a bare exclusive lock,
+    // so a deadline expiry names the pid, operation, and acquisition time of
+    // the holder. The bare path reports only "operation deadline expired during
+    // file lock", which cannot distinguish a genuinely busy peer from a stale
+    // lock file and leaves the caller nothing to act on.
+    let lock = gwt_core::operation_deadline::NamedFileLock::acquire(path, "managed_assets")?;
     let waited = started.elapsed();
     ASSET_LOCK_WAIT.with(|total| total.set(total.get().saturating_add(waited)));
     let result = operation();
-    let unlock = FileExt::unlock(&lock);
-    match (result, unlock) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
+    drop(lock);
+    result
 }
 
 /// Every `.codex/hooks.json` gwt owns for `worktree`: the worktree-local copy
@@ -274,6 +267,18 @@ pub fn cleanup_worktree_with_codex_project_trust<T>(
             ),
         )
     })
+}
+
+/// Collect missing generated hooks in the process-stable shared Codex config.
+/// Relative process homes keep their existing user-owned lifecycle.
+pub fn garbage_collect_shared_codex_hook_trust() -> io::Result<usize> {
+    let Some(config_path) = process_stable_codex_config_path_with(
+        std::env::var_os("CODEX_HOME").as_deref(),
+        dirs::home_dir().as_deref(),
+    ) else {
+        return Ok(0);
+    };
+    gwt_skills::codex_hook_trust::garbage_collect_codex_managed_hook_trust(&config_path, None)
 }
 
 /// Whether a present worktree-local merged hook config contains only
@@ -446,6 +451,7 @@ fn materialize_pm_project_policy(
         if targets.contains(&target) {
             gwt_skills::pm_guidance::generate_pm_guidance_with_policy(
                 &runtime.join(root),
+                target,
                 &policy,
             )?;
         }
@@ -928,14 +934,14 @@ fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
     ]);
     for root in [".claude/skills", ".codex/skills"] {
         let root = worktree.join(root);
-        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
-        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+        paths.extend(gwt_skills::coordination_guidance::managed_paths(&root));
+        paths.extend(gwt_skills::pm_guidance::managed_paths(&root));
     }
     paths
 }
 
 fn pm_managed_asset_targets(worktree: &Path) -> io::Result<Vec<PathBuf>> {
-    let plan = gwt_skills::distribute::plan_distribution_to_worktree_for_targets(
+    let plan = managed_asset_distribution_plan(
         worktree,
         &ManagedAssetTarget::ALL,
         gwt_skills::TrackedAssetWritePolicy::PreserveTracked,
@@ -1640,6 +1646,23 @@ fn worktree_is_ephemeral(worktree: &Path) -> bool {
     crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
+/// Share the same role selection between the writer and rollback snapshot.
+fn managed_asset_distribution_plan(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: gwt_skills::TrackedAssetWritePolicy,
+) -> io::Result<gwt_skills::distribute::DistributePlan> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree)
+        || crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some()
+    {
+        gwt_skills::distribute::plan_pm_distribution_to_worktree_for_targets(
+            worktree, targets, policy,
+        )
+    } else {
+        gwt_skills::distribute::plan_distribution_to_worktree_for_targets(worktree, targets, policy)
+    }
+}
+
 /// Materialize managed assets, returning the fallback binary the regenerated
 /// hook commands were pinned to (`None` when no hook config was generated).
 fn materialize_managed_gwt_assets_for_targets(
@@ -1681,9 +1704,11 @@ fn materialize_managed_gwt_assets_for_targets(
     } else {
         gwt_skills::TrackedAssetWritePolicy::PreserveTracked
     };
-    distribute_to_worktree_for_targets_with_policy(worktree, targets, policy).map_err(|error| {
-        io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
-    })?;
+    managed_asset_distribution_plan(worktree, targets, policy)
+        .and_then(|plan| plan.apply())
+        .map_err(|error| {
+            io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
+        })?;
     if targets.is_empty() {
         return Ok(None);
     }
@@ -1767,9 +1792,28 @@ fn regenerate_managed_hook_configs_for_targets(
         // The workspace-home copy of `.codex/hooks.json` resolves to the main
         // checkout for every linked worktree, so this one write is shared.
         with_shared_repo_asset_lock(worktree, || {
-            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
-                io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
-            })
+            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(
+                |error| {
+                    io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+                },
+            )?;
+            for path in gwt_skills::codex_hooks_paths_for_codex_discovery(
+                worktree,
+                CodexHookDiscoveryMode::Both,
+            )
+            .into_iter()
+            .filter(|path| path.exists())
+            {
+                tracing::info!(
+                    writer_pid = std::process::id(),
+                    writer_executable = ?std::env::current_exe().ok(),
+                    worktree = %worktree.display(),
+                    destination = %path.display(),
+                    fallback = %gwt_skills::settings_local::sanitize_hook_bin_for_config_path(&path, &hook_bin),
+                    "regenerated managed Codex hooks"
+                );
+            }
+            Ok(())
         })?;
     }
     if targets.contains(&ManagedAssetTarget::OpenCode) {
@@ -1871,61 +1915,36 @@ fn push_existing_target(
     }
 }
 
-/// Where the managed hook binary came from, which decides whether generation
-/// still has to publish it to the environment.
-enum HookBinPin {
-    /// Already answered for this thread or process; the generator will read it
-    /// without help.
-    Ambient(String),
-    /// Resolved here, so generation has to publish it for the duration of the
-    /// materialization.
-    Resolved(String),
-}
-
 /// The fallback binary a managed hook command embeds when a launch did not
 /// inject `GWT_BIN_PATH`.
 ///
 /// #3967: this is the one answer generation and Codex trust pre-registration
-/// must share. It is published to the environment only while materialization
+/// must share. It is pinned to the current thread only while materialization
 /// runs, so anything that needs it afterwards asks here rather than deriving a
 /// second answer of its own — gwt-skills' library fallback resolves a gwt
 /// started from a checkout build to `target/debug/gwtd`, which
 /// `sanitize_hook_bin_for_config_path` then reduces to the bare `gwtd`, while
 /// this resolver skips build outputs and pins the installed absolute path.
 pub fn managed_hook_bin() -> io::Result<String> {
-    Ok(match managed_hook_bin_pin()? {
-        HookBinPin::Ambient(hook_bin) | HookBinPin::Resolved(hook_bin) => hook_bin,
-    })
-}
-
-fn managed_hook_bin_pin() -> io::Result<HookBinPin> {
-    // #4057: a thread-local test pin already answers the generator, so leave
-    // the process environment alone — mutating it here would leak this
-    // thread's binary into every other materialization in the process.
     if let Some(hook_bin) = gwt_skills::settings_local::hook_bin_override() {
-        return Ok(HookBinPin::Ambient(hook_bin));
+        return Ok(hook_bin);
     }
     if let Some(hook_bin) = std::env::var_os("GWT_HOOK_BIN")
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string_lossy().into_owned())
     {
-        return Ok(HookBinPin::Ambient(hook_bin));
+        return Ok(hook_bin);
     }
-    Ok(HookBinPin::Resolved(
-        resolve_public_gwt_bin_path()?
-            .to_string_lossy()
-            .into_owned(),
-    ))
+    Ok(resolve_public_gwt_bin_path()?
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Pin the fallback binary generated hook commands embed, and report it.
-fn install_hook_bin_override() -> io::Result<(EnvVarGuard, String)> {
-    match managed_hook_bin_pin()? {
-        HookBinPin::Ambient(hook_bin) => Ok((EnvVarGuard::noop("GWT_HOOK_BIN"), hook_bin)),
-        HookBinPin::Resolved(hook_bin) => {
-            Ok((EnvVarGuard::set("GWT_HOOK_BIN", &hook_bin), hook_bin))
-        }
-    }
+fn install_hook_bin_override() -> io::Result<(gwt_skills::settings_local::ScopedHookBin, String)> {
+    let hook_bin = managed_hook_bin()?;
+    let guard = gwt_skills::settings_local::ScopedHookBin::set(&hook_bin);
+    Ok((guard, hook_bin))
 }
 
 pub fn resolve_public_gwt_bin_path() -> io::Result<PathBuf> {
@@ -2013,8 +2032,8 @@ fn is_bunx_temp_executable(path: &Path) -> bool {
         .any(|segment| segment.starts_with("bunx-"))
 }
 
-/// Whether `path` is a gwt build output owned by one checkout
-/// (`<root>/target/[<triple>/]{debug,release}/gwt[d]`).
+/// Whether `path` is a gwt build output
+/// (`<target-dir>/[<triple>/]{debug,release}/gwt[d]`, any `CARGO_TARGET_DIR`).
 ///
 /// #3567: the hook generator asks the same question when it decides whether a
 /// resolved binary may be written into another worktree's config, so both sides
@@ -2055,60 +2074,15 @@ fn same_path(left: &Path, right: &Path) -> bool {
     left == right
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-    restore: bool,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self {
-            key,
-            previous,
-            restore: true,
-        }
-    }
-
-    fn noop(key: &'static str) -> Self {
-        Self {
-            key,
-            previous: None,
-            restore: false,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if !self.restore {
-            return;
-        }
-        if let Some(previous) = self.previous.as_ref() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Mutex,
-    };
+    use std::path::{Path, PathBuf};
 
     use super::{
         is_bunx_temp_executable, is_named_gwt_binary, is_named_gwtd_binary,
         is_worktree_local_build_binary, normalized_path_segments,
         resolve_public_gwt_bin_with_candidates, resolve_public_gwt_bin_with_lookup, same_path,
-        EnvVarGuard,
     };
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn repoint_git(root: &Path, args: &[&str]) -> String {
         let output = gwt_core::process::run_git_logged(args, Some(root)).unwrap();
@@ -2178,7 +2152,11 @@ mod tests {
         .unwrap();
         let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
         super::refresh_managed_gwt_assets_for_pm_worktree_locked(&canonical_worktree).unwrap();
+        let policy = runtime.join(".claude/skills/gwt-pm/references/project-policy.md");
         assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("](references/project-policy.md)"));
+        assert!(std::fs::read_to_string(&policy)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
         assert!(!std::fs::symlink_metadata(&skill)
@@ -2190,6 +2168,7 @@ mod tests {
         assert!(!std::fs::read_to_string(&skill)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
+        assert!(!policy.exists(), "opt-out removes copied project rules");
         let before = std::fs::read(&skill).unwrap();
         // #4486 AC-11: an opted-in policy file the project does not carry is
         // configuration drift, not a refresh failure. This used to return an
@@ -2216,7 +2195,15 @@ mod tests {
             r#"{"settings":{"project_policy_files":["policy-dir"]}}"#,
         )
         .unwrap();
+        let stale_skill = runtime.join(".claude/skills/gwt-execute/legacy.txt");
+        std::fs::create_dir_all(stale_skill.parent().unwrap()).unwrap();
+        std::fs::write(&stale_skill, "previous implementation skill").unwrap();
         assert!(super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).is_err());
+        assert_eq!(
+            std::fs::read_to_string(stale_skill).unwrap(),
+            "previous implementation skill",
+            "failed refresh restores the entire pruned implementation subtree"
+        );
         assert_eq!(
             std::fs::read(&skill).unwrap(),
             before,
@@ -2245,8 +2232,32 @@ mod tests {
         let project_path = worktree.join(".claude/agents/project.md");
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
         std::fs::write(&project_path, "project before").unwrap();
-        let socket_path = project_path.with_extension("sock");
-        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        // Issue #4891: what this node is for is `capture`'s non-regular-file
+        // branch (`!metadata.file_type().is_file()`), reached through the parent
+        // `.claude/agents/` shares with the project-owned file above. A
+        // `UnixListener` stood here, and its path is bounded by the OS
+        // `sun_path` limit (104 bytes on macOS), which the fixture's own
+        // `/private/var/folders/.../T/.tmpXXXXXX/...` prefix already exhausts —
+        // so the test passed or failed on how long `TMPDIR` happened to be, and
+        // failed under the one the canonical verification actually uses. A FIFO
+        // carries no path limit and is likewise neither a regular file, nor a
+        // directory, nor a symlink, so the branch under test is unchanged.
+        let fifo_path = project_path.with_extension("fifo");
+        let fifo_cstr = std::ffi::CString::new(fifo_path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo_cstr.as_ptr(), 0o600) },
+            0,
+            "mkfifo {}: {}",
+            fifo_path.display(),
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            !std::fs::symlink_metadata(&fifo_path)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "the fixture node must be a non-regular file for this test to exercise anything"
+        );
         let managed_path = worktree.join(".claude/settings.local.json");
         std::fs::write(&managed_path, "managed before").unwrap();
         repoint_git(&worktree, &["config", "core.hooksPath", ".git-hooks/_"]);
@@ -2285,7 +2296,10 @@ mod tests {
             std::fs::read_to_string(worktree.join(".claude/hooks/scripts/gwt-old.sh")).unwrap(),
             "old script"
         );
-        assert!(socket_path.exists());
+        assert!(
+            fifo_path.exists(),
+            "restore must leave the project-owned non-regular node in place"
+        );
         assert!(!worktree.join(".codex").exists());
     }
 
@@ -2417,6 +2431,34 @@ mod tests {
         let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
         repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
         (RepointFixture { _home: home, temp }, worktree, target)
+    }
+
+    #[test]
+    fn shared_asset_lock_is_the_same_exclusive_file_across_homes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        repoint_git(&repo, &["init", "--quiet"]);
+        let first_home = temp.path().join("real-home");
+        let second_home = temp.path().join("fresh-home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(&first_home);
+        let shared_path = super::shared_repo_asset_lock_path(&repo);
+        let local_path = super::managed_asset_lock_path(&repo);
+        super::with_shared_repo_asset_lock(&repo, || {
+            let _fresh_home = gwt_core::test_support::ScopedGwtHome::set(&second_home);
+            let contender_path = super::shared_repo_asset_lock_path(&repo);
+            assert_eq!(contender_path, shared_path);
+            assert_ne!(super::managed_asset_lock_path(&repo), local_path);
+            let contender = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(contender_path)?;
+            let error = fs2::FileExt::try_lock_exclusive(&contender)
+                .expect_err("different HOME writers must contend on the shared asset lock");
+            assert!(gwt_core::operation_deadline::is_lock_contended(&error));
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -2712,6 +2754,29 @@ mod tests {
             std::fs::read_to_string(worktree.join(asset)).unwrap(),
             "original"
         );
+    }
+
+    #[test]
+    fn shared_codex_hook_collection_uses_the_process_home() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join("shared-codex");
+        let _codex_home = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &codex_home);
+        let worktree = tempfile::tempdir().unwrap();
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+        let config = codex_home.join("config.toml");
+        let report =
+            gwt_skills::register_codex_managed_hook_trust(worktree.path(), &config).unwrap();
+        assert!(!report.trusted_entries.is_empty());
+        worktree.close().unwrap();
+
+        assert_eq!(
+            super::garbage_collect_shared_codex_hook_trust().unwrap(),
+            report.trusted_entries.len()
+        );
+        assert_eq!(super::garbage_collect_shared_codex_hook_trust().unwrap(), 0);
     }
 
     #[test]
@@ -3112,36 +3177,53 @@ mod tests {
     }
 
     #[test]
-    fn same_path_and_env_var_guard_preserve_previous_values() {
-        let _guard = ENV_MUTEX
+    fn materialization_pin_survives_another_threads_ambient_pin() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::sync::mpsc;
+
+        let env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ambient = ScopedEnvVar::unset("GWT_HOOK_BIN");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (guard, selected) = super::install_hook_bin_override().expect("pin fallback");
+            ready_tx
+                .send(selected.clone())
+                .expect("report selected pin");
+            release_rx.recv().expect("ambient pin installed");
+            let observed = super::managed_hook_bin().expect("read scoped pin");
+            drop(guard);
+            (selected, observed)
+        });
+
+        let selected = ready_rx.recv().expect("materialization selected its pin");
+        let explicit_pin = "gwt-3839-explicit-pin";
+        let competing = ScopedEnvVar::set("GWT_HOOK_BIN", explicit_pin);
+        release_tx.send(()).expect("release materialization");
+        let result = worker.join();
+        let remaining_ambient = std::env::var("GWT_HOOK_BIN");
+        drop(competing);
+        drop(ambient);
+        drop(env_lock);
+
+        let (reported, observed) = result.expect("materialization completed");
+        assert_eq!(reported, selected);
+        assert_eq!(observed, selected, "another thread changed the scoped pin");
+        assert_eq!(
+            remaining_ambient.as_deref(),
+            Ok(explicit_pin),
+            "materialization teardown changed another thread's ambient pin"
+        );
+    }
+
+    #[test]
+    fn same_path_recognizes_the_same_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(&nested).expect("create nested");
 
         assert!(same_path(&nested, &dir.path().join("nested")));
-
-        std::env::set_var("GWT_MANAGED_ASSETS_TEST", "before");
-        {
-            let _scoped = EnvVarGuard::set("GWT_MANAGED_ASSETS_TEST", "during");
-            assert_eq!(
-                std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
-                Ok("during")
-            );
-        }
-        assert_eq!(
-            std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
-            Ok("before")
-        );
-
-        {
-            let _noop = EnvVarGuard::noop("GWT_MANAGED_ASSETS_TEST");
-            assert_eq!(
-                std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
-                Ok("before")
-            );
-        }
-        std::env::remove_var("GWT_MANAGED_ASSETS_TEST");
     }
 }

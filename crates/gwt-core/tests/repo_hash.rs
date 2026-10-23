@@ -224,6 +224,7 @@ fn detached_worktree_shares_the_layout_root_project_store() {
 #[test]
 fn pm_worktree_inside_a_project_store_resolves_to_the_repository_identity() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
     let root = tmp.path().join("workbench");
     let (bare, _worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
 
@@ -272,6 +273,7 @@ fn pm_worktree_inside_a_project_store_resolves_to_the_repository_identity() {
 #[test]
 fn existing_stores_never_change_where_a_project_root_resolves() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
     let root = tmp.path().join("workbench");
     let (_bare, worktree) = make_layout_root(&root, LAYOUT_ORIGIN);
     let expected = compute_repo_hash(LAYOUT_ORIGIN);

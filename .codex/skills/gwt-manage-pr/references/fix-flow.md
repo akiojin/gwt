@@ -45,7 +45,7 @@
 
 ## Step 4: Produce Diagnosis Report
 
-Output MUST use this exact structure:
+Include the blocking verdict, evidence, and next action; this structure is an example:
 
 ```text
 ## Diagnosis Report: PR #<number>
@@ -118,24 +118,28 @@ Blocking items: <N>
 
 ## Step 7: Reply to ALL reviewer comments and resolve threads (mandatory)
 
-> **CRITICAL:** Every unresolved review thread MUST receive a reply before resolution.
+> **CRITICAL:** Every unresolved review thread MUST be addressed before resolution.
 
 - For each unresolved thread:
   - Addressed: "Fixed: <what was done in commit abc1234>."
   - Not addressed: "Not addressed: <reason>."
-- Use JSON operation `pr.review_threads.reply_and_resolve` with coverage for ALL threads.
-- Script validates completeness; rejects if any thread missing.
+- Use JSON operation `pr.review_threads.reply_and_resolve` once per thread,
+  always specifying `thread_id` for an individual response.
+- Omitting `thread_id` processes all unresolved threads with the same `body`.
+  Existing identical replies are not repeated, and outdated threads are
+  resolved without a new reply.
+- Re-check unresolved threads after the calls to verify that all were handled.
 - Requires `Repository Permissions > Contents: Read and Write`.
 - Resolve threads after code fix is pushed. Do not wait for CI.
 - GraphQL only for thread operations. If rate-limited, back off and retry.
 
-### `--reply-and-resolve` JSON format
+### Targeted reply format
+
+`body` contains plain text reply content. JSON array bodies are rejected.
+Send one envelope per thread:
 
 ```json
-[
-  {"threadId": "PRRT_xxx123", "body": "Fixed: refactored the method as suggested."},
-  {"threadId": "PRRT_xxx456", "body": "Not addressed: this is intentional because ..."}
-]
+{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"thread_id":"PRRT_xxx123","body":"Fixed: refactored the method as suggested."}}
 ```
 
 ## Step 8: Notify reviewers (mandatory)
@@ -151,17 +155,28 @@ Blocking items: <N>
 - Exit code 1 --> issues remain --> go back to step 4.
 - CI pending/queued --> check at most 3 times with JSON operation `pr.checks`, waiting no more than 30 seconds between checks.
 - If checks are still pending after the bounded checks, post JSON operation
-  `board.post` with `params.kind:"blocked"`, the PR number, pending check
-  names, and resume command, then stop instead of sleeping indefinitely.
+  `board.post` with `params.kind:"status"` or `params.kind:"handoff"`, the PR
+  number, pending check names, and resume command. For autonomous / Issue Monitor
+  launches, declare `issue.monitor.wait` with the explicit owner Issue number
+  in `params.number`, `reason`, and `resume_condition`. Keep the execution Active
+  and auto-merge enabled; resume bounded checks when CI progresses and clear
+  the wait with `params.clear:true`. Without a Monitor owner, use the notification
+  only. Do not emit `params.kind:"blocked"` or NeedsHuman or call
+  `execution.blocked` for pending-only CI. The Ready / required CI / auto-merge
+  gates still apply; pending checks do not prove delivery.
 - After fix push, run the same bounded CI check path for the new run.
 
 ## Loop Safety Guard
 
+- CI pending alone never counts toward the failure guard and never requires a
+  human decision to keep waiting in an autonomous launch.
 - Same CI check name fails 3 consecutive iterations:
   1. Report which check, what was tried each iteration, what keeps failing.
   2. Ask user: **continue** / **abort** / **change approach**.
   3. Only proceed after explicit user decision.
 - Different checks failing in different iterations do NOT trigger the guard.
+- A human decision, unsafe operation, or actual tool refusal still follows the
+  existing blocked escalation contract in `gwt-coordination`.
 
 ## Anti-Patterns (Prohibited)
 
@@ -189,7 +204,7 @@ Blocking items: <N>
 {"schema_version":1,"operation":"pr.checks","params":{"number":123}}
 {"schema_version":1,"operation":"pr.reviews","params":{"number":123}}
 {"schema_version":1,"operation":"pr.review_threads","params":{"number":123}}
-{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"body":"[{\"threadId\":\"PRRT_xxx123\",\"body\":\"Fixed: ...\"}]"}}
+{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"thread_id":"PRRT_xxx123","body":"Fixed: ..."}}
 {"schema_version":1,"operation":"pr.comment","params":{"number":123,"body":"<summary comment>"}}
 ```
 

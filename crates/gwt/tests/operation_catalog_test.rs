@@ -39,9 +39,9 @@ fn suggestions_resolve_a_plain_typo() {
 /// does have.
 #[test]
 fn an_invented_name_falls_back_to_the_namespace_listing() {
-    let message = operation_catalog::unknown_subcommand_message("pr.merge");
+    let message = operation_catalog::unknown_subcommand_message("pr.nonexistent_operation");
     assert!(
-        message.starts_with("unknown subcommand: pr.merge"),
+        message.starts_with("unknown subcommand: pr.nonexistent_operation"),
         "the existing wording must open the message: {message}"
     );
     assert!(
@@ -49,7 +49,7 @@ fn an_invented_name_falls_back_to_the_namespace_listing() {
         "the message must list the pr. namespace: {message}"
     );
     assert!(
-        !message.contains("`pr.merge`"),
+        !message.contains("`pr.nonexistent_operation`"),
         "the unknown name must not be offered back as an option: {message}"
     );
 }
@@ -60,7 +60,10 @@ fn an_invented_name_falls_back_to_the_namespace_listing() {
 #[test]
 fn gwtd_answers_a_mistyped_operation_with_candidates() {
     use std::io::Write;
+    let home = tempfile::tempdir().expect("child home");
     let mut child = gwt_core::process::hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

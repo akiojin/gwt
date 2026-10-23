@@ -17,15 +17,29 @@ const RENEW_TTL: Duration = Duration::from_secs(super::DEFAULT_TTL_MINUTES * 60)
 const OBSERVE_EVERY: Duration = Duration::from_secs(30);
 const PENDING_THRESHOLD: usize = 3;
 const PRESSURE_AFTER: Duration = Duration::from_secs(5 * 60);
+const EXCLUSIVE_COMMAND_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// The runner publishes its exact command root, including daemon-hosted
 /// commands. Other light verifications on that daemon cannot renew this run.
 #[derive(Default)]
 pub(crate) struct CommandProgress {
     pid: AtomicU32,
+    timeout: Option<Duration>,
 }
 
 impl CommandProgress {
+    /// Bound an unknown workload while it owns the host's exclusive lock.
+    pub(crate) fn with_exclusive_timeout() -> Self {
+        Self {
+            timeout: Some(EXCLUSIVE_COMMAND_TIMEOUT),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub(crate) fn start(&self, pid: u32) -> RunningCommand<'_> {
         self.pid.store(pid, Ordering::Release);
         RunningCommand(self)
@@ -70,6 +84,11 @@ impl Renewal {
         worktree: PathBuf,
         commands: Arc<CommandProgress>,
     ) -> std::io::Result<Self> {
+        let lease_id = lease
+            .lock()
+            .map_err(|_| std::io::Error::other("verification lease renewal mutex poisoned"))?
+            .id()
+            .to_owned();
         let (stop, receiver) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("verification-renewal".to_string())
@@ -78,12 +97,14 @@ impl Renewal {
                 let mut pressure = QueuePressure::load(coordinator.root());
                 // Observe immediately so a holder handoff does not add another
                 // full polling interval to the gap between queue readings.
-                observe_pressure(&coordinator, &worktree, &mut pressure);
+                observe_pressure(&coordinator, &worktree, &lease_id, &mut pressure);
                 while matches!(
                     receiver.recv_timeout(OBSERVE_EVERY),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    let status = coordinator.heavy_lease_status().ok();
+                    let status = super::holder_for_lease(&coordinator, &lease_id)
+                        .ok()
+                        .flatten();
                     pressure.publish(coordinator.root(), &worktree, status.as_ref(), epoch_ms());
                     let activity = commands.observe(|pid| {
                         probe.observe(
@@ -120,6 +141,7 @@ fn renew_observed(
     activity: Option<HolderActivity>,
     now_ms: u64,
 ) -> Result<(), CoordinatorError> {
+    lease.record_ttl_overrun(activity.map(|activity| activity.cpu_percent));
     if activity.is_some_and(|activity| activity.advancing()) {
         lease.extend_until(now_ms.saturating_add(RENEW_TTL.as_millis() as u64))?;
     }
@@ -130,8 +152,15 @@ fn epoch_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn observe_pressure(coordinator: &IndexCoordinator, worktree: &Path, pressure: &mut QueuePressure) {
-    let status = coordinator.heavy_lease_status().ok();
+fn observe_pressure(
+    coordinator: &IndexCoordinator,
+    worktree: &Path,
+    lease_id: &str,
+    pressure: &mut QueuePressure,
+) {
+    let status = super::holder_for_lease(coordinator, lease_id)
+        .ok()
+        .flatten();
     pressure.publish(coordinator.root(), worktree, status.as_ref(), epoch_ms());
 }
 
@@ -162,7 +191,28 @@ impl QueuePressure {
         status: Option<&HeavyLeaseStatus>,
         now: u64,
     ) {
-        if self.observe(status.map(|status| status.pending), now) {
+        let update = || -> std::io::Result<(Self, bool)> {
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(root.join("verification-pressure.lock"))?;
+            fs2::FileExt::lock_exclusive(&lock)?;
+            let mut current = Self::load(root);
+            let report = current.observe(status.map(|status| status.pending), now);
+            current.save(root)?;
+            Ok((current, report))
+        };
+        let (current, report) = match update() {
+            Ok(update) => update,
+            Err(error) => {
+                tracing::warn!(%error, "verification pressure state publication failed");
+                return;
+            }
+        };
+        *self = current;
+        if report {
             if let Some(status) = status {
                 record_pressure(
                     worktree,
@@ -171,11 +221,6 @@ impl QueuePressure {
                     Duration::from_millis(now.saturating_sub(self.since.unwrap_or(now))),
                 );
             }
-        }
-        // Only the heavy lease holder writes this host-wide state. Its monitor
-        // is joined before release, so a successor cannot race this publication.
-        if let Err(error) = self.save(root) {
-            tracing::warn!(%error, "verification pressure state publication failed");
         }
     }
 
@@ -279,6 +324,7 @@ mod tests {
     #[test]
     fn progress_renews_a_job_beyond_its_initial_ttl_then_silence_expires() {
         let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
         let coordinator = IndexCoordinator::open(root.path()).unwrap();
         let key = TargetKey::verification("repo", "long-running");
         let JobAdmission::Owner(guard) = coordinator
@@ -290,6 +336,21 @@ mod tests {
         let mut lease = guard
             .acquire_heavy_with_ttl(Duration::from_secs(1), RENEW_TTL)
             .unwrap();
+        lease.record_runner_context(root.path(), "fixture", "test");
+        coordinator
+            .reserve_heavy(
+                &TargetKey::verification("repo", "waiting"),
+                JobPriority::ManualRebuild,
+                RENEW_TTL,
+                None,
+            )
+            .unwrap();
+        renew_observed(&mut lease, Some(activity()), epoch_ms()).unwrap();
+        coordinator
+            .heavy_lease_status()
+            .unwrap()
+            .record_ttl_overrun(Some(1.0));
+        assert!(error_ledger::list_since(None).unwrap().is_empty());
         // An explicit past deadline models a job that has outlived its TTL;
         // no wall-clock sleep controls this regression.
         let now = chrono::Utc::now().timestamp_millis() as u64;
@@ -324,6 +385,41 @@ mod tests {
         )
         .unwrap();
         assert!(!coordinator.heavy_lease_status().unwrap().expired);
+
+        let mut env = crate::cli::TestEnv::new(root.path().to_path_buf());
+        let mut output = String::new();
+        crate::cli::diagnostics::errors::run(
+            &mut env,
+            crate::cli::diagnostics::errors::ErrorsCommand::List {
+                since: None,
+                scope: crate::cli::diagnostics::errors::ErrorListScope::Project,
+                project_root: None,
+            },
+            &mut output,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(payload["count"], 1, "repeated observations count once");
+        let record = &payload["errors"][0];
+        assert_eq!(record["kind"], "verification_lease_expired");
+        assert_eq!(record["context"]["lease_id"], lease.id());
+        assert_eq!(record["context"]["ttl_overrun_count"], "1");
+        assert_eq!(record["context"]["holder_cpu_percent"], "1");
+        assert_eq!(record["context"]["pending"], "1");
+        assert_eq!(record["context"]["queue_len"], "1");
+        assert_eq!(record["context"]["expires_at_ms"], (now - 1).to_string());
+
+        // A later exceeded deadline is another occurrence, even on the same
+        // lease. A reclaim observation and settlement share the same identity.
+        lease.extend_until(now - 2).unwrap();
+        coordinator
+            .heavy_lease_status()
+            .unwrap()
+            .record_ttl_overrun(Some(0.0));
+        lease.release().unwrap();
+        let records = error_ledger::list_since(None).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].context["holder_cpu_percent"], "0");
     }
 
     #[test]
@@ -393,6 +489,20 @@ mod tests {
             Some(now - 1),
             "another verification's CPU must not renew this stopped holder"
         );
+    }
+
+    #[test]
+    fn concurrent_pressure_monitors_do_not_overwrite_persisted_observations() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = QueuePressure::default();
+        let mut second = QueuePressure::default();
+        let status = HeavyLeaseStatus {
+            pending: 3,
+            ..Default::default()
+        };
+        first.publish(root.path(), root.path(), Some(&status), 0);
+        second.publish(root.path(), root.path(), Some(&status), 30_000);
+        assert_eq!(QueuePressure::load(root.path()).since, Some(0));
     }
 
     #[test]

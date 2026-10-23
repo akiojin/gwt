@@ -27,6 +27,13 @@
 //! longer depends on elapsed time, and the deadline only keeps a genuinely
 //! wedged test from hanging. A test that *is* about the deadline pins the
 //! short value it asserts on.
+//!
+//! **Child processes inherit load mode, deliberately.** A test that spawns
+//! the real `gwtd` exercises production code in the child, and a budget
+//! dependency there is as real as one on the test thread; stripping
+//! [`LOAD_MODE_ENV`] from children would hide it. A thread pin cannot cross
+//! a process boundary, so such a test pins the child's budget explicitly
+//! through [`DeadlineBudget::env_var`] on the child's command.
 
 use std::time::Duration;
 

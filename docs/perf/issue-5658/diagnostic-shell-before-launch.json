@@ -1,0 +1,29 @@
+{
+  "gui_pid": 68476,
+  "issue_monitor_enabled": false,
+  "gui_started_at": "2026-10-16T18:45:00.3427754Z",
+  "sha256": {
+    "target/debug/gwt.exe": "aa3637da23bbfc9a3c55c2c150451a6adba17b5bfa7a4bf52bde36fadf099af3",
+    "crates/gwt-terminal/src/test_util.rs": "5d1b38f537eb5ac30725c6cb613d4a712a167e3bc24ad7ba0533f4b727ea4d08",
+    "crates/gwt/playwright/tests/idle-cpu-live.spec.ts": "40b14dd442d819af1c6d5778e37628e77560fcd118f12916b9fb13db141b99ed",
+    "crates/gwt/src/main.rs": "e4cb3cfd01bb80c1e26aeb287895c2a0e41bbd4db7c98022f56ddaf411eb0cda",
+    "scripts/diagnostics/issue-5658-cpu.ps1": "dd15b9325a9ea239c775ab96ea426a0cc87a757bc8d5a52d908929206062d489",
+    "scripts/diagnostics/issue-5658-browser-check.ps1": "f66f12405ea3953adfd4dd997299fddac497aeafe38db89a2c12f7455eb4e623",
+    "crates/gwt-terminal/src/pane.rs": "3f4ebe738e324d9609b650c59cb6b681b08a0f5c0a7eb80c4fc57883d23ccb08",
+    "target/debug/gwtd.exe": "b78c1a7cd7208135a6b57d83b426abedfdd369d8181d6cc06714b48c8b17d931"
+  },
+  "background_index": "normal",
+  "repo_hash": "99a8660247f5bc49",
+  "daemon_pid": 31428,
+  "pm_auto_start": false,
+  "user_verification_result": "n/a (autonomous)",
+  "git_head": "43f30e55a12dea2fa71ce4f5008896934494c03e",
+  "sessions_fixture": {
+    "sha256": "232add24b58d1a1b9bf2600d4655acd16fc357f663763ab4551eb18dfb5b6072",
+    "files": 14841,
+    "copied": true,
+    "bytes": 36009778
+  },
+  "project": "E:\\gwt\\work\\issue-5658",
+  "project_key": "99a8660247f5bc49"
+}

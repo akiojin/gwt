@@ -1,26 +1,53 @@
 name: Coverage Report
 
 on:
+  workflow_call:
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
 # Issue #4119: a manual dispatch supersedes a still-running scheduled report.
 concurrency:
-  group: ${{ github.workflow }}
+  # Called workflows inherit github.workflow from the caller. A distinct
+  # prefix prevents coverage from cancelling its own caller workflow.
+  group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
+env:
+  # Coverage artifacts omit backtrace line tables; instrumentation,
+  # debug assertions and the unoptimized test behavior stay unchanged.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  rust-coverage:
-    name: Rust Coverage
+  coverage-shard:
+    name: Coverage shard (${{ matrix.shard }}/6)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: develop
+          ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
+      # A PR uses the merge-ref workflow but measures its exact head source.
+      # Pre-shard heads must use their supported CLI and single-build report.
+      - name: Select coverage transport
+        id: transport
+        shell: bash
+        run: |
+          git show HEAD:.github/workflows/coverage.yml > "$RUNNER_TEMP/coverage-head.yml"
+          if grep -q '^  coverage-shard:' "$RUNNER_TEMP/coverage-head.yml"; then
+            echo "sharded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sharded=false" >> "$GITHUB_OUTPUT"
+          fi
       # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
       # list, so a changed set is never served the previous archive.
       - name: Cache Linux GTK dependency packages
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         uses: actions/cache@v6
         with:
           path: ~/.cache/gwt-apt-archives
@@ -41,18 +68,73 @@ jobs:
       # the script and not GitHub reports a dependency-install failure. The
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: actions/setup-node@v7
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt
+      - name: Select instrumented cache
+        id: cache-mode
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
+        shell: bash
+        run: |
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "compiler=$(rustc -vV | sha256sum | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.transport.outputs.sharded }}" = true ] && git cat-file -e HEAD:scripts/ci_coverage_cache.py 2>/dev/null; then
+            echo "rolling=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rolling=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: Swatinem/rust-cache@v2
+        if: ${{ (steps.transport.outputs.sharded == 'true' || matrix.shard == 1) && steps.cache-mode.outputs.rolling != 'true' }}
+        with:
+          # llvm-cov builds into its own instrumented target, not target/debug.
+          # Develop writes the base-branch cache every PR can restore; reports
+          # retain their existing save path. A miss still builds from source.
+          # Separate this from earlier default-target/dependency-only caches.
+          key: coverage-instrumented-workspace-v2
+          workspaces: . -> target/llvm-cov-target
+          cache-workspace-crates: true
+          save-if: ${{ matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         continue-on-error: true
+      # Cache writes are immutable. Keep the environment prefix stable for
+      # restoration, but publish each successful develop revision separately.
+      # Older PR heads keep their supported cache and never run a missing helper.
+      - name: Restore instrumented workspace
+        id: instrumented-cache
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            target/llvm-cov-target
+            target/coverage-cache-source.json
+          key: coverage-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-mode.outputs.compiler }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.config/nextest.toml', '.github/workflows/coverage.yml', 'scripts/ci_coverage_cache.py') }}-${{ steps.cache-mode.outputs.revision }}
+          restore-keys: |
+            coverage-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-mode.outputs.compiler }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.config/nextest.toml', '.github/workflows/coverage.yml', 'scripts/ci_coverage_cache.py') }}-
+        continue-on-error: true
+      - name: Restore verified coverage inputs
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' }}
+        env:
+          COVERAGE_CACHE_RESTORED: ${{ steps.instrumented-cache.outputs.cache-matched-key }}
+        run: python3 scripts/ci_coverage_cache.py restore
       - name: Install cargo-llvm-cov
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-nextest
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # Coverage is measured workspace-wide so every crate is visible in
       # Codecov, but the 90% release threshold applies to gwt-core + gwt
       # only (historical mandate surface; outer shells are excluded inside
@@ -62,24 +144,132 @@ jobs:
       # coverage-summary.mjs runs the tests, then reads every raw profile
       # before aggregating, so a truncated profile is reported apart from a
       # test failure and re-aggregated once, on record (Issue #4628).
-      - name: Generate workspace summary
-        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features
+      - name: Run and export coverage shard
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        env:
+          # Nextest starts one process per test. Share eight online-merge
+          # profiles per instrumented module instead of one copy per PID.
+          LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
+          NEXTEST_PROFILE: coverage
+        run: |
+          GWT_COVERAGE_REVISION="$(git rev-parse HEAD)"
+          export GWT_COVERAGE_REVISION
+          node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
         timeout-minutes: 20
+      - name: Run pre-shard head coverage
+        if: ${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}
+        env:
+          LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
+          NEXTEST_PROFILE: coverage
+        run: |
+          mkdir -p target/coverage-export
+          node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features
+        timeout-minutes: 20
+      - name: Generate pre-shard head lcov
+        if: ${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: |
+          failure_mode=()
+          if [ -f target/coverage-export/coverage-summary.json.profiles.json ]; then
+            failure_mode=(--failure-mode all)
+          fi
+          cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path target/coverage-export/lcov.info
+        timeout-minutes: 15
+      - name: Upload coverage shard
+        if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests-${{ matrix.shard }}
+          path: target/coverage-export/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Capture verified coverage inputs
+        id: cache-source
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: python3 scripts/ci_coverage_cache.py capture
+      - name: Save instrumented workspace
+        if: ${{ steps.cache-mode.outputs.rolling == 'true' && steps.cache-source.outputs.cacheable == 'true' && steps.instrumented-cache.outputs.cache-hit != 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            target/llvm-cov-target
+            target/coverage-cache-source.json
+          key: ${{ steps.instrumented-cache.outputs.cache-primary-key }}
+        continue-on-error: true
+
+  rust-coverage:
+    name: Rust Coverage
+    needs: coverage-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify coverage shards succeeded
+        env:
+          COVERAGE_SHARDS_RESULT: ${{ needs.coverage-shard.result }}
+        run: test "$COVERAGE_SHARDS_RESULT" = success
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
+      - name: Select coverage transport
+        id: transport
+        shell: bash
+        run: |
+          git show HEAD:.github/workflows/coverage.yml > "$RUNNER_TEMP/coverage-head.yml"
+          if grep -q '^  coverage-shard:' "$RUNNER_TEMP/coverage-head.yml"; then
+            echo "sharded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sharded=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@1.99.1
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Download coverage shards
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: workspace-tests-*
+          path: target/coverage-shards
+      # A single artifact is extracted directly into path, without its name.
+      - name: Download pre-shard head summary
+        if: ${{ steps.transport.outputs.sharded == 'false' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: workspace-tests-1
+          path: target/coverage-shards/workspace-tests-1
+      - name: Verify the complete workspace test union
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        run: python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6
+      - name: Generate workspace summary
+        if: ${{ steps.transport.outputs.sharded == 'true' }}
+        run: node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json
+        timeout-minutes: 5
+      - name: Restore pre-shard head summary
+        if: ${{ steps.transport.outputs.sharded == 'false' }}
+        run: cp target/coverage-shards/workspace-tests-1/coverage-summary.json target/coverage-summary.json
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
       - name: Enforce coverage floor (domain crates @ 80%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"
-      # Follow the summary's recorded recovery: the strict merge would refuse
-      # the same truncated profile the summary already left out.
+      # Reuse the same validated combined profiles and current objects.
       - name: Generate lcov
-        run: |
-          failure_mode=()
-          if [ -f target/coverage-summary.json.profiles.json ]; then
-            failure_mode=(--failure-mode all)
-          fi
-          cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path lcov.info
+        if: ${{ steps.transport.outputs.sharded == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json --lcov-output-path lcov.info
         timeout-minutes: 15
+      - name: Restore pre-shard head lcov
+        if: ${{ steps.transport.outputs.sharded == 'false' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: cp target/coverage-shards/workspace-tests-1/lcov.info lcov.info
       - name: Upload to Codecov
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: codecov/codecov-action@v7
         with:
           files: lcov.info

@@ -15,9 +15,7 @@
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
-// - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
-//   app.js (the markdown body renderer is shared with the knowledge
-//   surface).
+// - createNode: shared DOM helper owned by app.js.
 // - windowMap: workspace window element map owned by app.js.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
@@ -29,6 +27,7 @@
 import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
+  boardEntryAuthorLabel,
   boardEntryMentionsSelf,
   boardEntryOriginActionLabel,
   boardEntryOriginLabel,
@@ -40,16 +39,18 @@ import {
   mentionsForBoardSubmit,
   visibleBoardEntries,
 } from "/board-surface.js";
+import { createUiStateStore } from "/ui-state-store.js";
+import { renderUiContent } from "/ui-content.js";
 
 export function createBoardLogsSurface({
   send,
   createNode,
-  createKnowledgeMarkdownBody,
   windowMap,
   focusWindowLocally,
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
@@ -57,12 +58,30 @@ export function createBoardLogsSurface({
   getActiveWorkProjection,
 }) {
       const boardStateMap = new Map();
+      const maxBoardEntries = 1000;
       const logStateMap = new Map();
+      const maxLogEntries = 1000;
       let pendingBoardEntryFocusId = null;
+      const boardModel = createUiStateStore(null);
+      boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (!snapshot) return;
+        const state = ensureBoardState(snapshot.windowId);
+        state.entries = snapshot.entries;
+        renderBoard(snapshot.windowId);
+        if (state.error) return;
+        if (state.pendingLatestReload) {
+          state.pendingLatestReload = false;
+          requestBoard(snapshot.windowId, true);
+        } else if (state.pendingFocusScroll && state.focusEntryId
+          && !state.entries.some((entry) => entry.id === state.focusEntryId)
+          && state.hasMoreBefore && !state.loadingOlder) {
+          requestOlderBoardEntries(snapshot.windowId);
+        }
+      });
 
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
-          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .filter((windowData) => windowData.preset === "board")
           .map((windowData) => windowData.id);
       }
 
@@ -79,8 +98,12 @@ export function createBoardLogsSurface({
           state.audienceFilter = "all";
           if (
             !state.entries.some((entry) => entry.id === entryId) &&
-            state.hasMoreBefore &&
-            !state.loadingOlder
+            state.hasNewerEntries
+          ) {
+            requestBoard(windowId, true);
+          } else if (
+            !state.entries.some((entry) => entry.id === entryId) &&
+            state.hasMoreBefore && !state.loadingOlder
           ) {
             requestOlderBoardEntries(windowId);
           }
@@ -126,6 +149,7 @@ export function createBoardLogsSurface({
             composerBody: "",
             pendingSubmit: null,
             hasMoreBefore: false,
+            hasNewerEntries: false,
             oldestEntryId: null,
             loadingOlder: false,
             pendingSelfPostScroll: false,
@@ -148,7 +172,13 @@ export function createBoardLogsSurface({
       // resolved routing), keyed by project_root. Populated by the
       // `project_board_config` backend event; read by the Board window's
       // destination chip + config popover.
-      const boardConfigByProjectRoot = new Map();
+      const boardConfigModel = createUiStateStore({});
+      boardConfigModel.subscribe(configs => configs, configs => {
+        if (Object.keys(configs).length === 0) return;
+        for (const windowId of activeBoardWindowIds()) {
+          boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));
+        }
+      });
       let activeDestinationPopover = null;
 
       function boardDestinationLabel(config) {
@@ -218,7 +248,7 @@ export function createBoardLogsSurface({
         closeBoardDestinationPopover();
         const projectRoot = activeProjectTab()?.project_root || "";
         if (!projectRoot) return;
-        const config = boardConfigByProjectRoot.get(projectRoot) || {};
+        const config = boardConfigModel.read()[projectRoot] || {};
 
         const pop = createNode("div", "board-destination-popover");
 
@@ -370,7 +400,7 @@ export function createBoardLogsSurface({
       // Board windows — refreshes the destination chip for the matching project.
       function applyProjectBoardConfigEventToBoard(event) {
         if (!event || !event.project_root) return;
-        boardConfigByProjectRoot.set(event.project_root, {
+        boardConfigModel.update(configs => ({ ...configs, [event.project_root]: {
           provider: event.provider || "",
           channel: event.channel || "",
           tenant: event.tenant || "",
@@ -379,10 +409,7 @@ export function createBoardLogsSurface({
           resolvedChannel: event.resolved_channel || "",
           signedIn: event.signed_in === true,
           message: event.message || "",
-        });
-        for (const windowId of activeBoardWindowIds()) {
-          renderBoard(windowId);
-        }
+        } }));
       }
 
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
@@ -470,18 +497,44 @@ export function createBoardLogsSurface({
         }
       }
 
-      function requestBoard(windowId) {
+      function requestBoard(windowId, latest = false) {
         const state = ensureBoardState(windowId);
+        if (latest && (state.loadingOlder || state.loading)) {
+          state.pendingLatestReload = true;
+          return;
+        }
         if (state.loading) {
           return;
         }
         state.loading = true;
+        state.resetToLatest = latest;
         state.error = "";
         send({
           kind: "load_board",
           id: windowId,
           all: state.audienceFilter === "all",
         });
+      }
+
+      function resyncBoardLogs(windowIds) {
+        for (const windowId of windowIds) {
+          const board = boardStateMap.get(windowId);
+          if (board) {
+            // A lost history reply cannot be merged safely with a later window.
+            // Keep the draft until the recovered snapshot confirms the post.
+            if (board.pendingSubmit) board.pendingSubmit.recovering = true;
+            board.loading = false;
+            board.loadingOlder = false;
+            board.pendingLatestReload = false;
+            requestBoard(windowId, true);
+          }
+          const logs = logStateMap.get(windowId);
+          if (logs) {
+            logs.loading = false;
+            logs.pendingScope = null;
+            requestLogs(windowId);
+          }
+        }
       }
 
       function requestOlderBoardEntries(windowId) {
@@ -578,6 +631,7 @@ export function createBoardLogsSurface({
           origin_session_id: originSessionId,
           bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {
@@ -638,8 +692,8 @@ export function createBoardLogsSurface({
             continue;
           }
           state.entries.push(entry);
-          if (state.entries.length > 1000) {
-            state.entries = state.entries.slice(-1000);
+          if (state.entries.length > maxLogEntries) {
+            state.entries = state.entries.slice(-maxLogEntries);
           }
           if (logSeverityRank(entry.severity) >= logSeverityRank("warn")) {
             state.unreadAlerts += 1;
@@ -916,23 +970,34 @@ export function createBoardLogsSurface({
       }
 
       function mergeBoardEntries(existingEntries, incomingEntries) {
-        const merged = new Map();
-        for (const entry of existingEntries || []) {
-          if (entry.id) {
-            merged.set(entry.id, entry);
-          }
-        }
-        for (const entry of incomingEntries || []) {
-          if (entry.id) {
-            merged.set(entry.id, entry);
-          }
-        }
-        return Array.from(merged.values()).sort((left, right) => {
+        const merged = (existingEntries || []).slice();
+        const byId = new Map(merged.map((entry) => [entry.id, entry]));
+        const compare = (left, right) => {
           const leftKey = String(left.created_at || left.updated_at || "");
           const rightKey = String(right.created_at || right.updated_at || "");
-          return leftKey.localeCompare(rightKey)
-            || String(left.id || "").localeCompare(String(right.id || ""));
-        });
+          const leftId = String(left.id || ""), rightId = String(right.id || "");
+          return (leftKey > rightKey ? 1 : leftKey < rightKey ? -1 : 0)
+            || (leftId > rightId ? 1 : leftId < rightId ? -1 : 0);
+        };
+        for (const entry of incomingEntries || []) {
+          if (!entry.id) continue;
+          const previous = byId.get(entry.id);
+          if (previous) {
+            if (JSON.stringify(previous) === JSON.stringify(entry)) continue;
+            merged.splice(merged.indexOf(previous), 1);
+          }
+          // The common live push appends at the end; edits and late arrivals
+          // use a binary insertion without sorting the retained history.
+          let low = 0, high = merged.length;
+          while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (compare(merged[middle], entry) <= 0) low = middle + 1;
+            else high = middle;
+          }
+          merged.splice(low, 0, entry);
+          byId.set(entry.id, entry);
+        }
+        return merged;
       }
 
       // SPEC #3206 — board-mention notice rendered through the shared alerts
@@ -999,9 +1064,7 @@ export function createBoardLogsSurface({
         // SPEC-2963 FR-030: reflect this project's resolved Board destination.
         const destinationChip = body.querySelector("[data-action='board-destination']");
         if (destinationChip) {
-          const config = boardConfigByProjectRoot.get(
-            activeProjectTab()?.project_root || "",
-          );
+          const config = boardConfigModel.read()[activeProjectTab()?.project_root || ""];
           destinationChip.replaceChildren(
             createNode("span", "board-destination-dot"),
             createNode(
@@ -1082,6 +1145,12 @@ export function createBoardLogsSurface({
           previousScrollMax <= 0 ||
           previousScrollMax - previousScrollTop <= stickyBottomThreshold;
         state.shouldFollowBoardBottom = shouldFollowBoardBottom;
+        const scrollAnchor = !shouldFollowBoardBottom && scroller
+          ? Array.from(timeline.querySelectorAll("[data-board-entry-id]")).find(
+            (card) => card.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top,
+          )
+          : null;
+        const anchorTop = scrollAnchor?.getBoundingClientRect().top;
         if (scroller && scroller.dataset.boardScrollBound !== "true") {
           scroller.dataset.boardScrollBound = "true";
           scroller.addEventListener("scroll", () => {
@@ -1100,32 +1169,57 @@ export function createBoardLogsSurface({
 
         const visibleEntries = visibleBoardEntries(state);
 
-        timeline.innerHTML = "";
-        if (state.hasMoreBefore) {
-          const loadOlder = createNode(
-            "button",
-            "board-load-older",
-            state.loadingOlder ? "Loading earlier entries..." : "Load earlier entries",
-          );
-          loadOlder.type = "button";
-          loadOlder.disabled = state.loadingOlder;
-          loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
-          timeline.appendChild(loadOlder);
+        // Keep the timeline and unchanged cards attached, including focus and
+        // text selection. These caches are pruned with the bounded entry window.
+        if (state.renderedTimeline !== timeline) {
+          state.renderedTimeline = timeline;
+          state.renderedLanes = new Map();
         }
+        let loadOlder = timeline.querySelector(".board-load-older:not(.board-load-latest)");
+        if (state.hasMoreBefore) {
+          if (!loadOlder) {
+            loadOlder = createNode("button", "board-load-older");
+            loadOlder.type = "button";
+            loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
+            timeline.prepend(loadOlder);
+          }
+          loadOlder.textContent = state.loadingOlder ? "Loading earlier entries..." : "Load earlier entries";
+          loadOlder.disabled = state.loadingOlder;
+        } else {
+          loadOlder?.remove();
+        }
+        let latest = timeline.querySelector(".board-load-latest");
+        if (state.hasNewerEntries) {
+          if (!latest) {
+            latest = createNode("button", "board-load-older board-load-latest", "Back to latest entries");
+            latest.type = "button";
+            latest.addEventListener("click", () => {
+              requestBoard(windowId, true);
+              renderBoard(windowId);
+            });
+            timeline.prepend(latest);
+          }
+          latest.disabled = state.loading || state.loadingOlder;
+        } else {
+          latest?.remove();
+        }
+        let empty = timeline.querySelector(".board-empty");
         if (!state.loading && visibleEntries.length === 0) {
-          timeline.appendChild(
-            createNode(
-              "div",
-              "board-empty workspace-empty-state",
-              state.audienceFilter === "for_you"
+          if (!empty) {
+            empty = createNode("div", "board-empty workspace-empty-state");
+            timeline.appendChild(empty);
+          }
+          empty.textContent = state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
                 : state.audienceFilter === "workspace"
                   ? "No posts in this Work."
-                : "No coordination entries yet.",
-            ),
-          );
+                : "No coordination entries yet.";
+        } else {
+          empty?.remove();
         }
         let focusTarget = null;
+        const entriesById = new Map(state.entries.map((entry) => [entry.id, entry]));
+        const originAgents = boardOriginActiveAgents();
         // SPEC-2959: build a single message card. Reused for every lane so the
         // bubble layout, reply quote, for-you highlight, and origin actions stay
         // identical to the previous flat timeline (FR-017).
@@ -1161,7 +1255,7 @@ export function createBoardLogsSurface({
           }
           meta.appendChild(
             document.createTextNode(
-              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              `${boardEntryAuthorLabel(entry)} · ${boardTimestampLabel(
                 entry.updated_at || entry.created_at,
               )}`,
             ),
@@ -1179,12 +1273,12 @@ export function createBoardLogsSurface({
           }
           card.appendChild(meta);
           if (entry.parent_id) {
-            const parent = findBoardEntry(state, entry.parent_id);
+            const parent = entriesById.get(entry.parent_id);
             const quote = createNode(
               "button",
               "board-reply-quote",
               parent
-                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                ? `Reply to ${boardEntryAuthorLabel(parent)}: ${boardEntryPreview(parent)}`
                 : "Reply to earlier Board entry",
             );
             quote.type = "button";
@@ -1196,8 +1290,8 @@ export function createBoardLogsSurface({
           }
           // SPEC-2963: the body is authored in Markdown; render the
           // server-sanitized `body_html` (falls back to plaintext when absent),
-          // reusing the Knowledge surface's markdown renderer.
-          card.appendChild(createKnowledgeMarkdownBody(entry, "board-message-body"));
+          // using the content type committed by the model.
+          card.appendChild(renderUiContent(document, entry.content, "board-message-body"));
           const messageActions = createNode("div", "board-message-actions");
           const replyButton = createNode("button", "board-reply-button", "Reply");
           replyButton.type = "button";
@@ -1210,7 +1304,7 @@ export function createBoardLogsSurface({
           messageActions.appendChild(replyButton);
           const originActionLabel = boardEntryOriginActionLabel(
             entry,
-            boardOriginActiveAgents(),
+            originAgents,
           );
           if (originActionLabel) {
             const originButton = createNode("button", "board-origin-button", originActionLabel);
@@ -1229,55 +1323,110 @@ export function createBoardLogsSurface({
         if (!state.laneSeen) state.laneSeen = {};
         const lanes = groupBoardLanes(visibleEntries, {
           workspaces: boardLaneWorkspaces(),
+          entriesSorted: true,
         });
+        const laneKeys = new Set(lanes.map((lane) => lane.key));
+        for (const [key, rendered] of state.renderedLanes) {
+          if (!laneKeys.has(key)) {
+            rendered.element.remove();
+            state.renderedLanes.delete(key);
+          }
+        }
+        const retainedLaneKeys = new Set(groupBoardLanes(state.entries, {
+          workspaces: boardLaneWorkspaces(), entriesSorted: true,
+        }).map((lane) => lane.key));
+        for (const key of Object.keys(state.laneSeen)) {
+          if (!retainedLaneKeys.has(key)) {
+            delete state.collapsedLanes[key];
+            delete state.laneSeen[key];
+          }
+        }
+        let previousLane = null;
         for (const lane of lanes) {
           const explicit = state.collapsedLanes[lane.key];
           const collapsed = explicit === true || explicit === false ? explicit : lane.isDone;
           if (state.laneSeen[lane.key] === undefined) {
-            state.laneSeen[lane.key] = lane.entries.length;
+            state.laneSeen[lane.key] = new Set(lane.entries.map((entry) => entry.id));
           }
           const unread = collapsed
-            ? Math.max(0, lane.entries.length - state.laneSeen[lane.key])
+            ? lane.entries.filter((entry) => !state.laneSeen[lane.key].has(entry.id)).length
             : 0;
           if (!collapsed) {
-            state.laneSeen[lane.key] = lane.entries.length;
+            state.laneSeen[lane.key] = new Set(lane.entries.map((entry) => entry.id));
           }
 
-          const laneEl = createNode("section", "board-lane");
-          laneEl.dataset.laneKey = lane.key;
-          if (lane.isGeneral) laneEl.classList.add("general");
-          if (lane.isDone) laneEl.classList.add("done");
-          if (collapsed) laneEl.classList.add("collapsed");
-
-          const header = createNode("button", "board-lane-header");
-          header.type = "button";
-          header.setAttribute("aria-expanded", collapsed ? "false" : "true");
-          header.appendChild(
-            createNode("span", "board-lane-caret", collapsed ? "▸" : "▾"),
-          );
-          header.appendChild(createNode("span", "board-lane-label", lane.label));
-          header.appendChild(
-            createNode("span", "board-lane-count", String(lane.entries.length)),
-          );
-          if (unread > 0) {
-            const badge = createNode("span", "board-lane-unread", String(unread));
-            badge.setAttribute("aria-label", `${unread} unread in ${lane.label}`);
-            header.appendChild(badge);
-          }
-          header.addEventListener("click", () => {
-            state.collapsedLanes[lane.key] = !collapsed;
-            renderBoard(windowId);
-          });
-          laneEl.appendChild(header);
-
-          if (!collapsed) {
+          let rendered = state.renderedLanes.get(lane.key);
+          if (!rendered) {
+            const element = createNode("section", "board-lane");
+            element.dataset.laneKey = lane.key;
+            const header = createNode("button", "board-lane-header");
+            header.type = "button";
+            header.addEventListener("click", () => {
+              state.collapsedLanes[lane.key] = header.getAttribute("aria-expanded") === "true";
+              renderBoard(windowId);
+            });
             const laneBody = createNode("div", "board-lane-body");
-            for (const entry of lane.entries) {
-              laneBody.appendChild(buildBoardMessageCard(entry));
-            }
-            laneEl.appendChild(laneBody);
+            element.append(header, laneBody);
+            rendered = { element, header, body: laneBody, cards: new Map() };
+            state.renderedLanes.set(lane.key, rendered);
           }
-          timeline.appendChild(laneEl);
+          const laneEl = rendered.element;
+          laneEl.classList.toggle("general", lane.isGeneral);
+          laneEl.classList.toggle("done", lane.isDone);
+          laneEl.classList.toggle("collapsed", collapsed);
+          const header = rendered.header;
+          const headerKey = JSON.stringify([collapsed, lane.label, lane.entries.length, unread]);
+          if (rendered.headerKey !== headerKey) {
+            header.replaceChildren();
+            header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            header.appendChild(
+              createNode("span", "board-lane-caret", collapsed ? "▸" : "▾"),
+            );
+            header.appendChild(createNode("span", "board-lane-label", lane.label));
+            header.appendChild(
+              createNode("span", "board-lane-count", String(lane.entries.length)),
+            );
+            if (unread > 0) {
+              const badge = createNode("span", "board-lane-unread", String(unread));
+              badge.setAttribute("aria-label", `${unread} unread in ${lane.label}`);
+              header.appendChild(badge);
+            }
+            rendered.headerKey = headerKey;
+          }
+          const laneBody = rendered.body;
+          laneBody.hidden = collapsed;
+          const entryIds = new Set(lane.entries.map((entry) => entry.id));
+          for (const [id, cached] of rendered.cards) {
+            if (!entryIds.has(id) || collapsed) {
+              cached.card.remove();
+              rendered.cards.delete(id);
+            }
+          }
+          if (!collapsed) {
+            let previousCard = null;
+            for (const entry of lane.entries) {
+              const parent = entriesById.get(entry.parent_id);
+              const originAction = boardEntryOriginActionLabel(entry, originAgents);
+              let cached = rendered.cards.get(entry.id);
+              if (!cached || cached.entry !== entry || cached.parent !== parent || cached.originAction !== originAction) {
+                const card = buildBoardMessageCard(entry);
+                cached?.card.replaceWith(card);
+                cached = { card, entry, parent, originAction };
+                rendered.cards.set(entry.id, cached);
+              }
+              const card = cached.card;
+              const focused = state.focusEntryId === entry.id;
+              card.classList.toggle("focus-target", focused);
+              if (focused) { card.tabIndex = -1; focusTarget = card; }
+              else card.removeAttribute("tabindex");
+              const next = previousCard ? previousCard.nextSibling : laneBody.firstChild;
+              if (next !== card) laneBody.insertBefore(card, next);
+              previousCard = card;
+            }
+          }
+          const nextLane = previousLane ? previousLane.nextElementSibling : timeline.querySelector(".board-lane");
+          if (nextLane !== laneEl) timeline.insertBefore(laneEl, nextLane);
+          previousLane = laneEl;
         }
 
         if (scroller) {
@@ -1290,6 +1439,9 @@ export function createBoardLogsSurface({
             forceBoardScrollToBottom(scroller);
             state.pendingSelfPostScroll = false;
             state.newEntriesAvailable = false;
+          } else if (scrollAnchor?.isConnected) {
+            scroller.scrollTop += scrollAnchor.getBoundingClientRect().top - anchorTop;
+            state.preserveBoardScrollPosition = false;
           } else if (state.preserveBoardScrollPosition) {
             preserveBoardScrollPosition(scroller, previousScrollTop, previousScrollHeight);
             state.preserveBoardScrollPosition = false;
@@ -1301,6 +1453,18 @@ export function createBoardLogsSurface({
           }
         }
 
+        const composerKey = JSON.stringify([
+          state.replyParentId, entriesById.get(state.replyParentId),
+          state.submitting, boardComposerTarget(state), boardLaneWorkspaces(),
+        ]);
+        if (state.composerKey === composerKey && composer.firstChild) {
+          const titleInput = composer.querySelector(".board-title-input");
+          const bodyInput = composer.querySelector(".board-textarea");
+          if (titleInput.value !== (state.composerTitle || "")) titleInput.value = state.composerTitle || "";
+          if (bodyInput.value !== state.composerBody) bodyInput.value = state.composerBody;
+          return;
+        }
+        state.composerKey = composerKey;
         composer.innerHTML = "";
         if (state.replyParentId) {
           const parent = findBoardEntry(state, state.replyParentId);
@@ -1310,7 +1474,7 @@ export function createBoardLogsSurface({
               "span",
               "board-reply-banner-text",
               parent
-                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                ? `Replying to ${boardEntryAuthorLabel(parent)} - ${boardEntryPreview(parent)}`
                 : "Replying to earlier Board entry",
             ),
           );
@@ -1487,7 +1651,7 @@ export function createBoardLogsSurface({
               openBoardDestinationPopover(event.currentTarget);
             });
           const projectRoot = activeProjectTab()?.project_root || "";
-          if (projectRoot && !boardConfigByProjectRoot.has(projectRoot)) {
+          if (projectRoot && !Object.hasOwn(boardConfigModel.read(), projectRoot)) {
             send({ kind: "get_project_board_config", project_root: projectRoot });
           }
           const state = ensureBoardState(windowData.id);
@@ -1610,13 +1774,13 @@ export function createBoardLogsSurface({
 
       // SPEC-3064 Phase 3 (E6c): receive() bodies for board_* / log_*
       // events moved verbatim from app.js; the case arms in app.js delegate
-      // here. (process_line / process_console_snapshot stay in app.js with
-      // the Console window controllers.)
+      // here.
       function applyBoardLogsReceiveEvent(event) {
         switch (event.kind) {
           case "board_entries": {
             const state = ensureBoardState(event.id);
-            const incomingEntries = event.entries || [];
+            const incomingEntries = (event.entries || []).map(entry => ({ ...entry,
+              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } }));
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
             const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
             const retainedHistory = state.entries.some(
@@ -1641,10 +1805,21 @@ export function createBoardLogsSurface({
                   && String(entry.author_kind || "").toLowerCase() === "user"
                   && String(entry.body || "").trim() === pendingSubmit.body;
               });
-            state.entries = mergeBoardEntries(state.entries, incomingEntries);
-            state.hasMoreBefore = retainedHistory
+            const unconfirmedSubmit = pendingSubmit?.recovering && !completedSubmit;
+            // Preserve the requested cursor until its page arrives. Evicting it
+            // for a live push would leave a hole between history and this window.
+            if (state.loadingOlder && addedEntry) state.hasNewerEntries = true;
+            const acceptedEntries = state.hasNewerEntries && !state.resetToLatest
+              ? incomingEntries.filter((entry) => existingEntryIds.has(entry.id))
+              : incomingEntries;
+            const merged = mergeBoardEntries(state.resetToLatest ? [] : state.entries, acceptedEntries);
+            const evicted = merged.length > maxBoardEntries;
+            state.entries = merged.slice(-maxBoardEntries);
+            state.hasMoreBefore = evicted || (retainedHistory && !state.resetToLatest
               ? state.hasMoreBefore
-              : Boolean(event.has_more_before);
+              : Boolean(event.has_more_before));
+            if (state.resetToLatest) state.hasNewerEntries = false;
+            state.resetToLatest = false;
             state.oldestEntryId = state.entries[0]?.id || null;
             if (
               state.replyParentId &&
@@ -1663,6 +1838,9 @@ export function createBoardLogsSurface({
               state.pendingSubmit = null;
               state.submitting = false;
               state.pendingSelfPostScroll = true;
+            } else if (unconfirmedSubmit) {
+              state.pendingSubmit = null;
+              state.submitting = false;
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
@@ -1675,36 +1853,37 @@ export function createBoardLogsSurface({
               showBoardMentionNotification(addressedEntry, event.id);
             }
             state.loading = false;
-            state.error = "";
-            renderBoard(event.id);
+            state.error = unconfirmedSubmit
+              ? "Post result could not be confirmed. Check Board history before retrying; your draft is preserved."
+              : "";
+            if (completedSubmit && state.hasNewerEntries) {
+              state.pendingLatestReload = true;
+            }
+            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
             break;
           }
           case "board_history_page": {
             const state = ensureBoardState(event.id);
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
-            const olderEntries = (event.entries || []).filter(
+            const olderEntries = (event.entries || []).map(entry => ({ ...entry,
+              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })).filter(
               (entry) => !entry.id || !existingEntryIds.has(entry.id),
             );
-            state.entries = olderEntries.concat(state.entries);
+            const merged = mergeBoardEntries(state.entries, olderEntries);
+            state.hasNewerEntries = state.hasNewerEntries || merged.length > maxBoardEntries;
+            state.entries = merged.slice(0, maxBoardEntries);
             state.hasMoreBefore = Boolean(event.has_more_before);
             state.oldestEntryId = state.entries[0]?.id || null;
             state.loadingOlder = false;
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
-            renderBoard(event.id);
-            if (
-              state.focusEntryId &&
-              !state.entries.some((entry) => entry.id === state.focusEntryId) &&
-              state.hasMoreBefore
-            ) {
-              requestOlderBoardEntries(event.id);
-            }
+            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
             break;
           }
           case "log_entries": {
             if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
-            state.entries = event.entries || [];
+            state.entries = (event.entries || []).slice(-maxLogEntries);
             state.loading = false;
             state.error = "";
             state.unreadAlerts = 0;
@@ -1724,9 +1903,11 @@ export function createBoardLogsSurface({
             state.loading = false;
             state.loadingOlder = false;
             state.submitting = false;
+            state.resetToLatest = false;
+            state.pendingLatestReload = false;
             state.pendingSubmit = null;
             state.error = event.message;
-            renderBoard(event.id);
+            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
             break;
           }
           case "log_error": {
@@ -1748,6 +1929,7 @@ export function createBoardLogsSurface({
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,

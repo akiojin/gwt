@@ -13,9 +13,44 @@
 //! holds the whole payload.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Retry Windows access/sharing conflicts (os errors 5 and 32) with at most
+/// one second of backoff. Other errors and non-Windows operations return
+/// immediately; an exhausted retry retains the original native error.
+pub fn retry_on_sharing_violation<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    #[cfg(not(windows))]
+    {
+        operation()
+    }
+
+    #[cfg(windows)]
+    {
+        let original = match operation() {
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => error,
+            result => return result,
+        };
+        // Replacement can temporarily reject a concurrent open even with delete
+        // sharing. Bound recovery rather than hiding permanent permission errors.
+        let mut remaining = std::time::Duration::from_secs(1);
+        let mut delay = std::time::Duration::from_millis(1);
+        while !remaining.is_zero() {
+            let wait = delay.min(remaining);
+            std::thread::sleep(wait);
+            remaining -= wait;
+            match operation() {
+                Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => {}
+                result => return result,
+            }
+            delay *= 2;
+        }
+        Err(original)
+    }
+}
 
 /// Writes `bytes` to `path` so that no reader ever observes the destination
 /// holding a partial payload.
@@ -31,11 +66,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// that need crash durability must sync the file and its parent directory
 /// themselves.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     let temp = temp_path_for(path, parent);
-    fs::write(&temp, bytes)?;
+    // A leftover or planted sibling symlink must never be followed.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    file.write_all(bytes)?;
+    drop(file);
     match fs::rename(&temp, path) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -68,49 +110,24 @@ fn temp_path_for(path: &Path, parent: Option<&Path>) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
 
     #[test]
-    fn a_reader_never_observes_the_destination_partially_written() {
+    fn publication_preserves_the_previous_file_contents() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("descriptor.json");
-        let read_something = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
+        let previous = dir.path().join("previous.json");
+        let old = br#"{"turn":0}"#;
+        let new = br#"{"turn":100,"complete":true}"#;
+        write_atomic(&path, old).expect("publish initial descriptor");
 
-        let observer = {
-            let path = path.clone();
-            let read_something = Arc::clone(&read_something);
-            let done = Arc::clone(&done);
-            std::thread::spawn(move || {
-                let mut torn = 0_u64;
-                while !done.load(Ordering::Relaxed) {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        read_something.store(true, Ordering::Relaxed);
-                        if !content.starts_with('{') || !content.ends_with('}') {
-                            torn += 1;
-                        }
-                    }
-                }
-                torn
-            })
-        };
+        // Keep the old file observable without an open reader racing Windows
+        // replacement. An in-place truncate/write would also change this link,
+        // so the assertion catches that regression without scheduler timing.
+        fs::hard_link(&path, &previous).expect("retain the previous file");
+        write_atomic(&path, new).expect("publish replacement descriptor");
 
-        for turn in 0..2_000 {
-            write_atomic(&path, format!("{{\"turn\":{turn}}}").as_bytes())
-                .expect("publish descriptor");
-        }
-        done.store(true, Ordering::Relaxed);
-        let torn = observer.join().expect("observer thread");
-
-        assert!(
-            read_something.load(Ordering::Relaxed),
-            "the observer never read the file, so this run proves nothing"
-        );
-        assert_eq!(
-            torn, 0,
-            "a published file must never be readable as empty or partial"
-        );
+        assert_eq!(fs::read(&previous).expect("read previous descriptor"), old);
+        assert_eq!(fs::read(&path).expect("read published descriptor"), new);
     }
 
     #[test]

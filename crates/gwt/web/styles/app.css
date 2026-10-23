@@ -177,102 +177,12 @@ body {
   margin-top: 0;
 }
 
-.canvas-area {
+.surface-area {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
-
-.canvas {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  cursor: grab;
-  background: var(--color-canvas);
-}
-
-.canvas.panning {
-  cursor: grabbing;
-}
-
-.canvas-world-grid {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to right, var(--color-border) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
-  background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
-  background-position: 0 0;
-  opacity: 0.9;
-}
-
-.canvas-stage {
-  position: absolute;
-  inset: 0;
-  transform-origin: 0 0;
-  background: transparent;
-}
-
-/* SPEC-3038 AS-4.5 — empty-canvas call to action. Centered over the canvas,
-   pointer-events scoped to the card so canvas pan/zoom keep working around
-   it. */
-.canvas-empty-state {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  text-align: center;
-  pointer-events: none;
-  z-index: 5;
-}
-
-.canvas-empty-state[hidden] {
-  display: none;
-}
-
-.canvas-empty-state__kicker {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-state-active);
-}
-
-.canvas-empty-state__title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  font-size: var(--type-2xl);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-display-fg);
-}
-
-.canvas-empty-state__copy {
-  margin: 0 0 var(--space-2);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text-muted);
-}
-
-.canvas-empty-state__actions {
-  display: flex;
-  gap: var(--space-3);
-  pointer-events: auto;
-}
-
-/* SPEC-2356 operator chrome cleanup: the right-bottom floating toolbar and its
-   window-control group rows are removed. Window operations live in the sidebar
-   Windows section; Zoom lives in the Status Strip. No floating chrome over the
-   bottom-right canvas corner. */
 
 .window-list-shell {
   position: relative;
@@ -430,9 +340,11 @@ body {
    theme; the surface backgrounds and titlebar fills come from tokens
    so the dual-theme layer can re-skin them without further surgery. */
 .workspace-window {
-  position: absolute;
-  min-width: 420px;
-  min-height: 260px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--color-surface);
@@ -465,7 +377,6 @@ body {
   background: var(--color-surface);
 }
 
-.workspace-window.surface-file-tree,
 .workspace-window.surface-agent-kanban,
 .workspace-window.surface-branches,
 .workspace-window.surface-board,
@@ -473,9 +384,9 @@ body {
 .workspace-window.surface-mock,
 .workspace-window.surface-work,
 .workspace-window.surface-knowledge,
+.workspace-window.surface-settings,
 .workspace-window.surface-index,
-.workspace-window.surface-profile,
-.workspace-window.surface-console {
+.workspace-window.surface-profile {
   background: var(--color-surface);
 }
 
@@ -488,7 +399,6 @@ body {
   min-width: 0;
   padding: 0 12px;
   user-select: none;
-  cursor: grab;
 }
 
 .surface-terminal .titlebar {
@@ -497,24 +407,19 @@ body {
   border-bottom: 1px solid var(--color-border);
 }
 
-.surface-file-tree .titlebar,
 .surface-agent-kanban .titlebar,
 .surface-branches .titlebar,
 .surface-board .titlebar,
 .surface-logs .titlebar,
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
+.surface-settings .titlebar,
 .surface-index .titlebar,
 .surface-work .titlebar,
-.surface-profile .titlebar,
-.surface-console .titlebar {
+.surface-profile .titlebar {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   border-bottom: 1px solid var(--color-border);
-}
-
-.titlebar:active {
-  cursor: grabbing;
 }
 
 .title {
@@ -625,16 +530,15 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .status-chip,
 .surface-agent-kanban .status-chip,
 .surface-branches .status-chip,
 .surface-board .status-chip,
 .surface-logs .status-chip,
 .surface-knowledge .status-chip,
+.surface-settings .status-chip,
 .surface-index .status-chip,
 .surface-work .status-chip,
 .surface-profile .status-chip,
-.surface-console .status-chip,
 .surface-mock .status-chip {
   color: var(--color-text);
 }
@@ -691,16 +595,15 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .icon-button,
 .surface-agent-kanban .icon-button,
 .surface-branches .icon-button,
 .surface-board .icon-button,
 .surface-logs .icon-button,
 .surface-knowledge .icon-button,
+.surface-settings .icon-button,
 .surface-index .icon-button,
 .surface-work .icon-button,
 .surface-profile .icon-button,
-.surface-console .icon-button,
 .surface-mock .icon-button {
   color: var(--color-text);
 }
@@ -717,293 +620,25 @@ body {
   bottom: 0;
 }
 
-.workspace-window.tabbed .window-body {
-  top: 70px;
-}
-
-/* SPEC-2008 camera-focus: manual window resize handle. Framing fits the
-   CAMERA to a window; this grip still lets the user resize the WINDOW itself
-   (e.g. grow a tiled window back up). There is no maximized/minimized state,
-   so only the base + hover affordance exist. */
-.resize-handle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  background:
-    linear-gradient(135deg,
-      transparent 0 50%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
-      transparent 60% 70%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
-      transparent 80%);
-}
-
-.resize-handle:hover {
-  background:
-    linear-gradient(135deg,
-      transparent 0 50%,
-      color-mix(in oklab, var(--color-state-active) 70%, transparent) 50% 60%,
-      transparent 60% 70%,
-      color-mix(in oklab, var(--color-state-active) 70%, transparent) 70% 80%,
-      transparent 80%);
-}
-
-.workspace-window.dock-target .titlebar {
-  border-bottom-color: var(--color-state-active);
-  box-shadow:
-    inset 0 -2px 0 var(--color-state-active),
-    0 0 0 2px var(--color-focus-ring);
-}
-
-.workspace-window.dock-target {
-  outline: 2px solid var(--color-state-active);
-  outline-offset: 3px;
-  box-shadow:
-    0 0 0 5px color-mix(in oklab, var(--color-state-active) 20%, var(--color-surface)),
-    var(--shadow-window);
-}
-
-.workspace-window.dock-target .titlebar {
-  position: relative;
-}
-
-.workspace-window.dock-target .titlebar::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: -2px;
-  height: 3px;
-  border-radius: 999px;
-  background: var(--color-state-active);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, var(--color-surface));
-}
-
-.window-tab-strip {
-  display: none;
-  align-items: center;
-  gap: 4px;
-  height: 32px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface);
-  overflow-x: auto;
-}
-
-.workspace-window.dock-target .window-tab-strip {
-  position: relative;
-}
-
-.workspace-window.dock-target .window-tab-strip::before {
-  content: "";
-  flex: 0 0 3px;
-  align-self: stretch;
-  margin: 5px 2px 5px 0;
-  border-radius: 999px;
-  background: var(--color-state-active);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
-}
-
-.workspace-window.tabbed .window-tab-strip {
-  display: flex;
-}
-
-.window-tab-item {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-}
-
-.window-tab {
-  display: inline-flex;
-  align-items: center;
-  position: relative;
-  max-width: 180px;
-  height: 24px;
-  padding: 0 9px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text-muted);
-  font-size: var(--type-xs);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  cursor: grab;
-}
-
-/* SPEC-3038 US-2 — Telemetry tabs. The cue + label live inside the tab
-   button; the gap separates them without breaking the title ellipsis. */
-.window-tab .window-tab-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.window-tab-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  min-width: 24px;
-  height: 14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0;
-  flex-shrink: 0;
-}
-
-.window-tab-state[hidden] {
-  display: none;
-}
-
-/* The window-level [data-agent-state] rules paint a rim glow + pulse meant
-   for full windows; tabs neutralize that and express telemetry through an
-   agent-colored left rim + a compact state cue instead. */
-.window-tab[data-agent-state] {
-  box-shadow: none;
-  animation: none;
-  border-left: 3px solid var(--current-agent, var(--color-border-strong));
-  padding-left: 6px;
-}
-
-.window-tab[data-agent-state="running"] .window-tab-state {
-  color: var(--color-state-active);
-  animation: none;
-}
-
-.window-tab[data-agent-state="idle"] .window-tab-state {
-  color: var(--color-state-idle);
-  animation: none;
-}
-
-.window-tab[data-agent-state="starting"] .window-tab-state {
-  color: var(--color-state-idle);
-  animation: none;
-}
-
-/* FR-039 (anshin): waiting maps to the LOUD needs-input state, so the WAIT cue
-   stays prominent on an inactive tab through amber text + an amber tab edge —
-   the same loud-but-static treatment blocked gets, so "your turn" is never
-   lost in the quiet idle palette. */
-.window-tab[data-agent-state="waiting"] .window-tab-state {
-  color: var(--color-state-needs-input);
-  animation: none;
-}
-
-.window-tab[data-agent-state="waiting"] {
-  border-color: color-mix(in oklab, var(--color-state-needs-input) 55%, var(--color-border));
-}
-
-/* AS-2.3: blocked stays loud even on an inactive tab through red text,
-   border, and tab edge. */
-.window-tab[data-agent-state="error"] .window-tab-state {
-  color: var(--color-state-blocked);
-  animation: none;
-}
-
-.window-tab[data-agent-state="error"] {
-  border-color: color-mix(in oklab, var(--color-state-blocked) 55%, var(--color-border));
-}
-
-.window-tab[data-agent-state="stopped"] .window-tab-state {
-  color: var(--color-state-done);
-  opacity: 0.65;
-  animation: none;
-}
-
-/* AS-2.4: the close button only appears on hover / keyboard focus so a tab
-   click can never be one stray pixel away from killing the window. */
-.window-tab-close {
-  width: 22px;
-  height: 24px;
-  margin-left: -2px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text-muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--motion-fast) var(--motion-curve);
-}
-
-.window-tab-item:hover .window-tab-close,
-.window-tab-item:focus-within .window-tab-close,
-.window-tab-close:focus-visible {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  .window-tab-close {
-    opacity: 1;
-  }
-}
-
-.window-tab.active {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-}
-
-/* Issue #3104 — the active tab carries a theme-aware --color-state-active
-   underline. A surface vs surface-elevated background delta alone collapses to
-   near-white in light mode (and elevated is the darker step, so the active tab
-   even reads as recessed), making the active tab in a tabbed agent-window group
-   indistinguishable. Rendered as an ::after bar — not box-shadow (which
-   .window-tab[data-agent-state] clears) and not a border (which would reflow
-   and collide with the blocked border-color) — so it coexists with the
-   agent-color left rim, the state dot, and the blocked border. */
-.window-tab.active::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  border-radius: var(--radius-pill);
-  background: var(--color-state-active);
-  pointer-events: none;
-}
-
-.window-tab:active {
-  cursor: grabbing;
-}
-
-.window-tab-close:hover {
-  background: color-mix(in oklab, var(--color-text-muted) 18%, var(--color-surface-elevated));
-  color: var(--color-text);
-}
-
 /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
    continuous with the xterm Dark Operator background (#0a0d12). If
    Light theme leaks var(--color-canvas) here, the xterm region picks
    up a pale gray frame around the dark terminal and the window looks
-   double-framed. Chrome (titlebar / tab strip) still follows the
+   double-framed. Chrome (titlebar) still follows the
    overall theme; this override is scoped to the body only. */
 .surface-terminal .window-body {
   background: #0a0d12;
   color: #e8eaed;
 }
 
-.surface-file-tree .window-body,
 .surface-agent-kanban .window-body,
 .surface-branches .window-body,
 .surface-board .window-body,
 .surface-logs .window-body,
 .surface-knowledge .window-body,
+.surface-settings .window-body,
 .surface-index .window-body,
 .surface-work .window-body,
-.surface-console .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
@@ -1385,7 +1020,6 @@ body {
   87.5% { content: "⣷"; }
 }
 
-.file-tree-root,
 .branch-list-root,
 .board-root,
 .logs-root,
@@ -2215,7 +1849,6 @@ body {
   cursor: default;
 }
 
-.file-tree-path,
 .branch-heading,
 .knowledge-heading,
 .mock-heading {
@@ -2232,7 +1865,7 @@ body {
   text-overflow: ellipsis;
 }
 
-/* `.file-tree-scroll`, `.branch-scroll`, and `.mock-scroll` are now
+/* `.branch-scroll` and `.mock-scroll` are now
    layered on top of `.workspace-scroll` via additive class names. */
 
 .knowledge-search {
@@ -2302,6 +1935,12 @@ body {
   display: grid;
 }
 
+.knowledge-virtual-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+  overflow-anchor: none;
+}
+
 .knowledge-state-filter {
   display: inline-flex;
   align-items: center;
@@ -2336,24 +1975,6 @@ body {
 .knowledge-state-filter button.is-active {
   color: var(--color-state-active);
   background: color-mix(in oklab, var(--color-state-active) 16%, transparent);
-}
-
-.knowledge-monitor-max-active {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-text-muted);
-}
-
-.knowledge-monitor-max-active input {
-  width: 56px;
-  min-height: 30px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text-strong);
-  font: inherit;
-  text-align: center;
 }
 
 /* Issue #3561: the Autonomous control is a state switch (role="switch"), not an
@@ -2442,8 +2063,7 @@ body {
   cursor: default;
 }
 
-.knowledge-monitor-metric,
-.knowledge-monitor-max-active {
+.knowledge-monitor-metric {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
@@ -2457,6 +2077,60 @@ body {
 .knowledge-monitor-bar [data-action="monitor-settings"] {
   margin-left: auto;
 }
+
+/* Issue #5284: linked status only; diagnostics live in notifications. */
+.knowledge-notification-badge {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.knowledge-monitor-capacity-badge[data-tone="warning"] {
+  color: var(--color-state-needs-input);
+  border-color: var(--color-state-needs-input);
+}
+
+.knowledge-monitor-capacity-badge[data-tone="info"] {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+.knowledge-notification-badge[hidden] {
+  display: none;
+}
+
+.knowledge-monitor-pill:not(:disabled) {
+  cursor: pointer;
+}
+
+.knowledge-monitor-pill:disabled {
+  opacity: 1;
+}
+
+.knowledge-notification-badge:focus-visible,
+.notification-center__item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.notification-center__details {
+  grid-column: 2 / -1;
+  min-width: 0;
+  font-size: var(--type-sm);
+}
+
+.notification-center__details > summary {
+  cursor: pointer;
+}
+
+.notification-center__details-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-top: var(--space-2);
+}
+
 
 .issue-new-body {
   display: grid;
@@ -3574,7 +3248,6 @@ body {
 }
 
 .profile-field input,
-.profile-table-row input,
 .profile-env-grid input,
 .profile-env-grid select,
 .profile-textarea {
@@ -3588,8 +3261,8 @@ body {
   font-family: var(--font-body);
   color: var(--color-text);
 }
+
 .profile-field input:focus,
-.profile-table-row input:focus,
 .profile-env-grid input:focus,
 .profile-env-grid select:focus,
 .profile-textarea:focus {
@@ -3607,22 +3280,6 @@ body {
   min-height: 88px;
   resize: vertical;
   line-height: 1.5;
-}
-
-.profile-table {
-  display: grid;
-  gap: 8px;
-}
-
-.profile-table-row {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) auto;
-  align-items: center;
-}
-
-.profile-disabled-row {
-  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .profile-empty {
@@ -3730,39 +3387,6 @@ body {
 
 .profile-env-add-row:hover {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
-}
-
-.profile-preview {
-  display: grid;
-  gap: 8px;
-  max-height: 240px;
-  overflow: auto;
-  padding: 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-elevated);
-}
-
-.profile-preview-row {
-  display: grid;
-  gap: 4px;
-}
-
-.profile-preview-key {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  font-weight: 600;
-  color: var(--color-text);
-  overflow-wrap: anywhere;
-}
-
-.profile-preview-value {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
-  overflow-wrap: anywhere;
 }
 
 .board-chat-shell {
@@ -4333,6 +3957,10 @@ body {
 .notification-center-backdrop {
   z-index: var(--z-rail);
 }
+.notification-center-drawer[hidden],
+.notification-center-backdrop[hidden] {
+  display: none;
+}
 .notification-center__actions {
   display: flex;
   align-items: center;
@@ -4760,61 +4388,8 @@ body {
   container-type: inline-size;
 }
 
-.file-tree-list,
 .branch-list {
   padding: 8px 0;
-}
-
-.file-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 0 12px;
-  font-family: var(--font-mono);
-  font-size: var(--type-sm);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.file-tree-row:hover {
-  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-}
-
-.file-tree-row.selected {
-  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-}
-
-.tree-caret {
-  width: 12px;
-  color: var(--color-text-muted);
-  text-align: center;
-}
-
-.tree-icon {
-  width: 16px;
-  color: var(--agent-codex);
-}
-
-.tree-icon.file {
-  color: var(--color-text-muted);
-}
-
-.tree-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-tree-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--color-border);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
 }
 
 .branch-row {
@@ -5845,21 +5420,6 @@ body {
   flex-wrap: wrap;
 }
 
-.clone-project-path {
-  flex: 1;
-  min-width: 180px;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .clone-project-results {
   display: grid;
   gap: 8px;
@@ -6420,6 +5980,66 @@ body {
   color: var(--color-text-strong);
 }
 
+/* Issue 4911 — the Issue Monitor settings form repeats the Agent Settings
+   block once per launch candidate; the open set carries the form.
+   (No `#` before the number: the token audits scan this block for hex colors.) */
+.launch-agent-sets {
+  display: grid;
+  gap: 12px;
+}
+
+.launch-agent-set {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.launch-agent-set.is-open {
+  border-color: var(--color-focus-ring);
+}
+
+.launch-agent-set__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.launch-agent-set__heading,
+.launch-agent-set__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-agent-set__badge {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.launch-agent-set__actions .icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.launch-agent-set__body {
+  display: grid;
+  gap: 12px;
+}
+
+.launch-agent-sets__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
 .launch-intake-input {
   width: 100%;
@@ -6515,13 +6135,6 @@ body {
   .start-method-group-copy {
     text-align: left;
   }
-}
-
-.launch-toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
 }
 
 .launch-inline-check {
@@ -6812,11 +6425,6 @@ body {
   .wizard-actions .wizard-button {
     flex: 1 1 0;
   }
-
-  .launch-toggle-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
 }
 
 .project-picker,
@@ -6931,35 +6539,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Issue #4538 AC-3: Project header link back to the Hub. It opens a new
-   browser tab so the Project tab keeps its URL. */
-.project-home-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  margin-right: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  color: var(--color-link);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
-  text-decoration: none;
-}
-
-.project-home-link:hover {
-  color: var(--color-link-hover);
-  border-color: var(--color-border-strong);
-}
-
-.project-home-link:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
 }
 
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the
@@ -7104,68 +6683,6 @@ body.route-body {
   text-decoration: none;
 }
 
-/* Issue #4530 candidate pool */
-.knowledge-monitor-pool {
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--color-border);
-  font-size: var(--type-sm);
-}
-.knowledge-monitor-pool > summary {
-  padding: var(--space-2) var(--space-3);
-  cursor: pointer;
-  color: var(--color-text-muted);
-}
-.knowledge-monitor-pool-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  max-height: 300px;
-  overflow: auto;
-}
-.knowledge-monitor-candidate {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2);
-}
-.knowledge-monitor-candidate-heading,
-.knowledge-monitor-pool-add {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.knowledge-monitor-candidate-summary {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.knowledge-monitor-pool-field {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  font-size: var(--type-xs);
-}
-.knowledge-monitor-pool-field input {
-  min-width: 0;
-  max-width: 100%;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font: inherit;
-}
-.knowledge-monitor-pool-message {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--type-xs);
-}
-.knowledge-monitor-pool-message:empty {
-  display: none;
-}
-
 /* #4499: queue-first Issue board; status and controls remain separate. */
 .knowledge-monitor-status,
 .knowledge-monitor-controls {
@@ -7174,10 +6691,8 @@ body.route-body {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-.knowledge-monitor-controls { flex: 1; }
+.knowledge-monitor-controls { flex: 0 0 auto; }
 .knowledge-monitor-status { padding-right: var(--space-3); border-right: 1px solid var(--color-border); }
-.knowledge-monitor-refill-limit { display: flex; align-items: center; gap: var(--space-1); font-size: var(--type-xs); }
-.knowledge-monitor-refill-limit input { width: 4em; }
 .issue-queue-board { display: grid; grid-template-columns: repeat(4, minmax(262px, 1fr)); gap: var(--space-2); align-items: start; }
 .issue-queue-column { min-width: 0; background: var(--color-surface-elevated); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-2); }
 .issue-queue-heading { font-size: var(--type-sm); color: var(--color-text-strong); margin: 0 0 var(--space-2); }
@@ -7189,11 +6704,101 @@ body.route-body {
 .issue-queue-column .knowledge-row { grid-template-columns: minmax(0, 1fr); }
 .issue-queue-column .knowledge-row-actions { flex-wrap: wrap; }
 .issue-queue-column .knowledge-row-main { flex-wrap: wrap; }
+.issue-queue-column .knowledge-row.has-live-output {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1);
+  padding: var(--space-2);
+}
+.knowledge-row.has-live-output > .knowledge-row-actions { grid-column: 2; grid-row: 1; align-self: start; }
+.issue-card-output { min-width: 0; grid-column: 1 / -1; color: var(--color-text); padding: var(--space-1); }
+.issue-card-output-label { color: var(--color-text-muted); font-size: var(--type-xs); }
+.issue-card-output-screen { position: relative; grid-column: 1 / -1; }
+.issue-card-output-screen::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 12px;
+  background: linear-gradient(to bottom, transparent, var(--color-surface));
+  pointer-events: none;
+}
+.issue-card-output-text {
+  margin: 0;
+  max-height: 56px;
+  overflow: hidden;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 16px;
+}
 .issue-bridge-root .workspace-toolbar-main { grid-template-columns: minmax(100px, 320px) max-content; }
 .issue-bridge-root .knowledge-heading { grid-column: 1 / -1; }
 .issue-bridge-root .knowledge-search { width: 100%; }
 
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }
+/* Issue #5321: compact summary and selection preview. */
+.issue-bridge-root { container-type: inline-size; }
+.issue-bridge-root .knowledge-monitor-bar {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+}
+.issue-bridge-root .knowledge-monitor-status,
+.issue-bridge-root .knowledge-monitor-controls {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+.issue-bridge-root .knowledge-monitor-status {
+  padding-right: 0;
+  border-right: 0;
+}
+.issue-bridge-root .knowledge-monitor-controls { margin-left: 0; }
+.issue-bridge-root .knowledge-monitor-capacity-badge {
+  order: 0;
+  flex-shrink: 1;
+  max-width: 22ch;
+}
+.issue-bridge-root .knowledge-monitor-controls { order: 1; }
+.issue-bridge-root .knowledge-monitor-bar [data-action="monitor-settings"] { margin-left: 0; }
+.issue-bridge-root .issue-list-shell { grid-template-columns: minmax(0, 1fr) minmax(320px, 34%); }
+.issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+.issue-bridge-root .knowledge-list-pane { grid-area: 1 / 1; }
+.issue-bridge-root .modal-shell.issue-preview-shell {
+  grid-area: 1 / 2;
+  width: auto;
+  max-height: none;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-radius: 0;
+  box-shadow: none;
+}
+.issue-bridge-root .modal-header.issue-detail-tabs { align-items: center; }
+.issue-preview-close { margin-left: auto; }
+.issue-queue-column .knowledge-row-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.issue-preview-shell .knowledge-detail-title {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+@container (max-width: 1100px) {
+  .issue-bridge-root[data-view-mode="list"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+  .issue-bridge-root[data-view-mode="list"] .modal-shell.issue-preview-shell {
+    grid-area: 1 / 1;
+    justify-self: end;
+    width: min(460px, 85%);
+    z-index: 1;
+    box-shadow: var(--shadow-2);
+  }
+}
+/* /Issue #5321 */
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }

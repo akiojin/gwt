@@ -30,7 +30,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function knowledgeEntry(number, overrides = {}) {
@@ -83,8 +83,15 @@ test("a canvas agent window bound to an Issue produces a header model", async ()
   assert.ok(model.actions.length >= 1 && model.actions.length <= 2, "at most two actions");
   assert.deepEqual(
     model.actions.map((action) => action.action),
-    ["return-to-list", "open-issue"],
+    ["open-issue"],
   );
+});
+
+test("PM and Shell never acquire Issue window controls from restored metadata", async () => {
+  const { issueWindowHeaderModel } = await importSurfaceModule();
+  for (const overrides of [{ is_pm: true }, { preset: "shell" }]) {
+    assert.equal(issueWindowHeaderModel({ windowData: canvasAgentWindow(overrides) }), null);
+  }
 });
 
 test("a session with no Issue behind it has no header model", async () => {
@@ -164,10 +171,10 @@ test("the rendered header carries one badge and at most two actions", async () =
   }
 
   buttons[0].click();
-  assert.deepEqual(actions, ["return-to-list"], "the return control reports its action");
+  assert.deepEqual(actions, ["open-issue"], "the header only navigates to its Issue");
 });
 
-test("app.js mounts the header above an interactive terminal and folds it back", () => {
+test("app.js mounts the Issue header without the retired minimize action", () => {
   // The wiring lives in app.js, which no test can import; assert on its source the
   // way the sibling Issue-preview contract tests do. `ok` rather than `match` keeps
   // a failure from dumping the whole module into the report.
@@ -180,8 +187,8 @@ test("app.js mounts the header above an interactive terminal and folds it back",
     "the canvas terminal body renders the shared header",
   );
   assert.ok(
-    /kind:\s*"dock_agent_window_to_issue"/.test(appJs),
-    "FR-012: returning to the list is the inverse of the undock transition",
+    !/kind:\s*"dock_agent_window_to_issue"/.test(appJs),
+    "AC14: fixed surfaces must not render the retired minimize action",
   );
   assert.ok(
     !/createRuntime\(\s*windowData\.id,\s*terminalRoot,\s*\{\s*readOnly:\s*true/.test(appJs),

@@ -225,16 +225,14 @@ impl HolderActivity {
             return format!(
                 "holder orphaned: held {held}, its parent process exited and no command of its \
                  own is left running — in its tree or under the daemon — over the last \
-                 {window:.1}s. Nobody is waiting for this run and it will not release the lease \
-                 before the TTL; reclaim it with `verify.lease.release` and a reason"
+                 {window:.1}s. This describes the observed process set, not permission to stop it"
             );
         }
         if self.reclaimable() {
             return format!(
                 "holder reclaimable: held {held}, its in-tree commands have all exited and \
                  the driver gained no CPU beyond scheduler noise over the last {window:.1}s. \
-                 `verify.lease.release` with a reason re-checks that the workload remains \
-                 absent before reclaiming the lease"
+                 This describes the observed process set, not permission to stop it"
             );
         }
         if self.undecidable() {
@@ -242,8 +240,8 @@ impl HolderActivity {
                 "holder state unknown: held {held}, it launched its commands outside its own \
                  process tree (spawn-host daemon) and none of the {processes} processes this \
                  reading could reach gained CPU over the last {window:.1}s — that is not evidence \
-                 of a stopped holder, only that the work was not found. Confirm with `ps -eo \
-                 pid,ppid,time,command` before acting on it"
+                 of a stopped holder, only that the work was not found. Repeated sampling \
+                 does not authorize reclaiming or stopping it"
             );
         }
         if self.starved() {
@@ -381,6 +379,66 @@ fn descendants(owner_pid: u32, samples: &[ProcessSample]) -> Option<BTreeSet<u32
         next += 1;
     }
     Some(tree.into_iter().collect())
+}
+
+/// Exact roots whose descendants advanced during one shared sample window.
+/// Root CPU is not child progress, and a recycled or missing root is never
+/// credited. Start identities use `host_process_start_time`'s opaque token.
+pub(crate) fn progressing_descendants(roots: &[(u32, u64)]) -> BTreeSet<(u32, u64)> {
+    let mut roots: BTreeSet<_> = roots
+        .iter()
+        .copied()
+        .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
+        .collect();
+    roots.retain(|(pid, started_at)| {
+        crate::process::host_process_start_time(*pid) == Some(*started_at)
+    });
+    if roots.is_empty() {
+        return roots;
+    }
+
+    let first = read_processes();
+    roots.retain(|(pid, _)| first.iter().any(|sample| sample.pid == *pid));
+    if roots.is_empty() {
+        return roots;
+    }
+    let taken_at = Instant::now();
+    std::thread::sleep(PROGRESS_WINDOW);
+    let second = read_processes();
+    let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    roots.retain(|(pid, started_at)| {
+        crate::process::host_process_start_time(*pid) == Some(*started_at)
+            && descendants_advancing(*pid, &first, &second, window_ms)
+    });
+    roots
+}
+
+fn descendants_advancing(
+    root: u32,
+    first: &[ProcessSample],
+    second: &[ProcessSample],
+    window_ms: u64,
+) -> bool {
+    if !first.iter().any(|sample| sample.pid == root) {
+        return false;
+    }
+    let mut first = first.to_vec();
+    let mut second = second.to_vec();
+    for sample in first.iter_mut().chain(second.iter_mut()) {
+        if sample.pid == root {
+            sample.cpu_ms = 0;
+        }
+    }
+    activity_from_samples(
+        root,
+        &HolderWorkload::Owned,
+        0,
+        &first,
+        &second,
+        window_ms,
+        None,
+    )
+    .is_some_and(|activity| activity.advancing())
 }
 
 /// Repeated readings of one holder. Kept across a wait loop's polls so each
@@ -790,7 +848,10 @@ mod tests {
         let described = activity.describe();
         assert!(!described.contains("may be hung"), "{described}");
         assert!(described.contains("not evidence"), "{described}");
-        assert!(described.contains("ps -eo"), "{described}");
+        assert!(
+            described.contains("Repeated sampling does not authorize"),
+            "{described}"
+        );
     }
 
     /// The daemon is the launcher, not the work. Its own CPU — Issue Monitor
@@ -832,7 +893,7 @@ mod tests {
 
         assert!(!idle.orphaned());
         assert_eq!(idle.state(), "reclaimable", "{idle:?}");
-        assert!(idle.describe().contains("verify.lease.release"));
+        assert!(idle.describe().contains("not permission to stop it"));
         assert_eq!(
             activity(&samples, &samples, 100, None).state(),
             "progressing"
@@ -910,7 +971,10 @@ mod tests {
         assert_eq!(activity.state(), "orphaned", "{activity:?}");
         let described = activity.describe();
         assert!(described.contains("orphaned"), "{described}");
-        assert!(described.contains("verify.lease.release"), "{described}");
+        assert!(
+            described.contains("not permission to stop it"),
+            "{described}"
+        );
         assert!(!described.contains("progressing"), "{described}");
     }
 
@@ -995,5 +1059,93 @@ mod tests {
             HolderWorkload::Owned
         );
         assert_eq!(workload_for(None, Vec::new), HolderWorkload::Owned);
+    }
+
+    #[test]
+    fn issue_3809_provider_cpu_and_unrelated_work_are_not_descendant_progress() {
+        let first = [
+            sample(42, Some(1), 100),
+            sample(43, Some(42), 10),
+            sample(900, Some(1), 100),
+        ];
+        let second = [
+            sample(42, Some(1), 2_000),
+            sample(43, Some(42), 10),
+            sample(900, Some(1), 2_000),
+            sample(901, Some(900), 100),
+        ];
+        assert!(!descendants_advancing(42, &first, &second, WINDOW_MS));
+        assert!(!descendants_advancing(42, &first[1..], &second, WINDOW_MS));
+        assert!(!descendants_advancing(42, &first, &second[1..], WINDOW_MS));
+    }
+
+    #[test]
+    fn issue_3809_descendant_cpu_and_turnover_are_progress() {
+        let first = [sample(42, Some(1), 100), sample(43, Some(42), 10)];
+        let cpu = [sample(42, Some(1), 100), sample(43, Some(42), 30)];
+        assert!(descendants_advancing(42, &first, &cpu, WINDOW_MS));
+        let replaced = [sample(42, Some(1), 100), sample(44, Some(42), 0)];
+        assert!(descendants_advancing(42, &first, &replaced, WINDOW_MS));
+        assert!(descendants_advancing(42, &first, &first[..1], WINDOW_MS));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue_3809_owned_windows_child_reports_silent_cpu_progress() {
+        use std::process::{Child, Stdio};
+
+        struct OwnedChild(Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let root = std::process::id();
+        let started_at = crate::process::host_process_start_time(root).unwrap();
+        assert!(progressing_descendants(&[]).is_empty());
+        assert!(progressing_descendants(&[(0, 0), (root, started_at + 1)]).is_empty());
+        let child = OwnedChild(
+            gwt_core::process::hidden_command("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn an owned silent CPU child"),
+        );
+        let child_pid = child.0.id();
+        let first = read_processes();
+        let taken_at = Instant::now();
+        let progressing = progressing_descendants(&[(root, started_at)]);
+        let second = read_processes();
+        let window_ms = u64::try_from(taken_at.elapsed().as_millis()).unwrap();
+        let child_cpu = |samples: &[ProcessSample]| {
+            samples
+                .iter()
+                .find(|sample| sample.pid == child_pid)
+                .expect("the owned child remains in both samples")
+                .cpu_ms
+        };
+        assert!(child_cpu(&second) > child_cpu(&first));
+        let only_owned = |samples: &[ProcessSample]| {
+            samples
+                .iter()
+                .copied()
+                .filter(|sample| sample.pid == root || sample.pid == child_pid)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            descendants_advancing(root, &only_owned(&first), &only_owned(&second), window_ms),
+            "the owned child's CPU must advance without relying on parallel test children"
+        );
+        assert!(progressing.contains(&(root, started_at)), "{progressing:?}");
     }
 }

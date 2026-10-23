@@ -12,7 +12,7 @@
 
 use gwt::cli::hook::board_reminder;
 use serde_json::Value;
-use std::{ffi::OsString, path::Path, sync::Mutex};
+use std::{ffi::OsString, path::Path};
 
 const BOARD_REMINDER_SOURCE: &str = include_str!("../src/cli/hook/board_reminder/mod.rs");
 
@@ -39,9 +39,8 @@ impl Drop for ScopedEnvVar {
     }
 }
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn with_isolated_home<T>(run: impl FnOnce(&Path) -> T) -> T {
@@ -160,5 +159,60 @@ fn stop_payload_uses_system_message_contract() {
 
         assert!(parsed.get("hookSpecificOutput").is_none());
         assert!(parsed["systemMessage"].as_str().unwrap().contains("Stop"));
+    });
+}
+
+#[test]
+fn issue_4359_autonomous_stop_requires_continuation_without_pm_reply() {
+    use chrono::Utc;
+    use gwt_agent::{AgentId, LaunchRoute, Session};
+    use gwt_core::coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind};
+
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(dir.path(), "work/test", AgentId::Codex);
+        session.launch_route = LaunchRoute::Autonomous;
+        post_entry(
+            dir.path(),
+            BoardEntry::new(
+                AuthorKind::Agent,
+                &session.display_name,
+                BoardEntryKind::Status,
+                "Proceeding with verification",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        let mut buf = Vec::new();
+        plan.output.serialize_to(&mut buf).unwrap();
+        let parsed: Value = serde_json::from_slice(&buf).unwrap();
+        let text = parsed["systemMessage"].as_str().unwrap();
+        assert!(
+            text.contains("Do not stop to wait for a PM reply"),
+            "{text}"
+        );
+        assert!(
+            text.contains("After receiving a Board ruling, resume"),
+            "{text}"
+        );
+        assert!(text.contains("PM default ruling (override available)"));
+
+        session.launch_route = LaunchRoute::Manual;
+        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        let mut buf = Vec::new();
+        plan.output.serialize_to(&mut buf).unwrap();
+        let parsed: Value = serde_json::from_slice(&buf).unwrap();
+        assert!(!parsed["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("Do not stop to wait for a PM reply"));
     });
 }

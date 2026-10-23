@@ -176,6 +176,41 @@ pub fn acquire(gwt_home: &Path) -> Result<TrayLockHandle, TrayLockError> {
     )
 }
 
+/// Discover a resident without creating or acquiring its runtime ownership.
+/// Only a contended existing guard proves a running owner. An unreadable
+/// guard or payload stays an error so callers cannot start a competing helper.
+pub fn running_instance(gwt_home: &Path) -> Result<Option<TrayLockFile>, TrayLockError> {
+    let path = lock_path(gwt_home, &current_user_id());
+    let guard_path = guard_lock_path(&path);
+    let guard = match OpenOptions::new().read(true).write(true).open(&guard_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(TrayLockError::Io {
+                path: guard_path,
+                source,
+            });
+        }
+    };
+    match guard.try_lock_exclusive() {
+        Ok(()) => {
+            guard.unlock().map_err(|source| TrayLockError::Io {
+                path: guard_path,
+                source,
+            })?;
+            Ok(None)
+        }
+        // Windows ERROR_LOCK_VIOLATION is Uncategorized, not WouldBlock.
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            read_lock_contents(&path).map(Some)
+        }
+        Err(source) => Err(TrayLockError::Io {
+            path: guard_path,
+            source,
+        }),
+    }
+}
+
 /// Inner acquisition with the `GWT_FORCE_NEW_INSTANCE` decision injected so
 /// the override behaviour is unit-testable without mutating process env.
 ///
@@ -384,6 +419,33 @@ mod tests {
             !path.exists(),
             "lock file must be removed on Drop, but still exists at {}",
             path.display()
+        );
+    }
+
+    #[test]
+    fn running_instance_requires_an_existing_held_guard() {
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(running_instance(tmp.path()).unwrap().is_none());
+        assert!(!tmp.path().join("run").exists());
+
+        let mut holder = acquire_inner(tmp.path(), false).expect("acquire");
+        holder.set_url("http://127.0.0.1:55555/").unwrap();
+        let resident = running_instance(tmp.path()).unwrap().expect("held guard");
+        assert_eq!(resident.pid, std::process::id());
+        assert_eq!(
+            resident.control_token.as_deref(),
+            Some(holder.control_token())
+        );
+
+        fs::write(holder.path(), b"malformed").unwrap();
+        assert!(running_instance(tmp.path()).is_err());
+        let guard_path = holder.guard_path.clone();
+        drop(holder);
+        File::create(&guard_path).unwrap();
+        assert!(running_instance(tmp.path()).unwrap().is_none());
+        assert!(
+            guard_path.exists(),
+            "discovery does not remove stale ownership files"
         );
     }
 

@@ -1,11 +1,6 @@
-// Issue #3297 — cache-backed knowledge load recovery contract.
-//
-// The 5s load-recovery timer must not escalate its retry into a forced
-// remote refresh (a forced refresh runs a full GitHub sync that takes
-// minutes and guarantees the "Timed out loading cache-backed data" error
-// on slow machines), and a late knowledge_entries response must still be
-// applied when the window has no data yet instead of being discarded by
-// request_id mismatch.
+// Issues #3297 / #5413 — cache-backed knowledge load recovery contract.
+// Slow reads must not become duplicate requests or premature load errors;
+// successful late responses must recover the window.
 //
 // The surface module imports "/focus-trap.js" (a browser absolute path),
 // so the tests load the module source with that import stubbed and drive
@@ -40,12 +35,12 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
 function createSurface(mod, sent, preset = "issue", options = {}) {
-  const windowData = { id: "win-1", preset };
+  const windowData = options.windowData || { id: "win-1", preset };
   const directSend = options.sendKnowledgeSemanticSearchNow
     || ((message) => {
       sent.push(message);
@@ -58,7 +53,7 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
     createKnowledgeMarkdownBody:
       options.createKnowledgeMarkdownBody || (() => ({ appendChild() {} })),
     windowMap: options.windowMap || new Map(),
-    workspaceWindowById: (id) => (id === "win-1" ? windowData : null),
+    workspaceWindowById: options.workspaceWindowById || ((id) => (id === "win-1" ? windowData : null)),
     getWorkspaceWindows: () => [windowData],
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset:
@@ -73,6 +68,40 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
     launchPending: {},
   });
 }
+
+test("Issue #5531: resync replaces lost Knowledge owners and retains selection without retrying writes", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(() => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+    state.selectedNumber = 42;
+    state.selectionGeneration = 3;
+    state.query = "retained query";
+    surface.requestKnowledgeBridge("win-1", "issue");
+    const oldRequestId = state.loadRequestId;
+    state.detailRequestId = 99;
+    state.searchInFlight = true;
+    state.inFlightSearchRequestId = 100;
+    state.revisionPending = true;
+    state.pendingPhaseUpdates.set(101, { issueNumber: 42 });
+
+    surface.resyncKnowledge(["win-1"]);
+
+    assert.equal(sent.length, 2, "resync must bypass the lost loading owner");
+    assert.equal(sent[1].kind, "load_knowledge_bridge");
+    assert.equal(sent[1].selected_number, 42);
+    assert.ok(sent[1].request_id > oldRequestId);
+    assert.equal(state.ownedLoadRequestIds.has(oldRequestId), false);
+    assert.equal(state.detailRequestId, 0);
+    assert.equal(state.searchInFlight, false);
+    assert.equal(state.revisionPending, false);
+    assert.equal(state.query, "retained query");
+    assert.equal(state.selectionGeneration, 3);
+    assert.equal(state.pendingPhaseUpdates.size, 0, "a lost phase reply cannot leave a permanent pending marker");
+    surface.clearKnowledgeBridgeState("win-1");
+  });
+});
 
 // SPEC #3170 T-948/T-949 shared fixtures: two cached rows plus an
 // authoritative detail for row A, driven through the public surface API
@@ -99,7 +128,7 @@ function detailFor(row, body) {
     subtitle: "",
     state: row.state,
     labels: row.labels,
-    sections: [{ title: "Description", body }],
+    sections: [{ title: "Description", body, content: { type: "markdown", body, body_html: "" } }],
     launch_issue_number: row.number,
     related_works: [],
   };
@@ -126,6 +155,65 @@ function seedListAndAuthoritativeA(surface, kind) {
   });
   return surface.knowledgeBridgeStateMap.get("win-1");
 }
+
+test("Issue #5396: semantic list completion does not request an implicit preview", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    const before = sent.length;
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
+    assert.equal(sent.slice(before).filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  });
+});
+
+test("Issue #5543: related-work enrichment refreshes only the explicitly selected detail", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const listEvent = {
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent.at(-1).request_id, entries: [ROW_A, ROW_B],
+      selected_number: null, refresh_enabled: true,
+    };
+    const detailRequests = () => sent.filter(message => message.kind === "select_knowledge_bridge_entry");
+    surface.applyKnowledgeReceiveEvent(listEvent);
+    assert.equal(detailRequests().length, 0, "initial rows must not open a detail");
+
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: detailFor(ROW_B, "Beta body"),
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    const selectionGeneration = state.selectionGeneration;
+    const enriched = {
+      ...listEvent,
+      entries: [ROW_A, { ...ROW_B, related_work_refs: [{ id: "work-beta" }],
+        related_work_count: 1, related_session_count: 1 }],
+    };
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "enrichment must requery the selected detail once");
+    assert.equal(detailRequests().at(-1).number, ROW_B.number);
+    assert.equal(state.selectedNumber, ROW_B.number);
+    assert.equal(state.selectionGeneration, selectionGeneration, "refresh is not an explicit selection");
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "the same related snapshot must not requery again");
+
+    const relatedWorks = [{ id: "work-beta", title: "Beta work" }];
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: { ...detailFor(ROW_B, "Beta body"), related_works: relatedWorks },
+    });
+    assert.deepEqual(state.detail.related_works, relatedWorks);
+  });
+});
 
 for (const kind of ["issue", "spec"]) {
   test(`selecting row B renders the local preview synchronously (${kind} preset, AS-17.4)`, async () => {
@@ -716,7 +804,7 @@ test("SEARCH_UNAVAILABLE is the second exact typed transient code", async () => 
   });
 });
 
-test("auto refresh waits for every semantic search owner before loading (T-951, AS-17.2)", async () => {
+test("auto refresh gates revision checks on visibility and semantic owners (#5394, T-951)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ intervals }) => {
     const originalDocument = globalThis.document;
@@ -727,6 +815,14 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
+      const windowData = { id: "win-1", preset: "issue", minimized: true,
+        tab_group_id: "legacy-group", tab_group_active: false };
+      const cache = domDocument.createElement("section");
+      cache.className = "surface-cache";
+      cache.hidden = true;
+      cache.setAttribute("inert", "");
+      domDocument.body.appendChild(cache);
+      let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
         node.className = className || "";
@@ -735,6 +831,8 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       };
       const surface = createSurface(mod, sent, "issue", {
         windowMap,
+        windowData,
+        workspaceWindowById: () => activeTab ? windowData : null,
         createNode,
         createKnowledgeMarkdownBody: (value) =>
           createNode("div", "knowledge-markdown", String(value || "")),
@@ -745,6 +843,7 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       state.selectedNumber = ROW_A.number;
       state.detail = detailFor(ROW_A, "Alpha body");
       state.refreshEnabled = true;
+      state.cacheRevision = "revision-1";
 
       surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
       assert.equal(intervals.length, 1, "mount must install one auto-refresh owner");
@@ -778,11 +877,65 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       }
 
       intervals[0].callback();
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "visible legacy grouped windows refresh independently of saved canvas state");
+      intervals[0].callback();
+      intervals[0].callback();
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "a slow revision probe must not be duplicated by subsequent ticks");
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-1" });
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 0,
+        "unchanged cache must not load or rebuild the list");
+
+      // Repeated hidden ticks coalesce to one revision check on activation.
+      const hiddenCases = [
+        [() => { body.hidden = true; }, () => { body.hidden = false; }],
+        [() => { cache.appendChild(body); }, () => { domDocument.body.appendChild(body); }],
+        [() => { activeTab = false; }, () => { activeTab = true; }],
+        [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
+      ];
+      for (const [hide, reveal] of hiddenCases) {
+        const before = sent.length;
+        hide();
+        intervals[0].callback();
+        intervals[0].callback();
+        assert.equal(sent.length, before, "hidden/cache/inactive-project surfaces do no reads");
+        reveal();
+        surface.refreshVisibleKnowledgeWindows();
+        surface.refreshVisibleKnowledgeWindows();
+        assert.equal(sent.length, before + 1, "activation checks only once");
+        surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+          knowledge_kind: "issue", revision: "revision-1" });
+      }
+      intervals[0].callback();
+      // A probe that completes after hiding must defer its changed revision.
+      body.hidden = true;
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-2" });
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 0);
+      body.hidden = false;
+      surface.refreshVisibleKnowledgeWindows();
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-2" });
       assert.equal(
         sent.filter((message) => message.kind === "load_knowledge_bridge").length,
         1,
-        "auto refresh may load only after every semantic search owner releases",
+        "a changed revision loads once after visibility and semantic owners release",
       );
+      // A concurrent list response may already contain the probed change.
+      state.loading = false;
+      state.refreshing = false;
+      intervals[0].callback();
+      state.loading = true;
+      surface.applyKnowledgeCacheRevision({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-3" });
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1",
+        knowledge_kind: "issue", entries: [ROW_A, ROW_B], cache_revision: "revision-3",
+        refresh_enabled: true });
+      surface.refreshVisibleKnowledgeWindows();
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1,
+        "a matching concurrent list response consumes the pending revision change");
       surface.clearKnowledgeBridgeState("win-1");
     } finally {
       globalThis.document = originalDocument;
@@ -859,12 +1012,12 @@ test("changing knowledge kind invalidates an Issue retry owner", async () => {
     );
     const staleTimer = timers.find((timer) => timer.delay === 5000);
 
-    surface.ensureKnowledgeBridgeState("win-1", "pr");
+    surface.ensureKnowledgeBridgeState("win-1", "spec");
     const sentBefore = sent.length;
     forceFire(staleTimer);
 
     assert.equal(sent.length, sentBefore);
-    assert.equal(state.kind, "pr");
+    assert.equal(state.kind, "spec");
   });
 });
 
@@ -1113,174 +1266,23 @@ for (const semanticRetry of [
   });
 }
 
-test("PR selection retains the baseline full-render/full-view contract", async () => {
+test("Issue #4174: retired PR knowledge kind does not mount or request data", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async () => {
-    const originalDocument = globalThis.document;
     const { document: domDocument } = parseHTML("<html><body></body></html>");
-    globalThis.document = domDocument;
-    try {
-      const sent = [];
-      const body = domDocument.createElement("div");
-      domDocument.body.appendChild(body);
-      const windowMap = new Map([["win-1", body]]);
-      const createNode = (tag, className, textContent = "") => {
-        const node = domDocument.createElement(tag);
-        node.className = className || "";
-        node.textContent = textContent;
-        return node;
-      };
-      const surface = createSurface(mod, sent, "pr", {
-        windowMap,
-        knowledgeKindForPreset: () => "pr",
-        createNode,
-        createKnowledgeMarkdownBody: (value) =>
-          createNode("div", "knowledge-markdown", String(value || "")),
-      });
-      const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
-      state.entries = [ROW_A, ROW_B];
-      state.baseEntries = [ROW_A, ROW_B];
-      state.selectedNumber = ROW_A.number;
-      state.detail = detailFor(ROW_A, "Alpha PR body");
-      state.refreshEnabled = true;
-
-      surface.mountKnowledgeWindow({ id: "win-1", preset: "pr" }, body);
-      sent.length = 0;
-      const originalCards = [...body.querySelectorAll(".kanban-card")];
-      const rowB = body.querySelector(`[data-issue-number="${ROW_B.number}"]`);
-      assert.ok(rowB, "the PR fixture must render row B");
-
-      rowB.click();
-
-      assert.equal(state.selectedNumber, ROW_B.number);
-      assert.equal(state.detailLoading, true);
-      assert.equal(
-        state.selectionGeneration,
-        0,
-        "PR selection must not opt into the Issue/SPEC generation contract",
-      );
-      assert.equal(
-        state.detail?.number,
-        ROW_A.number,
-        "PR must retain its authoritative detail until the baseline full view completes",
-      );
-      assert.equal(sent.length, 1);
-      assert.deepEqual(sent[0], {
-        kind: "select_knowledge_bridge_entry",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        number: ROW_B.number,
-      });
-      assert.notStrictEqual(
-        body.querySelectorAll(".kanban-card")[0],
-        originalCards[0],
-        "PR selection must keep the legacy immediate full render",
-      );
-
-      const refreshedRowB = { ...ROW_B, title: "Beta PR refreshed" };
-      surface.applyKnowledgeReceiveEvent({
-        kind: "knowledge_entries",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        entries: [ROW_A, refreshedRowB],
-        selected_number: ROW_B.number,
-        empty_message: "",
-        refresh_enabled: true,
-      });
-      assert.equal(
-        state.baseEntries[1]?.title,
-        refreshedRowB.title,
-        "the PR select request id must accept its legacy full-list completion",
-      );
-
-      surface.applyKnowledgeReceiveEvent({
-        kind: "knowledge_detail",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        detail: detailFor(refreshedRowB, "Beta PR body"),
-      });
-      assert.equal(state.detail?.number, ROW_B.number);
-      assert.equal(state.detailLoading, false);
-      surface.clearKnowledgeBridgeState("win-1");
-    } finally {
-      globalThis.document = originalDocument;
-    }
-  });
-});
-
-test("a newer PR refresh rejects a late selection full-view completion", async () => {
-  const mod = await importSurfaceModule();
-  await withPatchedTimersAsync(async () => {
+    const body = domDocument.createElement("div");
     const sent = [];
     const surface = createSurface(mod, sent, "pr", {
       knowledgeKindForPreset: () => "pr",
     });
-    const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
-    state.entries = [ROW_A, ROW_B];
-    state.baseEntries = [ROW_A, ROW_B];
-    state.selectedNumber = ROW_A.number;
-    state.detail = detailFor(ROW_A, "Alpha PR body");
-    state.refreshEnabled = true;
-
-    surface.requestKnowledgeDetail("win-1", "pr", ROW_B.number);
-    const selectionRequestId = sent.at(-1).request_id;
-    surface.requestKnowledgeBridge("win-1", "pr", true);
-    const refreshRequestId = sent.at(-1).request_id;
-    assert.notEqual(refreshRequestId, selectionRequestId);
-
-    const refreshedRowB = { ...ROW_B, title: "Beta from newer refresh" };
-    const refreshedDetail = detailFor(refreshedRowB, "Fresh PR body");
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_entries",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: refreshRequestId,
-      entries: [ROW_A, refreshedRowB],
-      selected_number: ROW_B.number,
-      empty_message: "",
-      refresh_enabled: true,
-    });
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_detail",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: refreshRequestId,
-      detail: refreshedDetail,
-    });
-
-    const staleRowB = { ...ROW_B, title: "STALE selection snapshot" };
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_entries",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: selectionRequestId,
-      entries: [staleRowB],
-      selected_number: ROW_B.number,
-      empty_message: "",
-      refresh_enabled: true,
-    });
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_detail",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: selectionRequestId,
-      detail: detailFor(staleRowB, "STALE PR body"),
-    });
-
-    assert.deepEqual(
-      state.baseEntries.map((entry) => entry.title),
-      [ROW_A.title, refreshedRowB.title],
-      "the superseded PR selection must not overwrite the newer refresh list",
-    );
-    assert.equal(state.detail?.title, refreshedRowB.title);
-    assert.ok(
-      state.detail.sections.some((section) => section.body === "Fresh PR body"),
-      "the superseded PR detail must not overwrite the newer refresh detail",
-    );
-    surface.clearKnowledgeBridgeState("win-1");
+    try {
+      surface.mountKnowledgeWindow({ id: "win-1", preset: "pr" }, body);
+      assert.equal(body.childElementCount, 0, "retired PR GUI must not render a list or detail");
+      assert.deepEqual(sent, [], "retired PR GUI must not load, search or select");
+      assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+    } finally {
+      surface.clearKnowledgeBridgeState("win-1");
+    }
   });
 });
 
@@ -1319,10 +1321,124 @@ test("a new query filters baseEntries locally before semantic results arrive (T-
   });
 });
 
-test("500-row selection keeps list node identity and updates the right pane within p95 50ms", async () => {
+test("unchanged entry revisions retain rows while completing loads and preserving selection/search", async () => {
+  const mod = await importSurfaceModule();
+  const { document } = parseHTML(`
+    <section id="knowledge-window"><div class="issue-bridge-root">
+      <button data-action="refresh-knowledge"></button>
+      <input class="knowledge-search" />
+      <div class="knowledge-status"></div><div class="knowledge-list"></div>
+      <div class="knowledge-detail-pane"></div>
+    </div></section>
+  `);
+  const originalDocument = globalThis.document;
+  globalThis.document = document;
+  try {
+    await withPatchedTimersAsync(async ({ fire }) => {
+      const element = document.getElementById("knowledge-window");
+      const sent = [];
+      const createNode = (tag, className = "", text = "") => {
+        const node = document.createElement(tag);
+        node.className = className;
+        node.textContent = text;
+        return node;
+      };
+      const surface = createSurface(mod, sent, "issue", {
+        windowMap: new Map([["win-1", element]]), createNode,
+        createKnowledgeMarkdownBody: () => document.createElement("div"),
+      });
+      const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+      const receive = (revision, entries = [ROW_A, ROW_B]) => surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+        request_id: state.loadRequestId, revision, entries,
+        selected_number: ROW_A.number, refresh_enabled: true,
+      });
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+      const originalRow = element.querySelector('[data-issue-number="2"]');
+      const refresh = element.querySelector('[data-action="refresh-knowledge"]');
+      refresh.disabled = true;
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === originalRow,
+        "same revision must preserve list DOM nodes");
+      assert.equal(state.loading, false);
+      assert.equal(state.refreshing, false);
+      assert.equal(state.loadRecoveryTimer, null);
+      assert.equal(refresh.disabled, false, "load completion must re-enable refresh");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      assert.equal(element.querySelector(".knowledge-detail-title").textContent, ROW_B.title);
+      assert.equal(originalRow.classList.contains("selected"), true);
+
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: state.loadRequestId, message: "Temporary load error",
+      });
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      assert.ok(!element.querySelector(".knowledge-list").textContent.includes("Issue load failed"),
+        "a later successful response must clear the rendered load error");
+
+      receive("rows-v2", [ROW_A, { ...ROW_B, title: "Updated beta" }]);
+      assert.ok(element.querySelector('[data-issue-number="2"]') !== originalRow);
+      assert.ok(element.querySelector(".knowledge-list").textContent.includes("Updated beta"));
+      const updatedRow = element.querySelector('[data-issue-number="2"]');
+      receive(undefined, [ROW_A, { ...ROW_B, title: "Legacy beta" }]);
+      assert.ok(element.querySelector('[data-issue-number="2"]') !== updatedRow,
+        "changed legacy entries still update their row");
+
+      receive("rows-v2");
+      state.query = "Alpha";
+      surface.scheduleKnowledgeSearch("win-1", "issue");
+      const filteredRow = element.querySelector('[data-issue-number="1"]');
+      assert.ok(filteredRow);
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "same revision must retain filtered list nodes while resuming a cancelled search timer");
+      assert.equal(state.query, "Alpha");
+      assert.deepEqual(state.entries.map(entry => entry.number), [ROW_A.number]);
+      fire(timer => timer.delay === 250);
+      assert.equal(sent.at(-1).kind, "search_knowledge_bridge",
+        "a list completion must still dispatch the queued query");
+      assert.equal(sent.at(-1).query, "Alpha");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "resuming and dispatching the query must preserve the filtered list nodes");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_search_results", id: "win-1", knowledge_kind: "issue",
+        query: "Alpha", request_id: sent.at(-1).request_id,
+        entries: [ROW_B, ROW_A], refresh_enabled: true,
+      });
+      const semanticRow = element.querySelector('[data-issue-number="2"]');
+      assert.ok(semanticRow);
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v2");
+      assert.deepEqual(state.entries.map(entry => entry.number), [ROW_B.number, ROW_A.number],
+        "same base revision must preserve authoritative semantic results");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "same revision must retain semantic result nodes");
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an already reserved search must not redraw the list");
+      fire(timer => timer.delay === 250);
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an in-flight search must not redraw the list");
+      assert.equal(state.queuedSearchIntent, null, "the in-flight search must not be duplicated");
+      surface.clearKnowledgeBridgeState("win-1");
+    });
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("virtualized 500-row selection keeps mounted row identity and updates the right pane within p95 50ms", async () => {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML(`
     <section id="knowledge-window">
+      <div class="issue-bridge-root">
       <button data-action="refresh-knowledge"></button>
       <input class="knowledge-search" />
       <button data-issue-filter="open"></button>
@@ -1331,6 +1447,7 @@ test("500-row selection keeps list node identity and updates the right pane with
       <div class="knowledge-status"></div>
       <div class="knowledge-list"></div>
       <div class="knowledge-detail-pane"></div>
+      </div>
     </section>
   `);
   const originalDocument = globalThis.document;
@@ -1378,7 +1495,7 @@ test("500-row selection keeps list node identity and updates the right pane with
 
     const list = element.querySelector(".knowledge-list");
     const originalRows = [...list.querySelectorAll(".knowledge-row")];
-    assert.equal(originalRows.length, 500);
+    assert.ok(originalRows.length > 0 && originalRows.length < 200);
     const samples = [];
     for (let index = 0; index < 40; index += 1) {
       const target = originalRows[(index * 13) % originalRows.length];
@@ -1486,53 +1603,59 @@ function withPatchedTimers(run) {
   }
 }
 
-test("load recovery retry must not escalate to a forced refresh", async () => {
+test("slow cache loads show progress without retrying or overlapping refresh (#5413 AC-1/3)", async () => {
   const mod = await importSurfaceModule();
   withPatchedTimers(({ fire }) => {
     const sent = [];
     const surface = createSurface(mod, sent);
 
     surface.requestKnowledgeBridge("win-1", "issue", false);
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].kind, "load_knowledge_bridge");
-    assert.equal(sent[0].refresh, false);
-
     fire((timer) => timer.delay === 5000);
-
-    assert.equal(sent.length, 2, "recovery timer must retry the load once");
-    assert.equal(sent[1].kind, "load_knowledge_bridge");
-    assert.equal(
-      sent[1].refresh,
-      false,
-      "the recovery retry must stay a cache read; a forced refresh runs a full remote sync and always outlives the next 5s timer",
-    );
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.loading, true);
+    assert.equal(state.error, "");
+    assert.equal(state.loadSlow, true);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent[0].request_id, entries: [ROW_A], refresh_enabled: true,
+    });
+    const loads = sent.filter(message => message.kind === "load_knowledge_bridge");
+    assert.equal(loads.length, 2, "one queued explicit refresh starts only after the read completes");
+    assert.equal(loads[1].refresh, true);
+    assert.equal(state.loadSlow, false);
+    surface.clearKnowledgeBridgeState("win-1");
   });
 });
 
-test("a late knowledge_entries response is applied when the window has no data", async () => {
+test("cache load deadline errors recover on the original late response (#5413 AC-1/2)", async () => {
   const mod = await importSurfaceModule();
   withPatchedTimers(({ fire }) => {
     const sent = [];
     const surface = createSurface(mod, sent);
 
     surface.requestKnowledgeBridge("win-1", "issue", false);
-    const staleRequestId = sent[0].request_id;
+    const requestId = sent[0].request_id;
     fire((timer) => timer.delay === 5000);
-    const retryRequestId = sent[1].request_id;
-    assert.notEqual(staleRequestId, retryRequestId);
-
+    fire((timer) => timer.delay === 55000);
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.error, "Timed out loading cache-backed data");
+    assert.equal(state.loading, false);
+    assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1);
     surface.applyKnowledgeReceiveEvent({
       kind: "knowledge_entries",
       id: "win-1",
       knowledge_kind: "issue",
-      request_id: staleRequestId,
+      request_id: requestId,
       entries: [{ number: 42, title: "Issue bridge", phase: "backlog" }],
       selected_number: 42,
       empty_message: "",
       refresh_enabled: true,
     });
 
-    const state = surface.knowledgeBridgeStateMap.get("win-1");
     assert.equal(
       state.baseEntries.length,
       1,
@@ -1540,5 +1663,37 @@ test("a late knowledge_entries response is applied when the window has no data",
     );
     assert.equal(state.loading, false, "the applied response must finish the load");
     assert.equal(state.error, "");
+    assert.equal(state.loadSlow, false);
+  });
+});
+
+test("backend cache load failure ends waiting immediately (#5413 AC-1)", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    fire(timer => timer.delay === 5000);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+      request_id: sent[0].request_id, message: "Cache read failed",
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.loading, false);
+    assert.equal(state.error, "Cache read failed");
+    assert.equal(state.loadSlow, false);
+    assert.ok(timers.filter(timer => !timer.fired).every(timer => timer.cleared));
+  });
+});
+
+test("closing a slow cache load cancels its deadline (#5413)", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(({ timers, fire }) => {
+    const surface = createSurface(mod, []);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    fire(timer => timer.delay === 5000);
+    surface.clearKnowledgeBridgeState("win-1");
+    assert.ok(timers.filter(timer => !timer.fired).every(timer => timer.cleared));
+    assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
   });
 });

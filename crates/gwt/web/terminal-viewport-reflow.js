@@ -4,8 +4,8 @@
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 
-export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
-export const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
+const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
   if (typeof requestAnimationFrame === "function") {
@@ -572,13 +572,12 @@ export function classifyProjectWindowVisibility({
 
 /**
  * Predicate used by both the host resize fan-out and the existing
- * `fitTerminal` short-circuit. Pulled out so a unit test can pin the
- * `.hidden` short-circuit ahead of the workspace `minimized` check.
+ * `fitTerminal` short-circuit. Only the current DOM layout controls refresh;
+ * saved canvas placement no longer represents a window's visibility.
  */
-export function viewportEligibleForRefresh({ element, workspaceWindow }) {
+export function viewportEligibleForRefresh({ element }) {
   if (element && element.isConnected === false) return false;
   if (element && element.hidden) return false;
-  if (workspaceWindow && workspaceWindow.minimized) return false;
   return true;
 }
 
@@ -835,7 +834,7 @@ function activationResult({
   };
 }
 
-export function terminalActivationLayoutSnapshot(runtime) {
+function terminalActivationLayoutSnapshot(runtime) {
   const terminal = runtime?.terminal;
   const parent = terminal?.element?.parentElement;
   if (!terminal || !parent || !elementHasLayoutBox(parent)) {

@@ -26,7 +26,9 @@ async function importBoardLogsSurface() {
   const source = boardLogsSurfaceSource.replace(
     'from "/board-surface.js"',
     `from "${pathToFileURL(resolve(here, "../board-surface.js")).href}"`,
-  );
+  ).replace('from "/ui-state-store.js"',
+    `from "${pathToFileURL(resolve(here, "../ui-state-store.js")).href}"`).replace('from "/ui-content.js"',
+    `from "${pathToFileURL(resolve(here, "../ui-content.js")).href}"`);
   return import(
     `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
   );
@@ -301,4 +303,26 @@ test("scope selector reuses Logs chrome backed by Operator tokens", () => {
     /\.logs-scope-select\s*\{/,
     "scope selector must not fork a custom chrome instead of reusing Logs/Operator tokens",
   );
+});
+
+test("Logs snapshots and live appends retain the latest 1000 entries without extending the payload", async () => {
+  const { createBoardLogsSurface } = await importBoardLogsSurface();
+  const { surface } = createFixture(createBoardLogsSurface);
+  const entries = Array.from({ length: 1002 }, (_, id) => ({
+    id, project_scope: "project-alpha", severity: "info", message: `log-${id}`,
+  }));
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
+  const state = surface.ensureLogState("logs-1");
+  assert.equal(state.entries.length, 1000);
+  assert.deepEqual(state.entries.map(entry => entry.id), entries.slice(2).map(entry => entry.id));
+
+  surface.applyBoardLogsReceiveEvent({
+    kind: "log_entry_appended",
+    entry: { ...entries[0], id: 1002, message: "latest" },
+  });
+  assert.equal(state.entries.length, 1000);
+  assert.equal(state.entries[0].id, 3);
+  assert.equal(state.entries.at(-1).id, 1002);
+  assert.equal(entries.length, 1002, "receiving live output must not extend the snapshot payload");
+  assert.equal(entries.at(-1).id, 1001);
 });

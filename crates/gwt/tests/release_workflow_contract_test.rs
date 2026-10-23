@@ -1,7 +1,7 @@
 //! Contract tests for the release preparation workflow (Issue #3428).
 //!
 //! `Prepare Release` is the only supported release entrypoint, and every run
-//! writes to a protected branch (`develop`) and opens the `develop -> main`
+//! writes to a protected branch (`develop`) and opens a frozen snapshot's main
 //! Release PR. Both actions need credentials the default `GITHUB_TOKEN` does
 //! not have, so the token wiring is a contract — not an implementation
 //! detail — and is pinned here.
@@ -103,4 +103,40 @@ fn prepare_release_fails_fast_when_the_bypass_secret_is_missing() {
         "the workflow must fail with an actionable message before the version \
          bump when the release PAT is missing"
     );
+}
+
+#[test]
+fn release_pr_freezes_the_pushed_develop_version() {
+    let workflow = prepare_release_workflow();
+    let preflight = workflow.split("- name: Apply version bump").next().unwrap();
+    assert!(
+        preflight.contains("git ls-remote --heads origin \"refs/heads/release/${TAG_NAME}\""),
+        "refuse an existing snapshot before changing version files or develop"
+    );
+    let snapshot = workflow
+        .split("- name: Freeze release snapshot")
+        .nth(1)
+        .expect("freeze a versioned release head after pushing the develop bump");
+    assert!(
+        workflow.find("git push origin develop").unwrap()
+            < workflow.find("- name: Freeze release snapshot").unwrap()
+    );
+    assert!(snapshot.contains("RELEASE_BRANCH=\"release/${TAG_NAME}\""));
+    assert!(
+        snapshot.contains("--force-with-lease=\"refs/heads/${RELEASE_BRANCH}:\""),
+        "create the release ref only when absent; never move a frozen head"
+    );
+    let pr_step = snapshot
+        .split("- name: Create or update Release PR")
+        .nth(1)
+        .unwrap();
+    assert!(pr_step.contains("--head \"$RELEASE_BRANCH\""));
+    assert!(!pr_step.contains("--head develop"));
+}
+
+#[test]
+fn release_branch_merges_trigger_release_without_reverse_sync() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    assert!(workflow.contains("from akiojin/release/"));
+    assert!(!workflow.contains("sync-develop"));
 }

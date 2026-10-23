@@ -25,6 +25,8 @@ use crate::{
 /// SPEC-1942 command model for `board.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
+    /// Best-effort Discussion synchronization, independent of local reads/writes.
+    Sync,
     /// `board.show` with optional audience filters and latest-entry limit.
     /// `unresolved` keeps only `blocked` entries whose escalation is still open
     /// (Issue #4609).
@@ -113,6 +115,7 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
+        Some("sync") => Ok(BoardCommand::Sync),
         Some("config") => match it.next().map(String::as_str) {
             Some("show") | None => Ok(BoardCommand::ConfigShow),
             Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -128,6 +131,16 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        BoardCommand::Sync => {
+            let report = crate::board_discussion_sync::sync_now(env.repo_path())
+                .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?;
+            out.push_str(
+                &serde_json::to_string_pretty(&report)
+                    .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?,
+            );
+            out.push('\n');
+            0
+        }
         BoardCommand::Show {
             json,
             workspace,
@@ -158,6 +171,20 @@ pub(super) fn run<E: CliEnv>(
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
+            let complete_read = (all && limit.is_none() && !unresolved)
+                .then(|| (chrono::Utc::now(), snapshot.board.clone()));
+            // all:true is the recovery path for unread posts older than the hot projection.
+            if all {
+                snapshot.board.entries = crate::board_provider::load_entries_since(
+                    env.repo_path(),
+                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                )
+                .map_err(gwt_error_to_spec_ops_error)?;
+                snapshot.board.has_more_before = false;
+            }
+            snapshot.board.entries.retain(|entry| {
+                gwt_core::coordination::board_entry_visible_for_scope(entry, &scope)
+            });
             // The unresolved filter cannot answer without the index; a plain
             // read degrades to `indexed: false` rather than failing the page.
             let escalations = match gwt_core::coordination::load_escalation_store(env.repo_path()) {
@@ -202,6 +229,27 @@ pub(super) fn run<E: CliEnv>(
                     "Board snapshot: {returned_entries}/{total_entries} entries\n"
                 ));
                 render_snapshot(out, &snapshot);
+            }
+            if let Some(session_id) = crate::board_read_receipts::caller_session_from_env() {
+                let recorded = match complete_read {
+                    Some((started_at, hot)) => crate::board_read_receipts::record_complete_read(
+                        env.repo_path(),
+                        &session_id,
+                        &snapshot.board.entries,
+                        started_at,
+                        &hot,
+                    ),
+                    None => crate::board_read_receipts::record_returned_entries(
+                        env.repo_path(),
+                        &session_id,
+                        &snapshot.board.entries,
+                    ),
+                };
+                if let Err(error) = recorded {
+                    let warning = crate::board_read_receipts::warning(error);
+                    tracing::warn!(%warning, "explicit Board read receipt was not recorded");
+                    let _ = writeln!(env.stderr(), "{warning}");
+                }
             }
             0
         }
@@ -255,6 +303,7 @@ pub(super) fn run<E: CliEnv>(
             let mentions = normalize_board_mentions(
                 &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
             );
+            validate_agent_user_mentions(env.repo_path(), &mentions)?;
             let mut audience = Vec::new();
             if !broadcast {
                 if let BoardAudienceScope::Workspace(workspace_id) = current_session_board_scope(
@@ -310,6 +359,7 @@ pub(super) fn run<E: CliEnv>(
                     session.id.clone(),
                     session.display_name.clone(),
                 )
+                .with_agent_name(session.agent_name.clone())
                 .with_worktree_form(
                     crate::worktree_form::board_origin_worktree_form(
                         env.repo_path(),
@@ -386,6 +436,7 @@ pub(super) fn run<E: CliEnv>(
             let mentions = normalize_board_mentions(
                 &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
             );
+            validate_agent_user_mentions(env.repo_path(), &mentions)?;
             let input = crate::recovery_delivery::RecoveryDeliveryInput {
                 kind: kind.parse().map_err(gwt_error_to_spec_ops_error)?,
                 body,
@@ -994,6 +1045,35 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
     Ok(normalize_board_mentions(&mentions))
 }
 
+/// Human GUI posts use a separate path. Every CLI post is agent-authored,
+/// including the sessionless compatibility identity, so only the exact
+/// registered PM may address a human here. Recovery delivery shares this rule.
+fn validate_agent_user_mentions(
+    repo_path: &std::path::Path,
+    mentions: &[BoardMention],
+) -> Result<(), SpecOpsError> {
+    if !mentions
+        .iter()
+        .any(|mention| mention.target_kind == gwt_core::coordination::BoardMentionTargetKind::User)
+    {
+        return Ok(());
+    }
+    let registered_pm = current_session_from_env()
+        .ok()
+        .flatten()
+        .is_some_and(|session| {
+            std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() == Some(session.id.as_str())
+                && crate::board_read_receipts::registered_pm(repo_path, &session.id)
+        });
+    if registered_pm {
+        Ok(())
+    } else {
+        Err(io_as_spec_ops_error(io::Error::other(
+            "Only the registered PM session may mention a user. Address the PM with params.mentions:[\"agent:pm\"] (or its exact session:<id>) and retry board.post; the PM handles human decisions.",
+        )))
+    }
+}
+
 /// SPEC-2359 FR-096: `--mention workspace:<id>` routes to BoardEntry.audience,
 /// not to BoardMention. Split the raw mention args into (workspace_audience,
 /// other_mention_args) so the rest of the post path can parse other mentions
@@ -1065,13 +1145,14 @@ fn format_author(entry: &BoardEntry) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let author = entry.author_display_name();
     match (branch, session) {
         (Some(branch), Some(session)) => {
-            format!("{} @ {} / {}", entry.author, branch, session)
+            format!("{} @ {} / {}", author, branch, session)
         }
-        (Some(branch), None) => format!("{} @ {}", entry.author, branch),
-        (None, Some(session)) => format!("{} / {}", entry.author, session),
-        (None, None) => entry.author.clone(),
+        (Some(branch), None) => format!("{} @ {}", author, branch),
+        (None, Some(session)) => format!("{} / {}", author, session),
+        (None, None) => author,
     }
 }
 
@@ -1102,6 +1183,241 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn issue_3713_show_records_only_returned_entries_for_the_calling_session() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/reader", gwt_agent::AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut entries = Vec::new();
+        for workspace in ["workspace-current", "workspace-current", "workspace-other"] {
+            let entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Peer",
+                "status".parse().unwrap(),
+                "read the actual body",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec![workspace]);
+            post_entry(tmp.path(), entry.clone()).unwrap();
+            entries.push(entry);
+        }
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                BoardCommand::Show {
+                    json: true,
+                    workspace: Some("workspace-current".into()),
+                    all: false,
+                    limit: Some(1),
+                    unresolved: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(page["board"]["entries"][0]["id"], entries[1].id);
+        let receipt = gwt_core::paths::gwt_project_dir_for_repo_path(tmp.path())
+            .join("project-state/board-read-receipts")
+            .join(format!(
+                "{}.json",
+                crate::pm_registry::pm_delivery_prompt_sha256(&session.id)
+            ));
+        let bytes = std::fs::read_to_string(receipt)
+            .expect("successful explicit show must persist a session-local read receipt");
+        assert!(bytes.contains(&entries[1].id));
+        assert!(!bytes.contains(&entries[0].id));
+        assert!(!bytes.contains(&entries[2].id));
+    }
+
+    #[test]
+    fn issue_3713_show_all_returns_critical_evidence_older_than_the_hot_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let first = BoardEntry::new(
+            AuthorKind::Agent,
+            "Owner",
+            "handoff".parse().unwrap(),
+            "old but unread evidence",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        post_entry(tmp.path(), first.clone()).unwrap();
+        for index in 0..gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT {
+            post_entry(
+                tmp.path(),
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Peer",
+                    "status".parse().unwrap(),
+                    format!("later post {index}"),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        assert!(!load_snapshot(tmp.path())
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == first.id));
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(page["board"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == first.id));
+        assert_eq!(
+            page["page"]["returned_entries"],
+            gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT + 1
+        );
+    }
+
+    fn issue_3713_agent_post(recovery: bool) -> BoardCommand {
+        let post = Box::new(BoardPostCommand {
+            kind: "question".into(),
+            body: Some("Need a product decision".into()),
+            mentions: vec!["user:akiojin".into()],
+            ..BoardPostCommand::default()
+        });
+        if recovery {
+            BoardCommand::RecoveryPost {
+                intent_id: "test-intent".into(),
+                command: post,
+            }
+        } else {
+            BoardCommand::Post(post)
+        }
+    }
+
+    fn issue_3713_rejects_agent_user_mention(recovery: bool) {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/agent", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let error = run(
+            &mut env,
+            issue_3713_agent_post(recovery),
+            &mut String::new(),
+        )
+        .expect_err("non-PM must address PM instead of the user");
+        assert!(error.to_string().contains("agent:pm"), "{error}");
+        assert!(load_snapshot(tmp.path()).unwrap().board.entries.is_empty());
+    }
+
+    #[test]
+    fn issue_3713_ordinary_post_rejects_non_pm_user_mention_with_recovery() {
+        issue_3713_rejects_agent_user_mention(false);
+    }
+
+    #[test]
+    fn issue_3713_recovery_post_cannot_bypass_non_pm_user_mention() {
+        issue_3713_rejects_agent_user_mention(true);
+    }
+
+    fn issue_3713_register_pm(repo: &std::path::Path, session: &Session) {
+        let prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: session.id.clone(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        };
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+            &prefs,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_3713_registered_pm_can_address_user_and_replacement_loses_privilege() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        issue_3713_register_pm(tmp.path(), &session);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        assert_eq!(
+            run(&mut env, issue_3713_agent_post(false), &mut String::new()).unwrap(),
+            0
+        );
+        let replacement = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        issue_3713_register_pm(tmp.path(), &replacement);
+        for recovery in [false, true] {
+            assert!(run(
+                &mut env,
+                issue_3713_agent_post(recovery),
+                &mut String::new()
+            )
+            .is_err());
+        }
+        assert_eq!(load_snapshot(tmp.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn issue_3713_sessionless_agent_routes_to_pm_without_human_impersonation() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        assert!(run(&mut env, issue_3713_agent_post(false), &mut String::new()).is_err());
+        let routed = BoardCommand::Post(Box::new(BoardPostCommand {
+            kind: "handoff".into(),
+            body: Some("PM decision requested".into()),
+            mentions: vec!["agent:pm".into()],
+            ..BoardPostCommand::default()
+        }));
+        assert_eq!(run(&mut env, routed, &mut String::new()).unwrap(), 0);
     }
 
     fn immutable_execution_refusal() -> crate::cli::governance::OperationRefusal {
@@ -1230,6 +1546,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(2338),
             title: "launch rebinds dead sessions".to_string(),
             body: String::new(),
@@ -2286,8 +2603,15 @@ mod tests {
 
     #[test]
     fn board_family_run_post_persists_typed_mentions() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        issue_3713_register_pm(tmp.path(), &session);
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2458,7 +2782,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-        let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        let mut session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        session.agent_name = Some("ミオ".into());
         session.save(&sessions_dir).unwrap();
         let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
@@ -2499,6 +2824,7 @@ mod tests {
         );
         assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
     }
 
     #[test]
@@ -2821,7 +3147,7 @@ mod tests {
                     "session:session-target".into(),
                     "agent:reviewer".into(),
                     "agent:observer".into(),
-                    "user:akiojin".into(),
+                    "agent:pm".into(),
                 ],
                 resolves: Vec::new(),
                 broadcast: false,
@@ -3193,6 +3519,22 @@ mod tests {
             out.contains("Claude @ feature/foo / sess-a3f2"),
             "expected origin metadata suffix, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn board_author_format_prefers_the_captured_agent_name() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_agent_name("ミオ");
+        assert_eq!(format_author(&entry), "ミオ (Codex)");
     }
 
     #[test]

@@ -196,6 +196,7 @@ impl AppRuntime {
 
         self.profile_selections
             .insert(id.to_string(), profile_name.to_string());
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 
@@ -249,6 +250,7 @@ impl AppRuntime {
 
         self.profile_selections
             .insert(id.to_string(), request.name.trim().to_string());
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 
@@ -293,6 +295,7 @@ impl AppRuntime {
             )];
         }
 
+        self.launch_wizard_cache.refresh_agent_options();
         self.profile_snapshot_events(&tab_id, id, client_id)
     }
 

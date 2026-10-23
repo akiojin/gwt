@@ -21,6 +21,7 @@ const NOW: &str = "2026-08-06T05:00:00Z";
 
 fn auto_issue(number: u64) -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number,
         title: format!("Issue {number}"),
         labels: vec!["auto-merge".to_string()],
@@ -39,7 +40,7 @@ fn verified() -> BranchProtectionStatus {
 }
 
 fn autonomous_monitor() -> IssueMonitorState {
-    IssueMonitorState::with_prefs(
+    test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             autonomous_mode: true,
@@ -180,7 +181,7 @@ fn applying_pending_handoffs_is_idempotent() {
 /// mutates lifecycle state, exactly like every other autonomous transition.
 #[test]
 fn handoffs_are_not_applied_when_autonomous_mode_is_off() {
-    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut monitor = test_monitor(IssueMonitorConfig::default());
     gwt::scan_issue_monitor_candidates(&mut monitor, &[auto_issue(42)], NOW);
     monitor.complete_active_launch(42, "tab-1::agent-1");
 
@@ -201,6 +202,7 @@ fn handoffs_are_not_applied_when_autonomous_mode_is_off() {
 #[test]
 fn answering_a_handoff_resumes_the_same_session_without_a_duplicate_launch() {
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     let issue = auto_issue(42);
     launch_autonomous(&mut monitor, &issue);
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
@@ -256,6 +258,7 @@ fn answering_a_handoff_resumes_the_same_session_without_a_duplicate_launch() {
 #[test]
 fn parking_a_question_lets_the_next_ready_issue_launch_immediately() {
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     monitor.set_gui_connected(true);
     let blocked = auto_issue(42);
     let next_ready = auto_issue(43);
@@ -434,6 +437,7 @@ fn early_receipt_does_not_complete_an_undurable_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let prefs_path = dir.path().join("issue-monitor.json");
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     let issue = auto_issue(42);
     launch_autonomous(&mut monitor, &issue);
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
@@ -505,8 +509,7 @@ fn early_receipt_does_not_complete_an_undurable_launch() {
         AutonomousHandoffDeliveryState::Delivered { .. }
     ));
 
-    let mut materializer =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), receipt_prefs);
+    let mut materializer = test_monitor_with_prefs(IssueMonitorConfig::default(), receipt_prefs);
     assert!(materializer.mark_launch_delivery_materialized(
         42,
         &delivery_id,
@@ -559,7 +562,7 @@ fn delayed_receipt_after_monitor_disable_cannot_resurrect_the_launch() {
     let receipt = bind_answer_delivery(&prefs_path, &prepared);
     let mut enabled_prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load bound attempt");
     enabled_prefs.enabled = true;
-    let mut disabled = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), enabled_prefs);
+    let mut disabled = test_monitor_with_prefs(IssueMonitorConfig::default(), enabled_prefs);
     assert!(disabled.set_enabled_with_effect_revocation(false).is_some());
     gwt::save_issue_monitor_prefs(&prefs_path, &disabled.prefs()).expect("persist disabled state");
 
@@ -596,8 +599,7 @@ fn stale_daemon_rebase_preserves_the_disk_delivery_fence_and_receipt() {
     monitor.answer_autonomous_handoff("handoff-42", "Yes", "2026-08-06T06:00:00Z");
     monitor.resume_answered_autonomous_handoffs("2026-08-06T06:00:01Z");
     monitor.complete_active_launch(42, "tab-1::agent-answer");
-    let mut stale_daemon =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+    let mut stale_daemon = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist pending answer");
 
     let prepared = match gwt::prepare_autonomous_handoff_delivery_from_prefs(
@@ -662,7 +664,7 @@ fn stale_daemon_rebase_preserves_same_attempt_target_binding() {
     let unbound = gwt::load_issue_monitor_prefs(&prefs_path).expect("load unbound fence");
     bind_answer_delivery(&prefs_path, &prepared);
     let bound = gwt::load_issue_monitor_prefs(&prefs_path).expect("load bound fence");
-    let mut stale_daemon = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), unbound);
+    let mut stale_daemon = test_monitor_with_prefs(IssueMonitorConfig::default(), unbound);
 
     stale_daemon.rebase_daemon_driver_prefs(&bound);
 
@@ -699,7 +701,7 @@ fn live_prebind_materializer_survives_a_concurrent_daemon_scan() {
         .expect("ready"),
         AutonomousHandoffDeliveryPreparation::Ready(_)
     ));
-    let mut daemon = IssueMonitorState::with_prefs(
+    let mut daemon = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("load prebind fence"),
     );
@@ -852,7 +854,7 @@ fn unresolved_answer_attempt_becomes_ambiguous_and_frees_the_slot_on_restart() {
         *materializer_pid = 2_000_000_000;
         *materializer_started_at = 1;
     }
-    let mut restarted = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prepared);
+    let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), prepared);
     assert_eq!(
         restarted.apply_pending_autonomous_handoffs("2026-08-06T06:10:00Z"),
         vec![42],
@@ -924,7 +926,7 @@ fn live_materializer_attempt_is_not_reconciled_as_a_restart() {
         .expect("in-flight result"),
         AutonomousHandoffDeliveryPreparation::InFlight { attempt: 1, .. }
     ));
-    let mut daemon = IssueMonitorState::with_prefs(
+    let mut daemon = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("load in-flight attempt"),
     );
@@ -965,7 +967,7 @@ fn target_window_exit_before_receipt_reconciles_as_ambiguous() {
         other => panic!("expected Ready, got {other:?}"),
     };
     bind_answer_delivery(&prefs_path, &prepared);
-    let mut daemon = IssueMonitorState::with_prefs(
+    let mut daemon = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("load bound attempt"),
     );
@@ -1026,7 +1028,7 @@ fn dead_materializer_with_stale_launched_row_reconciles_as_ambiguous() {
     };
     target.materializer_pid = 2_000_000_000;
     target.materializer_started_at = 1;
-    let mut daemon = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), crashed);
+    let mut daemon = test_monitor_with_prefs(IssueMonitorConfig::default(), crashed);
 
     assert_eq!(
         daemon.apply_pending_autonomous_handoffs("2026-08-06T06:00:04Z"),
@@ -1120,7 +1122,7 @@ fn answered_handoff_delivery_failure_uses_bounded_resume_backoff() {
         retry_backoff_cap_secs: 60,
         ..gwt::issue_monitor::AutonomousTuning::default()
     };
-    let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+    let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
     let issue = auto_issue(42);
     launch_autonomous(&mut monitor, &issue);
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
@@ -1241,7 +1243,7 @@ fn delayed_receipt_is_rejected_after_the_human_updates_the_answer() {
     // Restart reconciliation makes the unresolved old attempt human-owned.
     gwt::prepare_autonomous_handoff_delivery_from_prefs(&prefs_path, 42, "2026-08-06T06:01:00Z")
         .expect("reconcile old attempt");
-    let mut replacement = IssueMonitorState::with_prefs(
+    let mut replacement = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).expect("load replacement state"),
     );
@@ -1311,7 +1313,7 @@ fn handoffs_survive_the_prefs_round_trip() {
     let decoded: IssueMonitorPrefs = serde_json::from_str(&encoded).expect("deserialize prefs");
     assert_eq!(decoded.autonomous_handoffs.len(), 1);
 
-    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), decoded);
+    let restored = test_monitor_with_prefs(IssueMonitorConfig::default(), decoded);
     let restored_handoff = restored
         .open_autonomous_handoff(42)
         .expect("handoff restored after restart");
@@ -1337,8 +1339,7 @@ fn a_parked_issue_stays_parked_across_a_restart_and_rescan() {
 
     // Restart: only the persisted prefs survive; the inbox is rebuilt by scan.
     let restarted_prefs = monitor.prefs();
-    let mut restarted =
-        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restarted_prefs);
+    let mut restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), restarted_prefs);
     restarted.set_gui_connected(true);
     gwt::scan_issue_monitor_candidates(
         &mut restarted,
@@ -1406,4 +1407,19 @@ fn status_view_exposes_the_needs_human_question_and_resumability() {
         .needs_human_reason
         .as_deref()
         .is_some_and(|reason| reason.contains("human judgment")));
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor(config: gwt::IssueMonitorConfig) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::new(config);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
+}
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

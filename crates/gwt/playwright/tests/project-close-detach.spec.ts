@@ -1,6 +1,6 @@
-/* Issue #4539: run against the browser-check isolated checkout, never a
- * resident server. The custom fixture agent is /bin/sh -i: a real agent
- * runtime/PTY without contacting an external provider. */
+/* Run against the browser-check isolated checkout, never a resident server.
+ * A custom shell Agent supplies a real runtime/PTY without contacting an
+ * external provider. The detach test requires the /bin/sh -i fixture. */
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -34,13 +34,14 @@ async function latestWizard(page: Page, cursor: number, requireOpen = false) {
 async function cursor(page: Page) {
   return page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
 }
-async function wizardAction(page: Page, action: unknown) {
+type CanvasBounds = { x: number; y: number; width: number; height: number };
+async function wizardAction(page: Page, action: unknown, bounds?: CanvasBounds) {
   const after = await cursor(page);
   await sendLiveGwtEvent(page, { kind: "launch_wizard_action", action,
-    bounds: { x: 80, y: 80, width: 700, height: 440 } });
+    bounds: bounds ?? { x: 80, y: 80, width: 700, height: 440 } });
   return latestWizard(page, after);
 }
-async function launchAgent(page: Page, agentId: string) {
+async function launchAgent(page: Page, agentId: string, bounds?: CanvasBounds) {
   const existing = await page.evaluate((agentId) => {
     const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
     return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
@@ -48,21 +49,22 @@ async function launchAgent(page: Page, agentId: string) {
   }, agentId);
   if (existing) return existing as string;
   const after = await cursor(page);
-  await openLiveLaunchWizardForBranch(page);
+  const fixture = await openLiveLaunchWizardForBranch(page);
   await latestWizard(page, after, true);
-  await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
-  let state = await wizardAction(page, { kind: "set_agent", agent_id: agentId });
+  await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" }, bounds);
+  let state = await wizardAction(page, { kind: "set_agent", agent_id: agentId }, bounds);
   for (let step = 0; step < 12 && state.wizard; step += 1) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== "host"
       && state.wizard.runtime_target_options?.some((option: any) => option.value === "host")) {
-      state = await wizardAction(page, { kind: "set_runtime_target", target: "Host" });
+      state = await wizardAction(page, { kind: "set_runtime_target", target: "Host" }, bounds);
     } else {
       expect(state.wizard.primary_action_enabled, state.wizard.primary_action_disabled_reason).toBe(true);
-      state = await wizardAction(page, { kind: "submit" });
+      state = await wizardAction(page, { kind: "submit" }, bounds);
     }
   }
   expect(state.wizard).toBeNull();
+  if (bounds) await fixture.cleanup();
   return (await page.waitForFunction((agentId) => {
     const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
     return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
@@ -206,4 +208,102 @@ test("live detach preserves the Agent; explicit close reaches all A tabs and lea
     }
     expect(observations.flatMap((entry) => entry.errors)).toEqual([]);
   });
+});
+
+
+// Test the shared controller with binary-served JS/CSS and local protocol data.
+// Confirm/cancel are captured here so no real project or Agent is closed.
+test("shared close preview renders immutable state and preserves authority and focus", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated checkout server");
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const { errors } = capture(page);
+  await gotoLiveGwt(page, base!, { enableTestBridge: true });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator("#close-project-button")).toBeVisible();
+  const fixturePath = "/__close-project-model-fixture";
+  await page.route(`**${fixturePath}`, route => route.fulfill({ contentType: "text/html", body: `
+    <html data-theme="${theme}"><head>
+      <link rel="stylesheet" href="/styles/tokens.css">
+      <link rel="stylesheet" href="/styles/typography.css">
+      <link rel="stylesheet" href="/styles/components.css">
+      <link rel="stylesheet" href="/styles/app.css">
+    </head><body><button id="origin" class="text-button">Close Project</button></body></html>` }));
+  await page.goto(new URL(fixturePath, base!).toString());
+  await page.evaluate(async () => {
+    const modulePath = '/close-project-confirm-modal.js';
+    const { createCloseProjectController } = await import(modulePath);
+    const sent: any[] = [], closed: string[] = [], failures: string[] = [];
+    const controller = createCloseProjectController({ document,
+      send: (message: any) => sent.push(message), onClosed: (key: string) => closed.push(key),
+      onError: (message: string) => failures.push(message) });
+    document.body.append(controller.modal);
+    document.querySelector<HTMLButtonElement>('#origin')!.onclick = () => controller.request('alpha');
+    const preview = () => controller.receive({ kind: 'close_project_preview',
+      token: { project_key: 'alpha', generation: 7, nonce: 'runtime-token' }, title: 'Alpha',
+      running_agents: [{ display_name: 'Local fixture', branch: 'work/alpha' }] });
+    (window as any).__closeModelFixture = { controller, sent, closed, failures, preview };
+  });
+  const origin = page.locator('#origin');
+  const modal = page.getByRole('dialog', { name: 'Close Project?' });
+  const cancel = modal.getByRole('button', { name: 'Cancel', exact: true });
+  const confirm = modal.getByRole('button', { name: 'Close Project', exact: true });
+  await origin.click();
+  await origin.click();
+  expect(await page.evaluate(() => (window as any).__closeModelFixture.sent)).toEqual([
+    { kind: 'preview_close_project', project_key: 'alpha' },
+  ]);
+  await page.evaluate(() => (window as any).__closeModelFixture.preview());
+  await expect(modal).toBeVisible();
+  await expect(modal).toHaveAttribute('aria-modal', 'true');
+  for (const primitive of ['modal-header', 'modal-body', 'modal-footer']) await expect(modal.locator(`.${primitive}`)).toBeVisible();
+  await expect(modal.locator('li')).toHaveText('Local fixture (work/alpha)');
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(modal).toBeHidden();
+  await expect(origin).toBeFocused();
+  await page.evaluate(() => {
+    const fixture = (window as any).__closeModelFixture;
+    const event = { kind: 'close_project_preview', title: 'Alpha',
+      token: { project_key: 'alpha', generation: 7, nonce: 'runtime-token' },
+      running_agents: [{ display_name: 'Local fixture', branch: 'work/alpha' }] };
+    fixture.controller.receive(event);
+    event.token.nonce = 'mutated';
+    fixture.controller.receive({ kind: 'project_closed', project_key: 'other' });
+  });
+  await expect(modal).toBeVisible();
+  await expect(cancel).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('shared-close-preview.png') });
+  await confirm.click();
+  await expect(modal).toBeHidden();
+  await expect(origin).toBeFocused();
+  expect(await page.evaluate(() => (window as any).__closeModelFixture.sent.slice(1))).toEqual([
+    { kind: 'cancel_close_project', token: { project_key: 'alpha', generation: 7, nonce: 'runtime-token' } },
+    { kind: 'confirm_close_project', token: { project_key: 'alpha', generation: 7, nonce: 'runtime-token' } },
+  ]);
+  await page.evaluate(() => {
+    const { controller, preview } = (window as any).__closeModelFixture;
+    preview(); controller.receive({ kind: 'project_closed', project_key: 'alpha' });
+    preview(); controller.receive({ kind: 'close_project_error', message: 'Close failed' });
+    preview(); controller.connectionLost();
+  });
+  await expect(modal).toBeHidden();
+  await expect(origin).toBeFocused();
+  expect(await page.evaluate(() => {
+    const { sent, closed, failures } = (window as any).__closeModelFixture;
+    return { sent: sent.length, closed, failures };
+  })).toEqual({ sent: 3, closed: ['other', 'alpha'], failures: ['Close failed'] });
+  await page.evaluate(() => (window as any).__closeModelFixture.controller.receive({
+    kind: 'close_project_preview', title: 'Alpha', running_agents: [],
+    token: { project_key: 'alpha', generation: 8, nonce: 'idle-token' },
+  }));
+  await expect(modal).toBeHidden();
+  expect(await page.evaluate(() => (window as any).__closeModelFixture.sent.at(-1))).toEqual({
+    kind: 'confirm_close_project', token: { project_key: 'alpha', generation: 8, nonce: 'idle-token' },
+  });
+  expect(errors).toEqual([]);
 });

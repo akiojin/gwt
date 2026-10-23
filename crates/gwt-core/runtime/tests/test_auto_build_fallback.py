@@ -422,7 +422,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 result["specResults"][0]["title"],
                 "gwt-spec: Semantic search platform",
             )
-            db = db_root / "abc1234567890def" / "specs"
+            db = db_root / "abc1234567890def" / "issues"
             self.assertTrue(db.exists(), f"index dir was not created: {db}")
 
     def test_search_memory_auto_builds_when_index_missing(self):
@@ -505,6 +505,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertEqual(result.get("error_code"), "EMPTY_CORPUS", result)
             self.assertEqual(result.get("scope"), "specs", result)
             self.assertIn("cache", result.get("error", "").lower(), result)
+            self.assertFalse(db_root.exists(), "diagnose an unsynced cache before creating a store")
 
     def test_search_issues_empty_corpus_returns_diagnostic_when_cache_unpopulated(self):
         with tempfile.TemporaryDirectory() as tmp:

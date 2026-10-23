@@ -14,14 +14,17 @@
 //! Per-session rows are gathered by [`collect_sessions`], which enumerates the
 //! gwt session store and reads each session's local rollout / transcript.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gwt_agent::{AgentId, AgentStatus, Session};
+use gwt_agent::{AgentId, AgentStatus};
 use gwt_config::{usage_config::UsageConfig, Settings};
 use gwt_core::usage::{
-    claude, codex, consumption,
+    cache::UsageCache,
+    claude, codex,
     state::{age_secs, apply_staleness, should_fetch_claude, DEFAULT_STALE_AFTER_SECS},
     ProviderConsumption, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     WindowKind,
@@ -41,7 +44,7 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-/// Called with each tick's account rows, in addition to the client broadcast.
+/// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
 /// event loop can touch, so the caller supplies the hop. Taking a callback
@@ -53,17 +56,24 @@ pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
     observe_accounts: AccountsObserver,
 ) {
     drop(
         runtime
             .handle()
-            .spawn(run(clients, refresh, observe_accounts)),
+            .spawn(run(clients, refresh, project_roots, observe_accounts)),
     );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
+async fn run(
+    clients: ClientHub,
+    refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
+    observe_accounts: AccountsObserver,
+) {
     let mut poller = Poller::default();
+    let mut observed_accounts = None;
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -78,11 +88,28 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
         if !clients.has_clients() {
             continue;
         }
-        let snapshot = poller.poll_once(Utc::now(), forced).await;
-        // Issue #3616: hand the account rows to the event loop before the
-        // broadcast. Both consumers need the same tick, and the classifier is
-        // the one whose absence lets a quota-dead pane hold a slot for days.
-        observe_accounts(snapshot.accounts.clone());
+        let now = Utc::now();
+        let roots = project_roots
+            .read()
+            .map(|roots| roots.clone())
+            .unwrap_or_default();
+        let snapshot = match poller.poll_in_background(now, forced, roots).await {
+            Ok((returned, snapshot)) => {
+                poller = returned;
+                snapshot
+            }
+            Err(error) => {
+                tracing::warn!(%error, "usage collection worker failed; retrying next tick");
+                poller = Poller::default();
+                continue;
+            }
+        };
+        // Issue #5597: only meaningful changes need a GUI-thread update.
+        // The existing terminal-convergence clock still sweeps pending quota
+        // candidates even when the account observation remains unchanged.
+        if account_usage_changed(&mut observed_accounts, &snapshot.accounts) {
+            observe_accounts(snapshot.accounts.clone());
+        }
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,
@@ -93,10 +120,97 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
     }
 }
 
+/// Poll timestamps and the age of an already-stale reading do not alter quota
+/// decisions. Preserve state transitions, account identity and every usage
+/// window (including its reset) when deciding whether the GUI needs a notice.
+fn account_usage_changed(
+    previous: &mut Option<Vec<ProviderUsage>>,
+    accounts: &[ProviderUsage],
+) -> bool {
+    let current = accounts
+        .iter()
+        .cloned()
+        .map(|mut account| {
+            account.fetched_at = None;
+            if let UsageState::Stale { age_secs } = &mut account.state {
+                *age_secs = 0;
+            }
+            account
+        })
+        .collect::<Vec<_>>();
+    if previous.as_ref() == Some(&current) {
+        return false;
+    }
+    *previous = Some(current);
+    true
+}
+
+/// Account recovery requires repository discovery and a durable prefs
+/// transaction. Keep both on the collection worker, including unchanged ticks
+/// so newly opened projects and failed writes still receive the observation.
+fn reconcile_project_accounts(
+    project_roots: &[PathBuf],
+    accounts: &[ProviderUsage],
+    now: DateTime<Utc>,
+) {
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let prefs_paths = project_roots
+        .iter()
+        .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
+        .collect::<HashSet<_>>();
+    for prefs_path in prefs_paths {
+        #[cfg(test)]
+        let timeout = crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        #[cfg(not(test))]
+        let timeout = crate::app_runtime::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + timeout,
+        );
+        if let Err(error) =
+            gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                let mut monitor = gwt::IssueMonitorState::with_prefs(
+                    gwt::IssueMonitorConfig::default(),
+                    prefs.clone(),
+                );
+                let mut changed = false;
+                for account in accounts {
+                    changed |= monitor.reconcile_provider_usage(account, &timestamp);
+                }
+                if changed {
+                    *prefs = monitor.prefs();
+                }
+                Ok(())
+            })
+        {
+            tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
+        }
+    }
+}
+
+/// Issue #4908 AC-5: publish this tick's account rows where
+/// `issue.monitor.status` reads them. The status bar was the only place these
+/// readings went, so a JSON reader could not see the usage a hold sat beside.
+/// A failed write costs that reader one tick, never the poll itself.
+fn publish_accounts(accounts: &[ProviderUsage], now: DateTime<Utc>) {
+    let path = gwt_core::usage::snapshot_store::provider_usage_snapshot_path();
+    if let Err(error) =
+        gwt_core::usage::snapshot_store::write_provider_usage_snapshot(&path, accounts, now)
+    {
+        tracing::warn!(
+            %error,
+            path = %path.display(),
+            "provider usage snapshot could not be published; issue.monitor.status keeps the previous reading"
+        );
+    }
+}
+
 /// Mutable state carried across polls (Claude cache + cadence + UA +
 /// consumption cache).
 #[derive(Default)]
 struct Poller {
+    #[cfg(test)]
+    collection_thread: Option<std::thread::ThreadId>,
+    transcripts: UsageCache,
     codex_account_id: Option<String>,
     codex_auth_observed: bool,
     codex_authenticated_at: Option<DateTime<Utc>>,
@@ -109,16 +223,42 @@ struct Poller {
 }
 
 impl Poller {
+    /// Keep all synchronous work (settings/auth, directory scans, parsing and
+    /// publication/account recovery) off async workers and the GUI thread.
+    /// HTTP futures still use the shared runtime.
+    async fn poll_in_background(
+        mut self,
+        now: DateTime<Utc>,
+        force: bool,
+        project_roots: Vec<PathBuf>,
+    ) -> Result<(Self, UsageSnapshot), tokio::task::JoinError> {
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = runtime.block_on(self.poll_once(now, force));
+            publish_accounts(&snapshot.accounts, now);
+            reconcile_project_accounts(&project_roots, &snapshot.accounts, now);
+            (self, snapshot)
+        })
+        .await
+    }
+
     async fn poll_once(&mut self, now: DateTime<Utc>, force: bool) -> UsageSnapshot {
+        #[cfg(test)]
+        {
+            self.collection_thread = Some(std::thread::current().id());
+        }
+        self.transcripts.begin_poll();
         let config = Settings::load().unwrap_or_default().usage;
         let accounts = vec![
             self.codex_account(&config, now),
             self.claude_account(&config, now, force).await,
         ];
         let consumption = self.consumption(&config, &accounts, now, force);
+        let sessions = collect_sessions(&config, &mut self.transcripts);
+        self.transcripts.end_poll();
         UsageSnapshot {
             accounts,
-            sessions: collect_sessions(&config),
+            sessions,
             consumption,
         }
     }
@@ -149,14 +289,14 @@ impl Poller {
         if config.codex_enabled {
             if let Some(home) = codex::codex_home() {
                 let week_start = week_start_for(accounts, UsageProvider::Codex, now);
-                out.push(consumption::read_codex_consumption(&home, week_start, now));
+                out.push(self.transcripts.codex_consumption(&home, week_start, now));
             }
         }
         // Claude consumption is read from local transcripts only, so it does not
         // require the account opt-in (mirrors Claude per-session usage).
         if let Some(home) = claude::claude_home() {
             let week_start = week_start_for(accounts, UsageProvider::ClaudeCode, now);
-            out.push(consumption::read_claude_consumption(&home, week_start, now));
+            out.push(self.transcripts.claude_consumption(&home, week_start, now));
         }
         self.cached_consumption = out.clone();
         self.last_consumption_at = Some(now);
@@ -181,7 +321,9 @@ impl Poller {
             self.codex_auth_observed = true;
             self.last_consumption_at = None;
         }
-        let account = codex::read_codex_account_since(&home, now, self.codex_authenticated_at);
+        let account = self
+            .transcripts
+            .codex_account_since(&home, now, self.codex_authenticated_at);
         if account.account_id != self.codex_account_id {
             // The auth file changed during collection. Publish identity only;
             // the next tick will establish the new observation boundary.
@@ -257,10 +399,10 @@ impl Poller {
                     ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
                 };
             }
-            // Only a successful fetch (has windows) replaces the cache. A
+            // Only a successful fetch (windows or credits) replaces the cache. A
             // transient failure (429 / auth / network) keeps the last good
             // value shown as stale instead of wiping the display.
-            if !fresh.windows.is_empty() {
+            if !fresh.windows.is_empty() || fresh.extra_usage.is_some() {
                 self.cached_claude = Some(fresh.clone());
                 return fresh;
             }
@@ -281,14 +423,14 @@ impl Poller {
 
 /// Serve the last good cached account (as stale) when present, else the given
 /// fallback. Keeps a transient fetch failure (e.g. 429) from wiping a usable
-/// display. "Good" = the cached value carries windows.
+/// display. "Good" = the cached value carries windows or credits.
 fn serve_cached_or(
     cached: &Option<ProviderUsage>,
     now: DateTime<Utc>,
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(c) if !c.windows.is_empty() => {
+        Some(c) if !c.windows.is_empty() || c.extra_usage.is_some() => {
             let mut c = c.clone();
             c.state = apply_staleness(c.state, c.fetched_at, now, DEFAULT_STALE_AFTER_SECS);
             c
@@ -306,7 +448,7 @@ fn serve_stale_cached_or(
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(cached) if !cached.windows.is_empty() => {
+        Some(cached) if !cached.windows.is_empty() || cached.extra_usage.is_some() => {
             let mut cached = cached.clone();
             cached.state = UsageState::Stale {
                 age_secs: cached
@@ -361,22 +503,13 @@ fn is_active_status(status: AgentStatus) -> bool {
 /// per-session usage from local rollout / transcript files. Keyed by the gwt
 /// session id so the frontend can match it to agent cards. Per-session reads
 /// are local-only; Claude does not require the account opt-in here.
-fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
+fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<SessionUsage> {
     let mut out = Vec::new();
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
     let claude_home = claude::claude_home();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = Session::load_and_migrate(&path) else {
-            continue;
-        };
+    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load_shared(&dir);
+    for session in sessions {
         if !is_active_status(session.status) {
             continue;
         }
@@ -393,11 +526,11 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
                 }
                 codex_home
                     .as_ref()
-                    .and_then(|home| codex::read_codex_session(home, &agent_sid))
+                    .and_then(|home| cache.codex_session(home, &agent_sid))
             }
             UsageProvider::ClaudeCode => claude_home
                 .as_ref()
-                .and_then(|home| claude::read_claude_session(home, &agent_sid)),
+                .and_then(|home| cache.claude_session(home, &agent_sid)),
         };
         if let Some(mut usage) = usage {
             // Re-key to the gwt session id (frontend agent cards use it) and
@@ -411,11 +544,124 @@ fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
 }
 
 #[cfg(test)]
+#[path = "usage_poller_performance_tests.rs"]
+mod performance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn account_notifications_ignore_poll_time_but_preserve_usage_changes() {
+        let mut previous = None;
+        let mut account = account_with_weekly_reset(UsageProvider::Codex, Some(now()));
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.fetched_at = Some(now() + chrono::Duration::seconds(30));
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].used_percent = 100.0;
+        account.limit_reached = true;
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 300 };
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 330 };
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.account_id = Some("replacement".into());
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].resets_at = Some(now() + chrono::Duration::days(7));
+        assert!(account_usage_changed(&mut previous, &[account]));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // isolated env must survive the worker's reads
+    async fn complete_poll_collects_on_a_blocking_thread_and_keeps_its_cache() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        // The collector crosses threads, so isolate the inherited environment.
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _codex =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", home.path().join("codex"));
+        let _claude = gwt_core::test_support::ScopedEnvVar::set(
+            "CLAUDE_CONFIG_DIR",
+            home.path().join("claude"),
+        );
+        let codex_home = home.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            r#"{"tokens":{"account_id":"account-a"}}"#,
+        )
+        .unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let calling_thread = std::thread::current().id();
+        let (poller, first) = Poller::default()
+            .poll_in_background(now(), false, vec![project.clone()])
+            .await
+            .unwrap();
+        assert_ne!(poller.collection_thread, Some(calling_thread));
+        assert_eq!(first.accounts.len(), 2);
+        assert!(first.sessions.is_empty());
+        assert_eq!(first.accounts[1].state, UsageState::Disabled);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        let prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.provider_quota_accounts["codex"].account_id,
+            first.accounts[0].account_id.as_deref().unwrap(),
+            "the collection worker must persist the same account recovery observation"
+        );
+        let (poller, second) = poller
+            .poll_in_background(now(), false, vec![project])
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(poller.last_consumption_at, Some(now()));
+        assert_eq!(poller.transcripts.bytes_read(), 0);
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    }
+
+    #[test]
+    fn credits_only_cache_survives_cooldown_and_failed_refresh() {
+        let mut good = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::Ok);
+        good.fetched_at = Some(now());
+        good.extra_usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "is_enabled":true, "monthly_limit":100, "used_credits":25,
+                "utilization":25, "currency":"USD"
+            }))
+            .unwrap(),
+        );
+        let fail = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData);
+        assert_eq!(
+            serve_cached_or(&Some(good.clone()), now(), fail.clone()),
+            good
+        );
+        let stale = serve_stale_cached_or(&Some(good.clone()), now(), fail);
+        assert_eq!(stale.extra_usage, good.extra_usage);
+        assert_eq!(stale.state, UsageState::Stale { age_secs: 0 });
     }
 
     #[test]
@@ -426,6 +672,7 @@ mod tests {
             account_id: None,
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
                 19.0,
@@ -472,6 +719,55 @@ mod tests {
         assert!(is_active_status(AgentStatus::WaitingInput));
         assert!(!is_active_status(AgentStatus::Stopped));
         assert!(!is_active_status(AgentStatus::Unknown));
+    }
+
+    #[test]
+    fn repeated_collection_skips_preferences_and_caches_bad_sessions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::prelude::*;
+
+        struct Warnings(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().target().starts_with("gwt_agent::session")
+                {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("display.toml"), "display_mode = 'grid'").unwrap();
+        std::fs::write(sessions.join("broken.toml"), "id = [").unwrap();
+        gwt_agent::Session::new(home.path(), "work/valid", AgentId::Codex)
+            .save(&sessions)
+            .unwrap();
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Warnings(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                collect_sessions(
+                    &UsageConfig {
+                        codex_enabled: false,
+                        claude_account_enabled: false,
+                    },
+                    &mut UsageCache::default(),
+                );
+            }
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "only the first bad Session read warns"
+        );
     }
 
     #[test]
@@ -647,6 +943,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
             state: UsageState::Ok,

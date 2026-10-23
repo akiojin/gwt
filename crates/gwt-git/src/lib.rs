@@ -19,6 +19,7 @@ pub mod refs;
 pub mod release_status;
 pub mod repository;
 pub mod worktree;
+mod worktree_inventory;
 
 pub use branch::{
     delete_local_branch, detect_cleanable_target, detect_cleanable_target_with_remote_names,
@@ -38,10 +39,10 @@ pub use pr_status::{
     parse_unlanded_branch_refs, pr_check_report, CiStatus, MergeStatus, PrCheckCounts,
     PrCheckReport, PrClosingIssue, PrInventoryFields, PrInventoryHistory, PrInventoryHistoryEntry,
     PrInventoryInclude, PrInventoryItem, PrInventoryOptions, PrInventoryRead, PrLifecycleClass,
-    PrLifecycleDecision, PrStatus, ReviewStatus, UnlandedBranch, UnlandedBranchProbe,
-    PR_ESCALATE_AFTER_UNCHANGED_CYCLES, PR_FALLBACK_WHEN_NOT_EXECUTABLE, PR_INVENTORY_CACHE_FILE,
-    PR_INVENTORY_CACHE_TTL_SECS, PR_INVENTORY_HISTORY_FILE, PR_STALE_AFTER_HOURS,
-    PR_VIEW_JSON_FIELDS, UNLANDED_BRANCH_BASE_REF,
+    PrLifecycleDecision, PrMergeQueueState, PrStatus, ReviewStatus, UnlandedBranch,
+    UnlandedBranchProbe, PR_ESCALATE_AFTER_UNCHANGED_CYCLES, PR_FALLBACK_WHEN_NOT_EXECUTABLE,
+    PR_INVENTORY_CACHE_FILE, PR_INVENTORY_CACHE_TTL_SECS, PR_INVENTORY_HISTORY_FILE,
+    PR_STALE_AFTER_HOURS, PR_VIEW_JSON_FIELDS, UNLANDED_BRANCH_BASE_REF,
 };
 pub use refs::{list_existing_refs, resolve_canonical_root_tree, CanonicalRootTree};
 pub use repository::{

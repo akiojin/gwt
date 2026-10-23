@@ -1,110 +1,187 @@
-import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { expect, test, type Page } from "@playwright/test";
+import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
 
-// A tabbed window tab truncates its label at max-width, so hovering must reveal
-// the full title via the native `title` tooltip. The tooltip text mirrors the
-// titlebar/window-list helper `windowTitleTooltip`: it prefers
-// `dynamic_title_detail`, otherwise falls back to the display title.
-test.describe("Agent window tab hover title", () => {
-  test.use({
-    deviceScaleFactor: 1,
-    viewport: { width: 1440, height: 900 },
+const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const appUrl = liveBase
+  ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
+  : APP_URL;
+const errors = new WeakMap<Page, string[]>();
+const rowFor = (page: Page, title: string) => page.locator(".window-list-row")
+  .filter({ has: page.locator(".window-list-title", { hasText: title }) });
+
+// #4777 T-3: grouped agents remain reachable through Windows after removing
+// the window tab strip. The existing titlebar/list retain title and telemetry.
+test.describe("Agent window navigation without tabs", () => {
+  test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
+
+  test.beforeEach(async ({ page }, info) => {
+    const captured: string[] = [];
+    errors.set(page, captured);
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+      info.project.name.includes("light") ? "light" : "dark");
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installTabbedAgentsBackend(page);
+    await page.goto(appUrl);
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
   });
 
-  test("tabbed window tabs expose the full title as a native tooltip", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installTabbedAgentsBackend(page);
-
-    await page.goto(APP_URL);
-
-    const activeWindow = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(activeWindow).toBeVisible({ timeout: 10_000 });
-    await expect(activeWindow).toHaveClass(/tabbed/);
-
-    const strip = activeWindow.locator(".window-tab-strip");
-    const detailTab = strip.locator(".window-tab[data-window-tab-id='agent-1']");
-    const fallbackTab = strip.locator(
-      ".window-tab[data-window-tab-id='agent-2']",
-    );
-
-    // agent-1 carries a dynamic detail, so the tooltip shows that detail.
-    await expect(detailTab).toHaveAttribute(
-      "title",
-      "Codex · implementing complete maximize",
-    );
-    // agent-2 has no dynamic detail, so the tooltip falls back to the title.
-    await expect(fallbackTab).toHaveAttribute("title", "Claude");
+  test.afterEach(async ({ page }, info) => {
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      info.project.name.includes("light") ? "light" : "dark");
+    expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
-  // Issue #3104 — in a tabbed agent-window group the active tab must stay
-  // distinguishable. Renders a --color-state-active ::after underline (works in
-  // both themes; chromium-light covers the reported light surface). Inactive
-  // tabs must not generate the accent.
-  test("active tab carries a state-active accent underline that inactive tabs lack", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installTabbedAgentsBackend(page);
+  test("full titles remain in the titlebar and Windows list without tab DOM", async ({ page }) => {
+    await expect(page.locator(".window-tab-strip, .window-tab")).toHaveCount(0);
+    await expect(page.locator(".workspace-window[data-id='agent-1'] .title-text"))
+      .toHaveAttribute("title", "Codex · implementing complete maximize");
+    await page.locator("#window-list-button").click();
+    await expect(rowFor(page, "Aster").locator(".window-list-title"))
+      .toHaveAttribute("title", "Codex · implementing complete maximize");
+    await expect(rowFor(page, "Birch").locator(".window-list-title"))
+      .toHaveAttribute("title", "Birch");
+  });
 
-    await page.goto(APP_URL);
+  test("Windows focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
+    const active = page.locator(".agent-tile[data-agent-id='agent-1']");
+    const target = page.locator(".agent-tile[data-agent-id='agent-2']");
+    const source = page.locator(".workspace-window[data-id='agent-2']");
+    await expect(target).toBeHidden();
+    await page.locator("#window-list-button").click();
+    await rowFor(page, "Birch").click();
+    await expect(target).toBeVisible();
+    await expect(active).toBeHidden();
+    await expect(target.locator("h3")).toHaveText("Birch");
+    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
+      .some(message => message.kind === "startup_terminal_ready" && message.id === "agent-2")))
+      .toBe(true);
+    await target.locator(".xterm-helper-textarea").focus();
+    await expect(target.locator(".xterm-helper-textarea")).toBeFocused();
+    await page.keyboard.type("hello");
+    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
+      .filter(message => message.kind === "terminal_input" && message.id === "agent-2")
+      .map(message => message.data).join(""))).toBe("hello");
+    const closedIds = () => page.evaluate(() => window.__tabbedAgentsFixture.sent
+      .filter(message => message.kind === "close_window").map(message => message.id));
+    await expect(source.locator('[data-action="close"]')).toHaveCount(0);
+    await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
+    expect(await closedIds()).toEqual([]);
+    // Agent tabs close only the view; the terminal remains owned by its session.
+    await page.getByRole("button", { name: "Close Birch tab", exact: true }).click();
+    expect(await closedIds()).toEqual([]);
+    await page.locator("#window-list-button").click();
+    await rowFor(page, "Birch").click();
+    await expect(target).toBeVisible();
+  });
 
-    const activeWindow = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(activeWindow).toBeVisible({ timeout: 10_000 });
-    await expect(activeWindow).toHaveClass(/tabbed/);
+  test("Windows list batches inactive telemetry without delaying navigation", async ({ page }, info) => {
+    await page.locator("#window-list-button").click();
+    const trigger = page.locator("#window-list-button");
+    await trigger.focus();
+    await trigger.hover();
+    const panel = page.locator("#window-list-panel");
+    const chip = rowFor(page, "Birch").locator(".status-chip");
+    await expect(chip).toHaveClass(/running/);
+    await expect(chip.locator(".status-label")).toHaveText("Running");
+    const burst = await panel.evaluate(async panel => {
+      const before = panel.innerHTML;
+      const focused = document.activeElement;
+      let rebuilds = 0;
+      const observer = new MutationObserver(records => {
+        rebuilds += records.filter(record => record.type === "childList" && record.removedNodes.length > 0).length;
+      });
+      observer.observe(panel, { childList: true });
+      try {
+        for (let n = 1; n <= 50; n++) window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", n % 2 ? "running" : "idle", true);
+        const unchanged = panel.innerHTML === before;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return { unchanged, rebuilds, focusPreserved: document.activeElement === focused,
+          hoverPreserved: focused?.matches(":hover") };
+      } finally { observer.disconnect(); }
+    });
+    expect(burst).toEqual({ unchanged: true, rebuilds: 1, focusPreserved: true, hoverPreserved: true });
+    await expect(chip).toHaveClass(/idle/);
+    await expect(chip.locator(".status-label")).toHaveText("Idle");
+    await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveAttribute("aria-selected", "true");
+    const fallback = await panel.evaluate(async panel => {
+      const originalRaf = window.requestAnimationFrame;
+      window.requestAnimationFrame = () => 0;
+      const started = performance.now();
+      const before = panel.innerHTML;
+      try {
+        return await new Promise<{ unchanged: boolean; latency: number }>((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            if (!panel.textContent?.includes("Running")) return;
+            observer.disconnect(); clearTimeout(timeout);
+            resolve({ unchanged, latency: performance.now() - started });
+          });
+          const timeout = setTimeout(() => { observer.disconnect(); reject(new Error("Windows list fallback exceeded 1 second")); }, 1000);
+          observer.observe(panel, { childList: true });
+          window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "running", true);
+          const unchanged = panel.innerHTML === before;
+        });
+      } finally { window.requestAnimationFrame = originalRaf; }
+    });
+    expect(fallback.unchanged).toBe(true);
+    expect(fallback.latency).toBeLessThan(1000);
+    await expect(chip).toHaveClass(/running/);
+    await info.attach("windows-list-frame", { body: JSON.stringify({ burst, fallback }), contentType: "application/json" });
+    await page.screenshot({ path: info.outputPath("windows-list-frame.png") });
+    // A receipt waiting for paint must not retarget the row already displayed.
+    await rowFor(page, "Birch").evaluate(row => {
+      window.__tabbedAgentsFixture.emitTerminalStatus("agent-2", "idle", true);
+      (row as HTMLButtonElement).click();
+    });
+    await expect(panel).toBeHidden();
+    await expect(page.getByRole("tab", { name: "Birch", exact: true })).toHaveAttribute("aria-selected", "true");
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
 
-    const accent = await page.evaluate(() => {
-      const read = (id: string) => {
-        const el = document.querySelector(
-          `.workspace-window[data-id='agent-1'] .window-tab[data-window-tab-id='${id}']`,
-        );
-        if (!el) {
-          return null;
+  test("provider runtime pushes update header, tab and fleet counts within one second", async ({ page }, info) => {
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
+    await page.evaluate(() => window.__tabbedAgentsFixture.emitStaleWorkProjection());
+    const transitions = [];
+    for (const state of ["running", "waiting", "idle"]) {
+      const label = state[0].toUpperCase() + state.slice(1);
+      await page.evaluate(state => window.__tabbedAgentsFixture.emitProviderStates(state), state);
+      await expect.poll(() => page.evaluate(({ state, label }) => {
+        const headers = ["agent-1", "agent-2"].every(id => {
+          const header = document.querySelector(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"] header`);
+          const tab = document.getElementById(`agents-tab-${id}`)?.parentElement;
+          return [header, tab].every(element => element?.querySelector(".status-chip .status-label")?.textContent === label);
+        });
+        const ready = headers && ["running", "waiting", "idle"].every(candidate =>
+          document.getElementById(`op-strip-${candidate}`)?.textContent === (candidate === state ? "2" : "0"));
+        if (ready) window.__tabbedAgentsFixture.lastStateObserved = performance.now();
+        return ready;
+      }, { state, label }), { timeout: 1000, intervals: [10, 25, 50] }).toBe(true);
+      const elapsed = await page.evaluate(() => window.__tabbedAgentsFixture.lastStateObserved - window.__tabbedAgentsFixture.lastStatePush);
+      expect(elapsed, `${state} push reaches all three state surfaces`).toBeLessThan(1000);
+      transitions.push({ state, elapsed_ms: elapsed });
+      for (const [id, name] of [["agent-1", "Aster"], ["agent-2", "Birch"]]) {
+        const tile = page.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"]`);
+        const tab = page.locator(`#agents-tab-${id}`);
+        await expect(tile.locator("h3")).toHaveText(name);
+        await expect(tab).toHaveAccessibleName(name);
+        for (const container of [tile.locator("header"), tab.locator("..")]) {
+          const chip = container.locator(".status-chip");
+          await expect(chip).toBeVisible();
+          await expect(chip).toHaveClass(new RegExp(`\\b${state}\\b`));
+          const title = container.locator(".agent-title");
+          const [titleBounds, chipBounds] = await Promise.all([title.boundingBox(), chip.boundingBox()]);
+          expect(chipBounds!.x, "runtime state is visually separate from the name").toBeGreaterThan(titleBounds!.x + titleBounds!.width);
         }
-        const after = getComputedStyle(el, "::after");
-        return {
-          content: after.content,
-          height: after.height,
-          background: after.backgroundColor,
-        };
-      };
-      return { active: read("agent-1"), inactive: read("agent-2") };
-    });
-
-    // The active tab generates the ::after accent bar...
-    expect(accent?.active?.content).toBe('""');
-    expect(accent?.active?.height).toBe("2px");
-    expect(accent?.active?.background).not.toBe("rgba(0, 0, 0, 0)");
-    // ...and the inactive tab does not generate the accent at all.
-    expect(accent?.inactive?.content).toBe("none");
-  });
-
-  test("inactive tab telemetry updates when runtime status changes", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installTabbedAgentsBackend(page);
-
-    await page.goto(APP_URL);
-
-    const activeWindow = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(activeWindow).toBeVisible({ timeout: 10_000 });
-
-    const siblingTab = activeWindow.locator(
-      ".window-tab[data-window-tab-id='agent-2']",
-    );
-    const siblingCue = siblingTab.locator(".window-tab-state");
-    await expect(siblingTab).toHaveAttribute("data-agent-state", "running");
-    await expect(siblingCue).toHaveText("RUN");
-    await expect(siblingCue).toHaveCSS("animation-name", "none");
-
-    await page.evaluate(() => {
-      window.__tabbedAgentsFixture?.emitTerminalStatus("agent-2", "idle");
-    });
-
-    await expect(siblingTab).toHaveAttribute("data-agent-state", "idle");
-    await expect(siblingCue).toHaveCSS("animation-name", "none");
+      }
+    }
+    await info.attach("runtime-transitions", { body: JSON.stringify(transitions, null, 2), contentType: "application/json" });
+    await page.screenshot({ path: info.outputPath("provider-runtime-states.png"), fullPage: true });
   });
 });
 
@@ -141,9 +218,11 @@ async function installTabbedAgentsBackend(page) {
                 {
                   ...baseWindow,
                   id: "agent-1",
+                  session_id: "session-agent-1",
                   title: "Codex",
                   z_index: 2,
                   agent_id: "codex",
+                  agent_name: "Aster",
                   agent_color: "cyan",
                   dynamic_title_detail: "Codex · implementing complete maximize",
                   tab_group_active: true,
@@ -151,10 +230,12 @@ async function installTabbedAgentsBackend(page) {
                 {
                   ...baseWindow,
                   id: "agent-2",
+                  session_id: "session-agent-2",
                   title: "Claude",
                   status: "running",
                   z_index: 1,
                   agent_id: "claude",
+                  agent_name: "Birch",
                   agent_color: "violet",
                   tab_group_active: false,
                 },
@@ -166,6 +247,8 @@ async function installTabbedAgentsBackend(page) {
         recent_projects: [],
       },
     };
+
+    const sent = [];
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -186,7 +269,32 @@ async function installTabbedAgentsBackend(page) {
         }, 0);
       }
 
-      send() {}
+      send(raw) {
+        const message = JSON.parse(raw);
+        sent.push(message);
+        const windows = workspaceState.workspace.tabs[0].workspace.windows;
+        if (message.kind === "activate_window_tab") {
+          for (const data of windows) data.tab_group_active = data.id === message.id;
+          this.emit(workspaceState);
+        }
+        if (message.kind === "dock_window_tab") {
+          const target = windows.find(data => data.id === message.target_id);
+          for (const data of windows) {
+            data.tab_group_id = "grp-1";
+            data.tab_group_active = data.id === message.id;
+            data.geometry = { ...target.geometry };
+          }
+          this.emit(workspaceState);
+        }
+        if (message.kind === "detach_window_tab") {
+          for (const data of windows) {
+            data.tab_group_id = null;
+            data.tab_group_active = false;
+            if (data.id === message.id) data.geometry = { ...message.geometry };
+          }
+          this.emit(workspaceState);
+        }
+      }
 
       close() {
         this.readyState = FixtureWebSocket.CLOSED;
@@ -207,10 +315,40 @@ async function installTabbedAgentsBackend(page) {
       value: FixtureWebSocket,
     });
     window.__tabbedAgentsFixture = {
-      emitTerminalStatus(windowId, status) {
-        FixtureWebSocket.instances?.forEach((socket) =>
-          socket.emit({ kind: "terminal_status", id: windowId, status }),
-        );
+      sent,
+      lastStatePush: 0,
+      lastStateObserved: 0,
+      emitStaleWorkProjection() {
+        FixtureWebSocket.instances.forEach(socket => socket.emit({ kind: "active_work_projection", projection: {
+          status_category: "active", active_agents: 2, blocked_agents: 0,
+          agents: [{ window_id: "agent-1" }, { window_id: "agent-2" }], active_works: [],
+        } }));
+      },
+      emitProviderStates(status) {
+        this.lastStatePush = performance.now();
+        FixtureWebSocket.instances.forEach(socket => {
+          socket.emit({ kind: "window_state", window_id: "agent-1", state: status });
+          socket.emit({ kind: "terminal_status", id: "agent-2", status });
+        });
+      },
+      resetUngrouped() {
+        workspaceState.workspace.tabs[0].workspace.windows.forEach((data, index) => {
+          data.tab_group_id = null;
+          data.tab_group_active = false;
+          data.geometry = { x: 120 + index * 650, y: 120, width: 500, height: 360 };
+        });
+        FixtureWebSocket.instances.forEach(socket => socket.emit(workspaceState));
+      },
+      emitTerminalStatus(windowId, status, immediate = false) {
+        const payload = { kind: "terminal_status", id: windowId, status };
+        // Controlled receiver bursts start after the transport dispatcher.
+        if (immediate) {
+          window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+          return;
+        }
+        FixtureWebSocket.instances?.forEach((socket) => {
+          socket.emit(payload);
+        });
       },
     };
   });

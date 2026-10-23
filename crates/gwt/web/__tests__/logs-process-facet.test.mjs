@@ -31,7 +31,9 @@ async function importBoardLogsSurface() {
   const source = boardLogsSurfaceSource.replace(
     'from "/board-surface.js"',
     `from "${pathToFileURL(resolve(here, "../board-surface.js")).href}"`,
-  );
+  ).replace('from "/ui-state-store.js"',
+    `from "${pathToFileURL(resolve(here, "../ui-state-store.js")).href}"`).replace('from "/ui-content.js"',
+    `from "${pathToFileURL(resolve(here, "../ui-content.js")).href}"`);
   return import(
     `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
   );

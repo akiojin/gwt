@@ -27,7 +27,37 @@ const PR_WORKFLOWS: [&str; 3] = [
     ".github/workflows/lint.yml",
 ];
 const RUST_CACHE_ACTION: &str = "Swatinem/rust-cache";
-const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@stable";
+const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@1.99.1";
+
+#[test]
+fn every_pull_request_rust_cache_disables_pr_cache_saves() {
+    for entry in fs::read_dir(repo_root().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) != Some("yml") {
+            continue;
+        }
+        let workflow: Value = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        if triggers(&workflow).get("pull_request").is_none() {
+            continue;
+        }
+        for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+            for step in job["steps"].as_sequence().into_iter().flatten() {
+                if step["uses"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(RUST_CACHE_ACTION)
+                {
+                    assert_eq!(
+                        step["with"]["save-if"].as_str(),
+                        Some("${{ github.ref == 'refs/heads/develop' }}"),
+                        "{} / {name:?} must not save a PR cache",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// AC-3: the repository cache ceiling is 10 GB and one warmed scope measured
 /// ~540 MB. Each shared key is stored once per warmed branch scope (develop and
@@ -208,10 +238,9 @@ fn every_pr_cache_scope_is_warmed_by_a_matching_job() {
 
 /// AC-1 / AC-4: the warm workflow has to run where PRs can restore from — the
 /// develop and main scopes — and it must also re-run without a repository
-/// change, because a stable-toolchain bump changes the key on its own and an
-/// untouched cache is evicted after 7 days.
+/// change, because an untouched cache is evicted after 7 days.
 #[test]
-fn warm_workflow_covers_pr_base_branches_and_toolchain_drift() {
+fn warm_workflow_covers_pr_base_branches_and_cache_eviction() {
     let doc = read_workflow(WARM_WORKFLOW);
     let on = triggers(&doc);
 
@@ -227,9 +256,8 @@ fn warm_workflow_covers_pr_base_branches_and_toolchain_drift() {
 
     assert!(
         on.get("schedule").is_some(),
-        "{WARM_WORKFLOW} must keep a schedule: a stable-toolchain update \
-         changes the cache key with no commit to trigger a push, and an \
-         unrestored cache is evicted after 7 days (Issue #4133 AC-4)"
+        "{WARM_WORKFLOW} must keep a schedule: an unrestored cache is evicted \
+         after 7 days (Issue #4133 AC-4)"
     );
     assert!(
         on.get("workflow_dispatch").is_some(),

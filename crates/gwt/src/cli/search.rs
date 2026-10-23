@@ -55,6 +55,7 @@ pub fn parse(args: &[String]) -> Result<SearchCommand, CliParseError> {
             "--board" => push_scope(&mut scopes, IndexSearchScope::Board),
             "--discussions" => push_scope(&mut scopes, IndexSearchScope::Discussions),
             "--works" => push_scope(&mut scopes, IndexSearchScope::Works),
+            "--reports" => push_scope(&mut scopes, IndexSearchScope::Reports),
             "--json" => json = true,
             "--match-mode" => {
                 i += 1;
@@ -176,6 +177,7 @@ pub fn run<E: CliEnv>(
             &suggestions,
             &outcome.stale_scopes,
             outcome.refresh_queued,
+            &outcome.unavailable_scopes,
         );
     } else {
         render_text(out, &results, &suggestions);
@@ -185,6 +187,7 @@ pub fn run<E: CliEnv>(
                 outcome.stale_scopes.join(", ")
             ));
         }
+        render_unavailable_scope_warning(out, &outcome.unavailable_scopes);
     }
     Ok(0)
 }
@@ -204,6 +207,9 @@ fn render_search_unavailable(
             "retryable": true,
             "reason": unavailable.reason,
             "retry_after_ms": unavailable.retry_after_ms,
+            "holder": unavailable.holder,
+            "start_decision": crate::index_search::SEARCH_UNAVAILABLE_START_DECISION,
+            "recovery": unavailable.recovery(),
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -291,6 +297,7 @@ fn render_json(
     suggestions: &[IndexSearchResult],
     stale_scopes: &[String],
     refresh_queued: bool,
+    unavailable_scopes: &[crate::index_search::IndexSearchUnavailableScope],
 ) {
     let mut payload = serde_json::json!({
         "ok": true,
@@ -304,8 +311,29 @@ fn render_json(
         payload["stale_scopes"] = serde_json::json!(stale_scopes);
         payload["refresh_queued"] = serde_json::json!(refresh_queued);
     }
+    if !unavailable_scopes.is_empty() {
+        payload["partial"] = serde_json::json!(true);
+        payload["unavailable_scopes"] = serde_json::json!(unavailable_scopes);
+    }
     out.push_str(&payload.to_string());
     out.push('\n');
+}
+
+fn render_unavailable_scope_warning(
+    out: &mut String,
+    unavailable_scopes: &[crate::index_search::IndexSearchUnavailableScope],
+) {
+    if unavailable_scopes.is_empty() {
+        return;
+    }
+    let excluded = unavailable_scopes
+        .iter()
+        .map(|scope| format!("{} ({})", scope.scope, scope.reason))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "warning: partial search; unavailable scopes excluded: {excluded}; check index.status for recovery\n"
+    ));
 }
 
 fn render_text(out: &mut String, results: &[IndexSearchResult], suggestions: &[IndexSearchResult]) {
@@ -508,6 +536,7 @@ mod tests {
             &[sample_result(IndexSearchScope::Specs, "spec suggestion")],
             &[],
             false,
+            &[],
         );
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
         assert_eq!(payload["ok"], serde_json::Value::Bool(true));
@@ -523,11 +552,49 @@ mod tests {
     #[test]
     fn render_json_adds_freshness_metadata_for_stale_scopes() {
         let mut out = String::new();
-        render_json(&mut out, "q", &[], &[], &["issues".to_string()], true);
+        render_json(&mut out, "q", &[], &[], &["issues".to_string()], true, &[]);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
         assert_eq!(payload["ok"], serde_json::Value::Bool(true));
         assert_eq!(payload["stale_scopes"][0], "issues");
         assert_eq!(payload["refresh_queued"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn partial_search_reports_every_unavailable_scope_in_json_and_text() {
+        let unavailable = vec![
+            crate::index_search::IndexSearchUnavailableScope {
+                scope: "issues".into(),
+                reason: "repair_stopped".into(),
+            },
+            crate::index_search::IndexSearchUnavailableScope {
+                scope: "memory".into(),
+                reason: "missing".into(),
+            },
+        ];
+        let mut json_out = String::new();
+        render_json(
+            &mut json_out,
+            "q",
+            &[sample_result(IndexSearchScope::Specs, "usable hit")],
+            &[],
+            &[],
+            false,
+            &unavailable,
+        );
+        let payload: serde_json::Value = serde_json::from_str(json_out.trim()).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["partial"], true);
+        assert_eq!(payload["results"][0]["title"], "usable hit");
+        assert_eq!(
+            payload["unavailable_scopes"],
+            serde_json::json!(unavailable)
+        );
+
+        let mut text_out = String::new();
+        render_unavailable_scope_warning(&mut text_out, &unavailable);
+        assert!(text_out.contains("warning: partial search"));
+        assert!(text_out.contains("issues (repair_stopped)"));
+        assert!(text_out.contains("memory (missing)"));
     }
 
     #[test]
@@ -589,6 +656,15 @@ mod tests {
         let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: "project index runner unavailable".to_string(),
             retry_after_ms: 5_000,
+            holder: Some(Box::new(crate::index_resources::IndexRunnerHolder {
+                repo_hash: "other-repo".into(),
+                owner_pid: Some(42),
+                project_root: Some(std::path::PathBuf::from("other-project")),
+                action: Some("index-issues".into()),
+                qos: Some("background".into()),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
+            })),
         });
 
         render_search_unavailable(&mut out, true, &error);
@@ -598,10 +674,46 @@ mod tests {
         assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
         assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
         assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(payload["holder"]["repo_hash"], "other-repo");
+        assert_eq!(payload["holder"]["project_root"], "other-project");
+        assert_eq!(payload["holder"]["action"], "index-issues");
+        assert_eq!(payload["holder"]["qos"], "background");
+        assert_eq!(payload["start_decision"], "known_approved_owner_only");
+        let recovery = payload["recovery"]
+            .as_str()
+            .expect("start and retry guidance");
+        assert!(recovery.contains("index.status"), "{recovery}");
+        assert!(recovery.contains("approved implementation"), "{recovery}");
+        assert!(recovery.contains("creating an Issue/SPEC"), "{recovery}");
+        // Issue #4840 AC-c / AC-h: an index-independent preflight path and a
+        // runner-specific action, distinct from lease contention guidance.
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(recovery.contains("index.repair"), "{recovery}");
+        assert!(!recovery.contains("checkpoint"), "{recovery}");
         assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
         assert!(error.retryable());
         assert_eq!(error.retry_after_ms(), Some(5_000));
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_search_unavailable_lease_contention_gets_its_own_recovery() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchUnavailable};
+        let mut out = String::new();
+        let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+            reason: "search heavy lease unavailable".to_string(),
+            retry_after_ms: 5_000,
+            holder: None,
+        });
+
+        render_search_unavailable(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        let recovery = payload["recovery"].as_str().expect("lease guidance");
+        assert!(recovery.contains("checkpoint"), "{recovery}");
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(!recovery.contains("index.repair"), "{recovery}");
+        assert!(error.to_string().contains(recovery), "{error}");
     }
 
     #[test]

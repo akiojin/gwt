@@ -1149,6 +1149,27 @@ mod store_consolidation {
         assert!(fixture.orphan_store.exists());
     }
 
+    #[test]
+    fn unreadable_canonical_snapshot_refuses_before_quarantine() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/unreadable-snapshot.git");
+        // A directory fails read on Windows and Unix without modifying permissions.
+        std::fs::create_dir_all(&fixture.canonical_works).unwrap();
+        let plan = plan_store_consolidation(&fixture.layout_root).unwrap();
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect_err("snapshot read failure must refuse before mutation");
+        assert_eq!(error.refusal, StoreConsolidationRefusal::CorruptInput);
+        assert!(error
+            .to_string()
+            .contains(&fixture.canonical_works.display().to_string()));
+        assert!(fixture.canonical_works.is_dir());
+        assert!(fixture.orphan_store.exists());
+        assert!(
+            !fixture.canonical_store().join("quarantine").exists(),
+            "an unreadable canonical snapshot must not start quarantine or rollback"
+        );
+    }
+
     /// AC-8 idempotence: re-applying an approved plan changes nothing.
     #[test]
     fn apply_is_idempotent() {

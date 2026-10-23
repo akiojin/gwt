@@ -1,9 +1,4 @@
-use std::{
-    ffi::OsString,
-    fs,
-    sync::{mpsc, Mutex, OnceLock},
-    time::Duration,
-};
+use std::{ffi::OsString, fs, sync::mpsc, time::Duration};
 
 use axum::{
     extract::State,
@@ -21,11 +16,8 @@ use gwt_github::{CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, Update
 use serde_json::Value;
 use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
+fn env_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -73,7 +65,7 @@ struct CaptureState {
 struct CaptureServer {
     // SPEC #4740: every test that starts a capture server asserts delivery.
     // Hook-live is fail-open, so an attempt that outlives its production
-    // 100 ms budget on a loaded host drops the event silently. Pinning the
+    // bounded budget on a loaded host drops the event silently. Pinning the
     // hang guard makes the verdict independent of how slow the host is.
     _attempt_budget: ScopedDeadlineBudget,
     runtime: Runtime,
@@ -148,6 +140,7 @@ async fn capture_hook_live(
 
 fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
     IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: String::new(),
@@ -209,6 +202,29 @@ fn runtime_state_owner_forwards_live_event_to_loopback_target() {
     assert_eq!(payload["agent_session_id"], "agent-session-1");
     assert_eq!(payload["branch"], "feature/runtime-daemon");
     assert_eq!(payload["status"], "Running");
+
+    // Issue #4905: losing runtime-state must not lose the transition when
+    // the next successful handler is Forward (which has no status itself).
+    env.set("GWT_HOOK_FORWARD_URL", "unsupported://local");
+    handle_runtime_state("Stop", &input).unwrap();
+    let health = gwt::daemon_runtime::hook_live_delivery_health(&runtime_path).unwrap();
+    assert_eq!(health.consecutive_failures, 1);
+    assert!(health.pending_runtime_state);
+
+    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
+    handle_forward(&input).unwrap();
+    let (_, recovered) = server.recv();
+    assert_eq!(recovered["kind"], "runtime_state");
+    assert_eq!(recovered["source_event"], "Stop");
+    let recovered: gwt::RuntimeHookEvent = serde_json::from_value(recovered).unwrap();
+    assert_eq!(
+        gwt::window_state::runtime_hook_window_state(&recovered),
+        Some(gwt::WindowState::Idle)
+    );
+    assert_eq!(server.recv().1["kind"], "forward");
+    let health = gwt::daemon_runtime::hook_live_delivery_health(&runtime_path).unwrap();
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(!health.pending_runtime_state);
 }
 
 #[test]
@@ -353,6 +369,9 @@ fn forward_owner_uses_persisted_agent_session_id_when_hook_session_id_is_missing
 fn forward_owner_is_fail_open_without_live_target_env() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();
+    env.unset("GWT_SESSION_ID");
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("CODEX_THREAD_ID");
     env.unset("GWT_HOOK_FORWARD_URL");
     env.unset("GWT_HOOK_FORWARD_TOKEN");
 
@@ -373,6 +392,11 @@ fn forward_owner_is_fail_open_without_live_target_env() {
 fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().expect("isolated hook home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    env.unset("GWT_SESSION_ID");
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("CODEX_THREAD_ID");
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
     let port = listener.local_addr().expect("listener addr").port();
     drop(listener);

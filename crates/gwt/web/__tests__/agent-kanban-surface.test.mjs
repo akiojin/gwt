@@ -41,7 +41,8 @@ test("Agent Kanban groups contained agent windows by stable lane order", () => {
       tab_group_id: "tabs-1",
       tab_group_active: true,
     }),
-    false,
+    true,
+    "legacy saved groups do not restrict the fixed Agents projection",
   );
 
   assert.deepEqual(
@@ -75,6 +76,7 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   const sent = [];
   const terminalMounts = [];
   const launchRequests = [];
+  const undockRequests = [];
 
   const surface = createAgentKanbanSurface({
     activeWorkspace: () => workspace,
@@ -84,6 +86,10 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
     },
     send: (message) => sent.push(message),
     onLaunchAgent: (target) => launchRequests.push(target),
+    onUndockAgent: (id) => {
+      assert.equal(sent.at(-1).kind, "undock_agent_window", "send the placement change before navigation");
+      undockRequests.push(id);
+    },
     windowDisplayTitle: (windowData) => windowData.dynamic_title || windowData.title || windowData.id,
     windowRoleBadgeLabel: (windowData) => windowData.agent_id || windowData.preset,
   });
@@ -121,11 +127,47 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   assert.deepEqual(sent[0], setAgentKanbanCardCollapsedMessage("agent-1", true));
   assert.equal(sent[1].kind, "undock_agent_window");
   assert.equal(sent[1].id, "agent-2");
+  assert.deepEqual(undockRequests, ["agent-2"], "undocking reveals the target in Agents");
   assert.equal(launchRequests[0].boardId, "kanban-1");
   assert.equal(launchRequests[0].laneId, "active");
 });
 
-test("Agent Kanban card messages preserve board, lane, order, and geometry", () => {
+test("Issue #4804 Agent Kanban focuses an existing Issue window until it closes", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].linked_issue_number = 4804;
+  workspace.windows[2].linked_issue_number = 4805;
+  workspace.windows[4].linked_issue_number = 4804;
+  const sent = [];
+  const focused = [];
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    send: message => sent.push(message),
+    onUndockAgent: id => focused.push(id),
+  });
+  const action = id => fixture.body.querySelector(`[data-window-id="${id}"] [data-action="undock"]`);
+  surface.mount(fixture.body, workspace.windows[0]);
+  assert.equal(action("agent-1").textContent, "◎");
+  assert.equal(action("agent-1").title, "Focus existing Issue window");
+  assert.equal(action("agent-1").getAttribute("aria-label"), "Focus existing Issue window");
+  action("agent-1").click();
+  action("agent-1").click();
+  assert.deepEqual(focused, ["agent-free", "agent-free"]);
+  assert.deepEqual(sent, []);
+
+  assert.equal(action("agent-2").title, "Undock", "another Issue can still undock");
+  action("agent-2").click();
+  assert.deepEqual(sent.map(message => message.id), ["agent-2"]);
+  workspace.windows = workspace.windows.filter(window => window.id !== "agent-free");
+  action("agent-1").click();
+  surface.mount(fixture.body, workspace.windows[0]);
+  assert.equal(action("agent-1").title, "Undock");
+  assert.equal(action("agent-1").getAttribute("aria-label"), "Undock agent window");
+  action("agent-1").click();
+  assert.deepEqual(sent.map(message => message.id), ["agent-2", "agent-1", "agent-1"]);
+});
+
+test("Agent Kanban card messages preserve board, lane, and order without saved canvas geometry", () => {
   assert.deepEqual(placeAgentWindowMessage("agent-1", "kanban-1", "blocked", 2), {
     kind: "place_agent_window_in_kanban",
     id: "agent-1",
@@ -145,8 +187,25 @@ test("Agent Kanban card messages preserve board, lane, order, and geometry", () 
   assert.deepEqual(undockAgentWindowMessage("agent-1", { x: 20, y: 30, width: 720, height: 420 }), {
     kind: "undock_agent_window",
     id: "agent-1",
-    geometry: { x: 20, y: 30, width: 720, height: 420 },
   });
+});
+
+test("Agent Kanban uses assigned identity as the primary card label", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].agent_name = "Lumen";
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    windowDisplayTitle: data => data.agent_name ? `${data.agent_name} — ${data.title}` : data.title,
+    windowRoleBadgeLabel: data => data.agent_id || "Agent",
+  });
+  surface.mount(fixture.body, workspace.windows[0]);
+  const card = fixture.body.querySelector('[data-window-id="agent-1"]');
+  assert.equal(card.querySelector(".agent-kanban-card-title").textContent, "Lumen");
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /Implement UI/);
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /codex/);
+  const unnamed = fixture.body.querySelector('[data-window-id="agent-2"]');
+  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, workspace.windows[2].title);
 });
 
 test("Agent Kanban drop target hit-test computes lane insertion order", () => {
@@ -229,14 +288,10 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
   );
   assert.match(
     extractFunctionBody(appSource, "sendGeometry"),
-    /isOffCanvasPlacement\(windowData\)[\s\S]*updateTerminalGridMessage/,
+    /updateTerminalGridMessage/,
     "contained terminal fits must update cols/rows without persisting hidden geometry",
   );
-  assert.match(
-    appSource,
-    /agentKanbanDropTargetAt\(event,\s*dragState\.id\)[\s\S]*placeAgentWindowMessage\(/,
-    "titlebar pointer release must place eligible agent windows into Kanban lanes",
-  );
+
 });
 
 // SPEC-3671 P1 / T-002 + T-003: every "is this window drawn on the canvas?" check in
@@ -244,7 +299,7 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
 // read `placement.board_id` / `placement.lane_id`, deliberately keep using
 // `isAgentKanbanPlacement()` because they ask a different question.
 test("canvas-visibility checks route through the off-canvas seam", () => {
-  for (const name of ["visibleWindowData", "canRefreshTerminalViewport", "sendGeometry"]) {
+  for (const name of ["visibleWindowData", "canRefreshTerminalViewport"]) {
     const body = extractFunctionBody(appSource, name);
     assert.match(
       body,

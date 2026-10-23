@@ -42,6 +42,7 @@ enum PerfRecordType {
     Sample,
     Violation,
     StartupPhase,
+    GuiDispatchSummary,
 }
 
 /// Evidence captured when a sustained budget violation is emitted.
@@ -99,6 +100,8 @@ pub struct PerfRecord {
     detector_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     startup: Option<super::startup::StartupSample>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatch: Option<super::dispatch::DispatchSummary>,
 }
 
 impl PerfRecord {
@@ -123,6 +126,7 @@ impl PerfRecord {
             duration_seconds: None,
             detector_version: None,
             startup: None,
+            dispatch: None,
         }
     }
 
@@ -148,7 +152,25 @@ impl PerfRecord {
             duration_seconds: Some(details.duration_seconds),
             detector_version: None,
             startup: None,
+            dispatch: None,
         }
+    }
+
+    pub fn dispatch(event: &str, summary: super::dispatch::DispatchSummary) -> Self {
+        let mut record = Self::sample(
+            summary.window_ended_at,
+            PerfStream::Ui,
+            if event.is_empty() {
+                "gui:event_loop".to_owned()
+            } else {
+                format!("handler:{event}")
+            },
+            summary.total_ms,
+            PerfUnit::Milliseconds,
+        );
+        record.record_type = PerfRecordType::GuiDispatchSummary;
+        record.dispatch = Some(summary);
+        record
     }
 
     pub fn startup(sample: super::startup::StartupSample, duration_ms: f64) -> Self {

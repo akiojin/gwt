@@ -1,8 +1,15 @@
-//! Issue #4730: isolated Windows startup-load measurement, deliberately ignored.
-//! Run with --ignored --test-threads=1 --nocapture after building this checkout.
+//! Issues #4730 / #4803: isolated Windows dev-host startup-load measurements.
+//! The ignored load fixtures preserve the original host measurement budgets.
+//! Keep their <= 5 s canvas / <= 500 ms response budgets on the Windows dev host.
+//! Run either fixture explicitly after building this checkout:
+//! cargo test -p gwt --test startup_tray_performance <fixture_name> -- --exact --ignored --test-threads=1 --nocapture
+//! PR CI selects only startup_metric_and_native_command_contract with --exact
+//! and without --ignored; the 1500-session Git-spawn budget runs as a unit test.
+//! Nightly selects startup_tray_under_large_stopped_session_load explicitly.
+//! The update-marker fixture remains dev-host-only (Issues #4839 / #4821).
 //! This observes the native tray window and sends the real muda WM_COMMAND route;
 //! it does NOT prove Explorer icon painting or a physical notification-area click.
-//! Command IDs are pinned to muda 0.20.0 and main's initial menu creation order.
+//! Command IDs follow the native menu allocation and main's initial creation order.
 #![cfg(windows)]
 
 use std::{
@@ -22,7 +29,7 @@ const REPEATS: usize = 5;
 const POLL: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(60);
 const OPEN: usize = 1001;
-const QUIT: usize = 1004;
+const QUIT: usize = 1005;
 type Hwnd = *mut c_void;
 
 #[link(name = "user32")]
@@ -102,7 +109,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    fn new(worktree_count: usize) -> Self {
         let temp = tempfile::tempdir().expect("isolated startup fixture");
         let repo = temp.path().join("repo");
         let template = temp.path().join("session-template");
@@ -116,9 +123,9 @@ impl Fixture {
             &repo,
             &["commit", "--quiet", "--allow-empty", "-m", "fixture"],
         );
-        // Exactly 300 real worktrees including the main worktree; no production repo is touched.
+        // Real worktrees including the main worktree; no production repo is touched.
         let mut worktrees = vec![repo.clone()];
-        for index in 1..300 {
+        for index in 1..worktree_count {
             let path = temp.path().join(format!("wt-{index}"));
             let target = path.to_str().unwrap();
             git(
@@ -248,12 +255,97 @@ fn tray_ready_ms(log: &str) -> Option<f64> {
         })
 }
 
+fn startup_latency_budget_passes(
+    tray_ms: Option<f64>,
+    native_ms: Option<f64>,
+    click_ms: Option<f64>,
+) -> bool {
+    tray_ms.is_some_and(|ms| ms <= 2000.0)
+        && native_ms.is_some_and(|ms| ms <= 2000.0)
+        && click_ms.is_some_and(|ms| ms <= 500.0)
+}
+
+fn click_ack(log: &str, sent_at: chrono::DateTime<chrono::Utc>) -> Option<(f64, Value)> {
+    log.lines()
+        .filter_map(|line| {
+            let row: Value = serde_json::from_str(line).ok()?;
+            if row["target"] != "gwt_tray"
+                || !matches!(
+                    row["fields"]["message"].as_str(),
+                    Some(
+                        "tray request accepted during startup"
+                            | "tray Open browser launch requested"
+                    )
+                )
+            {
+                return None;
+            }
+            let received = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str()?).ok()?;
+            let elapsed = received.signed_duration_since(sent_at).to_std().ok()?;
+            Some((elapsed.as_secs_f64() * 1000.0, row))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+}
+
 #[test]
 fn startup_metric_and_native_command_contract() {
+    let sent_at = chrono::DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let ack = r#"{"timestamp":"2026-10-21T11:00:00.120+09:00","target":"gwt_tray","fields":{"message":"tray request accepted during startup"}}"#;
+    let ack_ms = |log: &str| click_ack(log, sent_at).map(|(ms, _)| ms);
+    // Reading this record after 600ms must still measure the ACK at 120ms.
+    assert_eq!(ack_ms(ack), Some(120.0));
+    assert_eq!(
+        ack_ms(&ack.replace(
+            "tray request accepted during startup",
+            "tray Open browser launch requested"
+        )),
+        Some(120.0)
+    );
+    for invalid in [
+        String::new(),
+        ack.replace("timestamp", "missing_timestamp"),
+        ack.replace("2026-10-21T11:00:00.120+09:00", "invalid"),
+        ack.replace("11:00:00.120", "10:59:59.999"),
+        ack.replace("gwt_tray", "unrelated"),
+        ack.replace("tray request accepted during startup", "unrelated"),
+    ] {
+        assert_eq!(ack_ms(&invalid), None);
+    }
+    let slow_ack = ack.replace(".120", ".500001");
+    assert!(ack_ms(&slow_ack).is_some_and(|ms| ms > 500.0 && ms < 501.0));
+    assert!(!startup_latency_budget_passes(
+        Some(100.0),
+        Some(100.0),
+        ack_ms(&slow_ack)
+    ));
+    assert_eq!(ack_ms(&format!("{slow_ack}\n{ack}")), Some(120.0));
     let mark = r#"{"startup":{"phase":"tray_ready","start_ms":0},"value":1750}"#;
     assert_eq!(tray_ready_ms(mark), Some(1750.0));
-    let lock = include_str!("../../../Cargo.lock").replace('\r', "");
-    assert!(lock.contains("name = \"muda\"\nversion = \"0.20.0\""));
+    assert!(startup_latency_budget_passes(
+        tray_ready_ms(mark),
+        Some(1750.0),
+        Some(120.0)
+    ));
+    assert!(startup_latency_budget_passes(
+        Some(2000.0),
+        Some(2000.0),
+        Some(500.0)
+    ));
+    for (tray_ms, native_ms, click_ms) in [
+        (Some(2001.0), Some(2000.0), Some(500.0)),
+        (Some(2000.0), Some(2001.0), Some(500.0)),
+        (Some(2000.0), Some(2000.0), Some(501.0)),
+        (None, Some(2000.0), Some(500.0)),
+        (Some(2000.0), None, Some(500.0)),
+        (Some(2000.0), Some(2000.0), None),
+    ] {
+        assert!(
+            !startup_latency_budget_passes(tray_ms, native_ms, click_ms),
+            "startup budget must reject overrun or unmeasured latency: {tray_ms:?}, {native_ms:?}, {click_ms:?}"
+        );
+    }
     let menu = include_str!("../src/main.rs")
         .rsplit_once("let tray_menu = Menu::new();")
         .unwrap()
@@ -264,7 +356,8 @@ fn startup_metric_and_native_command_contract() {
     for item in [
         "let tray_open",
         "let tray_copy_url =",
-        "let tray_about",
+        "let tray_open_project",
+        "let tray_clone",
         "let tray_quit",
     ] {
         let position = menu.find(item).expect("native menu item construction");
@@ -276,7 +369,7 @@ fn startup_metric_and_native_command_contract() {
 #[test]
 #[ignore = "real Windows tray, 300 worktrees and 1500 stopped Sessions; run explicitly"]
 fn startup_tray_under_large_stopped_session_load() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(300);
     let control_binary = std::env::var_os("GWT_STARTUP_CONTROL_BINARY");
     let is_control = control_binary.is_some();
     let binary = control_binary.unwrap_or_else(|| env!("CARGO_BIN_EXE_gwt").into());
@@ -318,21 +411,33 @@ fn startup_tray_under_large_stopped_session_load() {
             ready = tray_ready_ms(&text);
         }
         let mut click_ms = None;
+        let mut click_observed_ms = None;
+        let mut click_sent_at = None;
+        let mut click_ack_record = None;
         if let Some(hwnd) = hwnd {
             if ready.is_some() && !is_control {
                 let click = Instant::now();
+                click_sent_at = Some(chrono::Utc::now());
                 menu_command(hwnd, OPEN);
                 while click.elapsed() < Duration::from_secs(2) {
                     text = logs(&log_dir);
-                    if text.contains("tray request accepted during startup")
-                        || text.contains("tray Open browser launch requested")
-                    {
-                        click_ms = Some(click.elapsed().as_secs_f64() * 1000.0);
+                    // The writer is asynchronous and polling has its own latency;
+                    // use the event timestamp for the native response budget.
+                    if let Some((ack_ms, record)) = click_ack(&text, click_sent_at.unwrap()) {
+                        click_ms = Some(ack_ms);
+                        click_observed_ms = Some(click.elapsed().as_secs_f64() * 1000.0);
+                        click_ack_record = Some(record);
                         break;
                     }
                     std::thread::sleep(POLL);
                 }
             }
+            eprintln!(
+                "{}",
+                json!({"run":run, "click_sent_at":click_sent_at,
+                    "click_ack_record":click_ack_record, "click_ack_ms":click_ms,
+                    "click_ack_observed_ms":click_observed_ms})
+            );
             if run == REPEATS - 1 && ready.is_some() && !is_control {
                 // Observe the whole first ten minutes, not just immediate tray readiness.
                 loop {
@@ -404,6 +509,8 @@ fn startup_tray_under_large_stopped_session_load() {
         samples.push(
             json!({"run":run, "native_window_ms":hwnd.map(|_| native_window_ms),
             "native_window_found":hwnd.is_some(), "tray_ready_ms":ready, "click_ack_ms":click_ms,
+            "click_ack_observed_ms":click_observed_ms,
+            "click_sent_at":click_sent_at, "click_ack_record":click_ack_record,
             "startup_phases":phases, "failure_stderr":stderr}),
         );
         drop(child);
@@ -422,9 +529,7 @@ fn startup_tray_under_large_stopped_session_load() {
     let ready_p95 = percentile("tray_ready_ms");
     let native_p95 = percentile("native_window_ms");
     let click_p95 = percentile("click_ack_ms");
-    let passed = ready_p95.is_some_and(|ms| ms <= 2000.0)
-        && native_p95.is_some_and(|ms| ms <= 2000.0)
-        && click_p95.is_some_and(|ms| ms <= 500.0)
+    let passed = startup_latency_budget_passes(ready_p95, native_p95, click_p95)
         && dispatch_observation_complete
         && project_restore_completed
         && probe_timeouts == 0
@@ -436,6 +541,7 @@ fn startup_tray_under_large_stopped_session_load() {
         "dispatch_observation_seconds":600, "dispatch_observation_complete":dispatch_observation_complete,
         "max_logged_dispatch_ms":max_logged_dispatch_ms,
         "native_response_probe_timeouts":probe_timeouts, "diagnostic_logs":diagnostic_logs,
+        "click_ack_measurement":"ACK event timestamp minus send timestamp; log observation delay reported separately",
         "dispatch_measurement":"frontend timing target only; durations below the 100ms warning threshold are not logged",
         "missing_measurements":"null means unmeasured/RED, never zero"});
     let out =
@@ -444,4 +550,177 @@ fn startup_tray_under_large_stopped_session_load() {
     fs::write(&out, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     eprintln!("{report}");
     assert!(passed, "startup tray budget failed or unmeasured");
+}
+
+/// Issue #4803: the update marker forces the historical Session path that
+/// ordinary cold-start coverage does not exercise.
+#[test]
+#[ignore = "real Windows startup with an update marker and 1500 Sessions"]
+fn startup_update_resume_under_large_session_load() {
+    // More worktrees than the Git budget proves a per-worktree Git cache
+    // alone is insufficient, without repeating the separate 300-worktree suite.
+    let fixture = Fixture::new(6);
+    git(
+        &fixture.repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/startup-fixture.git",
+        ],
+    );
+    let home = fixture.home(0);
+    {
+        let _scope = gwt_core::test_support::ScopedGwtHome::set(&home);
+        gwt_core::update::persist_update_resume_marker(&gwt_core::update::UpdateResumeMarker {
+            from_version: "fixture".into(),
+            to_version: env!("CARGO_PKG_VERSION").into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            restart_args: Vec::new(),
+            projects: vec![gwt_core::update::UpdateResumeProject {
+                hash: gwt_core::paths::project_scope_hash(&fixture.repo).to_string(),
+                update_drain: false,
+            }],
+            attempt: 1,
+        })
+        .unwrap();
+    }
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwt"));
+    fixture.configure(&mut command, &home);
+    let url_file = home.join("browser-url.txt");
+    command
+        .arg("--no-open")
+        .env("GWT_BROWSER_URL_FILE", &url_file)
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(home.join("stderr.log")).unwrap());
+    let mut child = Running(command.spawn().expect("spawn checkout gwt"));
+    let started = Instant::now();
+    let browser_binary = std::env::var_os("GWT_TEST_CHROMIUM")
+        .map(PathBuf::from)
+        .or_else(|| {
+            ["ProgramFiles(x86)", "ProgramFiles"]
+                .into_iter()
+                .find_map(|key| {
+                    let path = PathBuf::from(std::env::var_os(key)?)
+                        .join("Microsoft/Edge/Application/msedge.exe");
+                    path.is_file().then_some(path)
+                })
+        })
+        .expect("set GWT_TEST_CHROMIUM or install Chromium-based Microsoft Edge");
+    let mut browser = None;
+    let mut browser_url = None;
+    let mut browser_started_ms = None;
+    let mut canvas = None;
+    let mut drain = None;
+    let mut parsed_sessions = None;
+    let mut common_dir_spawns = std::collections::HashSet::new();
+    let mut process_logging_seen = false;
+    let mut phases = Vec::new();
+    while started.elapsed() < TIMEOUT && child.0.try_wait().unwrap().is_none() {
+        if browser.is_none() {
+            if let Ok(url) = fs::read_to_string(&url_file) {
+                if !url.trim().is_empty() {
+                    let project_url = format!(
+                        "{}p/{}",
+                        url.trim().trim_end_matches('/').to_owned() + "/",
+                        gwt_core::paths::project_scope_hash(&fixture.repo)
+                    );
+                    browser_url = Some(project_url.clone());
+                    browser_started_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+                    browser = Some(Running(
+                        hidden_command(&browser_binary)
+                            .arg(format!(
+                                "--user-data-dir={}",
+                                home.join("chromium-profile").display()
+                            ))
+                            .args([
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                                "--disable-background-networking",
+                                // Keep the headed measurement rendering when another
+                                // window occludes it, as browser test runners do.
+                                "--disable-background-timer-throttling",
+                                "--disable-backgrounding-occluded-windows",
+                                "--disable-renderer-backgrounding",
+                                "--no-sandbox",
+                                "--remote-debugging-port=0",
+                            ])
+                            .arg(format!("--app={project_url}"))
+                            .stdout(Stdio::null())
+                            .stderr(fs::File::create(home.join("chromium-stderr.log")).unwrap())
+                            .spawn()
+                            .expect("start isolated headed Chromium"),
+                    ));
+                }
+            }
+        }
+        let mut text = logs(&home.join(".gwt/logs"));
+        let project_logs = {
+            let _scope = gwt_core::test_support::ScopedGwtHome::set(&home);
+            gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.repo).join("logs")
+        };
+        text.push_str(&logs(&project_logs));
+        phases.clear();
+        common_dir_spawns.clear();
+        for row in text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            if row["target"] == "gwt.process.summary" && row["fields"]["phase"] == "start" {
+                process_logging_seen = true;
+                if row["fields"]["label"].as_str().is_some_and(|label| {
+                    label.contains("rev-parse") && label.contains("--git-common-dir")
+                }) {
+                    common_dir_spawns.insert(format!(
+                        "{}:{}:{}",
+                        row["timestamp"], row["fields"]["spawn_id"], row["fields"]["label"]
+                    ));
+                }
+            }
+            match row["startup"]["phase"].as_str() {
+                Some("canvas_ready") => canvas = row["value"].as_f64(),
+                Some("restore_drain") => drain = row["value"].as_f64(),
+                Some("session_load") => parsed_sessions = row["startup"]["count"].as_u64(),
+                _ => {}
+            }
+            if row["startup"].is_object() || row["target"] == "gwt.process.summary" {
+                phases.push(row);
+            }
+        }
+        if canvas.is_some() && drain.is_some() {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let passed = parsed_sessions == Some(1500)
+        && process_logging_seen
+        && common_dir_spawns.len() <= 5
+        && canvas.is_some_and(|ms| ms <= 5000.0)
+        && drain.is_some_and(|ms| ms <= 500.0);
+    let browser_exit = browser
+        .as_mut()
+        .and_then(|browser| browser.0.try_wait().ok().flatten());
+    let report = json!({"passed":passed, "sessions":1500, "worktrees":6,
+        "update_resume_marker":true, "parsed_sessions":parsed_sessions, "canvas_ready_ms":canvas,
+        "common_dir_git_spawns":common_dir_spawns.len(), "process_logging_seen":process_logging_seen,
+        "restore_drain_ms":drain, "perf_log_excerpt":phases,
+        "browser_started":browser.is_some(), "browser_binary":browser_binary,
+        "browser_url":browser_url, "browser_started_ms":browser_started_ms,
+        "browser_exit":browser_exit.map(|status|status.to_string()),
+        "browser_stderr":fs::read_to_string(home.join("chromium-stderr.log")).unwrap_or_default(),
+        "fixture_home":home,
+        "failure_stderr":(!passed).then(||fs::read_to_string(home.join("stderr.log")).unwrap_or_default())});
+    let out =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/startup-update-performance.json");
+    fs::write(out, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    eprintln!("{report}");
+    if let Some(hwnd) = tray_window(child.0.id()) {
+        menu_command(hwnd, QUIT);
+    }
+    drop(child);
+    drop(browser);
+    if !passed {
+        let _ = fixture._temp.keep();
+    }
+    assert!(passed, "update startup budget failed or unmeasured");
 }

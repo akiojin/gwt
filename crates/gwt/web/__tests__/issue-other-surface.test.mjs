@@ -6,9 +6,29 @@ import {
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import {
+  createActiveWorkProjectionModel,
   createIssueOtherSurface,
   mergeActiveWorkProjectionPatch,
 } from "../issue-other-surface.js";
+
+test("Active Work model commits immutable merged snapshots and clears on null", () => {
+  const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+  const rendered = [];
+  model.subscribe(state => state, state => rendered.push(state));
+  const initial = { id: "p", journal_entries: [{ id: "history" }], active_works: [] };
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: initial });
+  assert.notEqual(model.read().projection, initial);
+  assert.ok(Object.isFrozen(model.read().projection.journal_entries[0]));
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "p", title: "Changed" } });
+  assert.equal(model.read().projection.title, "Changed");
+  assert.deepEqual(model.read().projection.journal_entries, initial.journal_entries);
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "other" } });
+  assert.equal(model.read().projection.journal_entries, undefined, "project identity fences history");
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  assert.deepEqual(rendered.slice(-2), [{ projection: null }, { projection: null }]);
+  model.dispose();
+});
 
 test("bounded Active Work patches preserve history while replacing live membership", () => {
   const previousSession = {
@@ -361,6 +381,19 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
     queue.querySelectorAll(".workspace-overview-agent-row").length,
     1,
   );
+});
+
+test("Active Work agents show assigned names with provider as secondary context", () => {
+  const fixture = createFixture();
+  const projection = sampleProjection();
+  projection.unassigned_agents[0].agent_name = "Lumen";
+  const surface = createSurface(fixture, projection);
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "Lumen");
+  assert.match(fixture.body.querySelector(".workspace-overview-agent-meta").textContent, /Codex/);
+  projection.unassigned_agents[0].agent_name = null;
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "work/20260511-0100");
 });
 
 test("Workspace Overview renders Active Works from active_works and keeps Unassigned Agents separate", () => {
@@ -3536,4 +3569,33 @@ test("Other remote rows deduplicate Issue-linked branches and use the Issue lane
   surface.renderInto(fixture.body, fixture.windowData.id, { laneFilter: "remote" });
   assert.deepEqual(rowIdsInList(fixture), ["remote-start:feature/remote"]);
   assert.equal(fixture.body.querySelector(".issue-other-summary").textContent, "Other (1)");
+});
+
+
+test("Work detail keeps named windows distinct even when their provider matches", () => {
+  const projection = continuationProjection();
+  const work = projection.active_works[0].works[0];
+  work.agents = ["ミオ", "ハヤテ"].map((name, index) => ({
+    session_id: `window-${index}`, agent_id: "codex", display_name: "Codex", agent_name: name,
+    sessions: [{ agent_session_id: `conversation-${index}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.match(fixture.body.textContent, /ミオ \(Codex\)/);
+  assert.match(fixture.body.textContent, /ハヤテ \(Codex\)/);
+});
+
+test("Work detail retains separate sessions and Resume actions with the same assigned name", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = ["first", "second"].map(id => ({
+    session_id: id, agent_id: "codex", display_name: "Codex", agent_name: "ミオ",
+    status_category: "idle",
+    sessions: [{ agent_session_id: `conversation-${id}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.deepEqual(resumes.map(button => button.dataset.sessionId), ["first", "second"]);
 });

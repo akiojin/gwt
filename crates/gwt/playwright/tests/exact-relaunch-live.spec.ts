@@ -8,9 +8,9 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
-import { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 
@@ -63,12 +63,11 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
 
 async function launchCodex(page: Page, branch: string) {
   const after = await cursor(page);
-  await openLiveLaunchWizardForBranch(page, branch);
+  await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
-  await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
-  // The installed (fixture) Codex, never a package runner, is the route under test.
-  let state = await wizardAction(page, { kind: "set_version", version: "installed" });
+  // The installed (fixture) Codex is the only route: the wizard has no version choice.
+  let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
   for (let step = 0; step < 12 && state.wizard; step += 1) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== "host"
@@ -99,6 +98,12 @@ function tomlString(record: string, key: string): string | null {
   return record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1] ?? null;
 }
 
+async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path });
+  await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
 test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // The fixture spawns this checkout's target/debug/gwt, which the embedded
   // CI Playwright job does not build.
@@ -106,6 +111,25 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     "GWT_PLAYWRIGHT_EXACT_RELAUNCH=1 is not set; checkout relaunch E2E skipped");
   test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
   test.setTimeout(420_000);
+
+  test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
+    let starts = 0;
+    const cleanups: { pid: number; ps_status: number }[] = [];
+    const fixture = await startExactRelaunchFixture({
+      async attach(name, attachment) {
+        if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
+        if (name === "fixture-process-cleanup") cleanups.push(JSON.parse(attachment.body!.toString()));
+        await testInfo.attach(name, attachment);
+      },
+    } as TestInfo);
+    try {
+      await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
+      expect(cleanups).toHaveLength(2);
+      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+    } finally {
+      await fixture.stop();
+    }
+  });
 
   test("window restart and app restart rebind the exact provider session", async ({ page }, testInfo) => {
     const fixture = await startExactRelaunchFixture(testInfo);
@@ -124,6 +148,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.getByRole("button", { name: "Agents", exact: true }).click();
       await launchCodex(page, fixture.branch);
 
       // Initial launch: a fresh conversation whose native id gwt learns from the provider hook.
@@ -133,28 +158,46 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const native = first.provider_session_id;
       const firstWindow = await liveCodexWindow(page, first.gwt_session_id!);
       expect(tomlString(await syncedResumeId(first.gwt_session_id!), "agent_session_id")).toBe(native);
-      await testInfo.attach(`launched-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await attachScreenshot(page, testInfo, `launched-${theme}`);
 
-      // Window restart: the provider exits, the user presses Restart agent.
+      // Window restart: the provider exits, then an explicit runtime restart
+      // rebinds the same window. The Agents surface hides legacy canvas chrome.
       // Let the SessionStart runtime state land first so it cannot race the exit.
       await expect.poll(async () => (await codexWindows(page)).find((entry) => entry.id === firstWindow.id)?.status,
         { timeout: 60_000, message: "SessionStart runtime state reaches the window" }).toBe("idle");
-      // The provider dies (a clean exit closes the window instead); the window
-      // runtime turns error and the Restart agent control appears.
+      // A clean exit closes the window; a provider failure retains the tile.
+      const beforeExit = await cursor(page);
       process.kill(first.pid, "SIGTERM");
-      const restart = page.locator(`.workspace-window[data-id="${firstWindow.id}"] [data-action="restart"]`);
-      await expect(restart).toBeVisible({ timeout: 60_000 });
-      await restart.click();
+      await page.waitForFunction(({ after, id }) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "terminal_status"
+        && entry.payload.id === id && entry.payload.status === "error"),
+      { after: beforeExit, id: firstWindow.id }, { timeout: 60_000 });
+      const tile = page.locator(`.agent-tile[data-agent-id="${firstWindow.id}"]`);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Input unavailable");
+      const wizardCursor = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: fixture.branch });
+      const { wizard } = await latestWizard(page, wizardCursor, true);
+      await testInfo.attach("quick-start-cache-view", {
+        body: JSON.stringify(wizard.quick_start_entries), contentType: "application/json" });
+      await expect(page.locator("#wizard-modal")).toBeVisible();
+      await attachScreenshot(page, testInfo, `quick-start-${theme}`);
+      await wizardAction(page, { kind: "cancel" });
+      await sendLiveGwtEvent(page, { kind: "restart_window", id: firstWindow.id });
       const second = await launchAt(2);
       expect(second.argv.slice(second.argv.indexOf("resume"))).toContain(native);
       expect(second.resume_session_id).toBe(native);
       expect(second.provider_session_id).toBe(native);
       await liveCodexWindow(page, second.gwt_session_id!);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
       const secondRecord = await syncedResumeId(second.gwt_session_id!);
       expect(tomlString(secondRecord, "agent_session_id")).toBe(native);
+      expect(secondRecord, "the restarted Session stays eligible for the next app restore")
+        .toMatch(/^restore_window_on_startup\s*=\s*true$/m);
       expect(tomlString(secondRecord, "restore_source_session_id")).toBe(first.gwt_session_id);
       expect(tomlString(secondRecord, "launch_origin")).toBe("user_restart");
-      await testInfo.attach(`window-restarted-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await attachScreenshot(page, testInfo, `window-restarted-${theme}`);
       expect(errors, "console/page errors before app restart").toEqual([]);
 
       // App restart: the checkout process stops with the agent window open and
@@ -165,6 +208,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       errors = capture(restored);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
+      await restored.getByRole("button", { name: "Agents", exact: true }).click();
       const third = await launchAt(3);
       expect(third.argv.slice(third.argv.indexOf("resume"))).toContain(native);
       expect(third.resume_session_id).toBe(native);
@@ -172,16 +216,21 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await liveCodexWindow(restored, third.gwt_session_id!);
       const thirdRecord = await syncedResumeId(third.gwt_session_id!);
       expect(tomlString(thirdRecord, "agent_session_id")).toBe(native);
+      expect(thirdRecord, "automatic restore preserves the live Session restore flag")
+        .toMatch(/^restore_window_on_startup\s*=\s*true$/m);
       expect(tomlString(thirdRecord, "restore_source_session_id")).toBe(second.gwt_session_id);
       expect(tomlString(thirdRecord, "launch_origin")).toBe("automatic_restore");
       expect((await fixture.launches()).map((launch) => launch.provider_session_id)).toEqual([native, native, native]);
-      await testInfo.attach(`app-restarted-${theme}`, { body: await restored.screenshot(), contentType: "image/png" });
+      await attachScreenshot(restored, testInfo, `app-restarted-${theme}`);
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {
-      await testInfo.attach("provider-launches", {
-        body: JSON.stringify(await fixture.launches(), null, 2), contentType: "application/json",
-      });
-      await fixture.stop();
+      try {
+        await testInfo.attach("provider-launches", {
+          body: JSON.stringify(await fixture.launches(), null, 2), contentType: "application/json",
+        });
+      } finally {
+        await fixture.stop();
+      }
     }
   });
 });

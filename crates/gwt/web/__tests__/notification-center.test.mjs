@@ -282,8 +282,11 @@ test("renderNotificationBell syncs count, visibility, error emphasis, aria-label
 
 test("recordError dedups by key: repeats bump the occurrence count on ONE error row", () => {
   const { document, center } = setup();
+  const unreadChanges = [];
+  center.onUnreadChange((count, hasError) => unreadChanges.push([count, hasError]));
   const first = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
   const again = center.recordError({ key: "issue-monitor:last_error", title: "Issue Monitor", message: "scan failed" });
+  assert.equal(unreadChanges.length, 2, "one unread publication per recorded occurrence");
   assert.equal(first, again, "same key reuses the row");
   assert.equal(center.count(), 1);
   assert.equal(first.dataset.level, "error");
@@ -294,6 +297,9 @@ test("recordError dedups by key: repeats bump the occurrence count on ONE error 
   assert.equal(center.unreadHasError(), true);
   center.recordError({ key: "issue-window:w1:load", title: "Issue window", message: "gh: rate_limited" });
   assert.equal(center.count(), 2, "different keys are different rows");
+  center.recordError({ key: "issue-monitor:last_error" });
+  assert.match(first.querySelector(".notification-center__title").textContent, /Issue Monitor/);
+  assert.equal(first.querySelector(".notification-center__message")?.textContent, "scan failed", "legacy errors retain omitted optional fields");
 });
 
 test("resolveError marks the row resolved and read; a later recurrence re-flags the SAME row unread", () => {
@@ -322,6 +328,97 @@ test("a dismissed error row does not resurrect on recurrence", () => {
   const fresh = center.recordError({ key: "k", title: "t", message: "m" });
   assert.notEqual(fresh, row, "a new row is created after the old one was dismissed");
   assert.equal(fresh.querySelector(".notification-center__count"), null, "count starts over (single occurrence shows no ×N)");
+});
+
+test("surface status updates reuse one row with the latest severity and closed plain-text details", () => {
+  const { center } = setup();
+  assert.equal(typeof center.recordSurfaceNotice, "function");
+  const row = center.recordSurfaceNotice({
+    key: "capacity", title: "Capacity incomplete", level: "warn", message: "Wait for measurement.",
+    details: "<img src=x> inventory_complete=false\n/project/target",
+  });
+  const details = row.querySelector("details.notification-center__details");
+  assert.ok(details);
+  assert.equal(details.hasAttribute("open"), false, "diagnostics start collapsed");
+  assert.equal(details.querySelector("summary").textContent, "Details");
+  assert.equal(details.querySelector("summary").getAttribute("tabindex"), "0", "details remain keyboard reachable inside the shared focus trap");
+  assert.equal(details.querySelector(".notification-center__details-content").textContent,
+    "<img src=x> inventory_complete=false\n/project/target");
+  assert.equal(details.querySelector("img"), null, "diagnostics are text, never HTML");
+  assert.equal(row.dataset.severity, "warning");
+  details.setAttribute("open", "");
+
+  assert.equal(center.recordSurfaceNotice({
+    key: "capacity", title: "Manual capacity", level: "info", message: "No action needed.", details: "latest diagnostics",
+  }), row);
+  assert.equal(center.count(), 1);
+  assert.equal(row.dataset.level, "info");
+  assert.equal(row.dataset.severity, "neutral");
+  const marker = row.querySelector(".notification-center__severity");
+  assert.equal(marker.dataset.severity, "neutral");
+  assert.equal(marker.textContent, "·");
+  assert.equal(marker.getAttribute("aria-label"), "Neutral");
+  assert.equal(row.querySelector(".notification-center__title").textContent, "Manual capacity");
+  assert.equal(row.querySelector(".notification-center__message").textContent, "No action needed.");
+  assert.equal(details.querySelector(".notification-center__details-content").textContent, "latest diagnostics");
+  assert.equal(details.hasAttribute("open"), true, "updating retains the operator's expansion");
+  assert.equal(row.querySelector(".notification-center__count"), null, "status snapshots are not occurrences");
+  assert.equal(center.unreadCount(), 1);
+  assert.equal(center.unreadHasError(), false);
+
+  center.open();
+  center.close();
+  center.recordSurfaceNotice({
+    key: "capacity", title: "Manual capacity", level: "info", message: "No action needed.", details: "new live measurements",
+  });
+  assert.equal(details.querySelector(".notification-center__details-content").textContent, "new live measurements");
+  assert.equal(center.unreadCount(), 0, "diagnostic-only updates keep an acknowledged condition read");
+  center.recordSurfaceNotice({
+    key: "capacity", title: "Manual capacity", level: "info", message: "Use a lower Manual limit.", details: "new live measurements",
+  });
+  assert.equal(center.unreadCount(), 1, "changed guidance becomes unread again");
+
+  assert.equal(center.recordError({ key: "capacity", title: "Measurement failed", message: "Permission denied" }), row);
+  assert.equal(row.dataset.severity, "critical");
+  assert.equal(row.querySelector(".notification-center__severity").getAttribute("aria-label"), "Critical");
+  assert.equal(row.querySelector(".notification-center__title").textContent, "Measurement failed×2");
+  assert.equal(row.querySelector("details"), null, "omitted details remove stale diagnostics");
+  assert.equal(center.unreadHasError(), true);
+  center.recordSurfaceNotice({ key: "capacity", title: "Manual capacity", level: "info" });
+  assert.equal(row.querySelector(".notification-center__count").textContent, "×2", "a status update keeps the occurrence count");
+  assert.equal(row.querySelector(".notification-center__message"), null, "omitted messages remove stale text");
+  assert.equal(center.unreadHasError(), false);
+  assert.equal(center.resolveError("capacity"), true);
+  assert.equal(row.dataset.resolved, "true");
+  assert.equal(center.unreadCount(), 0);
+});
+
+test("open(key) reveals and focuses that row even while open, and close restores the original focus", () => {
+  const { document, center } = setup();
+  const trigger = document.createElement("button");
+  document.body.appendChild(trigger);
+  Object.defineProperty(document, "activeElement", { configurable: true, value: trigger });
+  let restored = 0;
+  trigger.focus = () => { restored += 1; };
+  const row = center.recordError({ key: "capacity", title: "Capacity", message: "incomplete" });
+  let focused = 0;
+  let scrolled = 0;
+  row.focus = () => { focused += 1; };
+  row.scrollIntoView = () => { scrolled += 1; };
+  assert.equal(center.open("capacity"), true);
+  assert.equal(center.isOpen(), true);
+  assert.equal(row.getAttribute("tabindex"), "-1");
+  assert.equal(focused, 1);
+  assert.equal(scrolled, 1);
+  assert.equal(center.unreadCount(), 0);
+  assert.equal(center.open("capacity"), true);
+  assert.equal(focused, 2, "an already open drawer still jumps to the requested item");
+  assert.equal(scrolled, 2);
+  assert.equal(center.open("missing"), false);
+  center.close();
+  assert.equal(restored, 1);
+  assert.equal(center.open("missing"), false);
+  assert.equal(center.isOpen(), true, "a missing key still opens the history");
 });
 
 // --- Issue #3979: triage row layout (user ruling 2026-09-05) ---

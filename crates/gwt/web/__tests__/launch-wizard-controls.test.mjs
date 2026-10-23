@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 import {
   chooseLaunchControlKind,
   reasoningSliderModel,
@@ -20,6 +21,22 @@ import {
   buildToggleField,
   buildChoiceOrSelectField,
 } from "../launch-controls.js";
+
+test("AC-11: wizard visibility publishes opening, ready and closed facts", () => {
+  const source = readFileSync(new URL("../launch-wizard-surface.js", import.meta.url), "utf8");
+  const start = source.indexOf("      function publishLaunchWizardVisibility(");
+  assert.notEqual(start, -1);
+  const end = source.indexOf("      function ", start + 15);
+  const visibilityModel = createUiStateStore({ open: false });
+  const apply = new Function("visibilityModel", "launchWizard", "launchWizardOpenError", "launchWizardOpening",
+    `${source.slice(start, end)}; publishLaunchWizardVisibility();`);
+  apply(visibilityModel, null, null, { title: "Start Work" });
+  assert.equal(visibilityModel.read().open, true);
+  apply(visibilityModel, { title: "Start Work" }, null, null);
+  assert.equal(visibilityModel.read().open, true);
+  apply(visibilityModel, null, null, null);
+  assert.equal(visibilityModel.read().open, false);
+});
 
 // --- fixtures (mirror the Rust DTO values served to the frontend) ----------
 
@@ -512,7 +529,7 @@ test("Launch Wizard の共通 reasoning control は Effort として set_reasoni
 test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(
     wizardSource,
-    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    /function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
     "wizard start methods must classify history, focus, and new-launch intents independently",
   );
   assert.match(
