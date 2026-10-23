@@ -2969,17 +2969,26 @@ format_version: Some(1),
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
         );
 
-        let result = with_terminal_bridge_env(&fixture, &server, |env| {
-            record_current_work_terminal_before_finalize(
-                env,
-                &SkillStateAction::Abort {
+        let execution_before = crate::cli::execution_state::record_contents(&fixture.git.repo)
+            .expect("active execution history");
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
                     spec: 3327,
                     reason: Some("cancelled".to_string()),
-                },
+                }),
             )
+            .expect("run build.abort before execution.blocked")
         });
 
-        assert!(result.is_ok(), "canonical abort must converge: {result:?}");
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap(),
+            execution_before,
+            "build.abort must leave the execution available for execution.blocked"
+        );
         let work = fixture.canonical_work();
         assert!(work.is_terminal());
         assert!(
@@ -2988,6 +2997,55 @@ format_version: Some(1),
         );
         let (_, request) = server.receive();
         assert_eq!(request["terminal_kind"], "discarded");
+
+        let history_paths = [
+            gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo),
+        ];
+        let history_before = history_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("aborted history"))
+            .collect::<Vec<_>>();
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                ),
+            )
+            .expect("run execution.blocked after build.abort")
+        });
+        assert_eq!(code, 0, "{output}");
+        let execution = crate::cli::execution_state::load(&fixture.git.repo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            execution.status,
+            crate::cli::execution_state::ExecutionControlStatus::Blocked
+        );
+        assert_eq!(
+            execution.blocked_reason.as_deref(),
+            Some("canonical verification is externally blocked")
+        );
+        assert_eq!(
+            execution.missing_verification.as_deref(),
+            Some("full matrix")
+        );
+        for (path, before) in history_paths.iter().zip(history_before) {
+            assert_eq!(std::fs::read(path).unwrap(), before, "{}", path.display());
+        }
+        assert!(
+            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        server.assert_no_request();
+        server.assert_no_abort_request();
     }
 
     #[test]
@@ -3025,18 +3083,20 @@ format_version: Some(1),
             ),
             crate::cli::hook::HookOutput::StopBlock { .. }
         ));
-        assert!(matches!(
-            crate::cli::execution_state::settle(
-                &abort_fixture.git.repo,
-                &abort_fixture.session.id,
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
+        let mut env = crate::cli::TestEnv::new(abort_fixture.git.repo.clone());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Blocked {
                     reason: "canonical verification is externally blocked".to_string(),
                     missing_verification: Some("full matrix".to_string()),
                 },
-            )
-            .expect("settle abort fixture execution"),
-            crate::cli::execution_state::SettleResult::Settled(_)
-        ));
+            ),
+        )
+        .expect("run execution.blocked before build.abort");
+        assert_eq!(code, 0, "{output}");
+        let blocked_history = crate::cli::execution_state::record_contents(&abort_fixture.git.repo)
+            .expect("blocked execution history");
         let abort_server = TerminalBridgeServer::start(
             StatusCode::OK,
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
@@ -3060,20 +3120,22 @@ format_version: Some(1),
         let (abort_code, abort_output) =
             with_terminal_bridge_env(&abort_fixture, &abort_server, |_| {
                 let mut env = crate::cli::TestEnv::new(abort_repo);
-                let mut output = String::new();
-                let code = run(
+                crate::cli::run_collect(
                     &mut env,
-                    SkillStateAction::Abort {
+                    crate::cli::CliCommand::Build(SkillStateAction::Abort {
                         spec: 3327,
                         reason: Some("blocked verification cannot proceed".to_string()),
-                    },
-                    &mut output,
+                    }),
                 )
-                .expect("run build.abort after execution.blocked");
-                (code, output)
+                .expect("run build.abort after execution.blocked")
             });
 
         assert_eq!(abort_code, 0, "{abort_output}");
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&abort_fixture.git.repo).unwrap(),
+            blocked_history,
+            "build.abort must preserve the preceding execution.blocked history"
+        );
         assert!(
             !gwt_core::skill_state::load(&abort_fixture.git.repo, SKILL_NAME)
                 .expect("load aborted build state")
