@@ -914,6 +914,10 @@ mod tests {
         fs::create_dir_all(&runtime).unwrap();
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
         assert_eq!(status["policy"]["forecasts"], serde_json::json!([]));
         assert_eq!(

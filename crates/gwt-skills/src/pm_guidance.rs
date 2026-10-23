@@ -199,6 +199,17 @@ Absent Monitor yields null, while an observed snapshot with no matching rows yie
 Keep the enclosing Monitor provenance: an old or degraded scan is not fresh activity evidence.
 Activity timing does not establish queue age, SLA breaches or liveness, and authorizes no action.
 
+`policy.dependency_observations` preserves every supplied inbox row, including repeated owners,
+with its typed state and canonical `dependency` (`blocked_by`, `cycle`, `bundle_with`).
+An absent typed status remains null and names `dependency_status` in missing inputs.
+Neither absent nor empty dependency status proves readiness or absence of declarations;
+the Monitor may omit status for zero declarations and omit resolved or unknown blockers.
+No usable Monitor observation yields null; a supplied empty inbox yields [].
+Keep the enclosing Monitor source, scan time and coverage limits. A reported cycle is the
+Monitor's observed verdict, not a fresh project-wide graph assessment; bundle declarations
+do not prove bundle completeness. Never recompute readiness or change priority, health or launches
+from these observations.
+
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
 respecting offsets, clamping elapsed deadlines to zero and rounding down whole seconds.
@@ -4470,6 +4481,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
+            "`policy.dependency_observations` preserves every supplied inbox row",
+            "Neither absent nor empty dependency status proves readiness",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",

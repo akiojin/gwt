@@ -868,6 +868,14 @@ harness の空き枠が不明な場合は、自身の補助枠が空いている
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+`policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
+重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
+型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
+Monitor は宣言がない場合に診断を省略し、解消済み・不明の blocker も省略するため、
+診断の欠落や空データから依存関係なし・起動可能とは判断できません。利用可能な観測が
+なければ null、供給された inbox が空なら [] です。取得元・スキャン時刻・観測範囲を
+併せて確認してください。この部分観測はプロジェクト全体の最新グラフ、bundle の充足、
+優先順位・マイルストーン health・起動許可を証明しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
