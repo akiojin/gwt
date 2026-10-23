@@ -12402,6 +12402,15 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("monitor_runtime_stop_requests");
+        // Assert presence and null before the legacy projection comparison;
+        // adding keys to its large json! fixture exceeds the macro recursion budget.
+        for field in ["priority_reason_note", "priority_reason_matches_order"] {
+            assert_eq!(
+                status.as_object_mut().unwrap().remove(field),
+                Some(serde_json::Value::Null),
+                "legacy preferences must explicitly report {field} as null"
+            );
+        }
         assert_eq!(
             status,
             serde_json::json!({
