@@ -24,6 +24,8 @@ class AptCacheTests(unittest.TestCase):
             '#!/usr/bin/env bash\n'
             'echo "$*" >> "$GWT_MOCK_TRACE"\n'
             'if grep -qr packages.microsoft.com "$GWT_APT_ETC_DIR"/sources.list*; then exit 98; fi\n'
+            'if [[ "${GWT_MOCK_EXPECT_HTTPS:-0}" == 1 ]] &&\n'
+            '   grep -qrE "mirror\\+file:|http://(azure\\.archive|archive|security)\\.ubuntu\\.com" "$GWT_APT_ETC_DIR"/sources.list*; then exit 97; fi\n'
             'if [[ "${GWT_MOCK_OFFLINE:-0}" == 1 && "$*" != *--no-download* ]]; then exit 99; fi\n'
             'if [[ "$*" == *install* && "$*" != *--no-download* ]]; then\n'
             '  echo package > "$GWT_APT_CACHE_DIR/mock_1_amd64.deb"\n'
@@ -93,6 +95,40 @@ class AptCacheTests(unittest.TestCase):
             self.assertNotIn("packages.microsoft.com", path.read_text())
         self.assertIn("archive.ubuntu.com", mixed.read_text())
         self.assertIn("archive.ubuntu.com", deb822.read_text())
+
+    def test_ci_cold_sources_bypass_the_runner_http_mirror(self):
+        sources = self.root / "apt/sources.list.d"
+        deb822 = sources / "ubuntu.sources"
+        deb822.write_text(
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+            "Suites: noble noble-updates\nComponents: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors-security.txt\n"
+            "Suites: noble-security\nComponents: main universe\n")
+        legacy = sources / "ubuntu.list"
+        legacy.write_text("deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n"
+                          "deb http://security.ubuntu.com/ubuntu noble-security main\n"
+                          "deb https://example.org/packages stable main\n")
+        result = self.install(GITHUB_ACTIONS="true", GWT_MOCK_EXPECT_HTTPS="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("mirror+file:", deb822.read_text())
+        self.assertIn("URIs: https://archive.ubuntu.com/ubuntu", deb822.read_text())
+        self.assertIn("URIs: https://security.ubuntu.com/ubuntu", deb822.read_text())
+        self.assertIn("Suites: noble noble-updates", deb822.read_text())
+        self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822.read_text())
+        self.assertNotIn("azure.archive", legacy.read_text())
+        self.assertNotIn("http://", legacy.read_text())
+        self.assertIn("https://example.org/packages stable main", legacy.read_text())
+        # The injected apt process must see the prepared sources on its first call.
+        self.assertIn("source-mirror=ubuntu-https", result.stdout)
+
+    def test_local_install_preserves_the_configured_mirror(self):
+        source = self.root / "apt/sources.list"
+        body = "deb http://azure.archive.ubuntu.com/ubuntu/ noble main\n"
+        source.write_text(body)
+        result = self.install(GITHUB_ACTIONS="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(source.read_text(), body)
 
 
 if __name__ == "__main__":
