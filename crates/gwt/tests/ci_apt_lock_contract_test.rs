@@ -134,6 +134,17 @@ fn every_github_apt_step_is_lock_aware_and_time_bounded() {
         let uses_wrapper = lines.iter().any(|line| {
             line.contains("ci-apt.sh") || line.contains("install-playwright-browsers.sh")
         });
+        if lines.iter().any(|line| {
+            line.contains("sudo ")
+                && line.contains("ci-apt.sh")
+                && !line.contains("GITHUB_ACTIONS=true")
+        }) {
+            failures.push(format!(
+                "{} / `{}` must pass GITHUB_ACTIONS=true through sudo for CI source filtering",
+                step.workflow.display(),
+                step.name
+            ));
+        }
         if uses_raw_apt {
             failures.push(format!(
                 "{} / `{}` still calls apt-get directly; route it through {CI_APT} \

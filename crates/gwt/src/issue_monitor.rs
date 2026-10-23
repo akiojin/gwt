@@ -67,6 +67,7 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
 pub const ISSUE_COMPLETION_MIGRATION_VERSION: u32 = 1;
+const ISSUE_MONITOR_PREFS_SCHEMA_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
@@ -978,6 +979,12 @@ pub struct IssueMonitorScanError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
+    /// Unversioned legacy preferences use the same known-compatible schema.
+    #[serde(
+        default = "current_issue_monitor_prefs_schema_version",
+        deserialize_with = "deserialize_issue_monitor_prefs_schema_version"
+    )]
+    pub schema_version: u32,
     pub enabled: bool,
     #[serde(default = "default_max_active_agents")]
     pub max_active_agents: usize,
@@ -1313,6 +1320,7 @@ pub struct IssueMonitorTerminalQueue {
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
+            schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
@@ -6326,6 +6334,52 @@ fn default_max_active_agents() -> usize {
     1
 }
 
+fn current_issue_monitor_prefs_schema_version() -> u32 {
+    ISSUE_MONITOR_PREFS_SCHEMA_VERSION
+}
+
+fn validate_issue_monitor_prefs_schema_version(actual: u32) -> io::Result<()> {
+    if actual != ISSUE_MONITOR_PREFS_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Issue Monitor preferences schema mismatch: actual={actual}, expected={ISSUE_MONITOR_PREFS_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_issue_monitor_prefs_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let actual = u32::deserialize(deserializer)?;
+    validate_issue_monitor_prefs_schema_version(actual).map_err(serde::de::Error::custom)?;
+    Ok(actual)
+}
+
+/// Full-snapshot saves must not overwrite preferences owned by another schema.
+/// Syntax/EOF failures remain eligible for the existing malformed-JSON recovery.
+fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
+    if let Some(actual) = value.get("schema_version") {
+        let actual = serde_json::from_value(actual.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        validate_issue_monitor_prefs_schema_version(actual)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn machine_managed_monitor_prefs(path: &Path) -> bool {
     path.strip_prefix(gwt_core::paths::gwt_projects_dir())
         .is_ok_and(|relative| {
@@ -6528,6 +6582,8 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
+    validate_existing_issue_monitor_prefs_schema(path)?;
     crate::machine_agent_settings::migration_before_project_save(path)?;
     let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
     if machine_managed_monitor_prefs(path) {
@@ -6583,16 +6639,26 @@ fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
 /// Only a snapshot that parses is a floor. The sidecar is written after the
 /// canonical file, so it is never newer than what was committed, and being a
 /// separate inode it does not share the canonical file's torn write.
-fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
+fn last_committed_prefs_generation(path: &Path) -> io::Result<Option<IssueMonitorPrefs>> {
     let sidecar = committed_prefs_generation_path(path);
-    let content = fs::read_to_string(&sidecar).ok()?;
-    let mut prefs = crate::update_settings::decode_project_prefs(&content).ok()?;
+    let content = match fs::read_to_string(&sidecar) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut prefs = match crate::update_settings::decode_project_prefs(&content) {
+        Ok(prefs) => prefs,
+        Err(error) if error.is_syntax() || error.is_eof() => return Ok(None),
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
     if machine_managed_monitor_prefs(path) {
-        if let Some(policy) = crate::machine_agent_settings::load().ok()? {
+        if let Some(policy) = crate::machine_agent_settings::load()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
+        {
             apply_machine_policy_to_prefs(&mut prefs, &policy);
         }
     }
-    Some(prefs)
+    Ok(Some(prefs))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7015,6 +7081,7 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
 /// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
 pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
     if machine_managed_monitor_prefs(path) {
+        load_issue_monitor_prefs_raw(path)?;
         crate::machine_agent_settings::ensure_migrated()?;
     }
     fn applied(prefs: &IssueMonitorPrefs) -> bool {
@@ -7162,6 +7229,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let committed = last_committed_prefs_generation(path)?;
                 let quarantine = unique_corrupt_prefs_path(path);
                 fs::copy(path, &quarantine)?;
                 // Issue #3883 AC-2/AC-5: prefer the last committed generation.
@@ -7172,7 +7240,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
                 // launches describe are still running. That single write is
                 // what emptied `active_launches` at max_active 3 with three
                 // launches, and what reverted `autonomous_mode` on restart.
-                match last_committed_prefs_generation(path) {
+                match committed {
                     Some(committed) => (committed, Some((quarantine, error, true))),
                     None => {
                         let mut baseline = recovery_baseline.clone();
@@ -7972,6 +8040,7 @@ impl IssueMonitorState {
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
+            schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
             max_active_agents: self
@@ -41610,6 +41679,100 @@ mod tests {
         );
         fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
         assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+    }
+
+    #[test]
+    fn issue_4193_prefs_schema_accepts_current_and_legacy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).expect("serialize current prefs");
+        assert_eq!(stored["schema_version"], 1);
+        fs::write(&path, stored.to_string()).expect("write current prefs");
+        assert_eq!(
+            load_issue_monitor_prefs(&path).expect("current schema"),
+            prefs
+        );
+
+        stored.as_object_mut().unwrap().remove("schema_version");
+        fs::write(&path, stored.to_string()).expect("write legacy prefs");
+        assert_eq!(
+            load_issue_monitor_prefs(&path).expect("legacy schema"),
+            prefs
+        );
+        assert_eq!(
+            serde_json::to_value(IssueMonitorState::new(IssueMonitorConfig::default()).prefs())
+                .expect("serialize projected prefs")["schema_version"],
+            1
+        );
+    }
+
+    #[test]
+    fn issue_4193_prefs_schema_rejects_older_and_newer_stores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        for actual in [0, 2] {
+            let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+            stored["schema_version"] = serde_json::json!(actual);
+            let original = stored.to_string();
+            fs::write(&path, &original).expect("write incompatible prefs");
+            let error = load_issue_monitor_prefs(&path).expect_err("incompatible schema");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let message = error.to_string();
+            assert!(message.contains("schema"), "{message}");
+            assert!(message.contains("expected=1"), "{message}");
+            assert!(message.contains(&format!("actual={actual}")), "{message}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn issue_4193_prefs_writers_preserve_an_incompatible_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).unwrap();
+        stored["schema_version"] = serde_json::json!(2);
+        let original = stored.to_string();
+        fs::write(&path, &original).expect("write incompatible prefs");
+
+        let error = save_issue_monitor_prefs(&path, &prefs).expect_err("full save must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let error =
+            mutate_issue_monitor_prefs(&path, |_| -> () { panic!("mutation must not run") })
+                .expect_err("mutation must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let error = mutate_issue_monitor_prefs_recovering(&path, &prefs, |_| -> () {
+            panic!("recovery mutation must not run")
+        })
+        .expect_err("schema mismatch must not recover from defaults");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(!committed_prefs_generation_path(&path).exists());
+    }
+
+    #[test]
+    fn issue_4193_prefs_recovery_preserves_an_incompatible_committed_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let sidecar = committed_prefs_generation_path(&path);
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).unwrap();
+        stored["schema_version"] = serde_json::json!(2);
+        let original = stored.to_string();
+        fs::write(&sidecar, &original).expect("write incompatible committed prefs");
+        let torn = "{\"enabled\":";
+        fs::write(&path, torn).expect("write torn canonical prefs");
+
+        let error = mutate_issue_monitor_prefs_recovering(&path, &prefs, |_| -> () {
+            panic!("incompatible recovery mutation must not run")
+        })
+        .expect_err("committed schema mismatch must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), torn);
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), original);
     }
 
     #[test]

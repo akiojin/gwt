@@ -534,7 +534,7 @@ fn workspace_resume_context_prefers_work_item_over_shared_projection() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&project_state_root, event)
+    record_legacy_workspace_work_event_for_test(&project_state_root, event)
         .expect("record work event");
 
     let context = super::super::workspace_resume_context_for_work_item(

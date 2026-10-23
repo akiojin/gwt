@@ -1,6 +1,30 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+fn commit_issue_monitor_preparations(
+    runtime: &mut AppRuntime,
+    queued: &BlockingTestTaskQueue,
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    let mut events = commit_issue4803_monitor_preparation(runtime, queued, recorded);
+    // The GUI can reprepare stale facts. Dispatch those completions too.
+    loop {
+        drain_queued_blocking_tasks(queued);
+        if !recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
+        {
+            return events;
+        }
+        events
+            .extend(runtime.handle_issue_monitor_launch_prepared(
+                take_issue4803_monitor_preparation(recorded),
+            ));
+    }
+}
+
 #[test]
 fn issue_3809_settings_refresh_uses_the_same_project_background_worker() {
     let _env_lock = env_test_lock()
@@ -5322,18 +5346,28 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
 
     let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
 
-    let first = runtime.auto_launch_issue_monitor_delivery_events(
-        &runtime.test_context(),
+    let (launch_spawner, launch_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = launch_spawner;
+    let mut first = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &repo,
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    assert!(first
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
-    let replay = runtime.auto_launch_issue_monitor_delivery_events(
-        &runtime.test_context(),
+    first.extend(commit_issue_monitor_preparations(
+        &mut runtime,
+        &launch_tasks,
+        &_recorded_events,
+    ));
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "launch must materialize a pane: {first:?}"
+    );
+    let replay = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &repo,
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -5967,13 +6001,18 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
 
         let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = ack_spawner;
-        let mut events = runtime.auto_launch_issue_monitor_delivery_events(
-            &runtime.test_context(),
+        let mut events = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+            &repo,
             3165,
             LinkedIssueKind::Spec,
             Some("launch:effect-3165".to_string()),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
+        events.extend(commit_issue_monitor_preparations(
+            &mut runtime,
+            &ack_tasks,
+            &_recorded_events,
+        ));
         events.extend(runtime.finish_queued_delivery_acks(&ack_tasks));
         let agent_windows = runtime.tabs[0]
             .workspace

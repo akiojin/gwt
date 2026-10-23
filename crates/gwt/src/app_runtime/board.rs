@@ -1211,9 +1211,33 @@ fn persist_workspace_board_milestone(
     project_root: &Path,
     entry: &coordination::BoardEntry,
 ) -> gwt_core::Result<(workspace_projection::WorkspaceProjection, bool)> {
-    workspace_projection::transact_workspace_state(
+    let projection = workspace_projection::load_or_default_workspace_projection(project_root)?;
+    let work_items = workspace_projection::load_or_synthesize_workspace_work_items(project_root)?;
+    let work_event_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+        &projection,
+        &work_items,
+        entry,
+    )
+    .and_then(|event| event.execution_container?.worktree_path)
+    .unwrap_or_else(|| project_root.to_path_buf());
+    workspace_projection::transact_workspace_state_for_work_event_root_with_preflight(
         project_root,
+        &work_event_root,
         |projection, work_items, _work_items_persisted| {
+            let current_root = workspace_projection::resolve_workspace_work_event_from_board_entry(
+                projection, work_items, entry,
+            )
+            .and_then(|event| event.execution_container?.worktree_path)
+            .unwrap_or_else(|| project_root.to_path_buf());
+            if current_root != work_event_root {
+                return Err(gwt_core::error::GwtError::Other(
+                    "Board milestone Worktree assignment changed; retry with current state".into(),
+                ));
+            }
+            Ok(())
+        },
+        |projection, work_items, _work_items_persisted| {
+            // The locked preflight rejects changed roots before migration writes.
             let Some(event) = workspace_projection::resolve_workspace_work_event_from_board_entry(
                 projection, work_items, entry,
             ) else {

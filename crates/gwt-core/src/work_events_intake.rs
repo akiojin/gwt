@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
-    save_workspace_work_items_projection_to_path, workspace_execution_container_same,
-    DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
-    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
-    WorkspaceExecutionContainerRef,
+    resolve_workspace_work_event_container, save_workspace_work_items_projection_to_path,
+    workspace_execution_container_same, DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance,
+    WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsIntakeSnapshot,
+    WorkItemsProjection, WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -51,7 +51,7 @@ impl WorkEventsIntakeReport {
     }
 }
 
-/// One shared `events.jsonl` source plus its reader context for diagnostics.
+/// One shared `events.jsonl` source plus its explicit worktree or ref context.
 /// Only explicit event containers establish Work refs; the reader's worktree
 /// or remote ref must never supply one. The raw content remains immutable and
 /// may be shared across several refs that point at the same Git blob.
@@ -69,7 +69,7 @@ impl SharedWorkEventsSource {
         Self::with_shared_container(content, source_execution_container.map(Arc::new))
     }
 
-    /// Keep one diagnostic context allocation for all sources in a group.
+    /// Keep one source context allocation for all sources in a group.
     pub fn with_shared_container(
         content: impl Into<Arc<str>>,
         source_execution_container: Option<Arc<WorkspaceExecutionContainerRef>>,
@@ -675,9 +675,16 @@ where
     // its multiplicity instead of retaining every decoded event in a cache.
     // Retaining the Arc also keeps its pointer identity valid while grouping.
     let mut grouped = Vec::<(SharedWorkEventsSource, usize)>::new();
-    let mut group_by_identity = HashMap::<usize, usize>::new();
+    let mut group_by_identity = HashMap::<_, usize>::new();
     for source in sources {
-        let identity = Arc::as_ptr(&source.content) as *const () as usize;
+        let context = source.source_execution_container.as_deref();
+        let root = context.and_then(|context| context.worktree_path.as_ref());
+        let branch = root.and_then(|_| context.and_then(|context| context.branch.clone()));
+        let identity = (
+            Arc::as_ptr(&source.content) as *const () as usize,
+            root.cloned(),
+            branch,
+        );
         if let Some(&index) = group_by_identity.get(&identity) {
             grouped[index].1 += 1;
         } else {
@@ -700,7 +707,7 @@ where
             .map(str::trim)
             .filter(|line| !line.is_empty())
         {
-            let event = match decode(line.as_bytes()) {
+            let mut event = match decode(line.as_bytes()) {
                 Ok(DecodedWorkspaceWorkEvent::Known(event)) => *event,
                 Ok(DecodedWorkspaceWorkEvent::Opaque) => {
                     report.skipped_opaque += multiplicity;
@@ -712,6 +719,12 @@ where
                     continue;
                 }
             };
+            let context = source.source_execution_container.as_deref();
+            resolve_workspace_work_event_container(
+                &mut event,
+                context.and_then(|context| context.worktree_path.as_deref()),
+                context.and_then(|context| context.branch.as_deref()),
+            );
             if is_close_kind(&event) {
                 report.skipped_close_kind += multiplicity;
                 continue;
@@ -2309,6 +2322,70 @@ mod tests {
     // SPEC-2359 T-820/T-821 (US-88 / FR-557): shared checkout logs use the
     // release-A compatible reader, while machine-local lifecycle state keeps
     // its strict fail-closed contract.
+    #[test]
+    fn shared_intake_resolves_portable_containers_only_against_each_source_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first-worktree");
+        let second = tmp.path().join("second-worktree");
+        let foreign = tmp.path().join("foreign-clone");
+        let content: Arc<str> = [Path::new("."), foreign.as_path()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                serde_json::json!({
+                    "id": format!("event-portable-{index}"),
+                    "work_item_id": format!("work-portable-{index}"),
+                    "kind": "start",
+                    "execution_container": {"branch": "work/target", "worktree_path": path},
+                    "updated_at": "2026-10-22T00:00:00Z"
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
+        let copied_to_develop = tmp.path().join("develop-worktree");
+        let sources = [
+            ("work/target", Some(first.clone())),
+            ("work/target", Some(second.clone())),
+            ("develop", Some(copied_to_develop)),
+            ("work/target", None),
+        ]
+        .map(|(branch, root)| {
+            let mut context = source_container(branch);
+            context.worktree_path = root;
+            SharedWorkEventsSource::new(Arc::clone(&content), Some(context))
+        });
+        let mut report = WorkEventsIntakeReport::default();
+        let events = collect_shared_work_event_sources(sources, &mut report).expect("collect");
+        let portable_paths = events
+            .iter()
+            .filter(|(event, _)| event.id == "event-portable-0")
+            .map(|(event, _)| {
+                event
+                    .execution_container
+                    .as_ref()
+                    .unwrap()
+                    .worktree_path
+                    .clone()
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            portable_paths,
+            HashSet::from([Some(first), Some(second), None])
+        );
+        assert!(events
+            .iter()
+            .filter(|(event, _)| event.id == "event-portable-1")
+            .all(|(event, _)| event
+                .execution_container
+                .as_ref()
+                .unwrap()
+                .worktree_path
+                .as_ref()
+                == Some(&foreign)));
+    }
+
     #[test]
     fn shared_intake_applies_known_event_with_additive_fields_without_rewriting_source() {
         let tmp = tempfile::tempdir().expect("tempdir");

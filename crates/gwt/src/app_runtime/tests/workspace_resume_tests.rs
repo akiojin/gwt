@@ -1915,8 +1915,7 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
                 pr_state: Some("MERGED".to_string()),
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -2213,8 +2212,7 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -2310,8 +2308,7 @@ fn active_work_projection_resumability_follows_published_branch_refs() {
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
-            .expect("record work");
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work");
     }
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);

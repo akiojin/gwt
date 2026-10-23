@@ -7154,6 +7154,16 @@ mod tests {
                 pr_url: None,
                 pr_state: None,
             });
+            if !matching_path {
+                // This foreign-container history predates portable shard writes.
+                // Replay its immutable bytes instead of asking the new writer
+                // to create a shard outside the owning root.
+                let shard = gwt_core::paths::gwt_repo_local_work_event_shard_path(&repo, &start.id);
+                std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
+                let mut bytes = serde_json::to_vec(&start).unwrap();
+                bytes.push(b'\n');
+                std::fs::write(shard, bytes).unwrap();
+            }
             record_workspace_work_event(&repo, start).expect("seed candidate Work");
         }
         let before_current = load_workspace_projection(&repo).expect("snapshot current");
