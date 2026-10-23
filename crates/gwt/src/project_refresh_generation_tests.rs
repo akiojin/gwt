@@ -113,7 +113,9 @@ fn daemon_subscription_stays_observer_until_startup_canvas_is_ready() {
     use gwt_core::test_support::ScopedEnvVar;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _env_lock = crate::env_test_lock().lock().unwrap();
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = gwt_core::test_support::socket_tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     // The subscriber resolves its endpoint on its own OS thread.

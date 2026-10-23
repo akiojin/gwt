@@ -3473,6 +3473,9 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
 /// Issue #5876: startup readiness must precede scheduled claim/launch work.
 #[test]
 fn app_runtime_scheduled_monitor_waits_for_canvas() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
