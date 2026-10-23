@@ -661,7 +661,16 @@ readback. Omission retains existing behavior; `null`, empty strings and other ty
 are rejected. This value comparison does not track intervening history or protect
 other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
-queue and requests a scan. Existing `issue.monitor.priority.move` and
+queue and requests a scan. Also read the current terminal's saved `queue_order`
+from `issue.monitor.queue.list` and pass it as `expected_queue_order` to
+`launch_now` (or `launch-now`). Both order guards are compared under the same
+preferences lock before any priority, queue or hold change and before a scan
+request. On conflict, re-read the relevant status/list and reconsider the
+instruction; read back status and the queue list after success. Each guard is
+optional; `[]` requires its saved order to be empty, and `null` is invalid.
+Arrays retain existing decimal u64 string compatibility. Queue comparison does
+not cover urgent metadata, other settings or intervening history.
+Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
 an intervening priority change, read the full `priority_order` from
 `issue.monitor.status` and pass that array as `expected_priority_order` to either
@@ -695,7 +704,13 @@ decision once it has been idle for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
 every idle row, and `dry_run: true` reports the targets without touching
 anything. `issue.monitor.profiles` reads the launch
-candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidate pool and `issue.monitor.profiles.set` replaces it. Both replies include
+an opaque `profiles_token`. Pass a fresh read's token as `expected_profiles_token`
+when updating the pool; a conflict leaves preferences unchanged. Re-read profiles,
+reconsider the change, and read back the successful result. The token covers the
+saved pool and its inheritance head, excluding other configuration, runtime state,
+and ABA history. Omitting the guard preserves existing callers.
+With two or more
 candidates the Monitor launches each Issue with the first eligible candidate
 (rate-limit holds and `prefer_for` routing decide eligibility; a provider
 leaves the pool when it refuses a launch, not when a usage reading predicts it
@@ -1367,6 +1382,12 @@ Repeat with `"dry_run":false` to preserve both originals in the reported home
 archives and publish both events under content-specific identities. Then retry
 the Git merge. Tracked shards, ordinary events, and tombstones for different
 branches are refused; existing source or archive bytes are never overwritten.
+
+If an existing Work contains both an absolute worktree container and its `.`
+alias, use `workspace.work_repair` with `params.work_id` to inspect a scoped
+repair. It defaults to dry-run; repeat with `"dry_run":false` to apply. The
+operation requires matching Git worktree and durable event evidence, preserves
+terminal state and source files, and refuses ambiguous or missing provenance.
 
 ## Share local Board milestones through GitHub Discussions
 

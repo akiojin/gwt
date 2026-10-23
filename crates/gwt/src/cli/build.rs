@@ -2485,6 +2485,13 @@ format_version: Some(1),
 
     #[test]
     fn managed_build_complete_confirms_canonical_done_without_another_host_request() {
+        struct RestoreCwd(PathBuf);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                // test-hygiene: allow-unlocked-env the enclosing test holds env_test_lock through this restore
+                std::env::set_current_dir(&self.0).expect("restore fixture caller CWD");
+            }
+        }
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2492,34 +2499,165 @@ format_version: Some(1),
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = BoundTerminalFixture::new();
+        let start = fixture.canonical_work().events[0].clone();
+        let start_path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.git.repo, &start.id);
+        std::fs::create_dir_all(start_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &start_path,
+            gwt_core::workspace_projection::canonical_workspace_work_event_bytes(
+                &start,
+                &fixture.git.repo,
+            )
+            .unwrap(),
+        )
+        .expect("persist accepted Start source without applying it again");
         fixture.terminalize_canonical_done();
         let works_path =
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
-        let before = std::fs::read(&works_path).expect("snapshot canonical Done WorkItems");
+        let terminal_before = fixture.canonical_work();
+        let mut old_pr = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            &fixture.work_id,
+            chrono::Utc::now(),
+        );
+        old_pr.agent_session_id = Some(fixture.session.id.clone());
+        old_pr.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(fixture.session.branch.clone()),
+                worktree_path: Some(std::path::PathBuf::from(".")),
+                pr_number: Some(6122),
+                pr_url: Some("https://github.com/akiojin/gwt/pull/6122".into()),
+                pr_state: Some("OPEN".into()),
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.git.repo, old_pr)
+            .expect("reproduce accepted old-reader relative PR container");
+        assert_eq!(fixture.canonical_work().execution_containers.len(), 2);
+        let closed_path =
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo);
+        let closed_before = std::fs::read(&closed_path).expect("accepted terminal source");
+        let source_bytes: Vec<_> = fixture
+            .canonical_work()
+            .events
+            .iter()
+            .filter_map(|event| {
+                let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(
+                    &fixture.git.repo,
+                    &event.id,
+                );
+                std::fs::read(&path).ok().map(|bytes| (path, bytes))
+            })
+            .collect();
+        let poisoned = std::fs::read(&works_path).unwrap();
+        let caller_cwd = RestoreCwd(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&fixture.git.repo).unwrap();
         let server = TerminalBridgeServer::start(
             StatusCode::OK,
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::WrongTerminal),
         );
 
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
-            record_current_work_terminal_before_finalize(
+            assert!(
+                record_current_work_terminal_before_finalize(
+                    env,
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
+                )
+                .is_err(),
+                "old duplicate containers must remain ambiguous before repair"
+            );
+            std::env::set_current_dir(&caller_cwd.0).unwrap();
+            let legacy = gwt_core::paths::gwt_repo_local_work_events_path(&fixture.git.repo);
+            let journal = fixture
+                .canonical_work()
+                .events
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap() + "\n")
+                .collect::<String>();
+            std::fs::write(&legacy, journal).unwrap();
+            let (source_path, original) = &source_bytes[0];
+            std::fs::write(source_path, b"{}\n").unwrap();
+            let mut damaged_env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            damaged_env.stdin = serde_json::json!({"operation":"workspace.work_repair", "params":{"work_id":fixture.work_id}}).to_string();
+            assert_ne!(
+                crate::cli::json_envelope::dispatch(&mut damaged_env, "gwtd"),
+                0,
+                "a valid legacy copy must not hide a tampered immutable shard"
+            );
+            assert_eq!(std::fs::read(&works_path).unwrap(), poisoned);
+            std::fs::write(source_path, original).unwrap();
+            for dry_run in [true, false, false] {
+                let mut repair_env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+                repair_env.stdin = serde_json::json!({
+                    "operation": "workspace.work_repair",
+                    "params": {"work_id":fixture.work_id, "dry_run":dry_run}
+                })
+                .to_string();
+                let code = crate::cli::json_envelope::dispatch(&mut repair_env, "gwtd");
+                assert_eq!(
+                    code,
+                    0,
+                    "repair failed: {} {}",
+                    String::from_utf8_lossy(&repair_env.stdout),
+                    String::from_utf8_lossy(&repair_env.stderr)
+                );
+                if dry_run {
+                    assert_eq!(std::fs::read(&works_path).unwrap(), poisoned);
+                }
+            }
+            let repaired = fixture.canonical_work();
+            assert_eq!(repaired.execution_containers.len(), 1);
+            assert_eq!(
+                repaired.execution_containers[0].worktree_path.as_deref(),
+                Some(fixture.git.repo.as_path())
+            );
+            assert_eq!(repaired.execution_containers[0].pr_number, Some(6122));
+            assert_eq!(repaired.owner, terminal_before.owner);
+            assert_eq!(repaired.completed_at, terminal_before.completed_at);
+            assert_eq!(repaired.status_category, terminal_before.status_category);
+            assert_eq!(std::fs::read(&closed_path).unwrap(), closed_before);
+            for (path, bytes) in &source_bytes {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes);
+            }
+            let before = std::fs::read(&works_path).unwrap();
+            let result = record_current_work_terminal_before_finalize(
                 env,
                 &SkillStateAction::Complete {
                     spec: 3327,
                     pr: None,
                 },
-            )
+            );
+            assert_eq!(
+                std::fs::read(&works_path).unwrap(),
+                before,
+                "confirm-only compatibility must not append another terminal event"
+            );
+            result
         });
 
         assert!(result.is_ok(), "canonical Done must win: {result:?}");
-        assert_eq!(
-            std::fs::read(&works_path).expect("read canonical WorkItems after retry"),
-            before,
-            "confirm-only compatibility must not append another terminal event"
-        );
         assert!(fixture.canonical_work().is_terminal());
         assert!(!fixture.canonical_work().discarded);
         server.assert_no_request();
+        let mut delivered = fixture.canonical_work().execution_containers[0].clone();
+        delivered.pr_state = Some("MERGED".to_string());
+        gwt_core::workspace_projection::record_workspace_pr_metadata_for_execution(
+            &fixture.git.repo,
+            "Issue #3327",
+            &fixture.session.id,
+            &delivered,
+        )
+        .expect("PR metadata must select the repaired canonical container");
+        assert_eq!(fixture.canonical_work().execution_containers.len(), 1);
+        assert_eq!(
+            fixture.canonical_work().execution_containers[0]
+                .pr_state
+                .as_deref(),
+            Some("MERGED")
+        );
     }
 
     #[test]

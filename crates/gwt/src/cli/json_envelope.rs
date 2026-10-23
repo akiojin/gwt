@@ -552,6 +552,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.work_repair" => {
+            reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair {
+                work_id: required_string(params, "work_id")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.work_prune" | "workspace.work-prune" => {
             // Issue #4465 AC-4'': this operation closes, discards and detaches
             // durable Work state across every Work in the project, so a scope
@@ -807,6 +814,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: lookup(params, "expected_queue_order")
+                    .map(|_| required_u64_vec(params, "expected_queue_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 expected_priority_order: lookup(params, "expected_priority_order")
@@ -1112,6 +1122,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })?;
             CliCommand::Issue(IssueCommand::MonitorProfilesSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_profiles_token: lookup(params, "expected_profiles_token")
+                    .map(|_| required_string(params, "expected_profiles_token"))
+                    .transpose()?,
                 profiles,
                 usage_threshold_percent: None,
             })
@@ -4903,6 +4916,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_work_repair_requires_work_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_repair", json!({"work_id":"work-test"})),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.work_repair", json!({})),
+            CliParseError::MissingFlag("work_id")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "project_root":"/foreign"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
     fn workspace_events_reconcile_requires_reference_and_defaults_to_dry_run() {
         assert!(matches!(
             ok(
@@ -5190,6 +5229,99 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_profiles_set_accepts_only_nonblank_supplied_observation_guards() {
+        for operation in ["issue.monitor.profiles.set", "issue.monitor.profiles-set"] {
+            ok(
+                operation,
+                json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":"observed-pool"}),
+            );
+            for invalid in [json!(null), json!(""), json!(" "), json!(2), json!(false)] {
+                err(
+                    operation,
+                    json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":invalid}),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_refuses_unobserved_pool_and_recovers_from_fresh_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![serde_json::from_value(json!({
+            "agent_id":"codex", "model":"observed-model"
+        }))
+        .unwrap()]);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert!(observed["profiles_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+        prefs.allowed_labels.push("unrelated-config".into());
+        prefs.last_scan_at = Some("2026-10-23T00:00:00Z".into());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let unrelated: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert_eq!(unrelated["profiles_token"], observed["profiles_token"]);
+        let fresh: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.profiles.set",
+                json!({"profiles":[{"agent_id":"codex", "model":"competing-model"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(fresh["profiles_token"], observed["profiles_token"]);
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.profiles.set",
+            json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":observed["profiles_token"]}),
+        ).expect_err("a pool changed since observation must be refused");
+        assert!(
+            error.to_string().contains("issue.monitor.profiles"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("reconsider"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        let reply: Value = serde_json::from_str(&invoke(
+            "issue.monitor.profiles-set",
+            json!({"profiles":[{"agent_id":"codex"}], "expected_profiles_token":fresh["profiles_token"]}),
+        ).unwrap()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["launch_profiles"][0]["model"], "competing-model");
+        assert_eq!(reply["profiles_token"], fresh["profiles_token"]);
+        assert!(reply["changes"]
+            .as_array()
+            .is_some_and(|changes| !changes.is_empty()));
+        // The raw head is part of sparse inheritance even with an explicit pool.
+        let mut head_changed = saved;
+        head_changed.launch_profile.as_mut().unwrap().model = Some("changed-head".into());
+        crate::save_issue_monitor_prefs(&path, &head_changed).unwrap();
+        let head: Value =
+            serde_json::from_str(&invoke("issue.monitor.profiles", json!({})).unwrap()).unwrap();
+        assert_eq!(head["launch_profiles"], reply["launch_profiles"]);
+        assert_ne!(head["profiles_token"], reply["profiles_token"]);
+    }
+
+    #[test]
     fn issue_monitor_profiles_operations_parse_shorthand_profiles() {
         assert_eq!(
             ok("issue.monitor.profiles", json!({})),
@@ -5206,6 +5338,7 @@ mod tests {
         );
         let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
             project_root,
+            expected_profiles_token,
             profiles,
             usage_threshold_percent,
         }) = parsed
@@ -5213,6 +5346,7 @@ mod tests {
             panic!("expected MonitorProfilesSet, got {parsed:?}");
         };
         assert_eq!(project_root, None);
+        assert_eq!(expected_profiles_token, None);
         assert_eq!(usage_threshold_percent, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].profile.agent_id, "codex");
@@ -5709,6 +5843,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -5720,6 +5855,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
@@ -6274,11 +6410,24 @@ mod tests {
                 json!({"number":42,"position":0}),
             ),
             ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
         ] {
             let unconditional = ok(operation, params.clone());
             params["expected_queue_order"] = json!([]);
             assert_ne!(ok(operation, params.clone()), unconditional);
-            for invalid in [Value::Null, json!("1,2")] {
+            params["expected_queue_order"] = json!([42]);
+            let numeric = ok(operation, params.clone());
+            params["expected_queue_order"] = json!(["42"]);
+            assert_eq!(ok(operation, params.clone()), numeric);
+            for invalid in [
+                Value::Null,
+                json!("1,2"),
+                json!([null]),
+                json!([true]),
+                json!([1.5]),
+                json!([-1]),
+            ] {
                 params["expected_queue_order"] = invalid;
                 assert!(matches!(
                     err(operation, params.clone()),

@@ -252,6 +252,7 @@ pub enum IssueCommand {
     /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
+        expected_profiles_token: Option<String>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
         /// saved candidate's value instead of resetting to `Default`.
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
@@ -281,6 +282,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         expected_priority_order: Option<Vec<u64>>,
+        expected_queue_order: Option<Vec<u64>>,
     },
     /// SPEC-3431 FR-033: the PM's stop instruction — revoke one launch's
     /// authority and slot without requeueing or relaunching it.

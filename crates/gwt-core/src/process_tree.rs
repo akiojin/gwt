@@ -165,23 +165,28 @@ mod windows_job {
     use windows::{
         core::{Error as WindowsError, HRESULT, PCWSTR},
         Win32::{
-            Foundation::{CloseHandle, ERROR_INVALID_HANDLE, HANDLE},
+            Foundation::{
+                CloseHandle, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA,
+                HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            },
             System::{
                 JobObjects::{
                     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-                    JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
-                    JobObjectExtendedLimitInformation, QueryInformationJobObject,
-                    SetInformationJobObject, TerminateJobObject,
-                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+                    JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+                    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
+                    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+                    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                     JOB_OBJECT_CPU_RATE_CONTROL, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
                     JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
-                    GetPriorityClass, OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
-                    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
-                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SET_QUOTA,
-                    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+                    GetPriorityClass, OpenProcess, SetPriorityClass, WaitForSingleObject,
+                    BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+                    PROCESS_CREATION_FLAGS, PROCESS_QUERY_LIMITED_INFORMATION,
+                    PROCESS_SET_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME,
+                    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
                 },
             },
         },
@@ -213,6 +218,8 @@ mod windows_job {
         UnsupportedPriorityClass(u32),
         /// A pane Job could not publish its CPU-observation descriptor.
         Registration(std::io::Error),
+        /// Native membership could not establish complete termination proof.
+        TerminationProof(&'static str),
     }
 
     impl std::fmt::Display for WindowsJobError {
@@ -226,6 +233,9 @@ mod windows_job {
                     write!(formatter, "unsupported priority class {class:#x}")
                 }
                 Self::Registration(error) => write!(formatter, "register Windows Job: {error}"),
+                Self::TerminationProof(reason) => {
+                    write!(formatter, "Job termination proof: {reason}")
+                }
             }
         }
     }
@@ -235,7 +245,9 @@ mod windows_job {
             match self {
                 Self::Operation { source, .. } => Some(source),
                 Self::Registration(source) => Some(source),
-                Self::InvalidCpuRate(_) | Self::UnsupportedPriorityClass(_) => None,
+                Self::InvalidCpuRate(_)
+                | Self::UnsupportedPriorityClass(_)
+                | Self::TerminationProof(_) => None,
             }
         }
     }
@@ -303,6 +315,9 @@ mod windows_job {
     pub struct WindowsJobObject {
         handle: Option<HANDLE>,
         registration: Option<PathBuf>,
+        termination_capture_attempted: bool,
+        termination_requested: bool,
+        termination_processes: Option<(u32, Vec<ScopedHandle>)>,
     }
 
     // Job handles are kernel-owned values. Access to the optional owner is
@@ -346,6 +361,9 @@ mod windows_job {
             Ok(Self {
                 handle: Some(job),
                 registration: None,
+                termination_capture_attempted: false,
+                termination_requested: false,
+                termination_processes: None,
             })
         }
 
@@ -478,23 +496,183 @@ mod windows_job {
             )
         }
 
-        /// Request termination of every member while retaining the Job handle
-        /// so completion can be observed with [`Self::active_process_count`].
-        pub fn request_termination(&self) -> Result<(), WindowsJobError> {
+        /// Request termination while retaining exact member handles for the
+        /// background completion check. Even a failed capture still kills the
+        /// Job, but cannot later turn an empty post-kill snapshot into proof.
+        pub fn request_termination(&mut self) -> Result<(), WindowsJobError> {
             let job = self.handle.ok_or_else(|| {
                 operation_error(
                     "TerminateJobObject",
                     WindowsError::from_hresult(HRESULT::from_win32(ERROR_INVALID_HANDLE.0)),
                 )
             })?;
+            let captured = if self.termination_capture_attempted {
+                Ok(())
+            } else {
+                // Latch before either native operation: even a failed kill
+                // may have partially terminated the original membership.
+                self.termination_capture_attempted = true;
+                self.capture_termination_processes()
+                    .map(|processes| self.termination_processes = Some(processes))
+            };
             // SAFETY: `job` is the captured owned handle and remains live for
             // this call. The termination request leaves its limits unchanged.
             unsafe { TerminateJobObject(job, 1) }
-                .map_err(|source| operation_error("TerminateJobObject", source))
+                .map_err(|source| operation_error("TerminateJobObject", source))?;
+            self.termination_requested = true;
+            captured?;
+            let (total_processes, _) =
+                self.termination_processes
+                    .as_ref()
+                    .ok_or(WindowsJobError::TerminationProof(
+                        "initial membership capture failed",
+                    ))?;
+            if self.accounting()?.TotalProcesses != *total_processes {
+                return Err(WindowsJobError::TerminationProof(
+                    "membership changed during termination capture",
+                ));
+            }
+            Ok(())
+        }
+
+        fn capture_termination_processes(
+            &self,
+        ) -> Result<(u32, Vec<ScopedHandle>), WindowsJobError> {
+            let total_processes = self.accounting()?.TotalProcesses;
+            let job = self.handle.expect("live Windows Job handle");
+            // usize storage provides the alignment of ULONG_PTR on both
+            // supported Windows architectures. The list has an 8-byte header.
+            let mut buffer = vec![0usize; 18];
+            for _ in 0..4 {
+                let size =
+                    u32::try_from(std::mem::size_of_val(buffer.as_slice())).map_err(|_| {
+                        WindowsJobError::TerminationProof(
+                            "membership list exceeds native buffer size",
+                        )
+                    })?;
+                // SAFETY: the aligned, initialized allocation covers `size`
+                // bytes and remains writable throughout the native query.
+                let result = unsafe {
+                    QueryInformationJobObject(
+                        Some(job),
+                        JobObjectBasicProcessIdList,
+                        buffer.as_mut_ptr().cast(),
+                        size,
+                        None,
+                    )
+                };
+                // SAFETY: even the initial allocation contains the native
+                // fixed header and its first variable-length element.
+                let list = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+                let assigned = list.NumberOfAssignedProcesses as usize;
+                let listed = list.NumberOfProcessIdsInList as usize;
+                if let Err(source) = result {
+                    if source.code() != HRESULT::from_win32(ERROR_MORE_DATA.0) {
+                        return Err(operation_error("QueryInformationJobObject", source));
+                    }
+                } else if listed == assigned {
+                    let offset =
+                        std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+                    let capacity = (size as usize - offset) / std::mem::size_of::<usize>();
+                    if listed > capacity {
+                        return Err(WindowsJobError::TerminationProof(
+                            "invalid membership list size",
+                        ));
+                    }
+                    // SAFETY: the validated count fits the initialized native
+                    // buffer, and the native ULONG_PTR array is aligned.
+                    let pids = unsafe {
+                        std::slice::from_raw_parts(
+                            buffer.as_ptr().cast::<u8>().add(offset).cast::<usize>(),
+                            listed,
+                        )
+                    };
+                    let mut processes = Vec::with_capacity(listed);
+                    for &pid in pids {
+                        let pid = u32::try_from(pid).map_err(|_| {
+                            WindowsJobError::TerminationProof("invalid member process ID")
+                        })?;
+                        // SAFETY: each successful call returns an owned exact
+                        // process handle; retaining it prevents PID reuse.
+                        let process = match unsafe {
+                            OpenProcess(
+                                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                false,
+                                pid,
+                            )
+                        } {
+                            Ok(handle) => ScopedHandle(handle),
+                            Err(source)
+                                if source.code()
+                                    == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) =>
+                            {
+                                continue
+                            }
+                            Err(source) => return Err(operation_error("OpenProcess", source)),
+                        };
+                        let mut contained = windows::core::BOOL::default();
+                        // SAFETY: both handles and the output remain live.
+                        unsafe { IsProcessInJob(process.0, Some(job), &mut contained) }
+                            .map_err(|source| operation_error("IsProcessInJob", source))?;
+                        if !contained.as_bool() {
+                            return Err(WindowsJobError::TerminationProof(
+                                "member identity changed",
+                            ));
+                        }
+                        processes.push(process);
+                    }
+                    return Ok((total_processes, processes));
+                }
+                buffer.resize((buffer.len() * 2).max(assigned + 2), 0);
+            }
+            Err(WindowsJobError::TerminationProof(
+                "membership list remained incomplete",
+            ))
+        }
+
+        /// Active count may reach zero while cancellation of a member's I/O
+        /// is still pending. Only its process handle signal proves completion.
+        pub fn termination_confirmed(&self) -> Result<bool, WindowsJobError> {
+            if !self.termination_requested {
+                return Err(WindowsJobError::TerminationProof(
+                    "termination was not requested",
+                ));
+            }
+            let (total_processes, processes) =
+                self.termination_processes
+                    .as_ref()
+                    .ok_or(WindowsJobError::TerminationProof(
+                        "initial membership capture unavailable",
+                    ))?;
+            for process in processes {
+                // SAFETY: retained owned handles remain open until after this
+                // nonblocking check; the caller owns the overall deadline.
+                match unsafe { WaitForSingleObject(process.0, 0) } {
+                    WAIT_OBJECT_0 => {}
+                    WAIT_TIMEOUT => return Ok(false),
+                    _ => {
+                        return Err(operation_error(
+                            "WaitForSingleObject",
+                            WindowsError::from_thread(),
+                        ))
+                    }
+                }
+            }
+            let info = self.accounting()?;
+            if info.TotalProcesses != *total_processes {
+                return Err(WindowsJobError::TerminationProof(
+                    "membership changed after termination capture",
+                ));
+            }
+            Ok(info.ActiveProcesses == 0)
         }
 
         /// Observe the number of processes still active in this captured Job.
         pub fn active_process_count(&self) -> Result<u32, WindowsJobError> {
+            Ok(self.accounting()?.ActiveProcesses)
+        }
+
+        fn accounting(&self) -> Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, WindowsJobError> {
             let job = self.handle.ok_or_else(|| {
                 operation_error(
                     "QueryInformationJobObject",
@@ -514,12 +692,12 @@ mod windows_job {
                 )
             }
             .map_err(|source| operation_error("QueryInformationJobObject", source))?;
-            Ok(info.ActiveProcesses)
+            Ok(info)
         }
 
-        /// Close the Job handle synchronously. With
-        /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, this terminates every member
-        /// and descendant still assigned to the Job.
+        /// Close the Job handle. With `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+        /// this requests termination of every member and descendant still
+        /// assigned to the Job; it does not wait for their completion.
         pub fn terminate(&mut self) -> bool {
             let closed = self.handle.take().is_none_or(|job| {
                 // SAFETY: `job` is owned by `self` and removed before close,

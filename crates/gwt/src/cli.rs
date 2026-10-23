@@ -90,6 +90,7 @@ pub use pr::types::{
 };
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
+pub use workspace::WorkspaceCommand;
 
 /// Dispatch already-read stdin through the standard JSON envelope path.
 pub fn dispatch_json_input<E: CliEnv>(env: &mut E, prog: &str, input: &str) -> i32 {
@@ -168,89 +169,6 @@ pub enum DaemonCommand {
         /// SPEC-3431 FR-025: bound the read so an unattended caller can run
         /// subscribe → reconcile in a loop without an external supervisor.
         timeout_seconds: Option<u64>,
-    },
-}
-
-/// SPEC-2359 command model for `workspace.*` JSON operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkspaceCommand {
-    /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
-    EventsReconcile { reference: String, dry_run: bool },
-    /// Ask the authenticated Host to close one eligible Work record.
-    Close { work_id: String, close_kind: String },
-    /// Read the outcome of one update without contacting or mutating the Host.
-    Receipt { operation_id: String },
-    /// `workspace.update` — update Workspace current projection and journal.
-    Update {
-        title: Option<String>,
-        status: Option<String>,
-        status_text: Option<String>,
-        summary: Option<String>,
-        progress_summary: Option<String>,
-        next_action: Option<String>,
-        owner: Option<String>,
-        agent_session: Option<String>,
-        current_focus: Option<String>,
-        title_summary: Option<String>,
-    },
-    /// `workspace.candidates` — list join candidates.
-    Candidates { agent_session: String },
-    /// `workspace.join`.
-    Join {
-        agent_session: String,
-        workspace_id: String,
-        current_focus: Option<String>,
-        title_summary: Option<String>,
-    },
-    /// `workspace.create`.
-    Create {
-        agent_session: String,
-        title_summary: String,
-        current_focus: Option<String>,
-        spec: Option<u64>,
-        issue: Option<u64>,
-        split_from: Option<String>,
-        boundary: Option<String>,
-    },
-    /// `workspace.ensure`.
-    Ensure {
-        agent_session: String,
-        title_summary: String,
-        current_focus: Option<String>,
-        spec: Option<u64>,
-        issue: Option<u64>,
-        topic: Option<String>,
-        boundary: Option<String>,
-    },
-    /// SPEC-2359 US-41: `workspace.projection_list` —
-    /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
-    /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
-    ProjectionList { stale: bool, all: bool },
-    /// SPEC-2359 US-41: `workspace.projection_prune` —
-    /// archive / delete stale Workspace projections (FR-153, FR-154).
-    ProjectionPrune { dry_run: bool, ids: Vec<String> },
-    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
-    /// fold project stores that a pre-#3466 build split apart back into the
-    /// repository's canonical store.
-    ///
-    /// The dry run reports the plan and issues its `manifest_hash`; applying
-    /// requires that hash back *and* the recorded dry run that issued it, so a
-    /// store nobody reviewed can never be moved. `project_root` names the
-    /// project explicitly; authority still comes from the ambient Session.
-    StoreConsolidate {
-        project_root: Option<PathBuf>,
-        dry_run: bool,
-        manifest_hash: Option<String>,
-    },
-    /// Issue #3448: settle incomplete Works whose owner Issue is already
-    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
-    /// reports the plan without emitting close events. `project_root` targets
-    /// a project other than the current one (the GUI opens the layout root,
-    /// which resolves to a different store than a linked worktree — #3466).
-    WorkPrune {
-        dry_run: bool,
-        ids: Vec<String>,
-        project_root: Option<String>,
     },
 }
 

@@ -936,6 +936,12 @@ pub(crate) struct ActivitySessionRoot {
 }
 
 pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<ActivitySessionRoot> {
+    activity_session_observation(session).map(|(root, _)| root)
+}
+
+fn activity_session_observation(
+    session: &gwt_agent::Session,
+) -> Option<(ActivitySessionRoot, Option<BTreeSet<String>>)> {
     let identity = gwt_agent::SessionExecutionIdentity::from_session(session).ok()??;
     let inventory =
         crate::session_inventory::observe_session(session, &gwt_core::paths::gwt_sessions_dir());
@@ -970,15 +976,19 @@ pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<Acti
     {
         return None;
     }
-    Some(ActivitySessionRoot {
-        process,
-        host: (observed.host_pid, host_started),
-        incarnation,
-    })
+    Some((
+        ActivitySessionRoot {
+            process,
+            host: (observed.host_pid, host_started),
+            incarnation,
+        },
+        runtime.active_tool_calls,
+    ))
 }
 
-/// Background scan only: measure owned child work once for all bound panes.
-/// Root-agent CPU/liveness and unrelated Host panes cannot extend this clock.
+/// Background scan only: observe accepted provider tool lifetimes, falling
+/// back to measured child progress for legacy sidecars. Helpers alone cannot
+/// extend the clock once the provider has supplied lifecycle evidence.
 pub fn refresh_issue_monitor_child_activity(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
@@ -1032,14 +1042,14 @@ pub fn refresh_issue_monitor_child_activity(
         let Some(session) = load_current_activity_session(&identity) else {
             continue;
         };
-        let Some(root) = activity_session_root(&session) else {
+        let Some((root, tools)) = activity_session_observation(&session) else {
             continue;
         };
         // An ambiguous shared provider root cannot lend progress to two owners.
         roots
             .entry(root.process)
             .and_modify(|entry| *entry = None)
-            .or_insert(Some((issue, identity, root)));
+            .or_insert(Some((issue, identity, root, tools)));
     }
     if gwt_core::operation_deadline::ensure_remaining("child progress observation").is_err() {
         return;
@@ -1047,18 +1057,39 @@ pub fn refresh_issue_monitor_child_activity(
     let advancing = crate::cli::verification_lease::holder_activity::progressing_descendants(
         &roots
             .iter()
-            .filter_map(|(root, owner)| owner.as_ref().map(|_| *root))
+            .filter_map(|(root, owner)| {
+                // Once lifecycle events are available, helper CPU/turnover
+                // cannot substitute for a currently accepted tool call.
+                owner
+                    .as_ref()
+                    .filter(|(_, _, _, tools)| tools.is_none())
+                    .map(|_| *root)
+            })
             .collect::<Vec<_>>(),
     );
     let sampled_at = chrono::Utc::now().to_rfc3339();
-    for root in advancing {
-        let Some(Some((issue, identity, observed))) = roots.get(&root) else {
+    for (root, owner) in &roots {
+        let Some((issue, identity, observed, tools)) = owner else {
             continue;
         };
+        if !tools
+            .as_ref()
+            .map_or_else(|| advancing.contains(root), |calls| !calls.is_empty())
+        {
+            continue;
+        }
         let Some(session) = load_current_activity_session(identity) else {
             continue;
         };
-        if activity_session_root(&session) == Some(*observed) {
+        let Some((current_root, current_tools)) = activity_session_observation(&session) else {
+            continue;
+        };
+        let still_active = match (tools, current_tools.as_ref()) {
+            (Some(before), Some(after)) => before.intersection(after).next().is_some(),
+            (None, None) => true,
+            _ => false,
+        };
+        if current_root == *observed && still_active {
             monitor.record_bound_process_activity(
                 *issue,
                 &identity.session_id,
@@ -3850,6 +3881,82 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(any(windows, unix))]
+    fn issue_6076_silent_provider_tool_lifetime_does_not_credit_persistent_helpers() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, now) = issue_3809_bound_activity_fixture(repo.path());
+        let mut helper_monitor = monitor.clone();
+        let previous = helper_monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .last_heartbeat
+            .clone();
+        let path = gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        let mut runtime: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        runtime["active_tool_calls"] = serde_json::json!(["silent-command"]);
+        runtime["source_event"] = serde_json::json!("PreToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+
+        let outcome = reconcile_issue_monitor_windows(&mut monitor, repo.path(), &now);
+        assert!(outcome.released.is_empty());
+        assert!(outcome.requeued.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_ne!(
+            monitor.autonomous_record(3809).unwrap().last_heartbeat,
+            previous,
+            "an accepted silent tool must remain active without CPU or process turnover"
+        );
+
+        struct Helper(std::process::Child);
+        impl Drop for Helper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[cfg(windows)]
+        let mut command = gwt_core::process::hidden_command("powershell.exe");
+        #[cfg(windows)]
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+        ]);
+        #[cfg(unix)]
+        let mut command = gwt_core::process::hidden_command("sh");
+        #[cfg(unix)]
+        command.args(["-c", "while :; do :; done"]);
+        let _helper = Helper(
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        runtime["active_tool_calls"] = serde_json::json!([]);
+        runtime["source_event"] = serde_json::json!("PostToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+        refresh_issue_monitor_child_activity(&mut helper_monitor, repo.path(), &now);
+        assert_eq!(
+            helper_monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat,
+            previous,
+            "after tool completion even a busy persistent helper cannot extend RUN/activity"
+        );
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
     fn issue_3809_production_reconciliation_retains_silent_owned_child_work() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -5491,9 +5598,74 @@ pub(crate) mod tests {
 
         monitor.switch_launch_profile_agent("codex").unwrap();
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        let mut prefs = monitor.prefs();
+        prefs
+            .queued_launch_session_strategies
+            .insert(42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired);
+        monitor.rebase_daemon_driver_prefs(&prefs);
         assert!(monitor.apply_confirmed_claim(42, "new-claim", owner, "new-effect", now));
         assert_eq!(monitor.active_count(), 1);
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+
+        // A successful claim is still unowned until a materializer takes it.
+        // Both the resident driver and the CLI's cold prefs fallback switch
+        // the profile inside the transaction that saves the compensation.
+        for (cold_start, replace_pool) in [(false, false), (true, false), (false, true)] {
+            let mut pending = if cold_start {
+                test_monitor_with_prefs(monitor.config.clone(), monitor.prefs())
+            } else {
+                monitor.clone()
+            };
+            let delivery = pending.pending_launch_delivery_id(42).unwrap();
+            if replace_pool {
+                pending.advance_effect_authority_epoch().unwrap();
+                pending.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                pending.switch_launch_profile_agent("openclaw").unwrap();
+            }
+            let committed = pending.prefs();
+            pending.rebase_daemon_driver_prefs(&committed);
+            assert!(pending.take_pending_launch_requests().is_empty());
+            assert!(!pending.claim_launch_delivery(
+                42,
+                &delivery,
+                "gui",
+                123,
+                "tab::agent-42",
+                |_| true
+            ));
+            assert_eq!(pending.pending_launch_delivery_id(42), None);
+            assert_eq!(pending.active_count(), 0);
+            assert_eq!(pending.attempt_count(42), 1);
+            assert!(pending.autonomous_in_flight_issues().is_empty());
+            if !cold_start {
+                let item = pending.inbox_item(42).unwrap();
+                assert_eq!(item.state, MonitorInboxState::NotReady);
+                assert!(item.exclusion_reason.as_ref().unwrap().contains("openclaw"));
+            }
+            assert_eq!(pending.pending_effects().iter().filter(|effect| matches!(
+                &effect.payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner: released_owner }
+                    if claim_id == "new-claim" && released_owner == owner
+            )).count(), 1);
+            pending.switch_launch_profile_agent("codex").unwrap();
+            crate::scan_issue_monitor_candidates(&mut pending, &[issue(42)], now);
+            assert!(pending.apply_confirmed_claim(42, "recovered", owner, "recovered-effect", now));
+            let recovered = pending.take_pending_launch_requests();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(
+                recovered[0].launch_session_strategy,
+                crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+        }
+
+        // The cancellation boundary excludes materializer-owned work.
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
+        monitor.switch_launch_profile_agent("openclaw").unwrap();
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
     }
 
     /// A launch profile naming `agent_id`, with every other field at the value

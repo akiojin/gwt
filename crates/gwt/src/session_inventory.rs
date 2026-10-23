@@ -1229,7 +1229,13 @@ fn observe_candidates(
                 child_started_at,
                 started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 launch_origin: session.launch_origin,
-                launch_entrypoint: (entrypoint != "launch").then_some(entrypoint),
+                launch_entrypoint: gwt_skills::assets::CLAUDE_SKILLS
+                    .dirs()
+                    .any(|skill| {
+                        skill.path().file_name().and_then(|name| name.to_str())
+                            == Some(entrypoint.as_str())
+                    })
+                    .then_some(entrypoint),
                 restore_source_session_id: session.restore_source_session_id.clone(),
             });
         }
@@ -2016,7 +2022,10 @@ mod tests {
         launched.save(&sessions).unwrap();
         let mut unlinked = Session::load(&sessions.join("second.toml")).unwrap();
         unlinked.linked_issue_number = None;
-        unlinked.launch_args = vec!["--model".to_string(), "unknown-prompt-kind".to_string()];
+        unlinked.launch_args = vec![
+            "--model".to_string(),
+            "$gwt-private-token-do-not-publish".to_string(),
+        ];
         unlinked.save(&sessions).unwrap();
         let mut bound = Session::load(&sessions.join("missing.toml")).unwrap();
         bound.execution_binding = Some(gwt_agent::SessionExecutionBinding {

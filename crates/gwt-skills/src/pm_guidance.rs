@@ -863,8 +863,14 @@ body cannot hold `plan` / `tasks` sections.
   at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
   For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard
-  from a fresh status read. On conflict, re-read status and reconsider the
-  instruction; no queue admission, hold clearing or scan request occurs.
+  from a fresh status read; also pass `expected_queue_order` from a fresh current-terminal
+  `issue.monitor.queue.list` saved `queue_order`, not the urgent display order.
+  Both order comparisons share the prefs lock and precede any priority, queue or
+  hold change and any scan request. On conflict, re-read the relevant status/list
+  and reconsider the instruction; read back status and the queue list after success.
+  Each guard is optional; `[]` matches only its empty saved order and `null` is
+  invalid. Arrays retain existing decimal u64 string compatibility. Queue value
+  equality does not guard urgent metadata, other settings or ABA history.
   It only moves the issue to the priority head and triggers an
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
@@ -907,6 +913,13 @@ body cannot hold `plan` / `tasks` sections.
   existing behavior; null, blank and non-string guards are invalid.
   Configuration CAS does not version individual overrides or detect ABA history.
   The existing non-decreasing minimum-tier merge remains in effect.
+- For `issue.monitor.profiles.set`, read fresh `issue.monitor.profiles` and pass
+  its `profiles_token` as `expected_profiles_token`. A token mismatch refuses before
+  publication without changing preferences: re-read profiles and reconsider,
+  then read back the successful result. The profile token covers the saved pool and inheritance head only;
+  it excludes other configuration, runtime state and ABA history. Existing sparse
+  inheritance and concurrent-writer protection remain active. Omitting the guard
+  preserves compatibility; null, blank and non-string supplied guards are invalid.
 - Provider switching is automatic. `issue.monitor.profiles` returns the launch
   candidate pool (ordered providers with their holds);
   `issue.monitor.profiles.set` replaces the whole pool with
@@ -4303,6 +4316,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "For `issue.monitor.profiles.set`, read fresh `issue.monitor.profiles`",
+            "`profiles_token` as `expected_profiles_token`",
+            "The profile token covers the saved pool and inheritance head only",
             "For `issue.monitor.tiers.set`, read fresh saved configuration",
             "For `issue.monitor.tier.set`, use the same fresh configuration token",
             "Configuration CAS does not version individual overrides",
@@ -4322,6 +4338,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "saved `queue_order`, not the urgent display order",
             "`expected_priority_order`",
             "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
+            "also pass `expected_queue_order` from a fresh current-terminal",
+            "Both order comparisons share the prefs lock",
+            "read back status and the queue list after success",
             "full saved `priority_order`",
             "re-read status and reconsider",
             "`pm.plan.status`",

@@ -614,6 +614,13 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
 `null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
+併せて現在端末の `issue.monitor.queue.list` から保存済み `queue_order` を読み、
+`launch_now`（または `launch-now`）に `expected_queue_order` として渡します。
+両方の順序ガードを同じ設定ロック内で比較し、priority・queue・hold の変更と scan 要求の前に
+不一致を拒否します。競合時は該当する status/list を再読して指示を再判断し、
+成功後も status と queue list を読み戻します。各ガードは省略可能で、`[]` は対応する保存順序が
+空の場合だけ一致し、`null` は拒否します。配列内の10進 u64 文字列は既存互換で受理します。
+キュー比較は urgent metadata、他の設定、途中の変更履歴を保護しません。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
 `priority_order` を読み、いずれの優先順操作または `issue.monitor.launch_now` にも同じ配列を
@@ -641,7 +648,12 @@ idle になったエージェント窓はスロットを自動的に解放しま
 判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
-プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+プールを置き換えます。両応答は opaque な `profiles_token` を返します。
+更新時は直前に読み取った token を `expected_profiles_token` に渡します。競合時は
+preferences を変更せず拒否するので、profiles を再読して変更を再評価し、成功後も
+読み戻してください。token の対象は保存プールと継承元の先頭候補であり、他の設定、
+runtime 状態、ABA 履歴は対象外です。guard を省略した既存呼び出しは互換です。
+候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold と `prefer_for` routing が適格性を決め、provider は
 使用率の読み値による予測ではなく、起動を拒否した時点でプールから外れる。
 詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
@@ -1253,6 +1265,12 @@ worktree にプロジェクトタブが切り替わります。
 保存し、内容ごとの ID で双方の event を公開します。その後 Git merge を再実行します。
 追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
 archive を上書きしません。
+
+既存 Work に絶対 worktree path と `.` の container が重複している場合は、
+`workspace.work_repair` の `params.work_id` で対象を指定して修復内容を確認できます。
+既定は dry-run で、`"dry_run":false` を加えると適用します。記録済み Git worktree と
+永続 event の証拠が一致する場合だけ修復し、terminal 状態とソースファイルを保持します。
+証拠の欠損や曖昧性がある場合は拒否します。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
