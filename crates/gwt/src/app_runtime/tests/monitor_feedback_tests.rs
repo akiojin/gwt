@@ -536,9 +536,14 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("three canonical machine admission slots for FIFO prefetch");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read monitor prefs");
-    prefs.max_active_agents = 3;
     for issue_number in [3166, 3167] {
         prefs.queued_launch_session_strategies.insert(
             issue_number,
@@ -625,6 +630,13 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     fixture.runtime.issue_monitor_provider_auth_probe = auth_probe;
     // Reap the real first materialization before assertions can unwind.
     // Its PTY preparation is never applied, so this test starts no provider.
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "first materialization not started: preparations={:?}, deliveries={:?}, queued={}",
+        fixture.runtime.issue_monitor_launch_preparations,
+        fixture.runtime.issue_monitor_launch_deliveries,
+        queued.lock().expect("queued workers").len()
+    );
     let (first_window, first_result) =
         take_monitor_launch_complete_event("facts-prefetch", &fixture.recorded_events);
     assert!(first_result.is_ok(), "first launch: {first_result:?}");
@@ -1060,12 +1072,10 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
     fixture.runtime.register_window("tab-1", &other.id);
-    gwt::try_mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
-        |prefs| {
-            prefs.max_active_agents = 3;
-            Ok(())
-        },
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
     )
     .expect("capacity for both issues");
     let (spawner, queued) = BlockingTaskSpawner::queued();
@@ -1142,6 +1152,12 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("capacity for both preclaim owners");
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "two-owner-preclaim",
@@ -1170,7 +1186,6 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
     fixture.runtime.register_window("tab-1", &foreign.id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        prefs.max_active_agents = 2;
         let delivery = prefs
             .pending_launch_deliveries
             .iter_mut()
@@ -1220,6 +1235,96 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
 }
 
 #[test]
+fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("manual admission slots independent of host observations");
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "capacity-renewal",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let reserved_names = fs::read(&history).expect("worker reserved identity");
+    // The host sampler creates/renews this file independently of launch facts.
+    let capacity = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+    fs::create_dir_all(capacity.parent().unwrap()).unwrap();
+    fs::write(&capacity, b"{}").unwrap();
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    let before = gwt_core::process::thread_git_spawn_count();
+    drain_queued_blocking_tasks(&queued);
+    assert_eq!(
+        fs::read(&history).unwrap(),
+        reserved_names,
+        "capacity renewal must retain the prepared identity"
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        1,
+        "only final admission may validate Git; claim/base/prompt facts stay prepared"
+    );
+    // A refreshed completion is queued, without creating a pane on the worker.
+    let refreshed = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(refreshed);
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "refreshed admission must reach pane creation, not another preparation"
+    );
+
+    let input = fixture.runtime.capture_issue_monitor_spawn_admission(
+        &fixture.project_root,
+        3165,
+        "work/issue-3165",
+    );
+    let previous = input.prepare().unwrap();
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        input
+            .refresh(&previous)
+            .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+        "a policy edit while the refresh is queued must retain the original fence"
+    );
+}
+
+#[test]
 fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let _env_lock = env_test_lock()
         .lock()
@@ -1228,6 +1333,12 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("allow the unrelated pane and the pending launch");
     let mut fixture = monitor_relaunch_fixture_with_settlement(
         temp.path(),
         "reuse-fresh-facts",
@@ -1265,10 +1376,10 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     fixture.runtime.register_window("tab-1", &unrelated.id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        prefs.max_active_agents = 3;
+        prefs.priority_order.push(3166);
         Ok(())
     })
-    .expect("change unrelated admission prefs");
+    .expect("change unrelated queue priority prefs");
     assert!(fixture
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
@@ -1407,6 +1518,12 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         true,
     );
     seed_resumed_autonomous_handoff(&fixture, "Continue the asking conversation");
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("allow the exact holder and the unrelated live pane");
     let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
     insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
@@ -1454,14 +1571,34 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             fixture.delivery_id.clone(),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-    for _ in 0..2 {
-        drain_queued_blocking_tasks(&queued);
-        fixture
-            .runtime
-            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-                &fixture.recorded_events,
+    let mut preparation_states = Vec::new();
+    let preparation_phases = capture_tracing_events(|| {
+        for _ in 0..2 {
+            drain_queued_blocking_tasks(&queued);
+            fixture.runtime.handle_issue_monitor_launch_prepared(
+                take_issue4803_monitor_preparation(&fixture.recorded_events),
+            );
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+            )
+            .expect("read exact-holder preparation state");
+            preparation_states.push((
+                fixture
+                    .runtime
+                    .issue_monitor_launch_deliveries
+                    .get(fixture.delivery_id.as_deref().unwrap())
+                    .cloned(),
+                fixture
+                    .runtime
+                    .pending_launch_feedback_contexts
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                queued.lock().expect("queued exact-holder tasks").len(),
+                prefs.autonomous_handoffs[0].delivery.clone(),
             ));
-    }
+        }
+    });
     fs2::FileExt::unlock(&history).expect("release name history");
     let windows = &fixture
         .runtime
@@ -1489,7 +1626,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
                 if window_id == &holder_window_id
         ),
-        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane"
+        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane; states={preparation_states:?}; phases={preparation_phases:?}"
     );
 }
 

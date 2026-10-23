@@ -47,6 +47,7 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
       return true;
     });
   return mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: options.send || ((message) => sent.push(message)),
     sendKnowledgeSemanticSearchNow: directSend,
     createNode: options.createNode || (() => ({ appendChild() {}, classList: { add() {} } })),
@@ -1122,6 +1123,7 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
     const online = { value: true };
     const windowData = { id: "win-1", preset: "issue" };
     const surface = mod.createKnowledgeKanbanSurface({
+      scheduleFrame: run => { run(); return () => {}; },
       send: (message) => sent.push(message),
       sendKnowledgeSemanticSearchNow: (message) => {
         if (!online.value) return false;

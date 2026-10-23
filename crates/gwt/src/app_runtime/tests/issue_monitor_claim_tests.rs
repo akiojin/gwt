@@ -1023,6 +1023,17 @@ fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() 
     );
 
     assert!(!events.is_empty(), "push answers with a refreshed snapshot");
+    assert!(
+        events.iter().any(|event| {
+            event.target == DispatchTarget::Client("client-1".to_string())
+                && serde_json::to_value(&event.event).expect("queue result wire shape")
+                    == serde_json::json!({
+                        "kind": "issue_monitor_queue_result", "operation": "push",
+                        "issue_numbers": [43], "error": null,
+                    })
+        }),
+        "queue push must return its committed result to the origin client"
+    );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let numbers = |terminal: &str| {
         persisted.terminal_queues[terminal]
@@ -1100,6 +1111,17 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
         !events.is_empty(),
         "removal answers with a refreshed snapshot"
     );
+    assert!(
+        events.iter().any(|event| {
+            event.target == DispatchTarget::Client("client-1".to_string())
+                && serde_json::to_value(&event.event).expect("queue result wire shape")
+                    == serde_json::json!({
+                        "kind": "issue_monitor_queue_result", "operation": "remove",
+                        "issue_numbers": [42], "error": null,
+                    })
+        }),
+        "queue removal must return its committed result to the origin client"
+    );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let numbers = |terminal: &str| {
         persisted.terminal_queues[terminal]
@@ -1110,6 +1132,77 @@ fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() 
     };
     assert_eq!(numbers(&host), vec![43]);
     assert_eq!(numbers(&format!("{host}-other")), vec![42]);
+}
+
+#[test]
+fn app_runtime_issue_monitor_queue_result_reports_daemon_and_local_commit_outcomes() {
+    use gwt::runtime_daemon_events::IssueMonitorControlPublishError;
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.test_context();
+    for (publication, expected_error) in [
+        (Ok(()), None),
+        (
+            Err(IssueMonitorControlPublishError::Rejected(
+                "control rejected".into(),
+            )),
+            Some("control rejected"),
+        ),
+        (
+            Err(IssueMonitorControlPublishError::OutcomeUnknown(
+                "ack timed out".into(),
+            )),
+            Some("ack timed out"),
+        ),
+    ] {
+        let events = runtime.issue_monitor_control_result_events_with_queue_result(
+            &context,
+            "client-1",
+            publication,
+            "queue-move",
+            Some(("move", vec![42])),
+            |_| panic!("an ACK or uncertain/rejected control must not apply local fallback"),
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client("client-1".into())));
+        assert!(events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorQueueResult { operation, issue_numbers, error }
+                if operation == "move" && issue_numbers == &[42] && error.as_deref() == expected_error)));
+        assert!(events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )));
+    }
+
+    runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
+    let events = runtime.issue_monitor_control_result_events_with_queue_result(
+        &context,
+        "client-1",
+        Err(IssueMonitorControlPublishError::TransportUnavailable(
+            "daemon unavailable".into(),
+        )),
+        "queue-push",
+        Some(("push", vec![42])),
+        |monitor| monitor.terminal_queue_push(&[42], "operator", "2026-10-23T00:00:00Z"),
+    );
+    let error = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorQueueResult {
+                error: Some(error), ..
+            } => Some(error),
+            _ => None,
+        })
+        .expect("failed local commit must return its actual error");
+    assert!(error.contains("local fallback control commit failed"));
+    assert!(error.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER));
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::IssueMonitorToast { message, .. } if message == error)));
 }
 
 #[test]
@@ -1633,7 +1726,8 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
     assert!(monitor.mark_pending_effect_attempting(&key));
     let attempting = monitor.pending_effects()[0].clone();
 
-    issue.labels.push("hold".to_string());
+    issue.labels.push("gwt-spec".to_string());
+    issue.readiness = gwt::IssueMonitorReadiness::NotReady;
     monitor.record_candidate(issue);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
 

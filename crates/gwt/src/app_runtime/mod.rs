@@ -2468,7 +2468,9 @@ fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
     {
         return std::time::Duration::from_millis(timeout);
     }
-    std::time::Duration::from_secs(1)
+    // Functional launch tests share the fallback commit's allowance for native
+    // Git/fsync latency. Explicit budget tests keep the override above.
+    std::time::Duration::from_secs(if cfg!(test) { 10 } else { 1 })
 }
 
 /// Wall-clock budget for one GUI-thread local fallback commit of the Issue
@@ -3887,7 +3889,11 @@ fn local_probe_batch<'a>(
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
 /// observed, keyed by Issue number (Issue #3528).
-type LocalClaimObservation = (String, std::collections::BTreeMap<u64, bool>);
+type LocalClaimObservation = (
+    String,
+    std::collections::BTreeMap<u64, bool>,
+    std::collections::BTreeMap<u64, gwt::issue_monitor::IssueMonitorDependencyObservation>,
+);
 
 type LocalIssueMonitorFallbackProjection = (
     Vec<gwt::IssueMonitorIssue>,
@@ -3958,16 +3964,47 @@ fn observe_local_claim_candidates(
     } else {
         0
     };
-    let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
-    // SPEC #4093 FR-005: one bulk linked-PR read for the whole frontier.
+    let (available, _) = monitor.claim_probe_plan(claimable_cap);
+    let dependencies = monitor.dependency_probe_candidates(claimable_cap);
+    if available == 0 && dependencies.is_empty() {
+        return Ok(Some((
+            gwt::process::current_claim_owner(),
+            Default::default(),
+            Default::default(),
+        )));
+    }
+    let (_, queued) = monitor.claim_candidate_refresh_plan(claimable_cap);
+    // One batch also covers candidates that dependency completion may release.
     let batch = local_probe_batch(
         owner,
         repo,
         loaded
             .issues
             .iter()
-            .filter(|issue| candidates.contains(&issue.number)),
+            .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
     );
+    let mut dependency_observations = std::collections::BTreeMap::new();
+    for issue_number in dependencies {
+        let observation = match loaded
+            .issues
+            .iter()
+            .find(|issue| issue.number == issue_number)
+        {
+            Some(issue) => {
+                let completed = observe_local_issue_completion(owner, repo, issue, &batch)?;
+                Some(gwt::issue_monitor::IssueMonitorDependencyObservation::new(
+                    issue, completed,
+                ))
+            }
+            None => monitor.dependency_observation(issue_number, None),
+        };
+        if let Some(observation) = observation {
+            dependency_observations.insert(issue_number, observation);
+        }
+    }
+    let mut ready_monitor = monitor.clone();
+    ready_monitor.observe_dependency_completions(&dependency_observations);
+    let (available, candidates) = ready_monitor.claim_probe_plan(claimable_cap);
     let observations =
         claim_candidate_completion_observations(available, candidates, |issue_number| {
             let Some(issue) = loaded
@@ -3977,29 +4014,34 @@ fn observe_local_claim_candidates(
             else {
                 return Ok(false);
             };
-            observe_claim_candidate_completion(owner, repo, issue, &batch)
+            observe_local_issue_completion(owner, repo, issue, &batch)
+                .map(|completed| completed.unwrap_or(false))
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
-    Ok(Some((gwt::process::current_claim_owner(), observations)))
+    Ok(Some((
+        gwt::process::current_claim_owner(),
+        observations,
+        dependency_observations,
+    )))
 }
 
 /// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): the deadline boundary of one
 /// completion probe. An ordinary readback error returned while the observation
 /// deadline is still valid keeps #3165's fail-open compatibility as an explicit
-/// negative outcome for that Issue; an expired deadline escapes as the typed
-/// stage failure so the caller discards the whole claim proposal.
-fn observe_claim_candidate_completion(
+/// inconclusive outcome. Candidates treat it as negative; dependencies disable
+/// that edge for this scan. An expired deadline discards the whole proposal.
+fn observe_local_issue_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
     batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
-) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+) -> Result<Option<bool>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
     match local_completion_probe(owner, repo, issue, Some(batch)) {
-        Ok(completed) => Ok(completed),
+        Ok(completed) => Ok(Some(completed)),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
             gwt::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
@@ -4008,7 +4050,7 @@ fn observe_claim_candidate_completion(
                 error = %failure,
                 "issue monitor completion probe failed within budget (fail-open)"
             );
-            Ok(false)
+            Ok(None)
         }
     }
 }
@@ -4511,7 +4553,8 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             if latest.config.enabled {
                 latest.set_gui_connected(true);
             }
-            if let Some((monitor_owner, observations)) = &local_claim_proposal {
+            if let Some((monitor_owner, observations, dependencies)) = &local_claim_proposal {
+                latest.observe_dependency_completions(dependencies);
                 prepare_local_issue_monitor_claim_proposals(
                     latest,
                     loaded,
@@ -9026,33 +9069,50 @@ impl AppRuntime {
         operation: &'static str,
         apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_control_result_events_with_queue_result(
+            context,
+            client_id,
+            publication,
+            operation,
+            None,
+            apply_fallback,
+        )
+    }
+
+    fn issue_monitor_control_result_events_with_queue_result(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        operation: &'static str,
+        queue_result: Option<(&'static str, Vec<u64>)>,
+        apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
         let project_root = Some(context.project_root.clone());
-        match publication {
+        let outcome = match publication {
             // The daemon ACK confirms the canonical control transaction
             // committed. Persisting it again here would advance authority
             // twice and leave the daemon's generation stale.
-            Ok(()) => Vec::new(),
+            Ok(()) => Ok(None),
             Err(error) if error.allows_local_fallback() => {
                 tracing::debug!(
                     error = %error,
                     operation,
                     "issue monitor control daemon publish failed; using local fallback"
                 );
-                match self.commit_local_issue_monitor_control(context, apply_fallback) {
-                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
-                        Some(client_id),
-                        project_root.as_deref(),
-                        monitor,
-                    ),
-                    Err(local_error) => self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        Some(client_id),
-                        local_error,
-                        operation,
-                        None,
-                    ),
-                }
+                self.commit_local_issue_monitor_control(context, apply_fallback)
+                    .map(|(monitor, ())| Some(monitor))
             }
+            Err(error) => Err(error),
+        };
+        let queue_error = outcome.as_ref().err().map(ToString::to_string);
+        let mut events = match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                project_root.as_deref(),
+                monitor,
+            ),
             Err(error) => self.issue_monitor_control_error_events(
                 Some(&context.project_root),
                 Some(client_id),
@@ -9060,7 +9120,18 @@ impl AppRuntime {
                 operation,
                 None,
             ),
+        };
+        if let Some((operation, issue_numbers)) = queue_result {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorQueueResult {
+                    operation: operation.to_string(),
+                    issue_numbers,
+                    error: queue_error,
+                },
+            ));
         }
+        events
     }
 
     fn issue_monitor_allowed_labels_result_events(
@@ -9797,7 +9868,9 @@ impl AppRuntime {
                         &now,
                     );
                     #[cfg(not(unix))]
-                    if let Some((monitor_owner, observations)) = &local_claim_proposal {
+                    if let Some((monitor_owner, observations, dependencies)) = &local_claim_proposal
+                    {
+                        monitor.observe_dependency_completions(dependencies);
                         prepare_local_issue_monitor_claim_proposals(
                             monitor,
                             loaded,
@@ -13405,11 +13478,12 @@ impl AppRuntime {
                     }),
                 );
                 let now = chrono::Utc::now().to_rfc3339();
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-push",
+                    Some(("push", issue_numbers.clone())),
                     |monitor| {
                         monitor.terminal_queue_push(&issue_numbers, "operator", &now);
                     },
@@ -13423,11 +13497,12 @@ impl AppRuntime {
                     }),
                 );
                 let now = chrono::Utc::now().to_rfc3339();
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-remove",
+                    Some(("remove", issue_numbers.clone())),
                     |monitor| {
                         monitor.terminal_queue_remove(&issue_numbers, &now);
                     },
@@ -13441,11 +13516,12 @@ impl AppRuntime {
                     context,
                     serde_json::json!({"terminal_queue_move": {"issue_number": issue_number, "position": position}}),
                 );
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-move",
+                    Some(("move", vec![issue_number])),
                     |monitor| {
                         monitor.terminal_queue_move(
                             issue_number,
@@ -13730,7 +13806,7 @@ impl AppRuntime {
                     );
                     return AgentFrontendDispatchOutcome::StaleCapability;
                 }
-                AgentDurableAuthority::Unavailable => {
+                AgentDurableAuthority::PendingActivation | AgentDurableAuthority::Unavailable => {
                     tracing::warn!(
                         target: "gwt_security",
                         "queued agent pane request rejected because execution authority is unavailable"

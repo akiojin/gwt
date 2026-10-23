@@ -13185,7 +13185,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 21] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -13201,6 +13201,7 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
     // were absent, so the one refusal that actually needed a prune route could
     // not carry it across the bridge and the agent was left guessing.
     "workspace.work_prune",
+    "workspace.work_repair",
     "workspace.candidates",
     "workspace.join",
     // Issue #5288: exact registered-PM supersession, live member stop, and
@@ -17095,13 +17096,15 @@ fn run_impl<E: CliEnv>(
                 ));
                 return Ok(2);
             }
+            let record = load(&worktree).ok().flatten();
+            let completed_by_session = record.as_ref().is_some_and(|record| {
+                record.status == ExecutionControlStatus::Completed
+                    && record.primary_session_id == session_id
+            });
             let evidence = crate::cli::verification_record::evaluate_evidence(
                 &worktree,
                 &session_id,
-                load(&worktree)
-                    .ok()
-                    .flatten()
-                    .map(|record| record.owner_number),
+                record.as_ref().map(|record| record.owner_number),
             );
             let mut expected_verification_hash =
                 match super::completion_pr::admit(env, &session_id, None, None, out) {
@@ -17115,7 +17118,11 @@ fn run_impl<E: CliEnv>(
                         return Ok(2);
                     }
                 };
-            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+            // Completed replay confirms the pinned receipt through settle below;
+            // only a new completion depends on the current remote marker.
+            if !completed_by_session
+                && evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+            {
                 let verification = crate::cli::verification_record::load(&worktree)
                     .map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(
@@ -33907,6 +33914,21 @@ exit 1
                         .active,
                     "successful execution.complete must also finish the matching build"
                 );
+                let completed_bytes = record_contents(dir.path()).unwrap();
+                let build_path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+                let build_bytes = fs::read(&build_path).unwrap();
+                let mut env = TestEnv::new(dir.path().to_path_buf());
+                let (code, out) = run_collect(
+                    &mut env,
+                    CliCommand::Build(crate::cli::SkillStateAction::Complete {
+                        spec: 3248,
+                        pr: None,
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "build.complete after execution.complete: {out}");
+                assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                assert_eq!(fs::read(&build_path).unwrap(), build_bytes);
                 assert_eq!(
                     crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
                         dir.path(),
@@ -34881,15 +34903,52 @@ exit 1
                 dir.path(),
                 ExecutionCommand::Blocked {
                     reason: "environment blocker".to_string(),
-                    missing_verification: None,
+                    missing_verification: Some("runner unavailable".to_string()),
                 },
             )
             .unwrap();
             assert_eq!(code, 0, "{out}");
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
             assert_eq!(
-                load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Blocked
+                record.blocked_reason.as_deref(),
+                Some("environment blocker")
             );
+            assert_eq!(
+                record.missing_verification.as_deref(),
+                Some("runner unavailable")
+            );
+            assert!(record.settled_at.is_some());
+            let path = state_path(dir.path());
+            let original = fs::read(&path).unwrap();
+
+            // FR-022: a retry confirms the first settlement without replacing
+            // its reason, missing verification, timestamp, or integrity hash.
+            let retry = || ExecutionCommand::Blocked {
+                reason: "different environment blocker".to_string(),
+                missing_verification: None,
+            };
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("already settled"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), original);
+
+            // Terminal replay still checks ownership and integrity first.
+            {
+                let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("settlement refused"), "{out}");
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+            let tampered = String::from_utf8(original)
+                .unwrap()
+                .replace("environment blocker", "edited blocker");
+            fs::write(&path, &tampered).unwrap();
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("integrity validation"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), tampered.as_bytes());
         }
 
         /// Issue #4363 AC-1: Monitor membership is not execution authority.

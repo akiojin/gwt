@@ -552,6 +552,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.work_repair" => {
+            reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair {
+                work_id: required_string(params, "work_id")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.work_prune" | "workspace.work-prune" => {
             // Issue #4465 AC-4'': this operation closes, discards and detaches
             // durable Work state across every Work in the project, so a scope
@@ -797,6 +804,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: lookup(params, "reason")
+                    .map(|_| required_string(params, "reason"))
+                    .transpose()?,
                 expected_priority_order: lookup(params, "expected_priority_order")
                     .map(|_| required_u64_vec(params, "expected_priority_order"))
                     .transpose()?,
@@ -807,6 +817,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: lookup(params, "expected_queue_order")
+                    .map(|_| required_u64_vec(params, "expected_queue_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 expected_priority_order: lookup(params, "expected_priority_order")
@@ -898,6 +911,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                reason: lookup(params, "reason")
+                    .map(|_| required_string(params, "reason"))
+                    .transpose()?,
                 expected_priority_order: lookup(params, "expected_priority_order")
                     .map(|_| required_u64_vec(params, "expected_priority_order"))
                     .transpose()?,
@@ -921,6 +937,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|_| required_u64_vec(params, "expected_queue_order"))
                 .transpose()?,
             issue_numbers: required_u64_vec(params, "numbers")?,
+            all_terminals: optional_bool(params, "all_terminals")?.unwrap_or(false),
         }),
         "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
             project_root: optional_path(params, "project_root")?,
@@ -4187,6 +4204,79 @@ mod tests {
         );
     }
 
+    /// Issue #4171 AC-1/3/4: a failed read after a successful POST must not
+    /// invite a duplicate POST or classify it as an operation refusal.
+    #[test]
+    fn issue_comment_preserves_success_when_postprocessing_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_next_fetch(gwt_github::ApiError::Parse {
+            operation: "graphql query".into(),
+            message: "GitHub GraphQL returned an unclassified error".into(),
+        });
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], true, "{payload}");
+        let comments = env.client.comments(issue.number);
+        assert_eq!(comments.len(), 1);
+        assert!(payload["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("created comment {} ", comments[0].id.0)));
+        assert_eq!(
+            payload["warnings"][0]["code"],
+            "issue_comment_postprocessing_failed"
+        );
+        assert!(payload["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("GitHub GraphQL"));
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert!(rows.iter().any(|row| row.kind
+            == gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+            && row.target.issue == Some(issue.number.0)));
+        assert!(!rows
+            .iter()
+            .any(|row| row.kind == gwt_core::error_ledger::ErrorKind::OperationRefusal));
+    }
+
+    #[test]
+    fn issue_comment_creation_failure_stays_an_operation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_create_comment_after(0);
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false, "{payload}");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected create_comment failure"));
+        assert!(env.client.comments(issue.number).is_empty());
+        assert!(!env
+            .client
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("fetch:")));
+        assert!(payload.get("warnings").is_none());
+    }
+
     #[test]
     fn operation_refusal_belongs_to_explicit_project_instead_of_caller_cwd() {
         let temp = tempfile::tempdir().unwrap();
@@ -4902,6 +4992,32 @@ mod tests {
         assert!(matches!(
             ok("workspace.work-prune", json!({"dry_run": false})),
             CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_work_repair_requires_work_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_repair", json!({"work_id":"work-test"})),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.work_repair", json!({})),
+            CliParseError::MissingFlag("work_id")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "project_root":"/foreign"})
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -5807,6 +5923,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -5818,6 +5935,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
@@ -6294,6 +6412,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.priority.move", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -6306,6 +6425,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 42, "position": 3})
             ),
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 42,
@@ -6318,6 +6438,7 @@ mod tests {
                 json!({"issue_numbers": [9, 4, 7]})
             ),
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: None,
                 issue_numbers: vec![9, 4, 7],
@@ -6372,11 +6493,24 @@ mod tests {
                 json!({"number":42,"position":0}),
             ),
             ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
         ] {
             let unconditional = ok(operation, params.clone());
             params["expected_queue_order"] = json!([]);
             assert_ne!(ok(operation, params.clone()), unconditional);
-            for invalid in [Value::Null, json!("1,2")] {
+            params["expected_queue_order"] = json!([42]);
+            let numeric = ok(operation, params.clone());
+            params["expected_queue_order"] = json!(["42"]);
+            assert_eq!(ok(operation, params.clone()), numeric);
+            for invalid in [
+                Value::Null,
+                json!("1,2"),
+                json!([null]),
+                json!([true]),
+                json!([1.5]),
+                json!([-1]),
+            ] {
                 params["expected_queue_order"] = invalid;
                 assert!(matches!(
                     err(operation, params.clone()),
@@ -9455,6 +9589,24 @@ mod tests {
             err("perf.violations", json!({"limit": 5})),
             CliParseError::InvalidJson(_)
         ));
+    }
+
+    #[test]
+    fn issue_monitor_priority_reason_parsing_preserves_presence() {
+        for (operation, mut params) in [
+            ("issue.monitor.priority.set", json!({"issue_numbers":[1]})),
+            ("issue.monitor.priority-set", json!({"issue_numbers":[1]})),
+            ("issue.monitor.priority.move", json!({"number":1})),
+            ("issue.monitor.priority-move", json!({"number":1})),
+        ] {
+            assert!(super::parse_operation(operation, &params).is_ok());
+            for invalid in [Value::Null, json!(" "), json!(3)] {
+                params["reason"] = invalid;
+                assert!(super::parse_operation(operation, &params).is_err());
+            }
+            params["reason"] = json!("Unblock the release");
+            assert!(super::parse_operation(operation, &params).is_ok());
+        }
     }
 
     #[test]

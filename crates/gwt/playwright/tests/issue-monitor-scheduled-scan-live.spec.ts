@@ -115,7 +115,9 @@ test("Issue #5876 canvas readiness precedes materializer admission", async ({ pa
       return send.call(this, data);
     };
     (window as any).__gwtReleaseCanvas = () => {
-      for (const { socket, data } of held) send.call(socket, data);
+      for (const { socket, data } of held) {
+        if (socket.readyState === WebSocket.OPEN) send.call(socket, data);
+      }
     };
   });
   await gotoLiveGwt(page, BASE, { enableTestBridge: true });
@@ -125,6 +127,18 @@ test("Issue #5876 canvas readiness precedes materializer admission", async ({ pa
   await page.evaluate(() => (window as any).__gwtReleaseCanvas());
   await expect.poll(async () => (await roles()).filter(row => row.materializer_ready === true).length,
     { timeout: 90_000 }).toBe(1);
+  // Keep the page alive across reconnects, as it is during an update restart.
+  // Each new backend connection needs its own post-hydration readiness event.
+  for (let reconnect = 0; reconnect < 3; reconnect++) {
+    const previous = await page.evaluate(() => {
+      const held = (window as any).__gwtHeldCanvas;
+      const count = held.length;
+      held.at(-1).socket.close();
+      return count;
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).__gwtHeldCanvas.length)).toBe(previous + 1);
+    await page.evaluate(() => (window as any).__gwtReleaseCanvas());
+  }
   // A repeated readiness event must preserve the already-live subscription.
   await page.evaluate(() => (window as any).__gwtReleaseCanvas());
   await sendLiveGwtEvent(page, { kind: "list_windows" });

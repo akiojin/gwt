@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use gwt_core::error::GwtError;
@@ -19,7 +19,93 @@ use gwt_core::workspace_projection::{
 };
 use gwt_github::{ApiError, SpecOpsError};
 
-use crate::cli::{CliEnv, CliParseError, WorkspaceCommand};
+use crate::cli::{CliEnv, CliParseError};
+
+/// SPEC-2359 command model for `workspace.*` JSON operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceCommand {
+    /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
+    EventsReconcile { reference: String, dry_run: bool },
+    /// Ask the authenticated Host to close one eligible Work record.
+    Close { work_id: String, close_kind: String },
+    /// Read the outcome of one update without contacting or mutating the Host.
+    Receipt { operation_id: String },
+    /// `workspace.update` — update Workspace current projection and journal.
+    Update {
+        title: Option<String>,
+        status: Option<String>,
+        status_text: Option<String>,
+        summary: Option<String>,
+        progress_summary: Option<String>,
+        next_action: Option<String>,
+        owner: Option<String>,
+        agent_session: Option<String>,
+        current_focus: Option<String>,
+        title_summary: Option<String>,
+    },
+    /// `workspace.candidates` — list join candidates.
+    Candidates { agent_session: String },
+    /// `workspace.join`.
+    Join {
+        agent_session: String,
+        workspace_id: String,
+        current_focus: Option<String>,
+        title_summary: Option<String>,
+    },
+    /// `workspace.create`.
+    Create {
+        agent_session: String,
+        title_summary: String,
+        current_focus: Option<String>,
+        spec: Option<u64>,
+        issue: Option<u64>,
+        split_from: Option<String>,
+        boundary: Option<String>,
+    },
+    /// `workspace.ensure`.
+    Ensure {
+        agent_session: String,
+        title_summary: String,
+        current_focus: Option<String>,
+        spec: Option<u64>,
+        issue: Option<u64>,
+        topic: Option<String>,
+        boundary: Option<String>,
+    },
+    /// SPEC-2359 US-41: `workspace.projection_list` —
+    /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
+    /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
+    ProjectionList { stale: bool, all: bool },
+    /// SPEC-2359 US-41: `workspace.projection_prune` —
+    /// archive / delete stale Workspace projections (FR-153, FR-154).
+    ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3466 / #3524 (folded into #3606): `workspace.store_consolidate` —
+    /// fold project stores that a pre-#3466 build split apart back into the
+    /// repository's canonical store.
+    ///
+    /// The dry run reports the plan and issues its `manifest_hash`; applying
+    /// requires that hash back *and* the recorded dry run that issued it, so a
+    /// store nobody reviewed can never be moved. `project_root` names the
+    /// project explicitly; authority still comes from the ambient Session.
+    StoreConsolidate {
+        project_root: Option<PathBuf>,
+        dry_run: bool,
+        manifest_hash: Option<String>,
+    },
+    /// Issue #3448: settle incomplete Works whose owner Issue is already
+    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
+    /// reports the plan without emitting close events. `project_root` targets
+    /// a project other than the current one (the GUI opens the layout root,
+    /// which resolves to a different store than a linked worktree — #3466).
+    WorkPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+        project_root: Option<String>,
+    },
+    /// Refold one existing Work's portable container aliases from its durable
+    /// sources. This never creates lifecycle events or changes ownership.
+    WorkRepair { work_id: String, dry_run: bool },
+}
 
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
@@ -1427,6 +1513,9 @@ pub(super) fn run<E: CliEnv>(
                 .unwrap_or_else(|| env.repo_path());
             run_work_prune(target, dry_run, &ids, out)
         }
+        WorkspaceCommand::WorkRepair { work_id, dry_run } => {
+            run_work_repair(env.repo_path(), &work_id, dry_run, out)
+        }
         WorkspaceCommand::StoreConsolidate {
             project_root,
             dry_run,
@@ -1436,6 +1525,136 @@ pub(super) fn run<E: CliEnv>(
             run_store_consolidate(target, dry_run, manifest_hash.as_deref(), out)
         }
     }
+}
+
+/// Recover one accepted projection from immutable sources rooted in its own
+/// recorded Git worktree. Reader CWD never supplies a portable event's root.
+fn run_work_repair(
+    repo_path: &Path,
+    work_id: &str,
+    dry_run: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let refuse = |reason: &str| {
+        core_error(GwtError::Other(format!(
+            "Work {work_id} container repair refused: {reason}"
+        )))
+    };
+    if work_id.trim().is_empty() {
+        return Err(refuse("work_id is required"));
+    }
+    let works_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let bytes = std::fs::read(&works_path).map_err(|error| core_error(error.into()))?;
+    // Do not run migrations or compaction while identifying a repair target.
+    let projection: WorkItemsProjection = serde_json::from_slice(&bytes)
+        .map_err(|error| refuse(&format!("invalid works projection: {error}")))?;
+    let targets: Vec<_> = projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_id)
+        .collect();
+    let [target] = targets.as_slice() else {
+        return Err(refuse("exactly one existing target Work is required"));
+    };
+    let anchors: Vec<_> = target
+        .execution_containers
+        .iter()
+        .filter(|container| {
+            container
+                .worktree_path
+                .as_deref()
+                .is_some_and(Path::is_absolute)
+        })
+        .collect();
+    let [anchor] = anchors.as_slice() else {
+        return Err(refuse("exactly one absolute worktree anchor is required"));
+    };
+    let root = anchor.worktree_path.as_deref().unwrap();
+    let branch = anchor
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| refuse("anchor branch is missing"))?;
+    let project = gwt_core::repo_hash::detect_repo_hash(repo_path)
+        .ok_or_else(|| refuse("current repository identity is unavailable"))?;
+    if gwt_core::repo_hash::detect_repo_hash(root).as_ref() != Some(&project) {
+        return Err(refuse("anchor belongs to a different or unknown project"));
+    }
+    let repository = gwt_git::Repository::open(root).map_err(core_error)?;
+    let top = gwt_core::process::run_git_logged(&["rev-parse", "--show-toplevel"], Some(root))
+        .map_err(|error| core_error(error.into()))?;
+    let physical_root = std::fs::canonicalize(root).map_err(|error| core_error(error.into()))?;
+    if !top.status.success()
+        || std::fs::canonicalize(String::from_utf8_lossy(&top.stdout).trim()).ok()
+            != Some(physical_root)
+    {
+        return Err(refuse("anchor is not its recorded Git worktree root"));
+    }
+    if repository.current_branch().map_err(core_error)?.as_deref() != Some(branch) {
+        return Err(refuse("anchor no longer has its recorded Git branch"));
+    }
+    let mut sources = Vec::new();
+    for event in &target.events {
+        let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(root, &event.id);
+        if gwt_core::workspace_projection::workspace_work_event_shard_matches(root, event)
+            .map_err(core_error)?
+        {
+            let content =
+                std::fs::read_to_string(path).map_err(|error| core_error(error.into()))?;
+            sources.push(gwt_core::work_events_intake::SharedWorkEventsSource::new(
+                content,
+                Some((*anchor).clone()),
+            ));
+        } else {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    return Err(refuse(&format!(
+                        "accepted event {} has a mismatched immutable shard",
+                        event.id
+                    )))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(core_error(error.into())),
+            }
+        }
+    }
+    let legacy = gwt_core::paths::gwt_repo_local_work_events_path(root);
+    // Legacy journals are eligible only inside real managed directories, just
+    // like shards. A symlink must not introduce another worktree's evidence.
+    for path in legacy.ancestors().take(3) {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(refuse("legacy event source is redirected"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(core_error(error.into())),
+        }
+    }
+    match std::fs::read_to_string(&legacy) {
+        Ok(content) => sources.push(gwt_core::work_events_intake::SharedWorkEventsSource::new(
+            content,
+            Some((*anchor).clone()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(core_error(error.into())),
+    }
+    let close_path =
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
+    let report = gwt_core::work_events_intake::repair_work_event_containers(
+        &works_path,
+        work_id,
+        sources,
+        Some(&close_path),
+        dry_run,
+    )
+    .map_err(core_error)?;
+    out.push_str(
+        &serde_json::to_string(&report)
+            .map_err(|error| refuse(&format!("repair report: {error}")))?,
+    );
+    out.push('\n');
+    Ok(0)
 }
 
 /// Issue #3466 / #3524 (folded into #3606): report or apply project store

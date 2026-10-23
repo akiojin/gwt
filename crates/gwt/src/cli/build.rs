@@ -2409,11 +2409,31 @@ format_version: Some(1),
             3854,
             crate::cli::pr::PrQuarantineContext {
                 number: 3854,
-                body: marker,
+                body: marker.clone(),
                 comments: Vec::new(),
             },
         );
         let mut out = String::new();
+        env.pr_quarantine_contexts
+            .get_mut(&3854)
+            .unwrap()
+            .body
+            .clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out,
+            )
+            .unwrap(),
+            2,
+            "active completion still requires its quarantine marker: {out}"
+        );
+        assert!(
+            out.contains("typed quarantine evidence is not current"),
+            "{out}"
+        );
+        env.pr_quarantine_contexts.get_mut(&3854).unwrap().body = marker;
         gwt_core::skill_state::save(
             repo.path(),
             SKILL_NAME,
@@ -2480,11 +2500,39 @@ format_version: Some(1),
             crate::cli::execution_state::record_contents(repo.path()).unwrap(),
             completed_bytes
         );
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_bytes);
+        assert_eq!(
+            crate::cli::verification_record::evaluate_evidence(repo.path(), session_id, Some(3248)),
+            crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+        );
+        out.clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "completed execution replay must not require the old PR marker: {out}"
+        );
+        assert!(out.contains("already settled"), "{out}");
+        assert_eq!(
+            crate::cli::execution_state::record_contents(repo.path()).unwrap(),
+            completed_bytes
+        );
         assert_eq!(std::fs::read(state_path).unwrap(), state_bytes);
     }
 
     #[test]
     fn managed_build_complete_confirms_canonical_done_without_another_host_request() {
+        struct RestoreCwd(PathBuf);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                // test-hygiene: allow-unlocked-env the enclosing test holds env_test_lock through this restore
+                std::env::set_current_dir(&self.0).expect("restore fixture caller CWD");
+            }
+        }
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2492,34 +2540,165 @@ format_version: Some(1),
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = BoundTerminalFixture::new();
+        let start = fixture.canonical_work().events[0].clone();
+        let start_path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.git.repo, &start.id);
+        std::fs::create_dir_all(start_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &start_path,
+            gwt_core::workspace_projection::canonical_workspace_work_event_bytes(
+                &start,
+                &fixture.git.repo,
+            )
+            .unwrap(),
+        )
+        .expect("persist accepted Start source without applying it again");
         fixture.terminalize_canonical_done();
         let works_path =
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
-        let before = std::fs::read(&works_path).expect("snapshot canonical Done WorkItems");
+        let terminal_before = fixture.canonical_work();
+        let mut old_pr = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            &fixture.work_id,
+            chrono::Utc::now(),
+        );
+        old_pr.agent_session_id = Some(fixture.session.id.clone());
+        old_pr.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(fixture.session.branch.clone()),
+                worktree_path: Some(std::path::PathBuf::from(".")),
+                pr_number: Some(6122),
+                pr_url: Some("https://github.com/akiojin/gwt/pull/6122".into()),
+                pr_state: Some("OPEN".into()),
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.git.repo, old_pr)
+            .expect("reproduce accepted old-reader relative PR container");
+        assert_eq!(fixture.canonical_work().execution_containers.len(), 2);
+        let closed_path =
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo);
+        let closed_before = std::fs::read(&closed_path).expect("accepted terminal source");
+        let source_bytes: Vec<_> = fixture
+            .canonical_work()
+            .events
+            .iter()
+            .filter_map(|event| {
+                let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(
+                    &fixture.git.repo,
+                    &event.id,
+                );
+                std::fs::read(&path).ok().map(|bytes| (path, bytes))
+            })
+            .collect();
+        let poisoned = std::fs::read(&works_path).unwrap();
+        let caller_cwd = RestoreCwd(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&fixture.git.repo).unwrap();
         let server = TerminalBridgeServer::start(
             StatusCode::OK,
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::WrongTerminal),
         );
 
         let result = with_terminal_bridge_env(&fixture, &server, |env| {
-            record_current_work_terminal_before_finalize(
+            assert!(
+                record_current_work_terminal_before_finalize(
+                    env,
+                    &SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
+                )
+                .is_err(),
+                "old duplicate containers must remain ambiguous before repair"
+            );
+            std::env::set_current_dir(&caller_cwd.0).unwrap();
+            let legacy = gwt_core::paths::gwt_repo_local_work_events_path(&fixture.git.repo);
+            let journal = fixture
+                .canonical_work()
+                .events
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap() + "\n")
+                .collect::<String>();
+            std::fs::write(&legacy, journal).unwrap();
+            let (source_path, original) = &source_bytes[0];
+            std::fs::write(source_path, b"{}\n").unwrap();
+            let mut damaged_env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            damaged_env.stdin = serde_json::json!({"operation":"workspace.work_repair", "params":{"work_id":fixture.work_id}}).to_string();
+            assert_ne!(
+                crate::cli::json_envelope::dispatch(&mut damaged_env, "gwtd"),
+                0,
+                "a valid legacy copy must not hide a tampered immutable shard"
+            );
+            assert_eq!(std::fs::read(&works_path).unwrap(), poisoned);
+            std::fs::write(source_path, original).unwrap();
+            for dry_run in [true, false, false] {
+                let mut repair_env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+                repair_env.stdin = serde_json::json!({
+                    "operation": "workspace.work_repair",
+                    "params": {"work_id":fixture.work_id, "dry_run":dry_run}
+                })
+                .to_string();
+                let code = crate::cli::json_envelope::dispatch(&mut repair_env, "gwtd");
+                assert_eq!(
+                    code,
+                    0,
+                    "repair failed: {} {}",
+                    String::from_utf8_lossy(&repair_env.stdout),
+                    String::from_utf8_lossy(&repair_env.stderr)
+                );
+                if dry_run {
+                    assert_eq!(std::fs::read(&works_path).unwrap(), poisoned);
+                }
+            }
+            let repaired = fixture.canonical_work();
+            assert_eq!(repaired.execution_containers.len(), 1);
+            assert_eq!(
+                repaired.execution_containers[0].worktree_path.as_deref(),
+                Some(fixture.git.repo.as_path())
+            );
+            assert_eq!(repaired.execution_containers[0].pr_number, Some(6122));
+            assert_eq!(repaired.owner, terminal_before.owner);
+            assert_eq!(repaired.completed_at, terminal_before.completed_at);
+            assert_eq!(repaired.status_category, terminal_before.status_category);
+            assert_eq!(std::fs::read(&closed_path).unwrap(), closed_before);
+            for (path, bytes) in &source_bytes {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes);
+            }
+            let before = std::fs::read(&works_path).unwrap();
+            let result = record_current_work_terminal_before_finalize(
                 env,
                 &SkillStateAction::Complete {
                     spec: 3327,
                     pr: None,
                 },
-            )
+            );
+            assert_eq!(
+                std::fs::read(&works_path).unwrap(),
+                before,
+                "confirm-only compatibility must not append another terminal event"
+            );
+            result
         });
 
         assert!(result.is_ok(), "canonical Done must win: {result:?}");
-        assert_eq!(
-            std::fs::read(&works_path).expect("read canonical WorkItems after retry"),
-            before,
-            "confirm-only compatibility must not append another terminal event"
-        );
         assert!(fixture.canonical_work().is_terminal());
         assert!(!fixture.canonical_work().discarded);
         server.assert_no_request();
+        let mut delivered = fixture.canonical_work().execution_containers[0].clone();
+        delivered.pr_state = Some("MERGED".to_string());
+        gwt_core::workspace_projection::record_workspace_pr_metadata_for_execution(
+            &fixture.git.repo,
+            "Issue #3327",
+            &fixture.session.id,
+            &delivered,
+        )
+        .expect("PR metadata must select the repaired canonical container");
+        assert_eq!(fixture.canonical_work().execution_containers.len(), 1);
+        assert_eq!(
+            fixture.canonical_work().execution_containers[0]
+                .pr_state
+                .as_deref(),
+            Some("MERGED")
+        );
     }
 
     #[test]
@@ -2790,17 +2969,26 @@ format_version: Some(1),
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
         );
 
-        let result = with_terminal_bridge_env(&fixture, &server, |env| {
-            record_current_work_terminal_before_finalize(
-                env,
-                &SkillStateAction::Abort {
+        let execution_before = crate::cli::execution_state::record_contents(&fixture.git.repo)
+            .expect("active execution history");
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Build(SkillStateAction::Abort {
                     spec: 3327,
                     reason: Some("cancelled".to_string()),
-                },
+                }),
             )
+            .expect("run build.abort before execution.blocked")
         });
 
-        assert!(result.is_ok(), "canonical abort must converge: {result:?}");
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&fixture.git.repo).unwrap(),
+            execution_before,
+            "build.abort must leave the execution available for execution.blocked"
+        );
         let work = fixture.canonical_work();
         assert!(work.is_terminal());
         assert!(
@@ -2809,6 +2997,55 @@ format_version: Some(1),
         );
         let (_, request) = server.receive();
         assert_eq!(request["terminal_kind"], "discarded");
+
+        let history_paths = [
+            gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo),
+        ];
+        let history_before = history_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("aborted history"))
+            .collect::<Vec<_>>();
+        let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::Blocked {
+                        reason: "canonical verification is externally blocked".to_string(),
+                        missing_verification: Some("full matrix".to_string()),
+                    },
+                ),
+            )
+            .expect("run execution.blocked after build.abort")
+        });
+        assert_eq!(code, 0, "{output}");
+        let execution = crate::cli::execution_state::load(&fixture.git.repo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            execution.status,
+            crate::cli::execution_state::ExecutionControlStatus::Blocked
+        );
+        assert_eq!(
+            execution.blocked_reason.as_deref(),
+            Some("canonical verification is externally blocked")
+        );
+        assert_eq!(
+            execution.missing_verification.as_deref(),
+            Some("full matrix")
+        );
+        for (path, before) in history_paths.iter().zip(history_before) {
+            assert_eq!(std::fs::read(path).unwrap(), before, "{}", path.display());
+        }
+        assert!(
+            !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        server.assert_no_request();
+        server.assert_no_abort_request();
     }
 
     #[test]
@@ -2846,18 +3083,20 @@ format_version: Some(1),
             ),
             crate::cli::hook::HookOutput::StopBlock { .. }
         ));
-        assert!(matches!(
-            crate::cli::execution_state::settle(
-                &abort_fixture.git.repo,
-                &abort_fixture.session.id,
-                crate::cli::execution_state::ExecutionSettlement::Blocked {
+        let mut env = crate::cli::TestEnv::new(abort_fixture.git.repo.clone());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Blocked {
                     reason: "canonical verification is externally blocked".to_string(),
                     missing_verification: Some("full matrix".to_string()),
                 },
-            )
-            .expect("settle abort fixture execution"),
-            crate::cli::execution_state::SettleResult::Settled(_)
-        ));
+            ),
+        )
+        .expect("run execution.blocked before build.abort");
+        assert_eq!(code, 0, "{output}");
+        let blocked_history = crate::cli::execution_state::record_contents(&abort_fixture.git.repo)
+            .expect("blocked execution history");
         let abort_server = TerminalBridgeServer::start(
             StatusCode::OK,
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
@@ -2881,20 +3120,22 @@ format_version: Some(1),
         let (abort_code, abort_output) =
             with_terminal_bridge_env(&abort_fixture, &abort_server, |_| {
                 let mut env = crate::cli::TestEnv::new(abort_repo);
-                let mut output = String::new();
-                let code = run(
+                crate::cli::run_collect(
                     &mut env,
-                    SkillStateAction::Abort {
+                    crate::cli::CliCommand::Build(SkillStateAction::Abort {
                         spec: 3327,
                         reason: Some("blocked verification cannot proceed".to_string()),
-                    },
-                    &mut output,
+                    }),
                 )
-                .expect("run build.abort after execution.blocked");
-                (code, output)
+                .expect("run build.abort after execution.blocked")
             });
 
         assert_eq!(abort_code, 0, "{abort_output}");
+        assert_eq!(
+            crate::cli::execution_state::record_contents(&abort_fixture.git.repo).unwrap(),
+            blocked_history,
+            "build.abort must preserve the preceding execution.blocked history"
+        );
         assert!(
             !gwt_core::skill_state::load(&abort_fixture.git.repo, SKILL_NAME)
                 .expect("load aborted build state")

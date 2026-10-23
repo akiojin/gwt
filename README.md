@@ -528,6 +528,16 @@ them, or reorder items within Queued. Selecting multiple items sends one queue
 change. Active and Done follow the execution lifecycle and cannot be changed by
 dragging. Queued items show who added them, including `auto-refill`.
 
+Move an Issue to Backlog to exclude it from this host's automatic launch queue.
+The `hold` label has no effect on queue admission, readiness, dependencies, or
+launches. Raw feedback and Issues from untrusted authors still require source
+triage; their rows show **Needs triage** with the exclusion reason.
+
+For maintenance, `issue.monitor.queue.remove` with `all_terminals:true` removes
+the requested `numbers` from every terminal queue saved in this machine's project
+store and preserves their manual auto-refill exclusions. Omit the option to affect
+only this host. It does not change another machine's independent project store.
+
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
@@ -542,6 +552,14 @@ Lowering the limit below the active count keeps existing agents running; new lau
 wait until the active count falls below the limit. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
+
+To wait for prerequisite Issues, add a line such as `Blocked-by: #123 #456` to
+the Issue body. The Monitor keeps that Issue in its queue position, shows
+**Blocked by dependency** with the unresolved Issue numbers, and starts the next
+ready entry. A known blocker releases the wait
+after its Issue closes or its work is confirmed complete. Missing or inconclusive
+blocker information allows scheduling; cycles show a warning and ignore
+only the cyclic links. Removing the marker also removes the wait on the next scan.
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
@@ -653,7 +671,16 @@ readback. Omission retains existing behavior; `null`, empty strings and other ty
 are rejected. This value comparison does not track intervening history or protect
 other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
-queue and requests a scan. Existing `issue.monitor.priority.move` and
+queue and requests a scan. Also read the current terminal's saved `queue_order`
+from `issue.monitor.queue.list` and pass it as `expected_queue_order` to
+`launch_now` (or `launch-now`). Both order guards are compared under the same
+preferences lock before any priority, queue or hold change and before a scan
+request. On conflict, re-read the relevant status/list and reconsider the
+instruction; read back status and the queue list after success. Each guard is
+optional; `[]` requires its saved order to be empty, and `null` is invalid.
+Arrays retain existing decimal u64 string compatibility. Queue comparison does
+not cover urgent metadata, other settings or intervening history.
+Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
 an intervening priority change, read the full `priority_order` from
 `issue.monitor.status` and pass that array as `expected_priority_order` to either
@@ -662,7 +689,13 @@ before queue admission, hold clearing, or a scan request; read status again and 
 the order, then confirm a successful update by reading it back. An explicit `[]`
 matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
 the existing behavior. The comparison protects the current order value, without
-tracking intervening history or other configuration changes. The
+tracking intervening history or other configuration changes. For priority.set/move,
+pass a nonempty `reason` to save the rationale and its applied full order together.
+The reply and status expose `priority_reason_note` (reason, priority_order,
+recorded_at). Omitting reason preserves this latest reasoned decision as history.
+`priority_reason_matches_order` compares its saved order with the current order;
+it does not prove freshness or continued applicability and is null without a note.
+Null, blank and non-string reasons are rejected. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For a conditional settings change,
 read `saved_config` and `config_token` from `issue.monitor.status`, then pass that
@@ -1286,6 +1319,10 @@ Use `scope: "host"` for machine-wide errors such as startup
 configuration failures, `scope: "unknown"` for unattributed records, or
 `scope: "all"` to inspect every scope. A `project_root` filter always excludes
 host and unknown records; gwt never guesses their project.
+Project records store the repo-hash when the error occurs, so deleting or reusing
+a worktree directory does not change the history's project. Older records without
+that identity are excluded from the default query; use an explicit `project_root`
+or `scope: "all"` to retrieve them.
 Damaged ledger rows appear as `ledger_corruption` host diagnostics with the
 ledger filename and line number. Their timestamp is when corruption is observed;
 the original rows remain intact.
@@ -1365,6 +1402,12 @@ Repeat with `"dry_run":false` to preserve both originals in the reported home
 archives and publish both events under content-specific identities. Then retry
 the Git merge. Tracked shards, ordinary events, and tombstones for different
 branches are refused; existing source or archive bytes are never overwritten.
+
+If an existing Work contains both an absolute worktree container and its `.`
+alias, use `workspace.work_repair` with `params.work_id` to inspect a scoped
+repair. It defaults to dry-run; repeat with `"dry_run":false` to apply. The
+operation requires matching Git worktree and durable event evidence, preserves
+terminal state and source files, and refuses ambiguous or missing provenance.
 
 ## Share local Board milestones through GitHub Discussions
 

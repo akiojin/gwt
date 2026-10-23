@@ -4028,6 +4028,179 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
 }
 
 #[test]
+fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Dependent owner",
+        &["bug"],
+        "Blocked-by: #43",
+        "2026-10-23T00:00:00Z",
+    );
+    source.author_login = Some("akiojin".into());
+    let blocker = sample_issue_snapshot(
+        43,
+        "Held blocker",
+        &["hold"],
+        "Still waiting",
+        "2026-10-23T00:00:00Z",
+    );
+    cache.write_snapshot(&source).unwrap();
+    cache.write_snapshot(&blocker).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare dependent owner");
+    assert!(
+        prepared.monitor.launch_dependency_exclusion(42).is_some(),
+        "known open blockers must survive spawn reconstruction"
+    );
+    assert!(prepared.is_current(&input.host_project_roots));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(&repo)
+        .linked_issue_number(42)
+        .build();
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+        "tab-1",
+        config,
+        canvas_bounds(),
+        None,
+        feedback,
+        prepared.clone(),
+    );
+    assert!(rejected.is_err_and(|reason| reason
+        .contains("dependency admission refused Issue #42: Blocked by #43")
+        && !reason.contains("(hold)")));
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    fs::write(cache_root.join("43/body.md"), "Blocked-by: #42").unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "blocker body edits must invalidate prepared dependency facts"
+    );
+    let cycle = input.prepare().expect("reconstruct dependency cycle");
+    assert!(cycle.monitor.launch_dependency_exclusion(42).is_none());
+    let mut closed = blocker;
+    closed.state = IssueState::Closed;
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !cycle.is_current(&input.host_project_roots),
+        "blocker metadata edits must invalidate prepared dependency facts"
+    );
+    assert!(input
+        .prepare()
+        .unwrap()
+        .monitor
+        .launch_dependency_exclusion(42)
+        .is_none());
+
+    fs::remove_dir_all(cache_root.join("43")).unwrap();
+    let unknown = input.prepare().expect("missing blocker remains unknown");
+    assert!(unknown.monitor.launch_dependency_exclusion(42).is_none());
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !unknown.is_current(&input.host_project_roots),
+        "new evidence for an unknown blocker requires re-preparation"
+    );
+}
+
+#[test]
+fn issue3165_spawn_admission_revalidates_hydrated_comment_sources() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs::default(),
+    )
+    .unwrap();
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let mut source = sample_issue_snapshot(
+        42,
+        "Comment-resident SPEC",
+        &["gwt-spec"],
+        "<!-- gwt-spec id=42 version=1 -->\n\
+         <!-- sections:\n\
+         spec=comment:420\n\
+         plan=body\n\
+         tasks=body\n\
+         -->\n\
+         <!-- artifact:plan BEGIN -->\nPlan\n<!-- artifact:plan END -->\n\
+         <!-- artifact:tasks BEGIN -->\n- [ ] T-001: Implement\n<!-- artifact:tasks END -->",
+        "2026-10-23T00:00:00Z",
+    );
+    source.comments[0].body =
+        "<!-- artifact:spec BEGIN -->\nBlocked-by: #43\n<!-- artifact:spec END -->".into();
+    cache.write_snapshot(&source).unwrap();
+    cache
+        .write_snapshot(&sample_issue_snapshot(43, "Blocker", &[], "Open", "t1"))
+        .unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    let prepared = input.prepare().expect("prepare hydrated comment evidence");
+    assert!(prepared.monitor.launch_dependency_exclusion(42).is_some());
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    let comment_path = cache_root.join("42/comments/420.md");
+    fs::write(
+        &comment_path,
+        "<!-- artifact:spec BEGIN -->\nNo dependencies\n<!-- artifact:spec END -->",
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a hydrated comment edit must invalidate prepared dependency facts"
+    );
+    fs::remove_file(&comment_path).unwrap();
+    let missing = input.prepare().expect("prepare missing declared comment");
+    assert!(missing.is_current(&input.host_project_roots));
+    fs::write(&comment_path, &source.comments[0].body).unwrap();
+    assert!(
+        !missing.is_current(&input.host_project_roots),
+        "a missing declared comment becoming present requires re-preparation"
+    );
+}
+
+#[test]
 fn issue4810_spawn_admission_restores_source_and_revalidates_its_cache_files() {
     let _env_lock = env_test_lock()
         .lock()

@@ -498,6 +498,22 @@ Queued 内では順序を変更でき、複数選択の移動は 1 回のキュ�
 Active と Done は実行ライフサイクルに従うため、ドラッグでは変更できません。
 Queued には `auto-refill` などの追加元も表示されます。
 
+このホストの自動起動キューから除外するには、Issue を Backlog に移動します。
+`hold` ラベルはキューへの追加・準備状態・依存関係・起動に影響しません。
+未整理のフィードバックや信頼されていない作成者の Issue は引き続き source triage が必要で、
+行には **Needs triage** と除外理由を表示します。
+
+保守用の `issue.monitor.queue.remove` に `all_terminals:true` を指定すると、このマシンの
+project store に保存された全端末のキューから `numbers` を外し、自動補充の手動除外も記録します。
+省略時はこのホストだけが対象です。別マシンの独立した project store は変更しません。
+
+前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
+Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号を
+表示して、次の実行可能な Issue を起動します。
+前提 Issue の close または作業の完了を確認すると待機を解除します。
+前提の情報が無い場合や判定できない場合は依存待機を適用せず、循環は警告を表示して
+循環する辺だけを無効にします。マーカーを削除した場合も次の scan で待機を解除します。
+
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
@@ -607,6 +623,13 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
 `null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
+併せて現在端末の `issue.monitor.queue.list` から保存済み `queue_order` を読み、
+`launch_now`（または `launch-now`）に `expected_queue_order` として渡します。
+両方の順序ガードを同じ設定ロック内で比較し、priority・queue・hold の変更と scan 要求の前に
+不一致を拒否します。競合時は該当する status/list を再読して指示を再判断し、
+成功後も status と queue list を読み戻します。各ガードは省略可能で、`[]` は対応する保存順序が
+空の場合だけ一致し、`null` は拒否します。配列内の10進 u64 文字列は既存互換で受理します。
+キュー比較は urgent metadata、他の設定、途中の変更履歴を保護しません。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
 `priority_order` を読み、いずれの優先順操作または `issue.monitor.launch_now` にも同じ配列を
@@ -615,6 +638,12 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 読み戻して確認します。明示的な `[]` は保存順序が空の場合だけ一致し、`null` は拒否します。
 引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
 他の設定変更は検出しません。
+priority.set/move に空でない `reason` を渡すと、理由と適用後の全順序を同時に保存します。
+応答と status の `priority_reason_note`（reason、priority_order、recorded_at）で読み戻せます。
+reason 省略時は最後の理由付き決定を履歴として保持します。
+`priority_reason_matches_order` は保存された順序と現在順序の値の比較だけであり、
+鮮度や理由が今も適用できることを証明しません。記録が無い場合は null です。
+reason の null、空文字、異なる型は拒否します。
 `issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。条件付きで設定を変更する場合は、
 `issue.monitor.status` の `saved_config` と `config_token` を読み、同じトークンを
@@ -1171,6 +1200,9 @@ error ledger（`errors.list`）に記録されます。
 `scope: "host"`、帰属不明の記録は `scope: "unknown"`、全スコープは
 `scope: "all"` を明示して取得します。`project_root` を指定した場合は
 host・unknown 行を含めず、所属プロジェクトを推測で補いません。
+project 行には発生時の repo-hash を保存するため、worktree ディレクトリを削除・再利用しても
+履歴の所属は変わりません。repo-hash を持たない旧行は既定検索から除外されます。
+`project_root` の明示指定または `scope: "all"` で取得してください。
 破損した台帳行は、ファイル名と行番号を持つ `ledger_corruption` の host 診断として
 返します。timestamp は破損を検出した時刻で、元の行は変更しません。
 
@@ -1251,6 +1283,12 @@ worktree にプロジェクトタブが切り替わります。
 保存し、内容ごとの ID で双方の event を公開します。その後 Git merge を再実行します。
 追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
 archive を上書きしません。
+
+既存 Work に絶対 worktree path と `.` の container が重複している場合は、
+`workspace.work_repair` の `params.work_id` で対象を指定して修復内容を確認できます。
+既定は dry-run で、`"dry_run":false` を加えると適用します。記録済み Git worktree と
+永続 event の証拠が一致する場合だけ修復し、terminal 状態とソースファイルを保持します。
+証拠の欠損や曖昧性がある場合は拒否します。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 

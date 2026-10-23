@@ -157,6 +157,40 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
     await expect(rows.last().locator(".logs-entry-message")).toHaveText(`${marker}-retained-3`);
     await expect(root.locator(".logs-status")).toHaveText("1000 visible / 1000 total");
     await expect(search).toBeFocused();
+
+    // SPEC #5016 LOGERR: the real receiver commits each error receipt,
+    // including an equal-valued retry, without replacing local controls.
+    const literalError = '<img src=x onerror="window.__logsErrorExecuted = true">';
+    for (let receipt = 0; receipt < 2; receipt++) {
+      await root.getByRole("button", { name: "Refresh logs", exact: true }).click();
+      await search.focus();
+      await page.evaluate(({ id, message }) => {
+        (window as any).__logsScopeSocket.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ kind: "log_error", id, message }),
+        }));
+      }, { id: windowId, message: literalError });
+      await expect(root.locator(".logs-status")).toHaveText(literalError);
+      await expect(root.locator(".logs-status")).toHaveClass(/error/);
+      await expect(root.locator(".logs-status img")).toHaveCount(0);
+      await expect(rows).toHaveCount(1000);
+      await expect(search).toHaveValue(`${marker}-retained-`);
+      await expect(search).toBeFocused();
+      await expect(selector).toHaveValue("global");
+    }
+    expect(await page.evaluate(() => (window as any).__logsErrorExecuted)).toBeUndefined();
+    await page.evaluate(({ id, marker }) => {
+      (window as any).__logsScopeSocket.dispatchEvent(new MessageEvent("message", {
+        data: JSON.stringify({ kind: "log_entries", id, entries: [{
+          id: 10001003, timestamp: new Date().toISOString(), severity: "info",
+          source: "gwt.playwright.scope", message: `${marker}-retained-recovered`, fields: {},
+        }] }),
+      }));
+    }, { id: windowId, marker });
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText(`${marker}-retained-recovered`);
+    await expect(root.locator(".logs-status")).toHaveText("1 visible / 1 total");
+    await expect(root.locator(".logs-status")).not.toHaveClass(/error/);
+    await expect(search).toBeFocused();
     await search.hover();
     await page.screenshot({ path: testInfo.outputPath("logs-scope.png") });
     expect(errors, "console and page errors").toEqual([]);

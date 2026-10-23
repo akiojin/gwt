@@ -726,6 +726,7 @@ fn issue_monitor_preparation_choice(
     cache: &LaunchWizardMemoryCache,
     provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
     request: &super::DeferredIssueMonitorLaunch,
+    profile_config_path: &Result<PathBuf, String>,
 ) -> Result<Option<IssueMonitorLaunchProfileChoice>, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
@@ -738,14 +739,71 @@ fn issue_monitor_preparation_choice(
     {
         return Ok(None);
     }
+    let choice = issue_monitor_owner_launch_profile_choice(
+        cache,
+        provider_usage_accounts,
+        &request.project_root,
+        request.issue_number,
+        request.linked_issue_kind,
+        None,
+    )?;
+    let config_error = issue_monitor_codex_config_error(
+        choice.profiles.preferred_profile(),
+        request,
+        profile_config_path,
+    )?;
+    let Some(config_error) = config_error else {
+        return Ok(Some(choice));
+    };
     issue_monitor_owner_launch_profile_choice(
         cache,
         provider_usage_accounts,
         &request.project_root,
         request.issue_number,
         request.linked_issue_kind,
+        Some(&config_error),
     )
     .map(Some)
+}
+
+/// Worker-only probe; preview selectors never execute provider commands.
+fn issue_monitor_codex_config_error(
+    profile: Option<&gwt::LaunchWizardPreviousProfile>,
+    request: &super::DeferredIssueMonitorLaunch,
+    profile_config_path: &Result<PathBuf, String>,
+) -> Result<Option<String>, String> {
+    let Some(profile) = profile.filter(|profile| {
+        profile.agent_id.eq_ignore_ascii_case("codex")
+            && profile.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+    }) else {
+        return Ok(None);
+    };
+    let branch =
+        knowledge_launch_target_branch_name(request.linked_issue_kind, request.issue_number);
+    let cwd = launch_runtime_worktrees(&request.project_root)
+        .and_then(|worktrees| crate::usable_worktree_path_for_branch(&worktrees, &branch))
+        .unwrap_or_else(|| request.project_root.clone());
+    let mut builder = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&cwd)
+        .fast_mode(profile.fast_mode);
+    if let Some(model) = &profile.model {
+        builder = builder.model(model);
+    }
+    if let Some(reasoning) = &profile.reasoning {
+        builder = builder.reasoning_level(reasoning);
+    }
+    let mut config = builder.build();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        profile_config_path.as_ref().map_err(Clone::clone)?,
+        gwt_agent::LaunchRuntimeTarget::Host,
+    )?
+    .with_project_root(&cwd)
+    .apply_to_config(&mut config);
+    match gwt_agent::check_codex_config(&config) {
+        Ok(()) => Ok(None),
+        Err(error) if gwt_agent::is_codex_config_preflight_failure(&error) => Ok(Some(error)),
+        Err(error) => Err(error),
+    }
 }
 
 fn prepare_issue_monitor_answer(
@@ -3381,6 +3439,7 @@ impl AppRuntime {
             project_root,
             issue_number,
             linked_issue_kind,
+            None,
         )
     }
 
@@ -3566,7 +3625,7 @@ impl AppRuntime {
                 // This worker performs reads only. The normal head worker owns
                 // claim, tier writes, admission and all Answer side effects.
                 let reusable = (|| {
-                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request).ok()??;
+                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path).ok()??;
                     let handoff = issue_monitor_resume_handoff(&request.project_root, request.issue_number);
                     if !handoff.as_ref().is_ok_and(Option::is_none) {
                         return None;
@@ -3784,7 +3843,7 @@ impl AppRuntime {
             let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), if retrying_facts { input.claim_or_reuse() } else { input.claim() }));
             record_issue_monitor_worker_phase("monitor_claim", &mut phase_started);
             let handoff = issue_monitor_resume_handoff(&request.project_root, issue_number);
-            let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request);
+            let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path);
             let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier))).map_err(Clone::clone);
             let reusable_facts = match reusable {
                 Some(IssueMonitorLaunchPreparation::Launch(facts))
@@ -3857,7 +3916,7 @@ impl AppRuntime {
                 if prefs.launch_auto && prefs.autonomous_handoffs.iter().any(|handoff| handoff.issue_number == issue_number && handoff.state == gwt::autonomous_handoff::AutonomousHandoffState::Resumed && handoff.delivered_at.is_none()) {
                     Ok(None)
                 } else {
-                    issue_monitor_owner_launch_profile_choice(&cache, &provider_usage, &request.project_root, issue_number, request.linked_issue_kind).map(|choice| Some((choice.profiles, choice.tier)))
+                    issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path).map(|choice| choice.map(|choice| (choice.profiles, choice.tier)))
                 }
             });
             if selection != current_selection || handoff != issue_monitor_resume_handoff(&request.project_root, issue_number)
@@ -4365,6 +4424,66 @@ impl AppRuntime {
             correlation_delivery_id.as_deref(),
             Some(prefs_stamp_elapsed_ms),
         );
+        // A five-second host sample renewal must not restart Git/base/prompt
+        // preparation. Recheck admission on its worker while all other facts
+        // retain their original freshness/claim fences on the returned event.
+        if admission_stale
+            && !session_changed
+            && !source_changed
+            && !prefs_changed
+            && !provider_changed
+            && delivery.unsubmitted_handoff_attempt().is_none()
+            && delivery.claim.as_ref().is_none_or(|(window_id, _)| {
+                self.tab(&context.tab_id).is_some_and(|tab| {
+                    *window_id
+                        == combined_window_id(
+                            &context.tab_id,
+                            &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+                        )
+                })
+            })
+        {
+            if let Some(previous) = delivery
+                .admission
+                .as_ref()
+                .and_then(|admission| admission.as_ref().ok())
+                .filter(|admission| admission.can_refresh_capacity(&roots))
+            {
+                let previous = previous.clone();
+                let branch = knowledge_launch_target_branch_name(
+                    request.linked_issue_kind,
+                    request.issue_number,
+                );
+                let input = self.capture_issue_monitor_spawn_admission(
+                    &request.project_root,
+                    request.issue_number,
+                    &branch,
+                );
+                let mut refreshed = IssueMonitorLaunchPrepared {
+                    context: context.clone(),
+                    request: request.clone(),
+                    prefs_stamp,
+                    provider_usage: provider_usage.clone(),
+                    delivery: delivery.clone(),
+                };
+                let proxy = self.proxy.clone();
+                let span = tracing::Span::current();
+                self.issue_monitor_launch_preparations.insert(key.clone());
+                let scheduled = self.blocking_tasks.try_spawn(move || {
+                    let _span = span.enter();
+                    let mut started = std::time::Instant::now();
+                    refreshed.delivery.admission = Some(input.refresh(&previous));
+                    record_issue_monitor_worker_phase("monitor_admission_refresh", &mut started);
+                    proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(refreshed)));
+                });
+                if let Err(error) = scheduled {
+                    self.issue_monitor_launch_preparations.remove(&key);
+                    return self
+                        .schedule_issue_monitor_launch_failure(context, request, error, None);
+                }
+                return Vec::new();
+            }
+        }
         if session_changed || source_changed || admission_stale || prefs_changed || provider_changed
         {
             if let Some(attempt) = delivery.unsubmitted_handoff_attempt() {
@@ -7630,6 +7749,16 @@ impl AppRuntime {
                     // the chosen provider already sat further down the pool.
                     None => prefs.set_head_launch_profile(launch_profile),
                 }
+                // Auto uses its unchanged tiers, not the manual pool this form
+                // saves. Compensate only when the effective pool changed.
+                if !prefs.launch_auto {
+                    let mut monitor = gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        prefs.clone(),
+                    );
+                    monitor.set_launch_profile_pool(prefs.launch_profile_pool());
+                    *prefs = monitor.prefs();
+                }
                 Ok(())
             },
         );
@@ -8399,12 +8528,110 @@ mod launch_agent_branch_resolution_tests {
     }
 }
 
+fn select_issue_monitor_profiles_with_codex_config(
+    pool: &[gwt::IssueMonitorLaunchProfile],
+    config_error: Option<&str>,
+    select: impl FnOnce(&[gwt::IssueMonitorLaunchProfile]) -> gwt::LaunchProfileSelection,
+) -> gwt::LaunchProfileSelection {
+    let Some(config_error) = config_error else {
+        return select(pool);
+    };
+    let eligible: Vec<_> = pool
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| {
+            !profile.agent_id.eq_ignore_ascii_case("codex")
+                || profile.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+        })
+        .collect();
+    let profiles: Vec<_> = eligible
+        .iter()
+        .map(|(_, profile)| (*profile).clone())
+        .collect();
+    let mut selection = select(&profiles);
+    selection.selected = selection.selected.map(|index| eligible[index].0);
+    for skipped in &mut selection.skipped {
+        skipped.index = eligible[skipped.index].0;
+    }
+    for (index, profile) in pool.iter().enumerate() {
+        if profile.agent_id.eq_ignore_ascii_case("codex")
+            && profile.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+        {
+            selection.skipped.push(gwt::LaunchProfileSkip {
+                index,
+                agent_id: profile.agent_id.clone(),
+                reason: config_error.to_string(),
+            });
+        }
+    }
+    selection.skipped.sort_by_key(|skipped| skipped.index);
+    selection
+}
+
+#[cfg(test)]
+mod codex_config_candidate_tests {
+    use super::*;
+
+    const CONFIG_ERROR: &str = "codex_config_preflight: invalid config; gwt retries this launch automatically without spending an attempt";
+
+    fn profile(agent: &str) -> gwt::IssueMonitorLaunchProfile {
+        serde_json::from_value(serde_json::json!({"agent_id": agent})).expect("profile")
+    }
+
+    fn select(pool: &[gwt::IssueMonitorLaunchProfile]) -> gwt::LaunchProfileSelection {
+        gwt::select_launch_profile(pool, &Default::default(), &[], None, "2026-10-23T00:00:00Z")
+    }
+
+    #[test]
+    fn invalid_host_codex_config_falls_back_with_original_pool_indexes() {
+        let pool = vec![profile("codex"), profile("claude")];
+        let selected =
+            select_issue_monitor_profiles_with_codex_config(&pool, Some(CONFIG_ERROR), select);
+        assert_eq!(selected.selected, Some(1));
+        assert_eq!(selected.skipped.len(), 1);
+        assert_eq!(selected.skipped[0].index, 0);
+        assert_eq!(selected.skipped[0].reason, CONFIG_ERROR);
+    }
+
+    #[test]
+    fn invalid_host_codex_config_preserves_docker_codex_in_automatic_tiers() {
+        let host = profile("codex");
+        let mut docker = host.clone();
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        let prefs = gwt::IssueMonitorPrefs {
+            launch_auto: true,
+            launch_tiers: vec![vec![host], vec![docker]],
+            ..Default::default()
+        };
+        let selected = prefs
+            .select_auto_launch_profile(4153, false, None, |pool| {
+                select_issue_monitor_profiles_with_codex_config(pool, Some(CONFIG_ERROR), select)
+            })
+            .expect("Docker candidate remains eligible");
+        assert_eq!(selected.tier, 1);
+        assert_eq!(
+            selected.profile.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(selected.skipped[0].reason, CONFIG_ERROR);
+
+        let all_invalid = select_issue_monitor_profiles_with_codex_config(
+            &[profile("codex")],
+            Some(CONFIG_ERROR),
+            select,
+        );
+        assert_eq!(all_invalid.selected, None);
+        assert_eq!(all_invalid.skipped[0].reason, CONFIG_ERROR);
+    }
+}
+
 fn issue_monitor_owner_launch_profile_choice(
     cache: &LaunchWizardMemoryCache,
     provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
     project_root: &Path,
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
+    codex_config_error: Option<&str>,
 ) -> Result<IssueMonitorLaunchProfileChoice, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
@@ -8412,15 +8639,23 @@ fn issue_monitor_owner_launch_profile_choice(
         let pool = prefs.launch_profile_pool();
         if !pool.is_empty() {
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let selection = gwt::select_launch_profile(
+            let selection = select_issue_monitor_profiles_with_codex_config(
                 &pool,
-                &prefs.launch_admission_provider_quota_holds(),
-                &[],
-                None,
-                &now,
+                codex_config_error,
+                |pool| {
+                    gwt::select_launch_profile(
+                        pool,
+                        &prefs.launch_admission_provider_quota_holds(),
+                        &[],
+                        None,
+                        &now,
+                    )
+                },
             );
             let index = selection.selected.ok_or_else(|| {
-                "No eligible Issue Monitor launch candidate: every provider is held".to_string()
+                codex_config_error
+                    .unwrap_or("No eligible Issue Monitor launch candidate: every provider is held")
+                    .to_string()
             })?;
             let profile = pool[index].clone();
             return Ok(IssueMonitorLaunchProfileChoice {
@@ -8432,12 +8667,17 @@ fn issue_monitor_owner_launch_profile_choice(
                 tier: None,
             });
         }
-        return Ok(issue_monitor_launch_profile_choice(
-            cache,
-            provider_usage_accounts,
-            project_root,
-            None,
-        ));
+        let choice =
+            issue_monitor_launch_profile_choice(cache, provider_usage_accounts, project_root, None);
+        if let Some(error) = codex_config_error.filter(|_| {
+            choice.profiles.preferred_profile().is_some_and(|profile| {
+                profile.agent_id.eq_ignore_ascii_case("codex")
+                    && profile.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+            })
+        }) {
+            return Err(error.to_string());
+        }
+        return Ok(choice);
     }
     let available = cache
         .agent_options()
@@ -8457,9 +8697,17 @@ fn issue_monitor_owner_launch_profile_choice(
             issue_number,
             linked_issue_kind == gwt::LinkedIssueKind::Spec,
             Some(&available),
-            |pool| gwt::select_launch_profile(pool, &holds, &work_tags, None, &now),
+            |pool| {
+                select_issue_monitor_profiles_with_codex_config(pool, codex_config_error, |pool| {
+                    gwt::select_launch_profile(pool, &holds, &work_tags, None, &now)
+                })
+            },
         )
-        .ok_or_else(|| "No eligible Issue Monitor automatic tier candidate".to_string())?;
+        .ok_or_else(|| {
+            codex_config_error
+                .unwrap_or("No eligible Issue Monitor automatic tier candidate")
+                .to_string()
+        })?;
     Ok(IssueMonitorLaunchProfileChoice {
         profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
             selection.profile.clone().into(),

@@ -2283,6 +2283,12 @@ pub enum BackendEvent {
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
     },
+    /// Origin-client-only result after queue control commit or refusal.
+    IssueMonitorQueueResult {
+        operation: String,
+        issue_numbers: Vec<u64>,
+        error: Option<String>,
+    },
     IssueMonitorLaunchFailed {
         issue_number: u64,
         message: String,
@@ -3140,6 +3146,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_queue_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_toast",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -3568,6 +3579,7 @@ impl BackendEvent {
                 "issue_monitor_allowed_labels_write_failed"
             }
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
+            BackendEvent::IssueMonitorQueueResult { .. } => "issue_monitor_queue_result",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
@@ -4074,6 +4086,28 @@ mod tests {
                 .get("loop_interval_secs_decimal")
                 .and_then(Value::as_str),
             Some("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn issue_monitor_queue_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::IssueMonitorQueueResult {
+            operation: "move".into(),
+            issue_numbers: vec![42],
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).expect("queue result wire shape"),
+            serde_json::json!({
+                "kind": "issue_monitor_queue_result", "operation": "move",
+                "issue_numbers": [42], "error": null,
+            })
+        );
+        let policy = event.delivery_policy();
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
     }
 

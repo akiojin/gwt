@@ -56,6 +56,7 @@ pub struct AgentCapabilityGrant {
 pub enum AgentDurableAuthority {
     ObservationOnly,
     Current,
+    PendingActivation,
     Stale,
     Unavailable,
 }
@@ -387,17 +388,41 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         kind: owner_kind,
         number: binding.owner_number,
     };
-    match crate::cli::execution_state::current_active_execution_binding_matches(
+    // Fresh launch promotion precedes the durable activation transaction.
+    // Probe Prepared first so activation between the two reads cannot look stale.
+    match crate::cli::execution_state::prepared_execution_binding_matches(
         &session.worktree_path,
         owner,
         principal.session_id(),
         &binding.identity,
     ) {
-        Ok(true) => {}
-        Ok(false) => return AgentDurableAuthority::Stale,
+        Ok(true) => return AgentDurableAuthority::PendingActivation,
+        Ok(false) => {}
         Err(_) => return AgentDurableAuthority::Unavailable,
     }
-    AgentDurableAuthority::Current
+    let current = crate::cli::execution_state::current_active_execution_binding_matches(
+        &session.worktree_path,
+        owner,
+        principal.session_id(),
+        &binding.identity,
+    );
+    // Activation publishes the ledger before the worktree projection/pointer.
+    // Only the unchanged, exact Active activation may wait for those mirrors.
+    if !matches!(current, Ok(true))
+        && crate::cli::execution_state::activated_continuation_binding_for_session(
+            &session.worktree_path,
+            owner,
+            principal.session_id(),
+        )
+        .is_ok_and(|activated| activated.as_ref() == Some(&binding.identity))
+    {
+        return AgentDurableAuthority::PendingActivation;
+    }
+    match current {
+        Ok(true) => AgentDurableAuthority::Current,
+        Ok(false) => AgentDurableAuthority::Stale,
+        Err(_) => AgentDurableAuthority::Unavailable,
+    }
 }
 
 pub async fn durable_agent_execution_authority_async(
@@ -406,9 +431,22 @@ pub async fn durable_agent_execution_authority_async(
     if !principal.authorizes_producing_mutation() {
         return AgentDurableAuthority::ObservationOnly;
     }
-    tokio::task::spawn_blocking(move || durable_agent_execution_authority(&principal))
-        .await
-        .unwrap_or(AgentDurableAuthority::Unavailable)
+    // Bound activation waiting independently of the subsequent mutation lease.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let current = principal.clone();
+            let authority =
+                tokio::task::spawn_blocking(move || durable_agent_execution_authority(&current))
+                    .await
+                    .unwrap_or(AgentDurableAuthority::Unavailable);
+            if authority != AgentDurableAuthority::PendingActivation {
+                return authority;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or(AgentDurableAuthority::Unavailable)
 }
 
 pub async fn durable_agent_execution_authority_with_lease_async(
@@ -417,11 +455,11 @@ pub async fn durable_agent_execution_authority_with_lease_async(
     let Some(binding) = principal.active_execution_binding().cloned() else {
         return AgentDurableAuthority::ObservationOnly;
     };
+    let authority = durable_agent_execution_authority_async(principal).await;
+    if authority != AgentDurableAuthority::Current {
+        return authority;
+    }
     tokio::task::spawn_blocking(move || {
-        let authority = durable_agent_execution_authority(&principal);
-        if authority != AgentDurableAuthority::Current {
-            return authority;
-        }
         match crate::cli::execution_state::with_current_active_execution_binding_lease(
             &gwt_core::paths::gwt_sessions_dir(),
             &binding,

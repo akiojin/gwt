@@ -84,6 +84,12 @@ pub struct ScopedOperationClock {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ScopedOperationClock {
+    /// Capture an explicitly fixed clock for a synchronous scoped worker.
+    /// `None` preserves the host clock when the parent has no test override.
+    pub fn current() -> Option<Instant> {
+        TEST_NOW.with(Cell::get)
+    }
+
     pub fn set(now: Instant) -> Self {
         Self {
             previous: TEST_NOW.with(|current| current.replace(Some(now))),
@@ -861,6 +867,7 @@ mod tests {
 
     #[test]
     fn fixed_operation_clock_controls_expiry_without_spending_wall_time() {
+        assert!(ScopedOperationClock::current().is_none());
         let directory = tempfile::tempdir().expect("tempdir");
         let file = File::create(directory.path().join("lock")).expect("lock file");
         // This deadline is already expired on the host clock. Only the
@@ -869,6 +876,7 @@ mod tests {
         let expiry = start + Duration::from_millis(250);
         let _clock = ScopedOperationClock::set(start);
         let _deadline = ScopedOperationDeadline::enter(expiry);
+        assert_eq!(ScopedOperationClock::current(), Some(start));
         assert_eq!(now(), start);
         lock_exclusive(&file).expect("logical budget remains");
         FileExt::unlock(&file).expect("unlock");
@@ -876,6 +884,7 @@ mod tests {
 
         {
             let _expired = ScopedOperationClock::set(expiry);
+            assert_eq!(ScopedOperationClock::current(), Some(expiry));
             assert_eq!(
                 lock_exclusive(&file).unwrap_err().kind(),
                 io::ErrorKind::TimedOut
@@ -888,6 +897,7 @@ mod tests {
         assert_eq!(now(), start, "nested clock restores the previous instant");
         assert!(std::thread::spawn(now).join().expect("other thread") > start);
         drop(_clock);
+        assert!(ScopedOperationClock::current().is_none());
         assert!(now() > start, "leaving the scope restores the host clock");
     }
 

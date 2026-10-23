@@ -52,6 +52,7 @@ async function makeFixture(options = {}) {
   const reported = [];
   const resolved = [];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);
@@ -140,7 +141,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
   assert.equal(pill.dataset.tone, "active");
-  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 1/2");
+  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 0/2", "no Issue cards are loaded");
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
@@ -713,11 +714,109 @@ test("T-7b.2a: tier chips show only reported minimums and agent failures with at
   assert.equal(body.querySelectorAll('[data-kind="tier"]').length, 0, "omitted facts clear stale chips");
 });
 
+test("Monitor list bursts render once while controls and notifications stay synchronous", async (t) => {
+  const frames = new Set();
+  let renders = 0;
+  const { body, surface, state, reported, resolved, sent } = await makeFixture({ surface: {
+    scheduleFrame(run) { frames.add(run); return () => frames.delete(run); },
+    renderOtherWork() { renders++; },
+  } });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "queued")];
+  surface.renderKnowledgeBridge("win-1");
+  const row = body.querySelector(".knowledge-row");
+  const before = surface.issueMonitorModel.read();
+  renders = 0;
+  for (let i = 0; i < 50; i++) {
+    surface.applyIssueMonitorStatus({ ...STATUS, enabled: false, queue_len: i,
+      last_error: i === 0 ? "Transient error" : "", tier_facts: [{ issue_number: 11,
+        recorded_launch_tier: 0, minimum_tier_override: i,
+      }],
+    });
+    surface.applyIssueMonitorInbox([{ issue: { number: 11 }, state: i % 2 ? "launched" : "queued" }]);
+  }
+  assert.equal(surface.issueMonitorModel.read().status.queue_len, 49);
+  assert.equal(surface.issueMonitorModel.read().inboxByIssue[11].state, "launched");
+  assert.equal(before.status.queue_len, 0, "previous snapshots remain immutable");
+  assert.ok(reported.some(error => error.message === "Transient error"), "transient errors are not coalesced away");
+  assert.ok(resolved.includes("issue-monitor:last_error"), "error recovery stays synchronous");
+  assert.equal(body.querySelector('[data-metric="queue"]').textContent, "Queue 49", "independent controls stay current");
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 1/2", "inbox-only updates keep the summary synchronous");
+  body.querySelector('[data-action="monitor-toggle"]').click();
+  assert.ok(sent.some(message => message.kind === "set_issue_monitor_enabled" && message.enabled === true));
+  assert.equal(renders, 0, "Monitor receipts wait for the shared frame before rendering the list");
+  assert.equal(body.querySelector(".knowledge-row"), row);
+  assert.equal(frames.size, 1);
+  for (const run of [...frames]) { frames.delete(run); run(); }
+  assert.equal(renders, 1, "status and inbox use the same latest render");
+  assert.match(body.querySelector(".knowledge-row").textContent, /Min tier 49/);
+  assert.ok(body.querySelector('[data-queue-column="active"] [data-issue-number="11"]'));
+  surface.applyIssueMonitorStatus({ ...STATUS, queue_len: 50 });
+  body.querySelector(".knowledge-row-select").click();
+  assert.equal(state.selectedNumber, 11, "selection stays synchronous with a pending frame");
+  surface.applyIssueMonitorQueueResult({ operation: "move", issue_numbers: [11] });
+  assert.match(body.textContent, /queue order updated/, "queue replies do not wait for a frame");
+  surface.clearKnowledgeBridgeState("win-1");
+  assert.equal(frames.size, 0, "closing cancels the pending view");
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
+test("Issue catalog bursts render the latest snapshot once and cancel on close", async (t) => {
+  const frames = new Set();
+  const catalog = { appState: { tabs: [{ workspace: { windows: [
+    { id: "agent-11", status: "running", linked_issue_number: 11 },
+  ] } }] }, runtimeStates: {} };
+  const model = createUiStateStore({ catalog }, { scheduleFrame(run) {
+    frames.add(run);
+    return () => frames.delete(run);
+  } });
+  let rows = 0;
+  const { body, surface, state, sent } = await makeFixture({ surface: {
+    windowCatalogModel: model,
+    createNode(tag, className, text) {
+      if (className === "knowledge-row") rows++;
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = String(text);
+      return node;
+    },
+  } });
+  t.after(() => { surface.clearKnowledgeBridgeState("win-1"); model.dispose(); });
+  state.entries = [entry(11, "launched")];
+  surface.applyIssueMonitorStatus({ ...STATUS, tier_facts: [{ issue_number: 11,
+    confirmed_launch: { tier: 0, window_id: "agent-11", delivery_id: "delivery-11" },
+  }] });
+  const previous = model.read();
+  const row = body.querySelector(".knowledge-row");
+  rows = 0;
+  model.update(current => ({ catalog: { ...current.catalog, focusedId: "win-1", version: 1 } }));
+  assert.equal(frames.size, 0, "unrelated focus changes do not render Issues");
+  for (let i = 0; i < 50; i++) model.update(current => ({ catalog: {
+    ...current.catalog, runtimeStates: { "agent-11": i % 2 ? "idle" : "running" },
+  } }));
+  assert.equal(model.read().catalog.runtimeStates["agent-11"], "idle", "model commits synchronously");
+  assert.deepEqual(previous.catalog.runtimeStates, {}, "prior snapshots remain immutable");
+  assert.equal(rows, 0, "catalog receipts wait for the shared frame");
+  assert.equal(body.querySelector(".knowledge-row"), row);
+  assert.equal(frames.size, 1);
+  for (const run of [...frames]) { frames.delete(run); run(); }
+  assert.equal(rows, 1, "only the latest runtime presentation is built");
+  assert.equal(body.querySelector('[data-key="tier-running"]'), null);
+  model.update(current => ({ catalog: { ...current.catalog, runtimeStates: { "agent-11": "running" } } }));
+  body.querySelector(".knowledge-row-select").click();
+  assert.equal(state.selectedNumber, 11, "local selection stays synchronous while a frame is held");
+  assert.ok(sent.some(message => message.kind === "select_knowledge_bridge_entry" && message.number === 11));
+  assert.equal(body.querySelector(".knowledge-row-select").getAttribute("aria-current"), "true", "displayed Issue remains the selected action target");
+  surface.clearKnowledgeBridgeState("win-1");
+  assert.equal(frames.size, 0, "closing cancels the pending frame");
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
 test("T-7b.2b.2: Running tier follows exact confirmation and raw catalog runtime", async (t) => {
   const agent = { id: "agent-11", status: "running", linked_issue_number: 11 };
   const windowCatalogModel = createUiStateStore({ catalog: {
     appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 1 }] } }] }, runtimeStates: {},
-  } });
+  } }, { scheduleFrame: run => { run(); return () => {}; } });
   const { body, surface, state } = await makeFixture({ surface: { windowCatalogModel } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   state.entries = [entry(11, "launched")];

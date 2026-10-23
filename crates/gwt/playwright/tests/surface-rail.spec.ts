@@ -295,8 +295,47 @@ test.describe("Surface rail", () => {
     await expect(right.locator("[data-agent-id='agent-one']")).toBeVisible();
     await expect(right.locator("[data-agent-id='agent-two']")).toBeVisible();
     await expect(right.locator("[data-id='pm-window']")).toHaveCount(0);
+    const frameResults = [];
+    for (const suspended of [false, true]) {
+      const result = await page.evaluate(async suspended => {
+        const host = document.getElementById("split-surfaces")!;
+        const before = host.dataset.catalogVersion;
+        const originalFrame = window.requestAnimationFrame;
+        let renders = 0;
+        let completed: () => void;
+        const changed = new Promise<void>(resolve => { completed = resolve; });
+        const observer = new MutationObserver(records => { renders += records.length; completed(); });
+        observer.observe(host, { attributes: true, attributeFilter: ["data-catalog-version"] });
+        if (suspended) window.requestAnimationFrame = () => 0;
+        const started = performance.now();
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          for (let index = 0; index < 50; index++) {
+            (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: `Split burst ${index}` }, true);
+          }
+          const beforeFlush = host.dataset.catalogVersion;
+          await Promise.race([changed, new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Split frame did not render within one second")), 1000);
+          })]);
+          return { before, beforeFlush, after: host.dataset.catalogVersion, renders, elapsed: performance.now() - started };
+        } finally {
+          clearTimeout(deadline);
+          observer.disconnect();
+          window.requestAnimationFrame = originalFrame;
+        }
+      }, suspended);
+      expect(result.beforeFlush, "receipt leaves Split presentation unchanged until the frame").toBe(result.before);
+      expect(result.after).not.toBe(result.before);
+      expect(result.renders, "Split reconciles a catalog burst once").toBe(1);
+      expect(result.elapsed).toBeLessThan(1000);
+      await expect(right.locator("[data-agent-id='agent-one'] h3")).toContainText("Split burst 49");
+      frameResults.push({ suspended, ...result });
+    }
+    await testInfo.attach("Split frame results", { body: JSON.stringify(frameResults, null, 2), contentType: "application/json" });
     // Focus selects which pane the fixed rail controls.
     await left.getByRole("combobox", { name: "Left pane surface" }).focus();
+    await left.getByRole("combobox", { name: "Left pane surface" }).hover();
+    await expect(left.getByRole("combobox", { name: "Left pane surface" })).toBeFocused();
     await page.locator(".op-rail__surface[data-surface='settings']").click();
     await expect(left).toHaveAttribute("data-surface", "settings");
     await expect(left.locator(".workspace-window[data-preset='settings']")).toBeVisible();
@@ -1163,10 +1202,11 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       if (changed) Object.assign(changed, update);
       socket?.emit(workspaceState());
     };
-    (window as any).__updateSurfaceAgent = (id: string, updates: Record<string, unknown>) => {
+    (window as any).__updateSurfaceAgent = (id: string, updates: Record<string, unknown>, immediate = false) => {
       const data = windows.find(data => data.id === id);
       if (data) Object.assign(data, updates);
-      socket?.emit(workspaceState());
+      if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState() }));
+      else socket?.emit(workspaceState());
     };
   }, { groupedSettings, ownership, focusedId });
 }

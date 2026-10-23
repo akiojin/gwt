@@ -27,6 +27,11 @@ function fixture({ routeProjectKey = null } = {}) {
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0, socketInputHandoff: null,
+    startupAutoResumeReadySent: false, startupFrames: [], startupTimers: [],
+    requestAnimationFrame(callback) { context.startupFrames.push(callback); return context.startupFrames.length; },
+    cancelAnimationFrame() {},
+    setTimeout(callback) { context.startupTimers.push(callback); return context.startupTimers.length; },
+    visibleBounds: () => ({ width: 800, height: 600 }),
     reconnectCallbacks: [], connectionStates: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
@@ -78,7 +83,7 @@ function fixture({ routeProjectKey = null } = {}) {
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
   });
-  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult"]) {
+  for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult", "sendStartupAutoResumeReady"]) {
     vm.runInContext(functionSource(name), context);
   }
   for (const name of ["mergeProjectCatalog", "receiveHubState", "showProjectRouteNotFound"]) {
@@ -399,7 +404,8 @@ test("a queued startup notification ignores a route that became missing", () => 
   for (const missing of [false, true]) {
     const queued = [], sent = [];
     const context = vm.createContext({
-      startupAutoResumeReadySent: false, routeProjectMissing: false,
+      startupAutoResumeReadySent: false, routeProjectMissing: false, socketReceiveDispatcherGeneration: 1,
+      setTimeout() {}, clearTimeout() {}, cancelAnimationFrame() {},
       requestAnimationFrame(callback) { queued.push(callback); },
       visibleBounds() { assert.equal(context.routeProjectMissing, false); return { width: 800, height: 600 }; },
       send(message) { sent.push(message); },
@@ -411,6 +417,40 @@ test("a queued startup notification ignores a route that became missing", () => 
     assert.equal(sent.length, missing ? 0 : 1);
     if (!missing) assert.equal(sent[0].kind, 'startup_auto_resume_ready');
   }
+});
+
+test("canvas readiness is sent once on each connection after backend restarts", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  for (let restart = 0; restart <= 3; restart++) {
+    const connection = sockets.at(-1);
+    const framesBefore = context.startupFrames.length;
+    context.sendStartupAutoResumeReady();
+    context.sendStartupAutoResumeReady();
+    assert.equal(context.startupFrames.length, framesBefore + 1, "each connection needs a fresh readiness callback");
+    context.startupFrames.at(-1)();
+    assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1,
+      `connection ${restart} must release its backend's startup gate exactly once`);
+    if (restart < 3) {
+      connection.close(); context.connectSocket(); sockets.at(-1).open();
+    }
+  }
+});
+
+test("canvas readiness survives suspended frames and discards old connection callbacks", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket(); sockets[0].open(); sockets[1].open();
+  context.sendStartupAutoResumeReady();
+  assert.equal(context.startupTimers.length, 1, "a background tab needs a timer fallback");
+  const oldFrame = context.startupFrames.at(-1), oldTimer = context.startupTimers.at(-1);
+  sockets[1].close(); context.connectSocket(); sockets.at(-1).open();
+  context.sendStartupAutoResumeReady();
+  const connection = sockets.at(-1);
+  oldTimer(); oldFrame();
+  assert.deepEqual(connection.sent, [{ kind: "frontend_ready" }], "old callbacks cannot release a new backend");
+  context.startupTimers.at(-1)(); // No animation frame runs in the background.
+  context.startupFrames.at(-1)(); // Foregrounding later must not send twice.
+  assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1);
 });
 
 test("a missing route ignores late receive work", () => {

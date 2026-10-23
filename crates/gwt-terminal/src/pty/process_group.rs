@@ -453,6 +453,11 @@ mod imp {
             .map(|fields| fields.split_whitespace().collect::<Vec<_>>())
             .filter(|fields| fields.len() >= 20)
             .ok_or_else(|| format!("incomplete native process record for {pid}"))?;
+        // A procfs read racing reap can expose a dead task with its session
+        // already cleared to -1. It is gone, not a changed root/session identity.
+        if fields[0] == "X" {
+            return Ok(None);
+        }
         let session_id = fields[3]
             .parse()
             .map_err(|error| format!("invalid native session for {pid}: {error}"))?;
@@ -463,8 +468,22 @@ mod imp {
             pid,
             session_id,
             started: [started, 0],
-            running: !matches!(fields[0], "Z" | "X"),
+            running: fields[0] != "Z",
         }))
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    #[test]
+    fn native_process_stat_treats_dead_records_as_disappeared() {
+        // Issue #6182: observed while SIGKILL and reap raced a procfs read.
+        // getsid had returned the original SID before stat cleared it to -1.
+        let stat = b"43551 (sleep) X 0 -1 -1 0 -1 4228108 60 0 0 0 0 0 0 0 20 0 0 0 11274543 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 17 14 0 0 0 0 0 0 0 0 0 0 0 0 0 9";
+        assert!(
+            native_process_from_stat(43551, Ok(stat.to_vec()))
+                .unwrap()
+                .is_none(),
+            "a dead record must not enter root/session identity validation"
+        );
     }
 
     #[cfg(all(test, target_os = "linux"))]

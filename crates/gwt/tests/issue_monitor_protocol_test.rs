@@ -336,6 +336,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
 #[test]
 fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let item = IssueMonitorInboxItem {
+        dependency: None,
         issue: IssueMonitorIssue {
             author_login: None,
             number: 42,
@@ -405,9 +406,10 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
 fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     for (state, wire_state) in [
         (MonitorInboxState::NotReady, "not_ready"),
-        (MonitorInboxState::HoldExcluded, "hold_excluded"),
+        (MonitorInboxState::SourceExcluded, "source_excluded"),
     ] {
         let item = IssueMonitorInboxItem {
+            dependency: None,
             issue: IssueMonitorIssue {
                 author_login: None,
                 number: 42,
@@ -428,12 +430,15 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
             launched_window_id: None,
             launch_plan: None,
             error_message: None,
-            exclusion_reason: Some("matched label: hold".to_string()),
+            exclusion_reason: Some("Untrusted source; PM triage required".to_string()),
         };
 
         let value = serde_json::to_value(item).expect("serialize excluded inbox item");
         assert_eq!(value["state"], wire_state);
-        assert_eq!(value["exclusion_reason"], "matched label: hold");
+        assert_eq!(
+            value["exclusion_reason"],
+            "Untrusted source; PM triage required"
+        );
     }
 }
 
@@ -476,10 +481,10 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
         has_unknown_phase: false,
         is_spec: false,
         parent_spec: None,
-        monitor_state: Some(MonitorInboxState::HoldExcluded),
+        monitor_state: Some(MonitorInboxState::SourceExcluded),
         queue_position: Some(3),
         queued_by: None,
-        exclusion_reason: Some("matched label: hold".to_string()),
+        exclusion_reason: Some("Untrusted source; PM triage required".to_string()),
         related_work_refs: vec![gwt::KnowledgeWorkRefView {
             id: "work-42".to_string(),
             branch: Some("work/issue-42".to_string()),
@@ -489,9 +494,12 @@ fn knowledge_list_item_monitor_projection_is_backward_compatible() {
     };
     let value = serde_json::to_value(projected).expect("serialize projected knowledge item");
     assert_eq!(value["state"], "open");
-    assert_eq!(value["monitor_state"], "hold_excluded");
+    assert_eq!(value["monitor_state"], "source_excluded");
     assert_eq!(value["queue_position"], 3);
-    assert_eq!(value["exclusion_reason"], "matched label: hold");
+    assert_eq!(
+        value["exclusion_reason"],
+        "Untrusted source; PM triage required"
+    );
     assert_eq!(value["related_work_refs"][0]["id"], "work-42");
     assert_eq!(value["related_work_refs"][0]["branch"], "work/issue-42");
 }

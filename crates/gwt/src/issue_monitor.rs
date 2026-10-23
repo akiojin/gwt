@@ -978,6 +978,13 @@ pub struct IssueMonitorScanError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPriorityReasonNote {
+    pub reason: String,
+    pub priority_order: Vec<u64>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
@@ -993,6 +1000,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     pub priority_order: Vec<u64>,
+    /// Latest explicitly reasoned order, retained as history after later unreasoned writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
     pub allowed_labels: Vec<String>,
@@ -1326,6 +1336,7 @@ impl Default for IssueMonitorPrefs {
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
             max_active_last_change: None,
             priority_order: Vec::new(),
+            priority_reason_note: None,
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
             monitor_runtime_stop_requests: Vec::new(),
@@ -1872,6 +1883,8 @@ pub enum IssueMonitorProviderUsageLimitOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_observations: Vec<IssueMonitorDependencyObservation>,
     pub delivery_id: String,
     pub issue_number: u64,
     /// Selected for this exact materializer/window, never inferred from history.
@@ -2629,6 +2642,127 @@ impl IssueMonitorReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorDependencies {
+    pub blocked_by: Vec<u64>,
+    pub bundle_with: Vec<u64>,
+}
+
+/// Dependency declarations are data, not executable instructions. Ignore
+/// examples in Markdown fences/comments and reject malformed marker lines.
+pub fn parse_issue_monitor_dependencies(body: &str, issue_number: u64) -> IssueMonitorDependencies {
+    let mut blocked_by = BTreeSet::new();
+    let mut bundle_with = BTreeSet::new();
+    let mut fence: Option<(char, usize)> = None;
+    let mut comment = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if fence.is_none() && (comment || line.contains("<!--")) {
+            comment = !line.contains("-->");
+            continue;
+        }
+        let marker = line.chars().next().filter(|c| matches!(c, '`' | '~'));
+        if let Some(marker) = marker {
+            let length = line.chars().take_while(|c| *c == marker).count();
+            if length >= 3 {
+                match fence {
+                    Some((open, size)) if marker == open && length >= size => fence = None,
+                    None => fence = Some((marker, length)),
+                    _ => {}
+                }
+                continue;
+            }
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let Some((name, values)) = line.split_once(':') else {
+            continue;
+        };
+        let target = if name.eq_ignore_ascii_case("Blocked-by") {
+            &mut blocked_by
+        } else if name.eq_ignore_ascii_case("Bundle-with") {
+            &mut bundle_with
+        } else {
+            continue;
+        };
+        let numbers = values
+            .split_whitespace()
+            .map(|value| {
+                value
+                    .strip_prefix('#')?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0)
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(numbers) = numbers {
+            target.extend(numbers.into_iter().filter(|n| *n != issue_number));
+        }
+    }
+    IssueMonitorDependencies {
+        blocked_by: blocked_by.into_iter().collect(),
+        bundle_with: bundle_with.into_iter().collect(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueMonitorDependencyFacts {
+    declarations: IssueMonitorDependencies,
+    state: IssueMonitorIssueState,
+    updated_at: Option<String>,
+    source_hash: String,
+}
+
+/// An observation is bound to the source the probe actually read. A pending
+/// delivery may retain it without turning an inconclusive answer into Done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorDependencyObservation {
+    pub issue_number: u64,
+    pub source_hash: String,
+    pub completed: Option<bool>,
+}
+
+impl IssueMonitorDependencyObservation {
+    pub fn new(issue: &IssueMonitorIssue, completed: Option<bool>) -> Self {
+        let mut labels = issue
+            .labels
+            .iter()
+            .map(|label| label.to_lowercase())
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels.dedup();
+        // URL is live-only; title is presentation. The remaining inputs are
+        // shared by live/cache dependency and completion classification.
+        let source = serde_json::json!([
+            issue.number,
+            issue.state,
+            issue.body.as_deref().unwrap_or("").replace("\r\n", "\n"),
+            labels,
+            issue.readiness,
+            issue.updated_at,
+        ]);
+        Self {
+            issue_number: issue.number,
+            source_hash: format!("{:x}", Sha256::digest(source.to_string().as_bytes())),
+            completed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorDependencyBlocker {
+    pub number: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorDependencyStatus {
+    pub blocked_by: Vec<IssueMonitorDependencyBlocker>,
+    pub cycle: bool,
+    /// D1 parses bundle declarations; D2 owns their execution semantics.
+    pub bundle_with: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorIssue {
     pub number: u64,
     /// Original Issue creator supplied by GitHub, absent in legacy snapshots.
@@ -2660,9 +2794,9 @@ pub enum MonitorInboxState {
     /// A design-required Issue is missing a usable plan or tasks artifact.
     /// This is re-evaluated on every scan and is therefore non-terminal.
     NotReady,
-    /// An operator excluded the Issue from automatic execution with a hold
-    /// label. This is re-evaluated on every scan and is therefore non-terminal.
-    HoldExcluded,
+    /// The source is untrusted and requires PM triage. Re-evaluated each scan.
+    #[serde(alias = "hold_excluded")]
+    SourceExcluded,
     Launching,
     Launched,
     /// Current Issue generation is complete. The GitHub Issue may still be
@@ -2674,6 +2808,7 @@ pub enum MonitorInboxState {
     LaunchFailed,
     AgentFailed,
     BlockedByClaim,
+    BlockedByDependency,
     Skipped,
     /// SPEC #3200 FR-027: autonomous resolution exhausted its bounded retries,
     /// hit a terminal review failure, or could not verify its safety gates, and
@@ -2810,6 +2945,8 @@ pub struct IssueMonitorInboxItem {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<IssueMonitorDependencyStatus>,
 }
 
 /// SPEC-3431 FR-033: the exact identity a PM-requested stop must match.
@@ -4656,6 +4793,8 @@ pub fn provider_unauthenticated_message(agent_id: &str) -> String {
 /// would dwarf the rest of the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorInboxSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<IssueMonitorDependencyStatus>,
     pub issue_number: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_tier: Option<u8>,
@@ -4896,6 +5035,12 @@ pub struct IssueMonitorState {
     process_held_issues: BTreeSet<u64>,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
+    /// Current scan facts include blockers outside the selected queue. They
+    /// are rebuilt from source observations, never restored as completion proof.
+    #[serde(skip)]
+    dependency_facts: BTreeMap<u64, IssueMonitorDependencyFacts>,
+    #[serde(skip)]
+    dependency_completions: BTreeMap<u64, IssueMonitorDependencyObservation>,
     legacy_git_launch_failure_migration_version: u32,
     /// Exact failure fingerprints removed by an in-memory migration that has
     /// not necessarily committed yet. An older concurrent snapshot may merge
@@ -4922,6 +5067,8 @@ pub struct IssueMonitorState {
     monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
     urgent_queue: IssueMonitorUrgentQueue,
@@ -5276,16 +5423,6 @@ fn issue_monitor_candidate_exclusion(
     if let Some(exclusion) = issue_monitor_source_exclusion(issue, source_repository) {
         return Some(exclusion);
     }
-    if let Some(label) = issue
-        .labels
-        .iter()
-        .find(|label| label.eq_ignore_ascii_case("hold"))
-    {
-        return Some((
-            MonitorInboxState::HoldExcluded,
-            format!("hold label: {label}"),
-        ));
-    }
     if issue
         .labels
         .iter()
@@ -5315,7 +5452,7 @@ fn issue_monitor_source_exclusion(
                 .is_some_and(|body| body.to_ascii_lowercase().contains("<!-- gwt-feedback:")))
     {
         return Some((
-            MonitorInboxState::HoldExcluded,
+            MonitorInboxState::SourceExcluded,
             "untrusted feedback; PM triage required; use a separate curated execution owner"
                 .to_string(),
         ));
@@ -5341,7 +5478,7 @@ fn issue_monitor_source_exclusion(
             .iter()
             .any(|trusted| author.eq_ignore_ascii_case(trusted))
         {
-            return Some((MonitorInboxState::HoldExcluded, "untrusted external Issue; PM triage required; use a separate curated execution owner".to_string()));
+            return Some((MonitorInboxState::SourceExcluded, "untrusted external Issue; PM triage required; use a separate curated execution owner".to_string()));
         }
     }
     None
@@ -6419,10 +6556,17 @@ pub(crate) fn monitor_project_prefs_equal(
 }
 
 fn load_issue_monitor_prefs_raw(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    load_issue_monitor_prefs_raw_with_cache(path, issue_monitor_prefs_cache())
+}
+
+fn load_issue_monitor_prefs_raw_with_cache(
+    path: &Path,
+    cache: &std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>>,
+) -> io::Result<IssueMonitorPrefs> {
     let key = std::path::absolute(path)?;
     // Serialize misses as well as hits so concurrent readers parse a generation once.
     // The cross-process sibling writer lock still owns every mutation transaction.
-    let mut cache = issue_monitor_prefs_cache()
+    let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = match fs::File::open(&key) {
@@ -7767,6 +7911,8 @@ impl IssueMonitorState {
             agent_capacity: AgentCapacity::default(),
             gui_connected: false,
             inbox: Vec::new(),
+            dependency_facts: BTreeMap::new(),
+            dependency_completions: BTreeMap::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
@@ -7780,6 +7926,7 @@ impl IssueMonitorState {
             allowed_labels: Vec::new(),
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
+            priority_reason_note: None,
             monitor_runtime_counts: BTreeMap::new(),
             monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
@@ -7876,6 +8023,7 @@ impl IssueMonitorState {
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
+        state.priority_reason_note = prefs.priority_reason_note;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
         state.monitor_runtime_stop_requests = prefs.monitor_runtime_stop_requests;
         state.retired_completed_sessions = prefs.retired_completed_sessions;
@@ -8049,6 +8197,7 @@ impl IssueMonitorState {
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
+            priority_reason_note: self.priority_reason_note.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
             monitor_runtime_stop_requests: self.monitor_runtime_stop_requests.clone(),
@@ -8117,7 +8266,26 @@ impl IssueMonitorState {
                     claimed_at: self.launching_claimed_at.get(issue_number).cloned(),
                 })
                 .collect(),
-            pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
+            pending_launch_deliveries: self
+                .pending_launch_deliveries
+                .iter()
+                .map(|delivery| {
+                    let mut projected = delivery.clone();
+                    // Non-scan writers have no facts; preserve their sealed
+                    // evidence. Scan writers project after adopting latest
+                    // prefs, so a rebase cannot discard a fresh observation.
+                    if self.dependency_facts.contains_key(&delivery.issue_number)
+                        && self.dependency_delivery_is_current_and_unmaterialized(delivery)
+                    {
+                        projected.dependency_observations = self
+                            .dependency_observations_for_delivery(
+                                delivery.issue_number,
+                                Some(delivery),
+                            );
+                    }
+                    projected
+                })
+                .collect(),
             queued_launch_session_strategies: self.queued_launch_session_strategies.clone(),
             failed_issues: self
                 .failed_issues
@@ -11196,6 +11364,18 @@ impl IssueMonitorState {
     /// [`IssueMonitorPrefs::set_launch_profile_pool`]).
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
         self.launch_profiles = dedupe_launch_profile_pool(pool);
+        self.compensate_permission_blocked_launch_deliveries(false);
+    }
+
+    /// Re-evaluate unowned deliveries when the effective tier policy changes.
+    pub(crate) fn set_launch_tiers(
+        &mut self,
+        auto: bool,
+        tiers: Vec<Vec<IssueMonitorLaunchProfile>>,
+    ) {
+        self.launch_auto = auto;
+        self.launch_tiers = tiers;
+        self.compensate_permission_blocked_launch_deliveries(true);
     }
 
     pub fn launch_usage_threshold_percent(&self) -> u8 {
@@ -11250,6 +11430,7 @@ impl IssueMonitorState {
         self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
         self.priority_order = disk.priority_order.clone();
+        self.priority_reason_note = disk.priority_reason_note.clone();
         self.terminal_queues = disk.terminal_queues.clone();
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
@@ -11592,8 +11773,17 @@ impl IssueMonitorState {
         let profile = profile.clone();
         self.launch_profiles =
             dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
-        // ConfigSet commits this state under the prefs lock. Revoke unusable
-        // unowned deliveries here, before publication can replay them to a GUI.
+        self.compensate_permission_blocked_launch_deliveries(false);
+        Ok(profile)
+    }
+
+    /// Profile writers commit this compensation under the prefs lock, before
+    /// publication can replay an unusable unowned delivery to a GUI.
+    fn compensate_permission_blocked_launch_deliveries(&mut self, reevaluate_auto: bool) {
+        // Manual profile writers leave Auto's effective tiers unchanged.
+        if self.launch_auto && !reevaluate_auto {
+            return;
+        }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let blocked = self
             .pending_launch_deliveries
@@ -11616,7 +11806,6 @@ impl IssueMonitorState {
                 self.record_permission_readiness_block(issue, &record);
             }
         }
-        Ok(profile)
     }
 
     /// Issue #4908 A/D: the first refused launch holds its provider. Keep
@@ -11800,7 +11989,14 @@ impl IssueMonitorState {
         let automatic = if self.launch_auto {
             let is_spec = self
                 .inbox_item(issue_number)
-                .is_some_and(|item| has_gwt_spec_label(&item.issue.labels));
+                .map(|item| has_gwt_spec_label(&item.issue.labels))
+                .unwrap_or_else(|| {
+                    // Cold settings writers have only the durable delivery.
+                    self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == issue_number
+                            && delivery.linked_issue_kind == LinkedIssueKind::Spec
+                    })
+                });
             self.prefs()
                 .select_auto_launch_profile(issue_number, is_spec, None, select)
         } else {
@@ -11857,6 +12053,7 @@ impl IssueMonitorState {
         }
         self.queue.retain(|queued| *queued != issue.number);
         self.upsert_inbox(IssueMonitorInboxItem {
+            dependency: None,
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
             state: MonitorInboxState::NotReady,
@@ -12328,6 +12525,7 @@ impl IssueMonitorState {
         // an older reset in a stale disk snapshot may never erase newer local
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
+        self.adopt_compensated_launch_deliveries(disk);
         self.refresh_disk_owned_prefs(disk);
         self.enforce_provider_quota_hold_releases();
         for issue_number in restarted {
@@ -12394,7 +12592,7 @@ impl IssueMonitorState {
                         item.state,
                         MonitorInboxState::Skipped
                             | MonitorInboxState::NotReady
-                            | MonitorInboxState::HoldExcluded
+                            | MonitorInboxState::SourceExcluded
                             | MonitorInboxState::BlockedByClaim
                     )
             })
@@ -13145,12 +13343,341 @@ impl IssueMonitorState {
         })
     }
 
-    /// Read-only inbox projection; readiness warnings never change scheduling state.
+    /// Replace scan-local facts before queue/label filtering. A new snapshot
+    /// never inherits positive or inconclusive completion observations.
+    pub fn observe_dependency_candidates(&mut self, issues: &[IssueMonitorIssue]) {
+        self.dependency_facts.clear();
+        self.dependency_completions.clear();
+        for issue in issues {
+            self.observe_dependency_candidate(issue);
+        }
+    }
+
+    fn observe_dependency_candidate(&mut self, issue: &IssueMonitorIssue) {
+        let facts = IssueMonitorDependencyFacts {
+            declarations: parse_issue_monitor_dependencies(
+                issue.body.as_deref().unwrap_or(""),
+                issue.number,
+            ),
+            state: issue.state,
+            updated_at: issue.updated_at.clone(),
+            source_hash: IssueMonitorDependencyObservation::new(issue, None).source_hash,
+        };
+        if self.dependency_facts.get(&issue.number) != Some(&facts) {
+            self.dependency_completions.remove(&issue.number);
+        }
+        self.dependency_facts.insert(issue.number, facts);
+    }
+
+    /// These answers apply only to the current facts. `None` disables the
+    /// corresponding edge for this scan; it is never saved as Done evidence.
+    pub fn observe_dependency_completions(
+        &mut self,
+        observations: &BTreeMap<u64, IssueMonitorDependencyObservation>,
+    ) {
+        for (&number, observation) in observations {
+            if observation.issue_number == number
+                && self
+                    .dependency_facts
+                    .get(&number)
+                    .is_some_and(|facts| facts.source_hash == observation.source_hash)
+            {
+                self.dependency_completions
+                    .insert(number, observation.clone());
+            }
+        }
+    }
+
+    pub fn dependency_observation(
+        &self,
+        number: u64,
+        completed: Option<bool>,
+    ) -> Option<IssueMonitorDependencyObservation> {
+        self.dependency_facts
+            .get(&number)
+            .map(|facts| IssueMonitorDependencyObservation {
+                issue_number: number,
+                source_hash: facts.source_hash.clone(),
+                completed,
+            })
+    }
+
+    fn record_dependency_completion(&mut self, number: u64, completed: Option<bool>) {
+        if let Some(observation) = self.dependency_observation(number, completed) {
+            self.observe_dependency_completions(&BTreeMap::from([(number, observation)]));
+        }
+    }
+
+    fn dependency_observations_for_delivery(
+        &self,
+        owner: u64,
+        previous: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> Vec<IssueMonitorDependencyObservation> {
+        let mut pending = vec![owner];
+        let mut reachable = BTreeSet::new();
+        while let Some(number) = pending.pop() {
+            if reachable.insert(number) {
+                if let Some(facts) = self.dependency_facts.get(&number) {
+                    pending.extend(facts.declarations.blocked_by.iter().copied());
+                }
+            }
+        }
+        reachable.remove(&owner);
+        reachable
+            .into_iter()
+            .filter_map(|number| {
+                self.dependency_completions
+                    .get(&number)
+                    .or_else(|| {
+                        previous.and_then(|delivery| {
+                            delivery
+                                .dependency_observations
+                                .iter()
+                                .find(|observation| observation.issue_number == number)
+                        })
+                    })
+                    .filter(|observation| {
+                        self.dependency_facts
+                            .get(&number)
+                            .is_some_and(|facts| facts.source_hash == observation.source_hash)
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+
+    fn dependency_closed_observation_is_current(&self, number: u64) -> bool {
+        self.dependency_facts.get(&number).is_some_and(|facts| {
+            facts.state == IssueMonitorIssueState::Closed
+                && self.closure_records.get(&number).is_none_or(|current| {
+                    Self::closure_transition_is_fresh(
+                        current,
+                        IssueClosureState::Closed,
+                        IssueClosureEvidence::ExplicitRevision,
+                        facts.updated_at.as_deref(),
+                    )
+                })
+        })
+    }
+
+    fn dependency_outcome(
+        &self,
+        number: u64,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> Option<Option<bool>> {
+        let facts = self.dependency_facts.get(&number)?;
+        if facts.state == IssueMonitorIssueState::Closed
+            && !self.dependency_closed_observation_is_current(number)
+        {
+            return Some(Some(false));
+        }
+        self.dependency_completions
+            .get(&number)
+            .or_else(|| {
+                delivery.and_then(|delivery| {
+                    delivery
+                        .dependency_observations
+                        .iter()
+                        .find(|observation| observation.issue_number == number)
+                })
+            })
+            .filter(|observation| observation.source_hash == facts.source_hash)
+            .map(|observation| observation.completed)
+    }
+
+    fn dependency_is_done(&self, number: u64) -> bool {
+        self.issue_is_closed(number)
+            || self.merged_issues.contains(&number)
+            || self.dependency_closed_observation_is_current(number)
+            || self.inbox_item(number).is_some_and(|item| {
+                matches!(
+                    item.state,
+                    MonitorInboxState::Merged | MonitorInboxState::Released
+                )
+            })
+    }
+
+    fn dependency_reaches(
+        &self,
+        from: u64,
+        target: u64,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> bool {
+        let mut pending = vec![from];
+        let mut visited = BTreeSet::new();
+        while let Some(number) = pending.pop() {
+            if self.dependency_is_done(number)
+                || matches!(
+                    self.dependency_outcome(number, delivery),
+                    Some(Some(true) | None)
+                )
+                || !visited.insert(number)
+            {
+                continue;
+            }
+            if number == target {
+                return true;
+            }
+            if let Some(facts) = self.dependency_facts.get(&number) {
+                pending.extend(facts.declarations.blocked_by.iter().copied());
+            }
+        }
+        false
+    }
+
+    fn dependency_status(
+        &self,
+        number: u64,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> Option<IssueMonitorDependencyStatus> {
+        let facts = self.dependency_facts.get(&number)?;
+        if facts.declarations.blocked_by.is_empty() && facts.declarations.bundle_with.is_empty() {
+            return None;
+        }
+        let mut status = IssueMonitorDependencyStatus {
+            blocked_by: Vec::new(),
+            cycle: false,
+            bundle_with: facts.declarations.bundle_with.clone(),
+        };
+        for &blocker in &facts.declarations.blocked_by {
+            if self.dependency_is_done(blocker)
+                || matches!(
+                    self.dependency_outcome(blocker, delivery),
+                    Some(Some(true) | None)
+                )
+            {
+                continue;
+            }
+            let Some(_) = self.dependency_facts.get(&blocker) else {
+                continue; // Unknown dependencies retain the specified fail-open policy.
+            };
+            if self.dependency_reaches(blocker, number, delivery) {
+                status.cycle = true;
+            } else {
+                status
+                    .blocked_by
+                    .push(IssueMonitorDependencyBlocker { number: blocker });
+            }
+        }
+        Some(status)
+    }
+
+    pub fn launch_dependency_exclusion(&self, number: u64) -> Option<String> {
+        let claim = self.live_claim_id(number);
+        let delivery_id = self.pending_launch_delivery_id(number);
+        let delivery = self.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == number
+                && claim.as_deref() == Some(&delivery.claim_id)
+                && delivery_id.as_deref() == Some(&delivery.delivery_id)
+        });
+        self.dependency_exclusion(number, delivery)
+    }
+
+    fn dependency_delivery_is_current_and_unmaterialized(
+        &self,
+        delivery: &PendingIssueMonitorLaunchDelivery,
+    ) -> bool {
+        self.live_claim_id(delivery.issue_number).as_deref() == Some(&delivery.claim_id)
+            && self
+                .pending_launch_delivery_id(delivery.issue_number)
+                .as_deref()
+                == Some(&delivery.delivery_id)
+            && delivery.materialized_window_id.is_none()
+            && !self.launched_windows.contains_key(&delivery.issue_number)
+            && !self.has_observed_monitor_runtime(delivery.issue_number)
+            && !self.launch_delivery_can_reack(delivery)
+            && !self.issue_is_closed(delivery.issue_number)
+    }
+
+    fn scan_dependency_exclusion(&self, number: u64) -> Option<String> {
+        self.dependency_exclusion(number, None)
+    }
+
+    fn dependency_exclusion(
+        &self,
+        number: u64,
+        delivery: Option<&PendingIssueMonitorLaunchDelivery>,
+    ) -> Option<String> {
+        let status = self.dependency_status(number, delivery)?;
+        (!status.blocked_by.is_empty()).then(|| {
+            format!(
+                "Blocked by {}",
+                status
+                    .blocked_by
+                    .iter()
+                    .map(|blocker| format!("#{}", blocker.number))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+    }
+
+    /// Known blockers use the existing completion batch before claimable
+    /// candidates are selected. They consume no claim capacity themselves.
+    pub fn dependency_probe_candidates(&self, active_cap: usize) -> Vec<u64> {
+        if !self.gui_connected
+            || !self.config.enabled
+            || self.effective_max_active_agents().min(active_cap) == 0
+        {
+            return Vec::new();
+        }
+        // Pending claims already reserve their slots. A new scan invalidates
+        // their old observations too, so retries need fresh dependency probes
+        // even when no capacity remains for another claim.
+        self.claim_candidate_refresh_plan(active_cap)
+            .1
+            .into_iter()
+            .chain(self.pending_claim_issue_numbers())
+            .filter(|number| {
+                self.claim_candidate_exclusions_without_dependencies(*number)
+                    .iter()
+                    .all(|reason| reason == "claim_pending")
+            })
+            .filter_map(|number| self.dependency_status(number, None))
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .filter_map(|delivery| {
+                        (self.dependency_delivery_is_current_and_unmaterialized(delivery)
+                            && self
+                                .launch_source_exclusion(delivery.issue_number)
+                                .is_none())
+                        .then(|| self.dependency_status(delivery.issue_number, Some(delivery)))
+                        .flatten()
+                    }),
+            )
+            .flat_map(|status| status.blocked_by.into_iter().map(|blocker| blocker.number))
+            .filter(|number| !self.dependency_completions.contains_key(number))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn project_dependency_status(&self, item: &mut IssueMonitorInboxItem) {
+        if item.state != MonitorInboxState::Queued {
+            return;
+        }
+        item.dependency = self.dependency_status(item.issue.number, None);
+        if let Some(reason) = self.scan_dependency_exclusion(item.issue.number) {
+            item.state = MonitorInboxState::BlockedByDependency;
+            item.exclusion_reason = Some(reason);
+        }
+        if item.dependency.as_ref().is_some_and(|status| status.cycle) {
+            let warning = "Dependency cycle detected; cyclic dependencies ignored";
+            item.exclusion_reason = Some(match item.exclusion_reason.take() {
+                Some(reason) => format!("{reason}; {warning}"),
+                None => warning.to_string(),
+            });
+        }
+    }
+
+    /// Read-only projection; dependency waits preserve stored queue membership.
     pub fn inbox_view_at(&self, now: &str) -> Vec<IssueMonitorInboxItem> {
         self.inbox
             .iter()
             .cloned()
             .map(|mut item| {
+                self.project_dependency_status(&mut item);
                 item.error_message = item
                     .error_message
                     .or_else(|| self.pending_session_start_diagnosis_at(item.issue.number, now));
@@ -14093,9 +14620,13 @@ impl IssueMonitorState {
                 .inbox
                 .iter()
                 .map(|item| {
+                    let mut projected = item.clone();
+                    self.project_dependency_status(&mut projected);
+                    let item = &projected;
                     let (recoverable_merged, completion_reason) = self.completion_anomaly(item);
                     let runtime = self.runtime_consistency_at(item.issue.number, now);
                     IssueMonitorInboxSummary {
+                        dependency: item.dependency.clone(),
                         issue_number: item.issue.number,
                         state: item.state,
                         github_state: item.issue.state,
@@ -14430,12 +14961,14 @@ impl IssueMonitorState {
             .queue
             .iter()
             .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
+            .filter(|issue_number| self.scan_dependency_exclusion(**issue_number).is_none())
             .filter(|issue_number| self.retry_ready_for_saved_profile(**issue_number, now))
             .count();
         let held = self
             .failed_issues
             .keys()
             .filter(|issue_number| !self.open_pr_launch_held(**issue_number))
+            .filter(|issue_number| self.scan_dependency_exclusion(**issue_number).is_none())
             .filter(|issue_number| {
                 self.autonomous_records
                     .get(issue_number)
@@ -15183,6 +15716,7 @@ impl IssueMonitorState {
                     || self.cancelled_claim_awaits_runtime(*issue_number)
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
+                    || self.scan_dependency_exclusion(*issue_number).is_some()
         )
     }
 
@@ -15344,7 +15878,7 @@ impl IssueMonitorState {
         if self.inbox_item(number).is_some_and(|item| {
             matches!(
                 item.state,
-                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+                MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded
             )
         }) {
             return EligibilityDecision::HumanGate(
@@ -16619,6 +17153,7 @@ impl IssueMonitorState {
             MonitorInboxState::Queued
         };
         let item = IssueMonitorInboxItem {
+            dependency: None,
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
             state,
@@ -16642,6 +17177,7 @@ impl IssueMonitorState {
     }
 
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
+        self.observe_dependency_candidate(&issue);
         let issue_number = issue.number;
         let allowed = self.allows_issue_labels(&issue);
         if !allowed {
@@ -16799,7 +17335,7 @@ impl IssueMonitorState {
                 Some(MonitorInboxState::Released)
                 | Some(MonitorInboxState::Merged)
                 | Some(MonitorInboxState::NotReady)
-                | Some(MonitorInboxState::HoldExcluded)
+                | Some(MonitorInboxState::SourceExcluded)
                 | Some(MonitorInboxState::Skipped)
                 | None => MonitorInboxState::Queued,
                 Some(other) => other,
@@ -16830,6 +17366,7 @@ impl IssueMonitorState {
                     .and_then(|item| item.exclusion_reason.clone())
             });
         let item = IssueMonitorInboxItem {
+            dependency: None,
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
             state,
@@ -16856,7 +17393,7 @@ impl IssueMonitorState {
         };
         if matches!(
             state,
-            MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded
         ) {
             self.clear_provisional_implementation(issue_number);
             revoke_uncommitted_claims_for_issue(
@@ -17020,6 +17557,7 @@ impl IssueMonitorState {
             None => format!("blocked by claim owned by {owner} until {expires_at}"),
         });
         self.upsert_inbox(IssueMonitorInboxItem {
+            dependency: None,
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
             state: MonitorInboxState::BlockedByClaim,
@@ -17251,6 +17789,29 @@ impl IssueMonitorState {
             self.cancel_pending_review_dispatch(*issue_number);
         }
         self.reconcile_terminal_queue();
+    }
+
+    /// Explicit maintenance of every terminal saved in this project store.
+    /// Remote liveness timestamps remain observations, not mutation timestamps.
+    pub fn terminal_queue_remove_all_terminals(&mut self, issue_numbers: &[u64], now: &str) {
+        self.terminal_queue_remove(issue_numbers, now);
+        let hosts = self
+            .terminal_queues
+            .keys()
+            .chain(self.terminal_queue_exclusions.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for host in hosts {
+            self.terminal_queue_exclusions
+                .entry(host.clone())
+                .or_default()
+                .extend(issue_numbers.iter().copied());
+            if let Some(queue) = self.terminal_queues.get_mut(&host) {
+                queue
+                    .entries
+                    .retain(|entry| !issue_numbers.contains(&entry.number));
+            }
+        }
     }
 
     pub fn terminal_queue_move(&mut self, number: u64, position: usize, now: &str) -> bool {
@@ -17489,6 +18050,7 @@ impl IssueMonitorState {
                 && !self.cancelled_claim_awaits_runtime(*issue)
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
+                && self.scan_dependency_exclusion(*issue).is_none()
         })?;
         let issue_number = self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
@@ -17592,6 +18154,14 @@ impl IssueMonitorState {
     /// Shared by the claim planner and its row diagnostics. Delivery
     /// annotations deliberately do not appear here: they are not holds.
     fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<String> {
+        let mut reasons = self.claim_candidate_exclusions_without_dependencies(issue_number);
+        if let Some(reason) = self.scan_dependency_exclusion(issue_number) {
+            reasons.push(reason);
+        }
+        reasons
+    }
+
+    fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
         if let Some(reason) = self.launch_source_exclusion(issue_number) {
             reasons.push(reason);
@@ -17684,6 +18254,19 @@ impl IssueMonitorState {
     /// commit anything. The planner below only ever walks this list, so a scan
     /// only ever needs to probe this list.
     pub fn claim_probe_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
+        let (available, candidates) = self.claim_candidate_refresh_plan(active_cap);
+        (
+            available,
+            candidates
+                .into_iter()
+                .filter(|number| self.scan_dependency_exclusion(*number).is_none())
+                .collect(),
+        )
+    }
+
+    /// Refresh blocked candidates before completion observation too, so a
+    /// cache-fallback pass can confirm a candidate unblocked later in the pass.
+    pub fn claim_candidate_refresh_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
         let max_active = self.effective_max_active_agents().min(active_cap);
         if !self.config.enabled || max_active == 0 {
             return (0, Vec::new());
@@ -17699,7 +18282,10 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| self.claim_candidate_exclusions(*issue_number).is_empty())
+            .filter(|issue_number| {
+                self.claim_candidate_exclusions_without_dependencies(*issue_number)
+                    .is_empty()
+            })
             .collect();
         (available, candidates)
     }
@@ -17753,6 +18339,14 @@ impl IssueMonitorState {
         self.requeue_expired_claim_blocks(now);
         if !self.gui_connected || self.launch_admission_is_held_at(now) {
             return Ok(0);
+        }
+        for number in self.dependency_probe_candidates(active_cap) {
+            let completed = match completed_probe(number)? {
+                ClaimProbeOutcome::Completed => Some(true),
+                ClaimProbeOutcome::Claimable => Some(false),
+                ClaimProbeOutcome::Deferred => None,
+            };
+            self.record_dependency_completion(number, completed);
         }
         let (mut available, candidates) = self.claim_probe_plan(active_cap);
         if available == 0 {
@@ -17846,6 +18440,9 @@ impl IssueMonitorState {
         if max_active == 0 || self.launch_admission_is_held_at(now) {
             return launches;
         }
+        for number in self.dependency_probe_candidates(active_cap) {
+            self.record_dependency_completion(number, Some(completed_probe(number)));
+        }
         while self.config.enabled && self.gui_connected && self.occupied_slot_count() < max_active {
             let Some(issue_number) = self.queue.iter().copied().find(|issue_number| {
                 self.terminal_queue_contains(*issue_number)
@@ -17853,6 +18450,7 @@ impl IssueMonitorState {
                     && !self.has_monitor_pane_for_issue(*issue_number)
                     && !self.open_pr_launch_held(*issue_number)
                     && self.launch_source_exclusion(*issue_number).is_none()
+                    && self.scan_dependency_exclusion(*issue_number).is_none()
                     && self.retry_ready_for_saved_profile(*issue_number, now)
             }) else {
                 break;
@@ -17976,6 +18574,9 @@ impl IssueMonitorState {
         while let Some(request) = self.pending_launches.pop_front() {
             if requests.len() < capacity
                 && self.launch_source_exclusion(request.issue_number).is_none()
+                && self
+                    .launch_dependency_exclusion(request.issue_number)
+                    .is_none()
             {
                 requests.push(request);
             } else {
@@ -18189,6 +18790,12 @@ impl IssueMonitorState {
         {
             return true;
         }
+        if self
+            .launch_dependency_exclusion(delivery.issue_number)
+            .is_some()
+        {
+            return false;
+        }
         let max_active = self.effective_max_active_agents();
         if max_active == 0 {
             return false;
@@ -18384,6 +18991,7 @@ impl IssueMonitorState {
                     && !self.launch_admission_is_held_at(now)
                     && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
+                    && self.scan_dependency_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_monitor_pane_for_issue(issue_number)
                     && !self.open_pr_launch_held(issue_number)
@@ -18455,8 +19063,11 @@ impl IssueMonitorState {
             .iter()
             .any(|delivery| delivery.delivery_id == delivery_id)
         {
+            let dependency_observations =
+                self.dependency_observations_for_delivery(issue_number, None);
             self.pending_launch_deliveries
                 .push_back(PendingIssueMonitorLaunchDelivery {
+                    dependency_observations,
                     delivery_id,
                     issue_number,
                     selected_tier: None,
@@ -20502,6 +21113,75 @@ impl IssueMonitorState {
             })
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled_issues);
+    }
+
+    /// Adopt an exact cancellation before replacing the local delivery journal.
+    /// Otherwise the launch-reservation union can resurrect a committed pool
+    /// cancellation and prevent the control receipt from converging.
+    fn adopt_compensated_launch_deliveries(&mut self, disk: &IssueMonitorPrefs) {
+        if disk.effect_authority_epoch <= self.effect_authority_epoch {
+            return;
+        }
+        let protected = disk
+            .launched_issues
+            .iter()
+            .map(|launch| launch.issue_number)
+            .chain(
+                disk.launching_issues
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                disk.pending_launch_deliveries
+                    .iter()
+                    .map(|delivery| delivery.issue_number),
+            )
+            .chain(
+                self.pending_effects
+                    .iter()
+                    .chain(&disk.pending_effects)
+                    .filter_map(|effect| match effect.payload {
+                        IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                            Some(issue_number)
+                        }
+                        _ => None,
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        let cancelled = self
+            .pending_launch_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && delivery.materialized_window_id.is_none()
+                    && !protected.contains(&delivery.issue_number)
+                    && !self.launched_windows.contains_key(&delivery.issue_number)
+                    && !self.process_held_issues.contains(&delivery.issue_number)
+                    && !self.has_monitor_pane_for_issue(delivery.issue_number)
+                    && !self.pending_launch_deliveries.iter().any(|other| {
+                        other.issue_number == delivery.issue_number
+                            && other.delivery_id != delivery.delivery_id
+                    })
+                    && !self
+                        .claim_identities
+                        .values()
+                        .chain(disk.claim_identities.iter())
+                        .any(|identity| {
+                            identity.issue_number == delivery.issue_number
+                                && (identity.claim_id != delivery.claim_id
+                                    || identity.owner != delivery.claim_owner)
+                        }) && disk.pending_effects.iter().any(|effect| {
+                    matches!(
+                        &effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim { issue_number, claim_id, owner }
+                            if *issue_number == delivery.issue_number
+                                && claim_id == &delivery.claim_id && owner == &delivery.claim_owner
+                    )
+                })
+            })
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.compensate_uncommitted_claims(&cancelled);
     }
 
     /// Exact pre-materialization compensation shared by provider holds and
@@ -24139,6 +24819,7 @@ pub fn scan_issue_monitor_candidates(
     now: &str,
 ) -> IssueMonitorScanSummary {
     let mut summary = IssueMonitorScanSummary::default();
+    monitor.observe_dependency_candidates(issues);
     let queue_label_issues = issues
         .iter()
         .filter(|issue| issue.state == IssueMonitorIssueState::Open && has_queue_label(issue))
@@ -24250,7 +24931,7 @@ pub fn scan_issue_monitor_candidates(
             matches!(
                 item.state,
                 MonitorInboxState::NotReady
-                    | MonitorInboxState::HoldExcluded
+                    | MonitorInboxState::SourceExcluded
                     | MonitorInboxState::Skipped
             )
         }) {
@@ -24538,6 +25219,37 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_reason_note_survives_state_roundtrip_and_disk_rebase() {
+        let legacy = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        assert!(legacy.get("priority_reason_note").is_none());
+        let note = serde_json::json!({
+            "reason":"Unblock the release", "priority_order":[2,1],
+            "recorded_at":"2026-10-23T00:00:00Z"
+        });
+        let mut raw = legacy;
+        raw["priority_order"] = serde_json::json!([2, 1]);
+        raw["priority_reason_note"] = note.clone();
+        let disk: IssueMonitorPrefs = serde_json::from_value(raw).unwrap();
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert_eq!(
+            serde_json::to_value(restored.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            serde_json::to_value(stale.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+        let mut stale_gui = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale_gui.rebase_gui_observer_prefs(&disk);
+        assert_eq!(
+            serde_json::to_value(stale_gui.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+    }
 
     #[test]
     fn agent_capacity_new_preferences_retain_saved_limit_before_measurement() {
@@ -25104,7 +25816,7 @@ mod tests {
             &[server, tools, client, held],
             "2026-10-06T00:00:00Z",
         );
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 4]);
         assert!(monitor.inbox_item(3).is_none());
         let status = serde_json::to_value(monitor.agent_status()).unwrap();
         assert_eq!(
@@ -25414,7 +26126,7 @@ mod tests {
             monitor.record_candidate(report);
 
             let row = monitor.inbox_item(42).unwrap();
-            assert_eq!(row.state, MonitorInboxState::HoldExcluded);
+            assert_eq!(row.state, MonitorInboxState::SourceExcluded);
             assert!(row
                 .exclusion_reason
                 .as_deref()
@@ -25467,7 +26179,7 @@ mod tests {
                 if author.is_none() {
                     MonitorInboxState::NotReady
                 } else {
-                    MonitorInboxState::HoldExcluded
+                    MonitorInboxState::SourceExcluded
                 }
             );
             assert!(row
@@ -25666,6 +26378,7 @@ mod tests {
                 needs_human: Vec::new(),
                 released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
+                    dependency: None,
                     launch_tier: None,
                     landing_tier: None,
                     issue_number: 42,
@@ -25817,7 +26530,7 @@ mod tests {
         });
         let candidate = issue(42);
         monitor.record_candidate(candidate.clone());
-        monitor.set_inbox_state(42, MonitorInboxState::HoldExcluded);
+        monitor.set_inbox_state(42, MonitorInboxState::SourceExcluded);
 
         assert!(!monitor.record_blocked_by_claim(
             candidate,
@@ -25831,7 +26544,7 @@ mod tests {
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::HoldExcluded)
+            Some(MonitorInboxState::SourceExcluded)
         );
     }
 
@@ -32110,9 +32823,8 @@ mod tests {
     /// Issue #4862 AC-3/AC-4, the live case: #4777 was working in its window while
     /// its row read `hold_excluded` with no bound window at all, so the card sat
     /// outside Active and the slot accounting under-counted by one
-    /// (`active_session_count` 4 against `occupied_slot_count` 2). A `hold` label
-    /// is an admission decision about launching new work; it must not unbind a
-    /// launch that is already running.
+    /// (`active_session_count` 4 against `occupied_slot_count` 2). The retired
+    /// `hold` label must not affect a launch that is already running either.
     #[test]
     fn a_hold_label_must_not_unbind_a_launch_that_is_already_running() {
         let mut held = issue(4777);
@@ -32127,7 +32839,7 @@ mod tests {
                 .inbox_item(4777)
                 .and_then(|item| item.launched_window_id.clone()),
             Some("project-a::agent-1343".to_string()),
-            "AC-3: a hold decides admission, not whether the running window is bound"
+            "AC-3: a retired hold label cannot unbind the running window"
         );
         assert_eq!(
             monitor.active_count(),
@@ -39048,6 +39760,336 @@ mod tests {
     }
 
     #[test]
+    fn dependency_markers_ignore_examples_self_references_and_malformed_lines() {
+        let declarations = parse_issue_monitor_dependencies(
+            "Blocked-by: #44 #42 #43 #44\nBundle-with: #47 #42\n\
+             Blocked-by: #45 invalid\nBlocked-by: #0\n\
+             ```text\nBlocked-by: #46\n```\n\
+             <!--\nBlocked-by: #48\n-->\n",
+            42,
+        );
+        assert_eq!(declarations.blocked_by, vec![43, 44]);
+        assert_eq!(declarations.bundle_with, vec![47]);
+        assert!(parse_issue_monitor_dependencies("ordinary issue body", 42)
+            .blocked_by
+            .is_empty());
+        assert_eq!(
+            parse_issue_monitor_dependencies("```html\n<!-- example\n```\nBlocked-by: #44", 42)
+                .blocked_by,
+            vec![44],
+            "comment examples inside fences cannot hide later declarations"
+        );
+    }
+
+    #[test]
+    fn dependency_pending_claim_reprobes_after_rescan_without_free_capacity() {
+        let now = "2026-10-23T00:00:00Z";
+        for outcome in [ClaimProbeOutcome::Completed, ClaimProbeOutcome::Deferred] {
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[42], "test", now);
+            let mut dependent = issue(42);
+            dependent.body = Some("Blocked-by: #44".to_string());
+            let candidates = [dependent, issue(44)];
+            scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(
+                monitor.try_prepare_claim_effects_with_probe_confirmed(
+                    "owner",
+                    now,
+                    1,
+                    None,
+                    |number| Ok::<_, ()>(if number == 44 {
+                        outcome
+                    } else {
+                        ClaimProbeOutcome::Claimable
+                    })
+                ),
+                Ok(1)
+            );
+            let key = monitor.pending_effects()[0].attempt_key();
+            assert!(monitor.mark_pending_effect_attempting(&key));
+            assert!(monitor.retry_pending_effect(&key));
+            scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+            assert_eq!(monitor.claim_candidate_refresh_plan(1).0, 0);
+            assert!(!monitor.effect_attempt_is_ready(&monitor.pending_effects()[0], now));
+            assert_eq!(monitor.dependency_probe_candidates(1), vec![44]);
+            let mut probed = Vec::new();
+            assert_eq!(
+                monitor.try_prepare_claim_effects_with_probe_confirmed(
+                    "owner",
+                    now,
+                    1,
+                    None,
+                    |number| {
+                        probed.push(number);
+                        Ok::<_, ()>(outcome)
+                    }
+                ),
+                Ok(0)
+            );
+            assert_eq!(probed, vec![44]);
+            assert_eq!(monitor.pending_effects().len(), 1);
+            assert!(monitor.effect_attempt_is_ready(&monitor.pending_effects()[0], now));
+            let retry_key = monitor.pending_effects()[0].attempt_key();
+            assert!(monitor.mark_pending_effect_attempting(&retry_key));
+        }
+    }
+
+    #[test]
+    fn dependency_cycles_disable_only_cyclic_edges_and_preserve_external_blockers() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        let mut a = issue(42);
+        a.body = Some("Blocked-by: #43 #44 #999".to_string());
+        let mut b = issue(43);
+        b.body = Some("Blocked-by: #42".to_string());
+        let mut c = issue(44);
+        c.labels.push("hold".to_string());
+        scan_issue_monitor_candidates(&mut monitor, &[a, b, c], now);
+
+        let view = monitor.inbox_view_at(now);
+        let a = view.iter().find(|item| item.issue.number == 42).unwrap();
+        assert_eq!(a.state, MonitorInboxState::BlockedByDependency);
+        assert_eq!(
+            a.dependency.as_ref().unwrap().blocked_by,
+            vec![IssueMonitorDependencyBlocker { number: 44 }]
+        );
+        assert!(a.dependency.as_ref().unwrap().cycle);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 43);
+        let status = monitor.agent_status_at(now);
+        assert_eq!(
+            status
+                .inbox
+                .iter()
+                .find(|item| item.issue_number == 42)
+                .unwrap()
+                .state,
+            MonitorInboxState::BlockedByDependency
+        );
+        assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), vec![42]);
+    }
+
+    #[test]
+    fn dependency_admission_evidence_survives_only_its_current_delivery_and_source() {
+        let now = "2026-10-23T00:00:00Z";
+        for completed in [Some(true), None] {
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                ..Default::default()
+            });
+            monitor.set_gui_connected(true);
+            monitor.terminal_queue_push(&[42, 45], "test", now);
+            let mut dependent = issue(42);
+            dependent.body = Some("Blocked-by: #44 #46".to_string());
+            let mut foreign = issue(45);
+            foreign.body = dependent.body.clone();
+            let mut blocker = issue(44);
+            blocker.url = Some("https://example.test/issues/44".to_string());
+            let observations = [dependent, blocker, foreign, issue(46)];
+            scan_issue_monitor_candidates(&mut monitor, &observations, now);
+            monitor.record_dependency_completion(44, completed);
+            monitor.record_dependency_completion(46, Some(true));
+            assert!(monitor.apply_confirmed_claim(42, "current-claim", "owner", "effect", now));
+            let prefs: IssueMonitorPrefs =
+                serde_json::from_value(serde_json::to_value(monitor.prefs()).unwrap()).unwrap();
+            let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            restored.set_gui_connected(true);
+            assert_eq!(
+                restored.prefs().pending_launch_deliveries[0]
+                    .dependency_observations
+                    .len(),
+                2,
+                "a writer without scan facts preserves sealed evidence"
+            );
+            let mut cached = observations.clone();
+            cached[1].url = None;
+            cached[1].title = "cached presentation".to_string();
+            restored.observe_dependency_candidates(&cached);
+            restored.record_candidate(observations[0].clone());
+            assert!(
+                restored.launch_dependency_exclusion(42).is_none(),
+                "the same delivery retains its source-bound admission observation"
+            );
+            assert!(
+                restored.launch_dependency_exclusion(45).is_some(),
+                "another owner cannot borrow that observation"
+            );
+            assert!(
+                restored.scan_dependency_exclusion(42).is_some(),
+                "a new claim cannot borrow predecessor delivery observations"
+            );
+            restored.record_dependency_completion(44, Some(false));
+            assert!(
+                restored.launch_dependency_exclusion(42).is_some(),
+                "a current negative takes precedence over an older sealed answer"
+            );
+            restored.observe_dependency_candidates(&cached);
+            let old_observation = restored.dependency_observation(44, Some(true)).unwrap();
+            let mut changed = observations[1].clone();
+            changed.body = Some("new prerequisite work".to_string());
+            restored.record_candidate(changed);
+            restored.observe_dependency_completions(&BTreeMap::from([(44, old_observation)]));
+            assert!(
+                restored.launch_dependency_exclusion(42).is_some(),
+                "changed blocker source invalidates the sealed observation"
+            );
+            assert_eq!(
+                restored.dependency_probe_candidates(1),
+                vec![44],
+                "an unmaterialized delivery refreshes invalidated proof despite its reserved slot"
+            );
+            let disk = restored.prefs();
+            restored.record_dependency_completion(44, completed);
+            restored.rebase_daemon_driver_prefs(&disk);
+            let prefs: IssueMonitorPrefs =
+                serde_json::from_value(serde_json::to_value(restored.prefs()).unwrap()).unwrap();
+            let mut refreshed = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+            cached[1].body = Some("new prerequisite work".to_string());
+            refreshed.observe_dependency_candidates(&cached);
+            refreshed.record_candidate(cached[0].clone());
+            assert!(
+                refreshed.launch_dependency_exclusion(42).is_none(),
+                "the refreshed same-delivery proof survives disk rebase and spawn reconstruction"
+            );
+            assert!(refreshed.launch_dependency_exclusion(45).is_some());
+            assert!(refreshed.scan_dependency_exclusion(42).is_some());
+        }
+    }
+
+    #[test]
+    fn dependency_readiness_preserves_a_newer_reopen_over_stale_closed_cache() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.transition_issue_closure(
+            44,
+            IssueClosureState::Reopened,
+            IssueClosureEvidence::ExplicitRevision,
+            Some("2026-10-23T00:02:00Z".to_string()),
+        );
+        let mut dependent = issue(42);
+        dependent.body = Some("Blocked-by: #44".to_string());
+        let mut stale = issue(44);
+        stale.state = IssueMonitorIssueState::Closed;
+        stale.updated_at = Some("2026-10-23T00:01:00Z".to_string());
+        scan_issue_monitor_candidates(&mut monitor, &[dependent, stale], now);
+        assert!(
+            monitor.launch_dependency_exclusion(42).is_some(),
+            "a rejected stale closure cannot release a dependency"
+        );
+    }
+
+    #[test]
+    fn dependency_completion_observations_are_scan_local_and_late_claims_are_released() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", now);
+        let mut dependent = issue(42);
+        dependent.body = Some("Blocked-by: #44".to_string());
+        let observations = [dependent.clone(), issue(44)];
+        scan_issue_monitor_candidates(&mut monitor, &observations, now);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+        monitor.record_dependency_completion(44, None);
+        assert!(monitor.launch_dependency_exclusion(42).is_none());
+        assert!(
+            !monitor.dependency_is_done(44),
+            "unknown never becomes Done"
+        );
+        scan_issue_monitor_candidates(&mut monitor, &observations, now);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+        monitor.record_dependency_completion(44, Some(true));
+        assert!(monitor.launch_dependency_exclusion(42).is_none());
+        let mut revised = issue(44);
+        revised.updated_at = Some("2026-10-23T00:01:00Z".to_string());
+        monitor.record_candidate(revised);
+        assert!(monitor.launch_dependency_exclusion(42).is_some());
+        assert!(!monitor.apply_confirmed_claim(42, "old-claim", "owner", "effect", now));
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                if claim_id == "old-claim" && owner == "owner"
+        )));
+    }
+
+    #[test]
+    fn dependency_ready_scan_keeps_a_blocked_head_and_claims_the_next_ready_issue() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42, 43], "test", now);
+        let mut dependent = issue(42);
+        dependent.body = Some("## Dependencies\nBlocked-by: #44".to_string());
+        let mut blocker = issue(44);
+        blocker.labels.push("hold".to_string());
+        scan_issue_monitor_candidates(&mut monitor, &[dependent, issue(43), blocker], now);
+
+        let (available, frontier) = monitor.claim_probe_plan(1);
+        assert_eq!(available, 1);
+        assert_eq!(
+            frontier,
+            vec![43],
+            "blocked work never enters the claim frontier"
+        );
+        assert_eq!(
+            monitor.claim_candidate_refresh_plan(1).1,
+            vec![42, 43],
+            "source refresh still confirms candidates that a dependency probe may unblock"
+        );
+        assert_eq!(monitor.active_count(), 0);
+        let launched = monitor
+            .next_launch_request(now)
+            .expect("the next ready issue");
+        assert_eq!(launched.issue_number, 43);
+        assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), vec![42]);
+    }
+
+    #[test]
+    fn dependency_ready_scan_unblocks_after_the_blocker_closes() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", now);
+        let mut dependent = issue(42);
+        dependent.body = Some("Blocked-by: #44".to_string());
+        let mut blocker = issue(44);
+        scan_issue_monitor_candidates(&mut monitor, &[dependent.clone(), blocker.clone()], now);
+        assert!(monitor.next_launch_request(now).is_none());
+        assert_eq!(monitor.queue_len(), 1);
+
+        blocker.state = IssueMonitorIssueState::Closed;
+        blocker.updated_at = Some("2026-10-23T00:01:00Z".to_string());
+        scan_issue_monitor_candidates(&mut monitor, &[dependent, blocker], "2026-10-23T00:01:00Z");
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 42);
+    }
+
+    #[test]
     fn scan_claim_planning_is_side_effect_free_and_deduplicated() {
         // Phase 7 T-140: the cloned scan may select candidates, but GitHub
         // mutation begins only after the proposal commits and is fenced by the
@@ -41655,6 +42697,11 @@ mod tests {
 
     #[test]
     fn prefs_cache_reuses_snapshots_and_invalidates_on_file_changes() {
+        // Parallel tests may legitimately evict entries from the global cache.
+        // Exercise the same reader with an isolated retention map.
+        let cache = std::sync::Mutex::new(BTreeMap::new());
+        let load_issue_monitor_prefs =
+            |path: &Path| load_issue_monitor_prefs_raw_with_cache(path, &cache);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issue-monitor.json");
         let mut prefs = IssueMonitorPrefs::default();
@@ -44739,17 +45786,49 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queue_auto_refill_skips_existing_readiness_exclusions() {
+    fn hold_label_uses_queue_membership_for_admission() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        let mut held = issue(1);
+        held.labels.push("HoLd".into());
+        monitor.terminal_queue_push(&[1], "operator", now);
+        scan_issue_monitor_candidates(&mut monitor, &[held.clone(), issue(2)], now);
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 1);
+        assert!(monitor.next_launch_request(now).is_none());
+
+        let mut backlog = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        backlog.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut backlog, &[held, issue(2)], now);
+        assert!(backlog.claim_probe_plan(1).1.is_empty());
+        assert!(backlog.next_launch_request(now).is_none());
+    }
+
+    #[test]
+    fn legacy_hold_exclusion_reads_as_source_exclusion() {
+        let state: MonitorInboxState = serde_json::from_str("\"hold_excluded\"").unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap(), "source_excluded");
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn terminal_queue_auto_refill_ignores_hold_but_preserves_readiness_exclusions() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.set_terminal_queue_auto_refill(true, 1);
+        monitor.set_terminal_queue_auto_refill(true, 2);
         let mut held = issue(1);
         held.labels.push("hold".to_string());
         let mut not_ready = issue(2);
         not_ready.labels.push("gwt-spec".to_string());
         not_ready.readiness = IssueMonitorReadiness::NotReady;
         scan_issue_monitor_candidates(&mut monitor, &[held, not_ready, issue(3)], now);
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3]);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 3]);
     }
 
     #[test]
@@ -47745,6 +48824,32 @@ mod tests {
             ..healthy
         };
         assert!(!provider_reports_healthy_for_agent("codex", &[reached]));
+    }
+
+    #[test]
+    fn codex_config_preflight_requeues_without_consuming_an_attempt() {
+        let now = "2026-10-23T00:00:00Z";
+        let message = format!(
+            "codex_config_preflight: invalid config.toml; {}",
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        );
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(4153, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        monitor.complete_active_launch(4153, "codex-config-preflight");
+
+        monitor.record_launch_failed_at(4153, &message, now);
+
+        assert_eq!(monitor.attempt_count(4153), 0);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(!monitor.failed_issues.contains_key(&4153));
+        let item = monitor.inbox_item(4153).expect("inbox item");
+        assert_eq!(item.state, MonitorInboxState::Queued);
+        assert_eq!(item.error_message.as_deref(), Some(message.as_str()));
+        assert!(!monitor.retry_ready(4153, now));
     }
 
     #[test]

@@ -2609,7 +2609,7 @@ async fn client_session_with_scope(
                                                     .await;
                                                     break;
                                                 }
-                                                AgentDurableAuthority::Unavailable => {
+                                                AgentDurableAuthority::PendingActivation | AgentDurableAuthority::Unavailable => {
                                                     tracing::warn!(
                                                         target: "gwt_security",
                                                         "agent pane WebSocket execution authority is unavailable"

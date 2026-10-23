@@ -58,13 +58,17 @@ test.describe("External feedback intake (isolated live backend)", () => {
       for (const number of [fixture.raw, fixture.external]) {
         const entry = inbox.find((row: any) => row.issue.number === number);
         expect(entry.issue.author_login).toBe(number === fixture.raw ? "akiojin" : "external-reporter");
-        expect(entry.state).toMatch(/hold_excluded|not_ready/);
+        expect(entry.state).toMatch(/source_excluded|not_ready/);
         expect(entry.claim_id ?? null).toBeNull();
         expect(entry.delivery_id ?? null).toBeNull();
         expect(entry.launched_window_id ?? null).toBeNull();
         const card = surface.locator(`.knowledge-row[data-issue-number="${number}"]:visible, .kanban-card[data-issue-number="${number}"]:visible`).first();
         await expect(card).toBeVisible();
         await expect(card).toContainText(entry.exclusion_reason);
+        if (entry.state === "source_excluded") {
+          await expect(card.locator(".knowledge-row-badge")).toHaveText("Needs triage");
+          await expect(card.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
+        }
       }
       const status = cli();
       expect(status).toMatchObject({ enabled: false, autonomous_mode: false, active_launches: [] });

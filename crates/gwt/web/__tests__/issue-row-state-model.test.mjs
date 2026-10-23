@@ -45,6 +45,31 @@ test("pending SessionStart diagnosis uses the existing row reason without changi
   assert.deepEqual(issueRowStateModel({ entry: { ...entry, readiness_diagnosis: null } }).secondary, []);
 });
 
+test("Issue #4499 source exclusions and legacy states show triage with their actual or fallback reason", async () => {
+  const { issueRowStateModel } = await importSurfaceModule();
+  for (const monitor_state of ["source_excluded", "hold_excluded"]) {
+    const entry = knowledgeEntry(4499, { monitor_state });
+    const fallback = issueRowStateModel({ entry });
+    assert.deepEqual(fallback.primary, { key: "monitor:source_excluded", label: "Needs triage", tone: "needs-input" });
+    assert.deepEqual(fallback.secondary, [{ kind: "reason", key: "reason",
+      label: "Source trust review is required before automatic launches." }]);
+    for (const exclusion_reason of [
+      "untrusted feedback; PM triage required; use a separate curated execution owner",
+      "Source temporarily unavailable; hold label: HoLd",
+    ]) {
+      const actual = issueRowStateModel({ entry: { ...entry, exclusion_reason } });
+      assert.equal(actual.secondary[0].label, exclusion_reason);
+    }
+    for (const exclusion_reason of [
+      "hold label: hold", "Excluded by label: hold", "hold label: HoLd", "hold label: HOLD", "Excluded by label: HoLd",
+    ]) {
+      const stale = issueRowStateModel({ entry: { ...entry, exclusion_reason } });
+      assert.equal(stale.secondary[0].label,
+        "This exclusion was reported by an older monitor. Refresh to confirm queue membership.");
+    }
+  }
+});
+
 test("Issue #4862 a deliberate stop stays Held despite stale window activity", async () => {
   const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
   const entry = knowledgeEntry(4862, { monitor_state: "needs_human", error_message: "stopped: PM paused for investigation",
@@ -77,6 +102,38 @@ test("Issue #4862 launch diagnoses retain the cause and name the next operation"
       assert.equal(issueQueueColumn(knowledgeEntry(4862, { monitor_state, error_message }), workRow()), "backlog");
     }
   }
+});
+
+test("Issue #6141 closed issues keep live sessions in Active until cleanup", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(6141, { state: "closed", monitor_state: "released" });
+  const live = agentWindow("live", 6141);
+  assert.equal(issueQueueColumn(entry, null, live), "active");
+  assert.equal(issueQueueColumn(entry, workRow()), "active");
+  assert.equal(issueQueueColumn({ ...entry, monitor_state: "launched" }), "active");
+  assert.equal(issueQueueColumn(entry, null, { ...live, status: "stopped" }), "done");
+  assert.equal(issueQueueColumn(entry, null, { ...live, status: "error" }), "done");
+  const model = issueRowStateModel({ entry, inlineWindow: live });
+  assert.deepEqual(model.secondary.map(item => item.label), ["Closed", "Session cleanup pending"]);
+});
+
+test("Issue #6141 Active metric follows the displayed cards and errors explain their cause", async t => {
+  const runtimeStates = {};
+  const fixture = await makeFixture({ workspaceWindows: [agentWindow("live", 6141)], runtimeStates });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  fixture.surface.applyIssueMonitorStatus({ active_count: 7, max_active_agents: 8 });
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(6141, { state: "closed" })]);
+  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1");
+  const metric = fixture.body.querySelector('[data-metric="active"]');
+  assert.equal(metric.textContent, "Active 1/8");
+  assert.match(metric.dataset.issueExplanation, /capacity.*7\/8/i);
+  runtimeStates.live = "error";
+  fixture.surface.applyIssueMonitorInbox([{ issue: { number: 6141, state: "closed" },
+    state: "agent_failed", error_message: "Agent exited with code 42" }]);
+  fixture.surface.renderAllKnowledgeBridgeWindows();
+  assert.equal(fixture.body.querySelector('[data-queue-column="done"] h3').textContent, "Done · 1");
+  assert.equal(metric.textContent, "Active 0/8");
+  assert.match(fixture.body.querySelector('.knowledge-row .knowledge-row-badge').dataset.issueExplanation, /Agent exited with code 42/);
 });
 
 test("Issue #5491 judgment holds outrank stale Work activity but preserve live agents", async () => {
@@ -157,7 +214,7 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue" } = {}) {
+async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue", runtimeStates = {} } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
@@ -178,6 +235,7 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
   };
   let windows = [issueWindow, ...workspaceWindows];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);
@@ -189,11 +247,11 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     workspaceWindowById: (id) => windows.find((entry) => entry.id === id) || null,
     getWorkspaceWindows: () => [...windows, ...otherProjectWindows],
     windowCatalogModel: {
-      read: () => ({ catalog: { appState: { tabs: [
+      read: () => ({ catalog: { runtimeStates, appState: { tabs: [
         { id: "project-1", workspace: { windows } },
         { id: "project-2", workspace: { windows: otherProjectWindows } },
       ] } } }),
-      subscribe: () => () => {},
+      subscribeFrame: () => () => {},
     },
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset: () => kind,
@@ -463,28 +521,28 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
   assert.deepEqual(merged.actions, ["cleanup-work", "resume-work"]);
   assert.deepEqual(merged.overflow, ["continue-work", "configure-issue"]);
 
-  const onHold = issueRowStateModel({
+  const sourceExcluded = issueRowStateModel({
     entry: knowledgeEntry(45, {
-      monitor_state: "hold_excluded",
-      exclusion_reason: "Excluded by label: hold",
+      monitor_state: "source_excluded",
+      exclusion_reason: "untrusted feedback; PM triage required",
       is_spec: true,
       labels: ["gwt-spec", "auto-merge"],
     }),
   });
-  assert.deepEqual(onHold.primary, {
-    key: "monitor:hold_excluded",
-    label: "On hold",
+  assert.deepEqual(sourceExcluded.primary, {
+    key: "monitor:source_excluded",
+    label: "Needs triage",
     tone: "needs-input",
   });
   assert.deepEqual(
-    onHold.secondary.map((item) => [item.kind, item.label]),
+    sourceExcluded.secondary.map((item) => [item.kind, item.label]),
     [
-      ["reason", "Excluded by label: hold"],
+      ["reason", "untrusted feedback; PM triage required"],
       ["chip", "Spec"],
     ],
   );
-  assert.deepEqual(onHold.actions, ["configure-issue"]);
-  assert.deepEqual(onHold.overflow, []);
+  assert.deepEqual(sourceExcluded.actions, ["configure-issue"]);
+  assert.deepEqual(sourceExcluded.overflow, []);
 
   const closedQueued = issueRowStateModel({
     entry: knowledgeEntry(46, { monitor_state: "queued", queue_position: 3, state: "closed" }),
@@ -704,8 +762,8 @@ test("every rendered Issue row has one primary badge, at most two secondary item
       related_work_refs: [{ id: "work-50", branch: "work/issue-50" }],
     }),
     knowledgeEntry(45, {
-      monitor_state: "hold_excluded",
-      exclusion_reason: "Excluded by label: hold",
+      monitor_state: "source_excluded",
+      exclusion_reason: "untrusted feedback; PM triage required",
       labels: ["gwt-spec", "auto-merge"],
       is_spec: true,
     }),
@@ -793,9 +851,9 @@ test("every rendered Issue row has one primary badge, at most two secondary item
   assert.deepEqual(visibleActions(row50), ["cleanup-work", "resume-work"]);
 
   const row45 = fixture.body.querySelector('[data-issue-number="45"]');
-  assert.equal(row45.querySelector(".knowledge-row-badge").textContent, "On hold");
+  assert.equal(row45.querySelector(".knowledge-row-badge").textContent, "Needs triage");
   assert.deepEqual(secondaryItems(row45), [
-    { kind: "reason", text: "Excluded by label: hold" },
+    { kind: "reason", text: "untrusted feedback; PM triage required" },
     { kind: "chip", text: "Spec" },
   ]);
   assert.deepEqual(visibleActions(row45), ["configure-issue"]);

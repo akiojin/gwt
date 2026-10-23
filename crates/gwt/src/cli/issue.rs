@@ -200,35 +200,9 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
+            run_issue_comment(env, number, &body, out)?
         }
-        IssueCommand::CommentBody { number, body } => {
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
-        }
+        IssueCommand::CommentBody { number, body } => run_issue_comment(env, number, &body, out)?,
         IssueCommand::MonitorReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -240,12 +214,14 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorPriorityMove {
             project_root,
             expected_priority_order,
+            reason,
             number,
             position,
         } => run_monitor_priority_move(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            reason.as_deref(),
             number,
             position,
             out,
@@ -253,11 +229,13 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorPrioritySet {
             project_root,
             expected_priority_order,
+            reason,
             issue_numbers,
         } => run_monitor_priority_set(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            reason.as_deref(),
             &issue_numbers,
             out,
         )?,
@@ -282,11 +260,13 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             expected_queue_order,
             issue_numbers,
+            all_terminals,
         } => run_monitor_queue_remove(
             env,
             project_root.as_deref(),
             expected_queue_order.as_deref(),
             &issue_numbers,
+            all_terminals,
             out,
         )?,
         IssueCommand::MonitorQueueMove {
@@ -370,10 +350,12 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
             expected_priority_order,
+            expected_queue_order,
         } => run_monitor_launch_now(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            expected_queue_order.as_deref(),
             number,
             out,
         )?,
@@ -928,6 +910,7 @@ fn run_monitor_status<E: CliEnv>(
     ))
     .map_err(io_as_api_error)?;
     output["priority_order"] = serde_json::json!(prefs.priority_order);
+    attach_priority_reason_note(&mut output, &prefs);
     output["monitor_runtime_stop_requests"] =
         serde_json::json!(prefs.monitor_runtime_stop_requests);
     output["config_token"] = serde_json::json!(prefs.config_token());
@@ -1505,10 +1488,39 @@ fn check_expected_priority_order(current: &[u64], expected: Option<&[u64]>) -> i
     Ok(())
 }
 
+fn record_priority_reason(
+    prefs: &mut crate::IssueMonitorPrefs,
+    reason: Option<&str>,
+) -> io::Result<()> {
+    if let Some(reason) = reason {
+        if reason.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reason must not be empty",
+            ));
+        }
+        prefs.priority_reason_note = Some(crate::issue_monitor::IssueMonitorPriorityReasonNote {
+            reason: reason.to_string(),
+            priority_order: prefs.priority_order.clone(),
+            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
+    }
+    Ok(())
+}
+
+fn attach_priority_reason_note(output: &mut serde_json::Value, prefs: &crate::IssueMonitorPrefs) {
+    output["priority_reason_note"] = serde_json::json!(prefs.priority_reason_note);
+    output["priority_reason_matches_order"] = serde_json::json!(prefs
+        .priority_reason_note
+        .as_ref()
+        .map(|note| note.priority_order == prefs.priority_order));
+}
+
 fn run_monitor_priority_move<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    reason: Option<&str>,
     number: u64,
     position: IssueMonitorPriorityPosition,
     out: &mut String,
@@ -1533,12 +1545,11 @@ fn run_monitor_priority_move<E: CliEnv>(
         }
         prefs.priority_order.insert(index, number);
         reorder_local_terminal_queue_by_priority(prefs);
+        record_priority_reason(prefs, reason)?;
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(
-        &monitor_priority_reply(&project_root, &prefs.priority_order, &[number]).to_string(),
-    );
+    out.push_str(&monitor_priority_reply(&project_root, &prefs, &[number]).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -1573,13 +1584,14 @@ fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs
 /// call now would report a write that happened as one that did not.
 fn monitor_priority_reply(
     project_root: &std::path::Path,
-    priority_order: &[u64],
+    prefs: &crate::IssueMonitorPrefs,
     placed: &[u64],
 ) -> serde_json::Value {
     let mut reply = serde_json::json!({
-        "priority_order": priority_order,
+        "priority_order": prefs.priority_order,
         "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
     });
+    attach_priority_reason_note(&mut reply, prefs);
     if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
         let not_in_inbox = placed
             .iter()
@@ -1602,6 +1614,7 @@ fn run_monitor_priority_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    reason: Option<&str>,
     issue_numbers: &[u64],
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -1611,12 +1624,11 @@ fn run_monitor_priority_set<E: CliEnv>(
         check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
         prefs.priority_order = issue_numbers.to_vec();
         reorder_local_terminal_queue_by_priority(prefs);
+        record_priority_reason(prefs, reason)?;
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(
-        &monitor_priority_reply(&project_root, &prefs.priority_order, issue_numbers).to_string(),
-    );
+    out.push_str(&monitor_priority_reply(&project_root, &prefs, issue_numbers).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -2077,6 +2089,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     expected_queue_order: Option<&[u64]>,
     numbers: &[u64],
+    all_terminals: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
@@ -2088,7 +2101,11 @@ fn run_monitor_queue_remove<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        monitor.terminal_queue_remove(numbers, &now);
+        if all_terminals {
+            monitor.terminal_queue_remove_all_terminals(numbers, &now);
+        } else {
+            monitor.terminal_queue_remove(numbers, &now);
+        }
         *prefs = monitor.prefs();
         Ok(())
     })
@@ -2174,6 +2191,7 @@ fn run_monitor_launch_now<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    expected_queue_order: Option<&[u64]>,
     number: u64,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -2219,6 +2237,7 @@ fn run_monitor_launch_now<E: CliEnv>(
     }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
+        check_expected_queue_order(prefs, expected_queue_order)?;
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
         // Issue #3616 AC-5: priority alone cannot beat `retry_ready`. A
@@ -4625,8 +4644,10 @@ fn apply_monitor_tiers_set(
     prefs
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.launch_auto = auto;
-    prefs.launch_tiers = tiers.unwrap_or_default();
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.set_launch_tiers(auto, tiers.unwrap_or_default());
+    *prefs = monitor.prefs();
     Ok(())
 }
 
@@ -4826,12 +4847,15 @@ fn apply_monitor_profiles_set(
     usage_threshold_percent: Option<u8>,
 ) -> io::Result<()> {
     validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    let mut candidate =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     // Same revocation the GUI save performs: proposals prepared against the
     // previous pool must not commit under the new one.
-    prefs
+    candidate
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.set_launch_profile_pool(profiles.to_vec());
+    candidate.set_launch_profile_pool(profiles.to_vec());
+    *prefs = candidate.prefs();
     Ok(())
 }
 
@@ -6186,6 +6210,44 @@ fn cache_resource_is_fresh(path: &Path) -> bool {
         .is_some_and(|age| age < crate::issue_cache::ISSUE_CACHE_TTL)
 }
 
+/// Once GitHub has created the comment, a failed local projection must not
+/// turn success into a refusal that invites a duplicate POST (Issue #4171).
+fn run_issue_comment<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    body: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let comment = env.client().create_comment(IssueNumber(number), body)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.comment",
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    out.push_str(&format!(
+        "created comment {} on #{}\n",
+        comment.id.0, number
+    ));
+    if let Err(error) = refresh_issue_cache(env, IssueNumber(number)) {
+        let message = format!(
+            "comment {} on #{} was created; postprocessing cache refresh failed: {error}",
+            comment.id.0, number
+        );
+        super::operation_warnings::push("issue_comment_postprocessing_failed", &message);
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            message,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: Some(number),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+    }
+    Ok(0)
+}
+
 pub(super) fn refresh_issue_cache<E: CliEnv>(
     env: &mut E,
     number: IssueNumber,
@@ -6399,10 +6461,9 @@ where
         // PM and let the index catch up through its own fingerprint check.
         if let Err(error) = rebuild_issue_index(env.repo_path()) {
             let message = format!("rebuild issue index: {error}");
-            tracing::warn!(
-                issue = number.0,
-                %message,
-                "issue cache written; index rebuild failed"
+            super::operation_warnings::push(
+                "issue_cache_index_refresh_failed",
+                format!("issue #{} cache written; {message}", number.0),
             );
             gwt_core::error_ledger::record_fail_open(
                 gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
@@ -7123,6 +7184,7 @@ mod tests {
         launched_window_id: Option<&str>,
     ) -> crate::issue_monitor::IssueMonitorInboxSummary {
         crate::issue_monitor::IssueMonitorInboxSummary {
+            dependency: None,
             launch_tier: None,
             landing_tier: None,
             non_agent_attempts: 0,
@@ -7282,10 +7344,10 @@ mod tests {
     fn a_held_row_with_a_live_session_still_reports_the_disagreement() {
         let mut inbox = vec![mismatch_row(
             4777,
-            crate::MonitorInboxState::HoldExcluded,
+            crate::MonitorInboxState::SourceExcluded,
             None,
         )];
-        inbox[0].exclusion_reason = Some("matched label: hold".to_string());
+        inbox[0].exclusion_reason = Some("Untrusted source; PM triage required".to_string());
         let sessions = vec![mismatch_session(Some(4777))];
 
         let output = mismatch_status(&inbox, &sessions);
@@ -7299,7 +7361,7 @@ mod tests {
         let reason = output["inbox"][0]["exclusion_reason"]
             .as_str()
             .expect("existing hold and live-session mismatch are both explained");
-        assert!(reason.starts_with("matched label: hold"));
+        assert!(reason.starts_with("Untrusted source; PM triage required"));
         assert!(reason.contains("working_without_active_row"));
     }
 
@@ -8021,6 +8083,37 @@ mod tests {
             comments: vec![],
         });
         (tmp, env)
+    }
+
+    #[test]
+    fn issue_comment_from_file_refreshes_cache_after_success() {
+        let (tmp, mut env) = seeded_edit_env(&[]);
+        let _home = ScopedGwtHome::set(tmp.path().join("gwt-home"));
+        let file = "comment.md".to_string();
+        env.files.insert(file.clone(), "evidence".into());
+        super::super::operation_warnings::take();
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::Comment { number: 7, file },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let comments = env.client.comments(IssueNumber(7));
+        assert_eq!(comments.len(), 1);
+        assert_eq!(out, format!("created comment {} on #7\n", comments[0].id.0));
+        assert_eq!(
+            Cache::new(env.cache_root())
+                .load_entry(IssueNumber(7))
+                .unwrap()
+                .snapshot
+                .comments,
+            comments
+        );
+        assert!(super::super::operation_warnings::take().is_empty());
     }
 
     fn fetched(env: &crate::cli::TestEnv, number: u64) -> IssueSnapshot {
@@ -9585,6 +9678,7 @@ mod tests {
         let without_profile_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9602,6 +9696,7 @@ mod tests {
         let disabled_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9616,6 +9711,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9680,6 +9776,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9728,6 +9825,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9776,6 +9874,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9887,6 +9986,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 5061,
@@ -10005,7 +10105,7 @@ mod tests {
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         assert_eq!(
-            run_monitor_launch_now(&env, None, None, 5061, &mut out).unwrap(),
+            run_monitor_launch_now(&env, None, None, None, 5061, &mut out).unwrap(),
             1
         );
         let response: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -10099,6 +10199,48 @@ mod tests {
         assert_eq!(
             monitor_queue_reply(&unrelated, Some("another-host"))["urgent_queue_token"],
             token
+        );
+    }
+
+    #[test]
+    fn issue_monitor_queue_remove_all_terminals_preserves_unrelated_entries() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-22T00:00:00Z");
+        let mut prefs = monitor.prefs();
+        let remote = prefs.terminal_queues[&crate::process::current_hostname()].clone();
+        prefs
+            .terminal_queues
+            .insert("orphan-host".into(), remote.clone());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let super::super::CliCommand::Issue(command) = super::super::json_envelope::parse_operation(
+            "issue.monitor.queue.remove",
+            &serde_json::json!({"numbers":[1,3,4], "all_terminals":true, "expected_queue_order":[1,2,3]}),
+        ).unwrap() else { panic!("expected Issue command") };
+        run(&mut env, command, &mut String::new()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        for (host, queue) in &saved.terminal_queues {
+            assert_eq!(
+                queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.number)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                saved.terminal_queue_exclusions[host],
+                [1, 3, 4].into_iter().collect()
+            );
+        }
+        assert_eq!(
+            saved.terminal_queues["orphan-host"].last_seen_at,
+            remote.last_seen_at
         );
     }
 
@@ -10612,7 +10754,7 @@ mod tests {
                 .unwrap();
         let mut out = String::new();
         assert_eq!(
-            run_monitor_launch_now(&env, None, None, 481002, &mut out).unwrap(),
+            run_monitor_launch_now(&env, None, None, None, 481002, &mut out).unwrap(),
             1
         );
         let refused: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -10658,8 +10800,15 @@ mod tests {
             assert_eq!(refused["refused"], serde_json::json!([481003]));
             let mut launch_out = String::new();
             assert_eq!(
-                run_monitor_launch_now(&client_env, Some(&repo), None, 481003, &mut launch_out)
-                    .unwrap(),
+                run_monitor_launch_now(
+                    &client_env,
+                    Some(&repo),
+                    None,
+                    None,
+                    481003,
+                    &mut launch_out
+                )
+                .unwrap(),
                 1
             );
             let refused: serde_json::Value = serde_json::from_str(&launch_out).unwrap();
@@ -10878,6 +11027,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -10937,15 +11087,21 @@ mod tests {
             },
         )
         .expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            Default::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        monitor.terminal_queue_push(&[7, 42], "operator", "2026-08-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
 
         let before = std::fs::read(&prefs_path).unwrap();
-        let command = |expected| {
+        let command = |expected, queue| {
             let super::super::CliCommand::Issue(command) =
                 super::super::json_envelope::parse_operation(
-                    "issue.monitor.launch_now",
-                    &serde_json::json!({"number": 42, "expected_priority_order": expected}),
+                    "issue.monitor.launch-now",
+                    &serde_json::json!({"number": 42, "expected_priority_order": expected, "expected_queue_order": queue}),
                 )
                 .unwrap()
             else {
@@ -10953,13 +11109,25 @@ mod tests {
             };
             command
         };
-        let error = run(&mut env, command(vec![7]), &mut out)
+        let error = run(&mut env, command(vec![7], vec![7, 42]), &mut out)
             .expect_err("stale launch must preserve queue and holds")
             .to_string();
         assert!(error.contains("priority_order changed"), "{error}");
         assert!(out.is_empty(), "no scan delivery result on conflict");
         assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
-        let _ = run(&mut env, command(vec![42]), &mut out).expect("launch_now result");
+        for stale_queue in [vec![42, 7], vec![]] {
+            let error = run(&mut env, command(vec![42], stale_queue), &mut out)
+                .expect_err("stale queue must preserve priority, queue and holds before scan")
+                .to_string();
+            assert!(error.contains("queue_order changed"), "{error}");
+            assert!(
+                error.contains("re-read issue.monitor.queue.list"),
+                "{error}"
+            );
+            assert!(out.is_empty(), "no scan delivery result on queue conflict");
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        }
+        let _ = run(&mut env, command(vec![42], vec![7, 42]), &mut out).expect("launch_now result");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
         assert_eq!(result["hold_cleared"], true);
@@ -11005,11 +11173,11 @@ mod tests {
         let mut out = String::new();
 
         let before = std::fs::read(&prefs_path).unwrap();
-        let command = |expected| {
+        let command = |expected, queue| {
             let super::super::CliCommand::Issue(command) =
                 super::super::json_envelope::parse_operation(
                     "issue.monitor.launch_now",
-                    &serde_json::json!({"number": 42, "expected_priority_order": expected}),
+                    &serde_json::json!({"number": 42, "expected_priority_order": expected, "expected_queue_order": queue}),
                 )
                 .unwrap()
             else {
@@ -11017,13 +11185,23 @@ mod tests {
             };
             command
         };
-        let error = run(&mut env, command(vec![7]), &mut out)
+        let error = run(&mut env, command(vec![7], vec![]), &mut out)
             .expect_err("stale launch must preserve queue and holds")
             .to_string();
         assert!(error.contains("priority_order changed"), "{error}");
         assert!(out.is_empty(), "no scan delivery result on conflict");
         assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
-        let _ = run(&mut env, command(vec![]), &mut out).expect("launch_now result");
+        let error = run(&mut env, command(vec![], vec![42, 7]), &mut out)
+            .expect_err("stale queue must preserve priority, queue and holds before scan")
+            .to_string();
+        assert!(error.contains("queue_order changed"), "{error}");
+        assert!(
+            error.contains("re-read issue.monitor.queue.list"),
+            "{error}"
+        );
+        assert!(out.is_empty(), "no scan delivery result on queue conflict");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let _ = run(&mut env, command(vec![], vec![]), &mut out).expect("launch_now result");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
         assert_eq!(result["hold_cleared"], true);
@@ -11726,6 +11904,7 @@ mod tests {
             needs_human: vec![2338],
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                dependency: None,
                 launch_tier: None,
                 landing_tier: None,
                 non_agent_attempts: 0,
@@ -11878,6 +12057,7 @@ mod tests {
                 needs_human: vec![2338],
                 released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                    dependency: None,
                     launch_tier: None,
                     landing_tier: None,
                     non_agent_attempts: 0,
@@ -12321,6 +12501,15 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("monitor_runtime_stop_requests");
+        // Assert presence and null before the legacy projection comparison;
+        // adding keys to its large json! fixture exceeds the macro recursion budget.
+        for field in ["priority_reason_note", "priority_reason_matches_order"] {
+            assert_eq!(
+                status.as_object_mut().unwrap().remove(field),
+                Some(serde_json::Value::Null),
+                "legacy preferences must explicitly report {field} as null"
+            );
+        }
         assert_eq!(
             status,
             serde_json::json!({
@@ -13013,6 +13202,7 @@ mod tests {
         for (command, expected) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
@@ -13021,6 +13211,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
@@ -13099,6 +13290,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![3, 1],
@@ -13112,6 +13304,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 4,
@@ -13147,6 +13340,7 @@ mod tests {
         for (command, expected_head) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![3, 1],
@@ -13155,6 +13349,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
@@ -13194,6 +13389,81 @@ mod tests {
                 "the next scan must select the priority head instead of FIFO issue 1"
             );
         }
+    }
+
+    #[test]
+    fn issue_monitor_priority_reason_note_roundtrips_without_claiming_freshness() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let super::super::CliCommand::Issue(command) =
+                super::super::json_envelope::parse_operation(operation, &params).unwrap()
+            else {
+                panic!("expected Issue command")
+            };
+            let mut out = String::new();
+            run(&mut env, command, &mut out)
+                .map(|_| serde_json::from_str::<serde_json::Value>(&out).unwrap())
+        };
+        let reply = invoke(
+            "issue.monitor.priority.set",
+            serde_json::json!({
+                "issue_numbers":[1,2], "expected_priority_order":[], "reason":"Unblock the release"
+            }),
+        )
+        .unwrap();
+        let note = reply["priority_reason_note"].clone();
+        assert_eq!(note["reason"], "Unblock the release");
+        assert_eq!(note["priority_order"], serde_json::json!([1, 2]));
+        let at =
+            chrono::DateTime::parse_from_rfc3339(note["recorded_at"].as_str().unwrap()).unwrap();
+        assert_eq!(at.offset().local_minus_utc(), 0);
+        assert_eq!(reply["priority_reason_matches_order"], true);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["priority_reason_note"], note);
+
+        let before = std::fs::read(&path).unwrap();
+        for params in [
+            serde_json::json!({"number":2,"reason":"stale","expected_priority_order":[]}),
+            serde_json::json!({"number":2,"reason":"bad position","position":9}),
+        ] {
+            assert!(invoke("issue.monitor.priority.move", params).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let moved = invoke(
+            "issue.monitor.priority-move",
+            serde_json::json!({
+                "number":2, "expected_priority_order":[1,2], "reason":"Fix the blocker first"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            moved["priority_reason_note"]["priority_order"],
+            serde_json::json!([2, 1])
+        );
+        assert_eq!(
+            moved["priority_reason_note"]["reason"],
+            "Fix the blocker first"
+        );
+        let historical = moved["priority_reason_note"].clone();
+        let unreasoned = invoke(
+            "issue.monitor.priority-set",
+            serde_json::json!({
+                "issue_numbers":[1,2]
+            }),
+        )
+        .unwrap();
+        assert_eq!(unreasoned["priority_reason_note"], historical);
+        assert_eq!(unreasoned["priority_reason_matches_order"], false);
+        let status = invoke("issue.monitor.status", serde_json::json!({})).unwrap();
+        assert_eq!(status["priority_reason_note"], historical);
+        assert_eq!(status["priority_reason_matches_order"], false);
     }
 
     #[test]
@@ -13308,6 +13578,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 1,
@@ -13327,6 +13598,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![1, 2, 3],
@@ -13340,6 +13612,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
@@ -13362,6 +13635,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
@@ -13383,6 +13657,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
@@ -13405,6 +13680,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 13,
@@ -13420,6 +13696,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo),
                     issue_numbers: Vec::new(),
@@ -13438,6 +13715,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(tmp.path().join("missing-project")),
                 issue_numbers: vec![99],
@@ -13817,6 +14095,26 @@ mod tests {
         let mut prefs = crate::IssueMonitorPrefs::default();
         prefs.set_launch_profile_pool(vec![pool_profile("claude", &[])]);
         let saved_pool = prefs.launch_profile_pool();
+        // All three claims were confirmed on the supported manual profile.
+        // The cold settings writer must use each delivery's saved Issue kind.
+        for (number, kind) in [(42, "issue"), (43, "spec"), (44, "issue")] {
+            prefs
+                .launching_issues
+                .push(crate::issue_monitor::IssueMonitorLaunchingIssue {
+                    issue_number: number,
+                    claimed_at: Some("2026-07-02T00:00:10Z".into()),
+                });
+            prefs.pending_launch_deliveries.push(
+                serde_json::from_value(serde_json::json!({
+                    "delivery_id": format!("pending-{number}"), "issue_number": number,
+                    "branch_name": format!("work/issue-{number}"), "linked_issue_kind": kind,
+                    "claim_id": format!("claim-{number}"), "claim_owner": "host:1",
+                    "materializer_id": (number == 44).then_some("gui"),
+                    "created_at": "2026-07-02T00:00:10Z"
+                }))
+                .unwrap(),
+            );
+        }
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -13826,7 +14124,7 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("codex", &[])],
+                vec![pool_profile("openclaw", &[])],
                 vec![pool_profile("claude", &["kind:spec"])],
             ]),
             &mut out,
@@ -13839,6 +14137,44 @@ mod tests {
         assert!(prefs.launch_auto);
         assert_eq!(prefs.tier_overrides[&4774], 1);
         assert_eq!(prefs.effective_launch_tiers().len(), 2);
+        assert_eq!(
+            prefs
+                .pending_launch_deliveries
+                .iter()
+                .map(|delivery| delivery.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44],
+            "cancel only the unowned unsupported Issue; keep the cold SPEC and owned delivery"
+        );
+        assert_eq!(
+            prefs
+                .launching_issues
+                .iter()
+                .map(|launch| launch.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44]
+        );
+        assert_eq!(prefs.pending_effects.len(), 1);
+        assert!(matches!(&prefs.pending_effects[0].payload,
+            crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                if claim_id == "claim-42" && owner == "host:1"));
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        assert!(restored.inbox_item(43).is_none());
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
         let before = fs::read(&path).unwrap();
         assert!(run_monitor_tier_set(&env, None, None, 4774, 2, &mut out).is_err());
         assert!(run_monitor_tiers_set(&env, None, None, true, Some(vec![]), &mut out).is_err());
@@ -14075,6 +14411,51 @@ command = "my-agent-cli"
         assert!(changes.iter().any(|change| {
             change["index"] == 1 && change["field"] == "model" && change["action"] == "reset"
         }));
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_fallback_compensates_an_unusable_pending_delivery() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
+        initial.launching_issues = vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: Some("2026-07-02T00:00:10Z".into()),
+        }];
+        initial.pending_launch_deliveries = vec![serde_json::from_value(serde_json::json!({
+            "delivery_id": "pending", "issue_number": 42,
+            "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+            "claim_id": "claim", "claim_owner": "host:1", "created_at": "2026-07-02T00:00:10Z"
+        }))
+        .unwrap()];
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+
+        assert_eq!(set_monitor_profiles(
+            &repo, None, vec![pool_patch("openclaw", &[])], None, &mut String::new(),
+            |_, _| Err(crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable("offline".into())),
+        ).unwrap(), 0);
+        let committed = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(committed.effect_authority_epoch, 1);
+        assert_eq!(committed.launch_profile_pool()[0].agent_id, "openclaw");
+        assert!(committed.pending_launch_deliveries.is_empty());
+        assert!(committed.launching_issues.is_empty());
+        assert_eq!(
+            committed
+                .pending_effects
+                .iter()
+                .filter(|effect| matches!(
+                    &effect.payload,
+                    crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number: 42, claim_id, owner
+                    } if claim_id == "claim" && owner == "host:1"
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -15945,6 +16326,7 @@ command = "my-agent-cli"
             needs_human: Vec::new(),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                dependency: None,
                 launch_tier: None,
                 landing_tier: None,
                 non_agent_attempts: 0,
@@ -16320,6 +16702,7 @@ command = "my-agent-cli"
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: Some(repo),
                 number: 42,
@@ -17058,6 +17441,7 @@ command = "my-agent-cli"
     /// and the next read is a warm hit instead of another fetch plus rebuild.
     #[test]
     fn index_rebuild_failure_publishes_receipt_and_records_the_failure() {
+        super::super::operation_warnings::take();
         let temp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
@@ -17114,6 +17498,10 @@ command = "my-agent-cli"
             rows[0].message
         );
         assert_eq!(rows[0].target.issue, Some(42));
+        let warnings = super::super::operation_warnings::take();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "issue_cache_index_refresh_failed");
+        assert!(warnings[0].message.contains("injected rebuild failure"));
     }
 
     #[test]

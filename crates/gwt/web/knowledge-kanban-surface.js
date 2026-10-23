@@ -173,7 +173,7 @@ function reconcileKnowledgeList(host, entries, options) {
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
-  hold_excluded: Object.freeze({ label: "On hold", tone: "needs-input" }),
+  source_excluded: Object.freeze({ label: "Needs triage", tone: "needs-input" }),
   launching: Object.freeze({ label: "Launching", tone: "active" }),
   launched: Object.freeze({ label: "Launched", tone: "active" }),
   merged: Object.freeze({ label: "Merged", tone: "done" }),
@@ -181,12 +181,14 @@ const MONITOR_STATE_VIEWS = Object.freeze({
   launch_failed: Object.freeze({ label: "Launch failed", tone: "blocked" }),
   agent_failed: Object.freeze({ label: "Agent failed", tone: "blocked" }),
   blocked_by_claim: Object.freeze({ label: "Blocked by claim", tone: "needs-input" }),
+  blocked_by_dependency: Object.freeze({ label: "Blocked by dependency", tone: "needs-input" }),
   skipped: Object.freeze({ label: "Skipped", tone: "idle" }),
   needs_human: Object.freeze({ label: "Needs human", tone: "needs-input" }),
 });
 
 export function monitorStateView(value) {
-  const state = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const reported = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const state = reported === "hold_excluded" ? "source_excluded" : reported;
   if (!state) return null;
   const known = MONITOR_STATE_VIEWS[state];
   return known
@@ -352,7 +354,12 @@ function issueLaunchRecovery(entry) {
 }
 
 export function issueQueueColumn(entry, work = null, liveWindow = null) {
-  if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) return "done";
+  if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) {
+    // Closing an Issue does not stop its agent or release a monitor launch.
+    const live = liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status);
+    return live || Number(work?.active_agents) > 0 || ["launching", "launched"].includes(entry.monitor_state)
+      ? "active" : "done";
+  }
   if (issueStopReason(entry) !== null) return "backlog";
   if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
   // Judgment holds are not live launches; Work activity can outlast the agent.
@@ -396,19 +403,29 @@ function issueQueuePriorityLabel(entry) {
   return entry.priority === "urgent" ? "Urgent" : "Normal";
 }
 
-function issueRowSecondaryItems({ entry, work, attention, primary }) {
+function legacyMonitorExclusionReason(entry) {
+  return monitorStateView(entry?.monitor_state)?.state === "source_excluded" &&
+    ["hold label: hold", "excluded by label: hold"].includes(String(entry?.exclusion_reason || "").trim().toLowerCase())
+    ? "This exclusion was reported by an older monitor. Refresh to confirm queue membership." : "";
+}
+
+function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, canvasWindow }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
   }
-  const exclusion = String(entry?.exclusion_reason || "").trim();
+  const exclusion = legacyMonitorExclusionReason(entry) || String(entry?.exclusion_reason || "").trim() ||
+    (primary.key === "monitor:source_excluded" ? "Source trust review is required before automatic launches." : "");
   const stopReason = issueStopReason(entry);
   const recovery = stopReason === null ? issueLaunchRecovery(entry) : "";
   const failureReason = stopReason ?? (["launch_failed", "agent_failed", "needs_human"].includes(entry?.monitor_state) || recovery
     ? String(entry?.error_message || "").trim() : "");
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+  const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
+    issueQueueColumn(entry, work, inlineWindow || canvasWindow) === "active";
+  const reason = cleanupPending ? "Session cleanup pending"
+    : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -780,6 +797,7 @@ export function createKnowledgeKanbanSurface({
   isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
+  scheduleFrame,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
@@ -946,11 +964,17 @@ export function createKnowledgeKanbanSurface({
         return chips;
       }
 
-      function issueStateExplanation(primary) {
+      function issueStateExplanation(primary, entry) {
+        if (primary.key === "agent:error") {
+          const cause = String(entry?.error_message || "").trim();
+          return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issue Monitor."}`;
+        }
+        const legacyReason = legacyMonitorExclusionReason(entry);
+        if (primary.key === "monitor:source_excluded" && legacyReason) return legacyReason;
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
-          "monitor:hold_excluded": "A hold label excludes this issue from automatic launches.",
+          "monitor:source_excluded": "This issue requires source trust triage before automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",
           "monitor:launched": "The monitor launched an agent for this issue.",
           "monitor:merged": "The current execution is complete; the GitHub issue may remain open until release.",
@@ -1074,7 +1098,7 @@ export function createKnowledgeKanbanSurface({
         label_excluded_issues: [],
         quota_hold: null,
         github_budget: null,
-      }});
+      }}, { scheduleFrame });
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
@@ -1257,7 +1281,7 @@ export function createKnowledgeKanbanSurface({
         return badge;
       }
 
-      function renderIssueMonitorControls(element) {
+      function renderIssueMonitorControls(element, windowId) {
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
         const maxActive = Math.max(
@@ -1293,8 +1317,11 @@ export function createKnowledgeKanbanSurface({
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
-          active.textContent = `Active ${issueMonitorModel.read().status.active_count || 0}/${maxActive}`;
-          explainIssueControl(active, "Running issue agents / maximum agents the monitor may run at once.");
+          const bridgeState = knowledgeBridgeStateMap.get(windowId);
+          const count = bridgeState ? filteredIssueEntries(bridgeState)
+            .filter(entry => issueQueueColumnForEntry(entry, windowId) === "active").length : 0;
+          active.textContent = `Active ${count}/${maxActive}`;
+          explainIssueControl(active, `Issues in the Active column. Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
@@ -1367,6 +1394,17 @@ export function createKnowledgeKanbanSurface({
           .filter(item => Number.isFinite(item?.issue?.number))
           .map(item => [item.issue.number, item]));
         issueMonitorModel.update(model => ({ ...model, inboxByIssue }));
+      }
+
+      function applyIssueMonitorQueueResult(event) {
+        const action = {push:"added to the queue", remove:"removed from the queue", move:"queue order updated"}[event.operation];
+        if (!action) return;
+        const issues = (event.issue_numbers || []).map(number => `Issue #${number}`).join(", ");
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (state.kind !== "issue") continue;
+          state.queueFeedback = event.error ? `${issues}: ${event.error}` : `${issues}: ${action}.`;
+          issueWindowViewModel.update(() => ({windowId}));
+        }
       }
 
       function scheduleIssueMonitorProjectionRefresh() {
@@ -1488,7 +1526,7 @@ export function createKnowledgeKanbanSurface({
         return issueNewPopover;
       }
 
-      function wireIssueMonitorControls(body) {
+      function wireIssueMonitorControls(body, windowId) {
         body
           .querySelector('[data-action="issue-new"]')
           ?.addEventListener("click", (event) => {
@@ -1541,7 +1579,7 @@ export function createKnowledgeKanbanSurface({
               enabled: !Boolean(issueMonitorModel.read().status.autonomous_mode),
             });
           });
-        renderIssueMonitorControls(body);
+        renderIssueMonitorControls(body, windowId);
         send({ kind: "list_issue_monitor" });
       }
 
@@ -3177,7 +3215,8 @@ export function createKnowledgeKanbanSurface({
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
+        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
+          exclusion_reason: live.exclusion_reason ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
           readiness_diagnosis: typeof diagnosis === "string" &&
@@ -3206,6 +3245,7 @@ export function createKnowledgeKanbanSurface({
       function renderIssueQueueBoard(windowId, state, list, entries) {
         const feedback = list.querySelector(".issue-queue-feedback") || createNode("div", "issue-queue-feedback");
         feedback.setAttribute("role", "status");
+        feedback.textContent = state.queueFeedback || "";
         const board = list.querySelector(".issue-queue-board") || createNode("div", "issue-queue-board");
         if (!board.parentNode) list.prepend(feedback, board);
         // Drop handlers read this current snapshot, never a previous render's array.
@@ -3329,31 +3369,56 @@ export function createKnowledgeKanbanSurface({
           column.addEventListener("dragover", event => event.preventDefault());
           column.addEventListener("drop", event => {
             event.preventDefault();
-            const number = Number.parseInt(event.dataTransfer?.getData("text/plain"), 10);
-            const currentEntries = state.queueBoardEntries;
+            const explain = message => {
+              state.queueFeedback = message;
+              issueWindowViewModel.update(() => ({windowId}));
+            };
+            const raw = event.dataTransfer?.getData("text/plain") || "";
+            const number = /^\d+$/.test(raw) ? Number(raw) : NaN;
+            if (!Number.isSafeInteger(number) || number <= 0) {
+              explain("Drop an issue card into Backlog or Queued.");
+              return;
+            }
+            const currentEntries = state.queueBoardEntries || [];
             const entry = currentEntries.find(item => item.number === number);
-            if (!entry) return;
+            if (!entry) {
+              explain(`Issue #${number} is no longer on this board. Refresh and try again.`);
+              return;
+            }
             if (phase === "active" || phase === "done") {
-              feedback.textContent = `${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`;
+              explain(`${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`);
               return;
             }
             const origin = issueQueueColumnForEntry(entry, windowId);
             if (origin !== "backlog" && origin !== "queued") {
-              feedback.textContent = "Active and Done issues cannot be moved into the queue.";
+              explain("Active and Done issues cannot be moved into the queue.");
               return;
             }
+            let message;
             if (phase === "queued" && origin === "queued") {
               const target = event.target?.closest?.("[data-issue-number]");
               const queued = canonicalQueuedKnowledgeEntries(state);
               const targetIndex = queued.findIndex(item => item.number === Number(target?.dataset.issueNumber));
-              send({kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex});
+              message = {kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex};
             } else if (origin !== phase) {
               const numbers = state.queueSelection.has(number)
                 ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item, windowId) === origin).map(item => item.number)
                 : [number];
-              send({kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers});
-            } else return;
-            feedback.textContent = "Queue change requested; waiting for server confirmation.";
+              message = {kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers};
+            } else {
+              explain(`Issue #${number} is already in ${label}.`);
+              return;
+            }
+            try {
+              const outcome = send(message);
+              explain(outcome === "unavailable" || outcome === false
+                ? "Queue change could not be sent. Reconnect and try again."
+                : outcome === "queued"
+                  ? "Queue change is waiting for reconnection; it has not been confirmed."
+                  : "Queue change requested; waiting for server confirmation.");
+            } catch (error) {
+              explain(`Queue change could not be sent: ${error.message || error}`);
+            }
           });
           board.appendChild(column);
         }
@@ -3589,7 +3654,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
         badge.dataset.tone = statusView.tone;
         badge.dataset.status = statusView.status;
-        explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }), `preview-state-${target.id}`);
+        explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }, entry), `preview-state-${target.id}`);
         header.appendChild(badge);
 
         const action = faces.canvasWindow ? "focus-canvas-window" : "windowize-issue-preview";
@@ -3743,7 +3808,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
-        explainIssueControl(badge, issueStateExplanation(model.primary), `split-state-${entry.number}`);
+        explainIssueControl(badge, issueStateExplanation(model.primary, entry), `split-state-${entry.number}`);
         header.appendChild(badge);
         const elapsed = createNode("span", "issue-split-elapsed", issueAgentElapsedLabel(target));
         elapsed.title = elapsed.textContent
@@ -4091,7 +4156,7 @@ export function createKnowledgeKanbanSurface({
         const pill = createNode("span", "knowledge-row-badge", row.primary.label);
         pill.dataset.tone = row.primary.tone;
         pill.dataset.stateKey = row.primary.key;
-        explainIssueControl(pill, issueStateExplanation(row.primary), `detail-state-${number}`);
+        explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
@@ -4621,8 +4686,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function issueProjectWindows(windowId) {
-        const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
-        const tabs = windowCatalogModel?.read().catalog?.appState?.tabs;
+        const catalog = windowCatalogModel?.read().catalog;
+        const windows = (typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [])
+          .map(windowData => Object.hasOwn(catalog?.runtimeStates || {}, windowData.id)
+            ? { ...windowData, status: catalog.runtimeStates[windowData.id] } : windowData);
+        const tabs = catalog?.appState?.tabs;
         if (!tabs) return windows;
         const project = tabs.find(tab => tab.workspace?.windows?.some(window => window.id === windowId));
         const ids = new Set((project?.workspace?.windows || []).map(window => window.id));
@@ -4691,7 +4759,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
-        explainIssueControl(badge, issueStateExplanation(model.primary), `row-state-${entry.number}`, false);
+        explainIssueControl(badge, issueStateExplanation(model.primary, entry), `row-state-${entry.number}`, false);
         main.appendChild(badge);
         select.appendChild(main);
 
@@ -4716,7 +4784,7 @@ export function createKnowledgeKanbanSurface({
           select.appendChild(secondary);
         }
         explainIssueControl(select,
-          [issueStateExplanation(model.primary), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : "",
+          [issueStateExplanation(model.primary, entry), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : "",
             ...tierChips.map(item => item.explanation)].filter(Boolean).join("\n"),
           `issue-${entry.number}`);
 
@@ -4806,6 +4874,7 @@ export function createKnowledgeKanbanSurface({
           child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
+        renderIssueMonitorControls(element, windowId);
         if (state.error) {
           list.insertBefore(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error), other);
         } else if (state.loading && state.loadSlow && knowledgeEntriesAreEmpty(state)) {
@@ -5108,15 +5177,15 @@ export function createKnowledgeKanbanSurface({
             // Initial rendering follows registration so a failed mount can retry.
             let mounted = false;
             state.monitorSubscriptions = [
-              issueMonitorModel.subscribe(model => model.status, () => {
-                if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id));
-              }),
               issueMonitorModel.subscribe(model => model, () => {
+                if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id), windowData.id);
+              }),
+              issueMonitorModel.subscribeFrame(model => model, () => {
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }),
             ];
             if (windowCatalogModel && state.kind === "issue") {
-              state.monitorSubscriptions.push(windowCatalogModel.subscribe(model =>
+              state.monitorSubscriptions.push(windowCatalogModel.subscribeFrame(model =>
                 JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
                   .map(windowData => [windowData.id, windowData.linked_issue_number,
                     windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,
@@ -5207,7 +5276,7 @@ export function createKnowledgeKanbanSurface({
                 closeIssuePreview(windowData.id, state);
               }
             });
-            wireIssueMonitorControls(body);
+            wireIssueMonitorControls(body, windowData.id);
           }
           // SPEC-2017 — Hide done toggle persists via localStorage so
           // reloads honour the user preference. The hidden state hides
@@ -5738,6 +5807,7 @@ export function createKnowledgeKanbanSurface({
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
         applyIssueMonitorInbox,
+        applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,

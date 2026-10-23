@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::Path,
     sync::{Mutex, OnceLock},
@@ -936,6 +936,12 @@ pub(crate) struct ActivitySessionRoot {
 }
 
 pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<ActivitySessionRoot> {
+    activity_session_observation(session).map(|(root, _)| root)
+}
+
+fn activity_session_observation(
+    session: &gwt_agent::Session,
+) -> Option<(ActivitySessionRoot, Option<BTreeSet<String>>)> {
     let identity = gwt_agent::SessionExecutionIdentity::from_session(session).ok()??;
     let inventory =
         crate::session_inventory::observe_session(session, &gwt_core::paths::gwt_sessions_dir());
@@ -970,15 +976,19 @@ pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<Acti
     {
         return None;
     }
-    Some(ActivitySessionRoot {
-        process,
-        host: (observed.host_pid, host_started),
-        incarnation,
-    })
+    Some((
+        ActivitySessionRoot {
+            process,
+            host: (observed.host_pid, host_started),
+            incarnation,
+        },
+        runtime.active_tool_calls,
+    ))
 }
 
-/// Background scan only: measure owned child work once for all bound panes.
-/// Root-agent CPU/liveness and unrelated Host panes cannot extend this clock.
+/// Background scan only: observe accepted provider tool lifetimes, falling
+/// back to measured child progress for legacy sidecars. Helpers alone cannot
+/// extend the clock once the provider has supplied lifecycle evidence.
 pub fn refresh_issue_monitor_child_activity(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
@@ -1032,14 +1042,14 @@ pub fn refresh_issue_monitor_child_activity(
         let Some(session) = load_current_activity_session(&identity) else {
             continue;
         };
-        let Some(root) = activity_session_root(&session) else {
+        let Some((root, tools)) = activity_session_observation(&session) else {
             continue;
         };
         // An ambiguous shared provider root cannot lend progress to two owners.
         roots
             .entry(root.process)
             .and_modify(|entry| *entry = None)
-            .or_insert(Some((issue, identity, root)));
+            .or_insert(Some((issue, identity, root, tools)));
     }
     if gwt_core::operation_deadline::ensure_remaining("child progress observation").is_err() {
         return;
@@ -1047,18 +1057,39 @@ pub fn refresh_issue_monitor_child_activity(
     let advancing = crate::cli::verification_lease::holder_activity::progressing_descendants(
         &roots
             .iter()
-            .filter_map(|(root, owner)| owner.as_ref().map(|_| *root))
+            .filter_map(|(root, owner)| {
+                // Once lifecycle events are available, helper CPU/turnover
+                // cannot substitute for a currently accepted tool call.
+                owner
+                    .as_ref()
+                    .filter(|(_, _, _, tools)| tools.is_none())
+                    .map(|_| *root)
+            })
             .collect::<Vec<_>>(),
     );
     let sampled_at = chrono::Utc::now().to_rfc3339();
-    for root in advancing {
-        let Some(Some((issue, identity, observed))) = roots.get(&root) else {
+    for (root, owner) in &roots {
+        let Some((issue, identity, observed, tools)) = owner else {
             continue;
         };
+        if !tools
+            .as_ref()
+            .map_or_else(|| advancing.contains(root), |calls| !calls.is_empty())
+        {
+            continue;
+        }
         let Some(session) = load_current_activity_session(identity) else {
             continue;
         };
-        if activity_session_root(&session) == Some(*observed) {
+        let Some((current_root, current_tools)) = activity_session_observation(&session) else {
+            continue;
+        };
+        let still_active = match (tools, current_tools.as_ref()) {
+            (Some(before), Some(after)) => before.intersection(after).next().is_some(),
+            (None, None) => true,
+            _ => false,
+        };
+        if current_root == *observed && still_active {
             monitor.record_bound_process_activity(
                 *issue,
                 &identity.session_id,
@@ -3394,6 +3425,35 @@ pub fn load_cached_issue_monitor_candidate(
         .map(cached_issue_monitor_candidate)
 }
 
+/// Read only the target's cached dependency evidence, recording each source
+/// before it is read so launch admission can reject changes to that evidence.
+pub fn load_cached_issue_monitor_dependency_candidates(
+    cache_root: &Path,
+    issue_number: u64,
+    mut before_load: impl FnMut(u64) -> Result<(), String>,
+) -> Result<Vec<IssueMonitorIssue>, String> {
+    let mut pending = BTreeSet::from([issue_number]);
+    let mut seen = BTreeSet::new();
+    let mut issues = Vec::new();
+    while let Some(number) = pending.pop_first() {
+        if !seen.insert(number) {
+            continue;
+        }
+        before_load(number)?;
+        if let Some(issue) = load_cached_issue_monitor_candidate(cache_root, number) {
+            pending.extend(
+                crate::issue_monitor::parse_issue_monitor_dependencies(
+                    issue.body.as_deref().unwrap_or(""),
+                    number,
+                )
+                .blocked_by,
+            );
+            issues.push(issue);
+        }
+    }
+    Ok(issues)
+}
+
 fn cached_issue_monitor_candidate(entry: CacheEntry) -> IssueMonitorIssue {
     let is_spec = entry
         .snapshot
@@ -3818,6 +3878,82 @@ pub(crate) mod tests {
         UpdatedAt,
     };
     use std::path::PathBuf;
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn issue_6076_silent_provider_tool_lifetime_does_not_credit_persistent_helpers() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, now) = issue_3809_bound_activity_fixture(repo.path());
+        let mut helper_monitor = monitor.clone();
+        let previous = helper_monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .last_heartbeat
+            .clone();
+        let path = gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        let mut runtime: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        runtime["active_tool_calls"] = serde_json::json!(["silent-command"]);
+        runtime["source_event"] = serde_json::json!("PreToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+
+        let outcome = reconcile_issue_monitor_windows(&mut monitor, repo.path(), &now);
+        assert!(outcome.released.is_empty());
+        assert!(outcome.requeued.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_ne!(
+            monitor.autonomous_record(3809).unwrap().last_heartbeat,
+            previous,
+            "an accepted silent tool must remain active without CPU or process turnover"
+        );
+
+        struct Helper(std::process::Child);
+        impl Drop for Helper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[cfg(windows)]
+        let mut command = gwt_core::process::hidden_command("powershell.exe");
+        #[cfg(windows)]
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+        ]);
+        #[cfg(unix)]
+        let mut command = gwt_core::process::hidden_command("sh");
+        #[cfg(unix)]
+        command.args(["-c", "while :; do :; done"]);
+        let _helper = Helper(
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        runtime["active_tool_calls"] = serde_json::json!([]);
+        runtime["source_event"] = serde_json::json!("PostToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+        refresh_issue_monitor_child_activity(&mut helper_monitor, repo.path(), &now);
+        assert_eq!(
+            helper_monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat,
+            previous,
+            "after tool completion even a busy persistent helper cannot extend RUN/activity"
+        );
+    }
 
     #[test]
     #[cfg(any(windows, unix))]
@@ -5063,6 +5199,7 @@ pub(crate) mod tests {
             },
         );
         monitor.inbox.push(crate::IssueMonitorInboxItem {
+            dependency: None,
             issue: issue(42),
             state: MonitorInboxState::Launched,
             claim_id: None,
@@ -5473,14 +5610,19 @@ pub(crate) mod tests {
         // A successful claim is still unowned until a materializer takes it.
         // Both the resident driver and the CLI's cold prefs fallback switch
         // the profile inside the transaction that saves the compensation.
-        for cold_start in [false, true] {
+        for (cold_start, replace_pool) in [(false, false), (true, false), (false, true)] {
             let mut pending = if cold_start {
                 test_monitor_with_prefs(monitor.config.clone(), monitor.prefs())
             } else {
                 monitor.clone()
             };
             let delivery = pending.pending_launch_delivery_id(42).unwrap();
-            pending.switch_launch_profile_agent("openclaw").unwrap();
+            if replace_pool {
+                pending.advance_effect_authority_epoch().unwrap();
+                pending.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                pending.switch_launch_profile_agent("openclaw").unwrap();
+            }
             let committed = pending.prefs();
             pending.rebase_daemon_driver_prefs(&committed);
             assert!(pending.take_pending_launch_requests().is_empty());
@@ -5521,8 +5663,54 @@ pub(crate) mod tests {
         let delivery = monitor.pending_launch_delivery_id(42).unwrap();
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
         monitor.switch_launch_profile_agent("openclaw").unwrap();
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
+    }
+
+    #[test]
+    fn permission_readiness_manual_profile_writes_preserve_auto_spec_deliveries() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        prefs.launch_auto = true;
+        prefs.launch_tiers = vec![
+            vec![unsupported_launch_profile("openclaw")],
+            vec![unsupported_launch_profile("codex")],
+        ];
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(IssueMonitorIssue {
+            labels: vec!["gwt-spec".into()],
+            readiness: IssueMonitorReadiness::Ready,
+            ..issue(42)
+        });
+        assert!(monitor.apply_confirmed_claim(42, "claim", "host:1", "effect", now));
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        let original = monitor.prefs();
+
+        // Cold profile writers have no inbox. Saving the unused manual pool
+        // must not misclassify this SPEC as a tier-0 Issue and release its claim.
+        for replace_pool in [false, true] {
+            let mut cold =
+                test_monitor_with_prefs(crate::IssueMonitorConfig::default(), original.clone());
+            assert!(cold.inbox_item(42).is_none());
+            if replace_pool {
+                cold.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                cold.switch_launch_profile_agent("openclaw").unwrap();
+            }
+            let committed = cold.prefs();
+            cold.rebase_daemon_driver_prefs(&committed);
+            assert_eq!(cold.pending_launch_delivery_id(42), Some(delivery.clone()));
+            assert_eq!(cold.active_count(), 1);
+            assert_eq!(committed.launch_profile_pool()[0].agent_id, "openclaw");
+            assert_eq!(committed.launch_tiers, original.launch_tiers);
+            assert!(committed.pending_effects.iter().all(|effect| !matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
+            )));
+        }
     }
 
     /// A launch profile naming `agent_id`, with every other field at the value
@@ -7312,8 +7500,12 @@ pub(crate) mod tests {
             "2026-10-16T00:00:02Z",
         );
         let row = monitor.inbox_item(42).unwrap();
-        assert_eq!(row.state, MonitorInboxState::HoldExcluded);
-        assert!(row.exclusion_reason.as_deref().unwrap().contains("hold"));
+        assert_eq!(row.state, MonitorInboxState::NotReady);
+        assert!(row
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("plan/tasks"));
         assert_eq!(held.title, snapshot.title);
         assert_eq!(held.author_login, snapshot.author_login);
         assert_eq!(held.body.as_deref(), Some(snapshot.body.as_str()));
@@ -7569,6 +7761,41 @@ pub(crate) mod tests {
         let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
             .expect("fresh cache is left alone");
         assert!(!within_ttl, "a fresh cache does not spend a list call");
+    }
+
+    #[test]
+    fn cached_dependency_candidates_follow_blockers_once_and_preserve_body_and_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut target = github_issue(42);
+        target.body = "Blocked-by: #43 #44\nBundle-with: #99".into();
+        let mut blocker = github_issue(43);
+        blocker.body = "Blocked-by: #44 #45".into();
+        blocker.labels = vec!["hold".into()];
+        let mut cycle = github_issue(44);
+        cycle.body = "Blocked-by: #42".into();
+        let unrelated = github_issue(99);
+        for snapshot in [&target, &blocker, &cycle, &unrelated] {
+            cache.write_snapshot(snapshot).expect("write cached issue");
+        }
+        let mut read_numbers = Vec::new();
+        let candidates =
+            load_cached_issue_monitor_dependency_candidates(dir.path(), 42, |number| {
+                read_numbers.push(number);
+                Ok(())
+            })
+            .expect("read cached dependency closure");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|issue| issue.number)
+                .collect::<Vec<_>>(),
+            vec![42, 43, 44]
+        );
+        assert_eq!(candidates[0].body.as_deref(), Some(target.body.as_str()));
+        assert_eq!(candidates[1].labels, vec!["hold"]);
+        read_numbers.sort_unstable();
+        assert_eq!(read_numbers, vec![42, 43, 44, 45]);
     }
 
     #[test]
@@ -8164,11 +8391,14 @@ exit 1
             },
         );
         monitor.terminal_queue_push(&[50, 51], "test", "2026-07-02T00:00:00Z");
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
         let mut not_ready = issue(50);
+        not_ready.author_login = Some("akiojin".into());
         not_ready.labels = vec!["gwt-spec".to_string(), "auto-merge".to_string()];
         not_ready.readiness = IssueMonitorReadiness::NotReady;
         let mut held = issue(51);
-        held.labels = vec!["auto-merge".to_string(), "hold".to_string()];
+        held.author_login = Some("akiojin".into());
+        held.labels = vec!["auto-merge".to_string(), "gwt-feedback".to_string()];
         crate::scan_issue_monitor_candidates(
             &mut monitor,
             &[not_ready.clone(), held.clone()],
@@ -8189,7 +8419,7 @@ exit 1
         );
         assert_eq!(
             monitor.inbox_item(51).map(|item| item.state),
-            Some(MonitorInboxState::HoldExcluded)
+            Some(MonitorInboxState::SourceExcluded)
         );
 
         // Eligibility precedes claim acquisition. A fresh exclusion must also
@@ -8203,7 +8433,7 @@ exit 1
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
         monitor.terminal_queue_push(&[50, 51], "test", now);
         for mut ready in [not_ready.clone(), held.clone()] {
-            ready.labels.retain(|label| label != "hold");
+            ready.labels.retain(|label| label != "gwt-feedback");
             ready.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
             ready.body = Some("## Acceptance Criteria\n- [ ] AC-1: execute\n".to_string());
             monitor.record_candidate(ready.clone());

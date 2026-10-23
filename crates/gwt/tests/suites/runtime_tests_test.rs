@@ -40,6 +40,8 @@ mod index_search_public_api_test;
 mod index_status_batch_test;
 #[path = "../knowledge_bridge_test.rs"]
 mod knowledge_bridge_test;
+#[path = "../launch_authority_test.rs"]
+mod launch_authority_test;
 #[path = "../launch_payload_test.rs"]
 mod launch_payload_test;
 #[path = "../managed_assets_test.rs"]

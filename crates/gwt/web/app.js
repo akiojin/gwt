@@ -8,6 +8,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         initOperatorShell,
         applyTelemetryCounts,
         applyIssueMonitorStatus,
+        subscribeIssueMonitorStatus,
         applyProviderUsage,
         subscribeRuntimeHealth,
       } from "/operator-shell.js";
@@ -1295,6 +1296,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           },
         });
         projectPageMetadata.resetConnection();
+        // A restarted backend has its own restore gate, even when this page survives.
+        startupAutoResumeReadySent = false;
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         if (socketProjectKey) projectPageMetadata.reportAttention();
@@ -2034,13 +2037,22 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         startupAutoResumeReadySent = true;
-        requestAnimationFrame(() => {
-          if (routeProjectMissing) return;
+        const generation = socketReceiveDispatcherGeneration;
+        let delivered = false;
+        const notify = () => {
+          if (delivered) return;
+          delivered = true;
+          clearTimeout(timer);
+          cancelAnimationFrame(frame);
+          if (routeProjectMissing || generation !== socketReceiveDispatcherGeneration) return;
           send({
             kind: "startup_auto_resume_ready",
             bounds: visibleBounds(),
           });
-        });
+        };
+        // Background tabs may suspend frames; readiness must still reach the backend.
+        const timer = setTimeout(notify, 100);
+        const frame = requestAnimationFrame(notify);
       }
 
       function cycleFocus(direction) {
@@ -3730,6 +3742,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyIssueMonitorQueueResult,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
@@ -3796,8 +3809,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
         openSurfaceNotice: (key) => notificationCenter.open(key),
       });
-      issueMonitorModel.subscribe(model => model.status, status =>
-        window.__operatorShell?.applyIssueMonitorStatus?.(status));
+      subscribeIssueMonitorStatus(document, issueMonitorModel);
       issueMonitorModel.subscribe(model => model.status, status =>
         updateCtaController.handleIssueMonitorStatus(status));
       windowCatalogModel.subscribe(model => model.catalog, () =>
@@ -5258,6 +5270,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
+            break;
+          case "issue_monitor_queue_result":
+            applyIssueMonitorQueueResult(event);
             break;
           case "issue_monitor_inbox":
             applyKnowledgeIssueMonitorInbox(event.items);

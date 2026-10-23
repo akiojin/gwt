@@ -182,12 +182,14 @@ pub enum IssueCommand {
     MonitorPriorityMove {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         number: u64,
         position: IssueMonitorPriorityPosition,
     },
     MonitorPrioritySet {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         issue_numbers: Vec<u64>,
     },
     MonitorQueueList {
@@ -204,6 +206,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         expected_queue_order: Option<Vec<u64>>,
         issue_numbers: Vec<u64>,
+        all_terminals: bool,
     },
     MonitorQueueMove {
         project_root: Option<std::path::PathBuf>,
@@ -282,6 +285,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         expected_priority_order: Option<Vec<u64>>,
+        expected_queue_order: Option<Vec<u64>>,
     },
     /// SPEC-3431 FR-033: the PM's stop instruction — revoke one launch's
     /// authority and slot without requeueing or relaunching it.

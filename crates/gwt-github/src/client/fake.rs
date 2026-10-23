@@ -45,6 +45,7 @@ pub struct FakeIssueClient {
     /// `patch_title`, `set_labels`): the next such call fails with the stored
     /// error and writes nothing (Issue #3865 AC-5).
     fail_next_issue_patch: Arc<Mutex<Option<ApiError>>>,
+    fail_next_fetch: Arc<Mutex<Option<ApiError>>>,
     after_next_fetch: Arc<Mutex<Option<FetchHook>>>,
 }
 
@@ -140,6 +141,7 @@ impl FakeIssueClient {
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fail_next_issue_patch: Arc::new(Mutex::new(None)),
+            fail_next_fetch: Arc::new(Mutex::new(None)),
             after_next_fetch: Arc::new(Mutex::new(None)),
         }
     }
@@ -152,6 +154,11 @@ impl FakeIssueClient {
     /// Run once after capturing a fetch response, before returning it to the reader.
     pub fn after_next_fetch(&self, hook: impl FnOnce() + Send + 'static) {
         *self.after_next_fetch.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// Fail the next Issue read without affecting a preceding mutation.
+    pub fn fail_next_fetch(&self, error: ApiError) {
+        *self.fail_next_fetch.lock().unwrap() = Some(error);
     }
 
     /// Failure injection: the next `patch_body` / `patch_title` /
@@ -564,6 +571,9 @@ impl IssueClient for FakeIssueClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.record(&mut state, "fetch", &number.to_string());
+        if let Some(error) = self.fail_next_fetch.lock().unwrap().take() {
+            return Err(error);
+        }
         let issue = state
             .issues
             .get(&number)

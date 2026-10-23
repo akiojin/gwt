@@ -825,6 +825,12 @@ body cannot hold `plan` / `tasks` sections.
   the order instead of blindly retrying. Read back status after a successful write.
   Omitting the guard retains legacy behavior; value equality does not detect ABA
   history or guard other configuration changes.
+  Pass a nonempty `reason` with priority.set/move to persist the rationale with
+  its applied full order in the same transaction. `priority_reason_note` records the latest reasoned decision
+  (reason, priority_order, recorded_at); read it back in the reply and status.
+  Omitting reason preserves the historical note. `priority_reason_matches_order` is saved-value equality only,
+  not freshness, intervening history or proof that the rationale still applies;
+  it is null when there is no note. Null, blank and non-string reasons are invalid.
 - For `issue.monitor.queue.move` and `issue.monitor.queue.remove`, re-read
   `issue.monitor.queue.list` for the current terminal before writing. Pass its
   saved `queue_order`, not the urgent display order, as `expected_queue_order`.
@@ -863,8 +869,14 @@ body cannot hold `plan` / `tasks` sections.
   at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
   For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard
-  from a fresh status read. On conflict, re-read status and reconsider the
-  instruction; no queue admission, hold clearing or scan request occurs.
+  from a fresh status read; also pass `expected_queue_order` from a fresh current-terminal
+  `issue.monitor.queue.list` saved `queue_order`, not the urgent display order.
+  Both order comparisons share the prefs lock and precede any priority, queue or
+  hold change and any scan request. On conflict, re-read the relevant status/list
+  and reconsider the instruction; read back status and the queue list after success.
+  Each guard is optional; `[]` matches only its empty saved order and `null` is
+  invalid. Arrays retain existing decimal u64 string compatibility. Queue value
+  equality does not guard urgent metadata, other settings or ABA history.
   It only moves the issue to the priority head and triggers an
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
@@ -1624,6 +1636,39 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   fresh `issue.monitor.status` snapshot directly, complete the same
   reconcile contract, and note in your digest that push subscription is
   degraded (FR-109). Subscribe failures are never a reason to park.
+- Every cycle, check `saved_config.enabled` and `saved_config.autonomous_mode`
+  in fresh `issue.monitor.status`. If a disabled setting blocks intended
+  unattended work, use `issue.monitor.config.set` under the existing
+  registered-PM authority and `expected_config_token` rules, then read back
+  status before attempting a launch. Respect an explicit instruction to keep
+  the Monitor off; the standing mandate does not override it. Config success
+  alone is not proof of launch availability or launch success.
+  If recovery is refused or unavailable, keep its exact diagnostic, re-read
+  current status and consult `pm.capabilities` and the existing
+  approval/owner-handoff rules before asking the user to act. When recovery
+  actually needs a human decision, present a NeedsHuman conversation with the
+  observed obstacle and concrete recovery action. Do not manufacture an Issue
+  Monitor `needs_human` row or requeue healthy Issues to represent a project
+  configuration obstacle. A disabled Monitor is not a no-change success or
+  proof that an agent launched while intended launch work remains blocked;
+  continue the other resident duties within their authority.
+- Every cycle, check fresh `has_launch_profile` before attempting unattended launches.
+  If it is false, read `issue.monitor.profiles` to distinguish an empty saved
+  pool from a live-status publication that has not caught up. Initialize only an empty saved pool
+  through `issue.monitor.profiles.set`, choosing a known available provider under
+  the existing routing/capability rules and project preferences. Use sparse
+  `params.profiles` with `agent_id` and the existing provider defaults; pass
+  `expected_profiles_token` from that same read. On conflict, re-read and
+  reconsider; preserve any nonempty pool instead of replacing user choices to
+  repair a stale status. Read back `issue.monitor.profiles` and fresh status
+  before concluding profile setup is available. If status remains unresolved,
+  keep the diagnostic and continue reconciliation rather than claiming recovery.
+  Profile persistence is not executable, credential or launch-success evidence.
+  Preserve explicit OFF, provider holds and the existing approval boundaries;
+  use the capability/owner-handoff and NeedsHuman rules above for a recovery
+  requiring human action. Do not bypass Monitor preflight, claim or slot admission,
+  or spawn an agent yourself. A missing profile that still blocks intended work
+  is an obstacle to resolve, not a no-change success or proof of launch.
 - Explicit Board read receipts are separate from automatic reminder injection.
   Every cycle, read the Board bodies with this operation before making a
   lifecycle decision:
@@ -1636,6 +1681,26 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Before `pane.close` or `issue.monitor.stop`, read recent target-owner Board
   evidence. A new owner post requires another read before retrying the stop.
   Unavailable Board/receipt diagnostics mean unknown reading state, never zero.
+- After fresh Board and Monitor reconciliation, evaluate the standing mandate
+  every cycle, including the first cold start with zero signal differences and
+  no new user request. Before concluding that nothing needs action:
+  1. Check semantic priority against the current understanding; correct a
+     mismatch through `issue.monitor.priority.set` / `priority.move`, using
+     the existing observation, conflict detection, reason and readback rules.
+  2. Curate the backlog: evaluate duplicates, obsolete work, scope/acceptance
+     corrections and label consistency through the existing search-first
+     curation and safe-mutation rules.
+  3. Supervise running launches through the existing health, Board, steering
+     and error-disposition contracts below.
+  4. Decompose and register unprocessed conversational work through the
+     existing intake, owner-search and source-authority rules.
+  Act only where the evaluation finds work. Do not manufacture writes or
+  duplicate Issues to satisfy the checklist. Signal differences help identify
+  work; their absence never skips these duties. Never ask whether to perform
+  the standing mandate or stop at a choice menu. Irreversible or product
+  decisions and NeedsHuman still follow the existing decision and permission
+  boundaries. Only after these checks may the existing no-change reporting
+  rules apply.
 - Before judging branch divergence or stagnation, run `git fetch origin` in
   the target repository during this cycle, then inspect the branch again.
   A previous cycle's fetch is not current evidence. The advisory is warning-only;
@@ -3318,6 +3383,63 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    #[test]
+    fn contract_evaluates_standing_mandate_on_cold_start() {
+        let resident = section("## Resident loop (unattended)");
+        for phrase in [
+            "including the first cold start with zero signal differences and no new user request",
+            "Check semantic priority",
+            "Curate the backlog",
+            "Supervise running launches",
+            "Decompose and register unprocessed conversational work",
+            "Do not manufacture writes or duplicate Issues",
+            "Never ask whether to perform the standing mandate or stop at a choice menu",
+            "Irreversible or product decisions and NeedsHuman still follow the existing decision and permission boundaries",
+            "Only after these checks may the existing no-change reporting rules apply",
+        ] {
+            assert!(resident.contains(phrase), "missing resident duty: {phrase}");
+        }
+    }
+
+    #[test]
+    fn launch_obstacle_response_reaches_both_generated_resident_contracts() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        let mut contracts = vec![section("## Resident loop (unattended)")];
+        for provider in [".claude", ".codex"] {
+            contracts.push(unwrapped(
+                &std::fs::read_to_string(
+                    dir.path()
+                        .join(provider)
+                        .join("skills/gwt-pm/references/resident-loop.md"),
+                )
+                .unwrap(),
+            ));
+        }
+        for contract in contracts {
+            for phrase in [
+                "check `saved_config.enabled` and `saved_config.autonomous_mode`",
+                "registered-PM authority and `expected_config_token`",
+                "Respect an explicit instruction to keep the Monitor off",
+                "`pm.capabilities` and the existing approval/owner-handoff rules",
+                "NeedsHuman conversation with the observed obstacle and concrete recovery action",
+                "Do not manufacture an Issue Monitor `needs_human` row",
+                "A disabled Monitor is not a no-change success or proof that an agent launched",
+                "check fresh `has_launch_profile` before attempting unattended launches",
+                "Initialize only an empty saved pool",
+                "`expected_profiles_token` from that same read",
+                "preserve any nonempty pool",
+                "Read back `issue.monitor.profiles` and fresh status",
+                "Profile persistence is not executable, credential or launch-success evidence",
+            ] {
+                assert!(
+                    contract.contains(phrase),
+                    "missing launch-obstacle rule: {phrase}"
+                );
+            }
+        }
+    }
+
     /// Issue #3834 AC-9: both generated providers supervise from one health
     /// snapshot, while keeping disposition behind the existing authority gates.
     #[test]
@@ -4310,6 +4432,12 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "including the first cold start with zero signal differences and no new user request",
+            "Check semantic priority",
+            "Curate the backlog",
+            "Supervise running launches",
+            "Decompose and register unprocessed conversational work",
+            "Never ask whether to perform the standing mandate or stop at a choice menu",
             "For `issue.monitor.profiles.set`, read fresh `issue.monitor.profiles`",
             "`profiles_token` as `expected_profiles_token`",
             "The profile token covers the saved pool and inheritance head only",
@@ -4331,7 +4459,13 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "For `issue.monitor.queue.move` and `issue.monitor.queue.remove`",
             "saved `queue_order`, not the urgent display order",
             "`expected_priority_order`",
+            "Pass a nonempty `reason` with priority.set/move",
+            "`priority_reason_note` records the latest reasoned decision",
+            "`priority_reason_matches_order` is saved-value equality only",
             "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
+            "also pass `expected_queue_order` from a fresh current-terminal",
+            "Both order comparisons share the prefs lock",
+            "read back status and the queue list after success",
             "full saved `priority_order`",
             "re-read status and reconsider",
             "`pm.plan.status`",

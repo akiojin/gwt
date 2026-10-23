@@ -7,6 +7,8 @@ type PathPredicate<'a> = dyn Fn(&Path) -> bool + 'a;
 
 pub struct GwtdResolutionInputs<'a> {
     pub explicit_bin_path: Option<PathBuf>,
+    pub companion_bin_path: Option<PathBuf>,
+    pub hook_bin_path: Option<PathBuf>,
     pub path_lookup: Box<PathLookup<'a>>,
     pub installed_candidates: Vec<PathBuf>,
     pub development_fallbacks: Vec<PathBuf>,
@@ -14,13 +16,18 @@ pub struct GwtdResolutionInputs<'a> {
 }
 
 pub fn resolve_gwtd_path() -> Option<PathBuf> {
-    let explicit_bin_path = std::env::var_os(gwt_agent::session::GWT_BIN_PATH_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("GWT_HOOK_BIN").map(PathBuf::from));
+    let explicit_bin_path =
+        std::env::var_os(gwt_agent::session::GWT_BIN_PATH_ENV).map(PathBuf::from);
+    let companion_bin_path = std::env::current_exe()
+        .ok()
+        .filter(|path| is_named_gwt_binary(path) || is_named_gwtd_binary(path))
+        .map(|path| gwtd_companion_path(&path));
     resolve_gwtd_path_with(GwtdResolutionInputs {
         explicit_bin_path,
+        companion_bin_path,
+        hook_bin_path: std::env::var_os("GWT_HOOK_BIN").map(PathBuf::from),
         path_lookup: Box::new(|command| which::which(command).ok()),
-        installed_candidates: default_installed_candidates(std::env::current_exe().ok().as_deref()),
+        installed_candidates: default_installed_candidates(None),
         development_fallbacks: default_development_fallbacks(),
         is_file: Box::new(|path| path.is_file()),
     })
@@ -29,6 +36,8 @@ pub fn resolve_gwtd_path() -> Option<PathBuf> {
 pub fn resolve_gwtd_path_with(inputs: GwtdResolutionInputs<'_>) -> Option<PathBuf> {
     let GwtdResolutionInputs {
         explicit_bin_path,
+        companion_bin_path,
+        hook_bin_path,
         path_lookup,
         installed_candidates,
         development_fallbacks,
@@ -37,6 +46,10 @@ pub fn resolve_gwtd_path_with(inputs: GwtdResolutionInputs<'_>) -> Option<PathBu
 
     explicit_bin_path
         .filter(|path| is_file(path))
+        // The stable hook fallback can name an older installed build. Keep
+        // the runtime daemon paired with the running GUI before using it.
+        .or_else(|| companion_bin_path.filter(|path| is_file(path)))
+        .or_else(|| hook_bin_path.filter(|path| is_file(path)))
         .or_else(|| path_lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|path| is_file(path)))
         .or_else(|| first_existing(installed_candidates, &is_file))
         .or_else(|| first_existing(development_fallbacks, &is_file))

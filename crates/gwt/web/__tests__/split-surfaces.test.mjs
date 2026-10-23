@@ -27,7 +27,11 @@ test("the title bar offers a reversible split and the split uses Operator tokens
 
 async function fixture() {
   const { createUiStateStore } = await import("../ui-state-store.js");
-  const model = createUiStateStore({ catalog: { version: 0 } });
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const model = createUiStateStore({ catalog: { version: 0 } }, {
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
   const { createSplitSurfaces } = await import("../split-surfaces.js");
   const { document, window } = parseHTML(html);
   const parking = document.createDocumentFragment();
@@ -76,7 +80,7 @@ async function fixture() {
     onLayout: () => {},
   });
   for (const element of elements.values()) controller.park(element);
-  return { controller, model, document, window, windows, elements, opened, agents, agentHosts };
+  return { controller, model, frames, flush, document, window, windows, elements, opened, agents, agentHosts };
 }
 
 test("two panes select independently and reset parks live DOM without hiding the rail host", async () => {
@@ -156,8 +160,8 @@ test("same Agents surface keeps the active live host and a preview in the other 
   assert.equal(agentHosts.at(-1)[1], null);
 });
 
-test("Split reconciles arriving views from catalog commits and unsubscribes", async () => {
-  const { controller, model, windows, elements, document } = await fixture();
+test("Split batches catalog bursts, keeps local navigation synchronous and cancels disposed frames", async () => {
+  const { controller, model, frames, flush, windows, elements, document, agentHosts } = await fixture();
   const settings = document.createElement("select");
   settings.innerHTML = '<option value="Normal" disabled>Normal</option><option value="Continue" selected>Continue</option>';
   elements.get("board").appendChild(settings);
@@ -168,16 +172,38 @@ test("Split reconciles arriving views from catalog commits and unsubscribes", as
   controller.park(element);
   elements.set(second.id, element);
   windows.push(second);
-  model.update(() => ({ catalog: { version: 1 } }));
+  const before = model.read();
+  const notifications = agentHosts.length;
+  for (let version = 1; version <= 50; version++) model.update(() => ({ catalog: { version } }));
+  assert.equal(model.read().catalog.version, 50);
+  assert.equal(before.catalog.version, 0);
+  assertParked(element);
+  assert.equal(agentHosts.length, notifications, "receipt must not reconcile hosts before the frame");
+  assert.equal(frames.size, 1);
+  flush();
   assert.equal(settings.value, "Continue", "host sync must preserve embedded settings choices");
   assert.equal(settings.options[0].hasAttribute("disabled"), true);
   assert.equal(settings.options[1].textContent, "Continue");
   assert.ok(element.closest(".split-pane") === document.querySelectorAll(".split-pane")[1], "catalog commit mounts the arriving view without manual sync");
-  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "50");
+  assert.equal(agentHosts.length, notifications + 1, "the latest catalog reconciles once");
+  model.update(state => ({ ...state, unrelated: 1 }));
+  assert.equal(frames.size, 0);
+  model.update(() => ({ catalog: { version: 51 } }));
+  assert.equal(controller.showWindow(second.id), true, "local navigation reads the latest catalog immediately");
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "51");
+  const afterNavigation = agentHosts.length;
+  flush();
+  assert.equal(agentHosts.length, afterNavigation, "the pending frame skips a synchronously rendered catalog");
+  controller.sync();
+  assert.equal(agentHosts.length, afterNavigation + 1, "explicit layout sync still runs at the same revision");
+  model.update(() => ({ catalog: { version: 52 } }));
   controller.dispose();
+  assert.equal(frames.size, 0);
   windows.splice(windows.indexOf(second), 1);
-  model.update(() => ({ catalog: { version: 2 } }));
-  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
+  model.update(() => ({ catalog: { version: 53 } }));
+  flush();
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "51");
 });
 
 test("Agents hosts its dedicated grid and releases it when switching surfaces", async () => {
@@ -191,7 +217,7 @@ test("Agents hosts its dedicated grid and releases it when switching surfaces", 
 });
 
 test("a missing surface requests the existing launcher once and mounts the arriving window", async () => {
-  const { controller, windows, opened } = await fixture();
+  const { controller, model, flush, windows, opened } = await fixture();
   windows.splice(windows.findIndex((w) => w.id === "settings"), 1);
   windows.splice(windows.findIndex((w) => w.id === "issues"), 1);
   controller.open("agents");
@@ -206,8 +232,10 @@ test("a missing surface requests the existing launcher once and mounts the arriv
   assert.deepEqual(opened, ["settings"], "switching layout preserves the in-flight launch");
   controller.show("agents");
   windows.push({ id: "settings", preset: "settings" });
-  controller.sync();
+  model.update(() => ({ catalog: { version: 1 } }));
   windows.splice(windows.findIndex(w => w.id === "settings"), 1);
+  model.update(() => ({ catalog: { version: 2 } }));
+  flush();
   controller.show("settings");
   assert.deepEqual(opened, ["settings", "settings"], "a view that arrived and closed outside split can be launched again");
   windows.push({ id: "settings", preset: "settings" });
@@ -319,7 +347,7 @@ test("PM uses one fixed window without entering the core split selector and reta
 });
 
 test("PM auxiliary selection survives sync and returns to the existing PM only after catalog removal", async () => {
-  const { controller, model, document, windows, elements, opened } = await fixture();
+  const { controller, model, flush, document, windows, elements, opened } = await fixture();
   const auxiliary = { id: "pm-settings", preset: "settings", surface_owner: "pm" };
   const element = document.createElement("div");
   controller.park(element);
@@ -332,6 +360,7 @@ test("PM auxiliary selection survives sync and returns to the existing PM only a
   assert.equal(controller.containsWindow(auxiliary.id), true, "a cancelled close or metadata update preserves the auxiliary selection");
   windows.splice(windows.indexOf(auxiliary), 1);
   model.update(() => ({ catalog: { version: 1 } }));
+  flush();
   assert.equal(controller.activeSurface(), "pm");
   assert.equal(controller.containsWindow("pm"), true);
   assert.equal(controller.containsWindow(auxiliary.id), false);
@@ -394,7 +423,7 @@ test("inactive live views stay in a hidden inert cache outside both pane bodies"
 });
 
 test("Settings and Issues reuse one canonical view and follow its internal section changes", async () => {
-  const { controller, windows, elements, model } = await fixture();
+  const { controller, windows, elements, model, flush } = await fixture();
   windows.splice(windows.findIndex(data => data.id === "settings"), 1);
   controller.show("issues");
   const view = elements.get("issues");
@@ -404,9 +433,11 @@ test("Settings and Issues reuse one canonical view and follow its internal secti
   assert.equal(windows.find(data => data.id === "issues").settingsSection, "system");
   view.querySelector('[data-settings-tab="issues"]').click();
   model.update(() => ({ catalog: { version: 1 } }));
+  flush();
   assert.equal(controller.activeSurface(), "issues");
   view.querySelector('[data-settings-tab="system"]').click();
   model.update(() => ({ catalog: { version: 2 } }));
+  flush();
   assert.equal(controller.activeSurface(), "settings");
   assert.equal(controller.containsWindow("issues"), true);
 });

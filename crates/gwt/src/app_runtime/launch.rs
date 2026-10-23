@@ -31,6 +31,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub use gwt::launch_wizard::LaunchWizardMemoryCache;
+use gwt::project_runtime::launch_authority::{
+    install_agent_capability_env, install_authenticated_active_resume_binding,
+    issue_preflighted_agent_capability_env, preflight_agent_capability_endpoints,
+    ActiveContinuationInstall, AgentCapabilityLaunchAuthority,
+};
 pub use gwt::project_runtime::launch_payload::{
     AgentLaunchCompletion, AgentLaunchError, AgentLaunchResult, AgentLaunchRuntimeContext,
     ProcessLaunch,
@@ -583,127 +588,6 @@ where
     }
 }
 
-fn install_agent_capability_env(
-    env: &mut HashMap<String, String>,
-    issuer: Option<&AgentCapabilityIssuer>,
-    project_root: &Path,
-    session_id: &str,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
-) -> Result<(), String> {
-    install_agent_capability_env_with_binding(
-        env,
-        issuer,
-        project_root,
-        session_id,
-        None,
-        runtime_target,
-        container_runtime,
-    )
-}
-
-fn install_agent_capability_env_with_binding(
-    env: &mut HashMap<String, String>,
-    issuer: Option<&AgentCapabilityIssuer>,
-    project_root: &Path,
-    session_id: &str,
-    execution_binding: Option<&gwt_agent::SessionExecutionBinding>,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
-) -> Result<(), String> {
-    let Some(issuer) = issuer else {
-        return Ok(());
-    };
-    let endpoints = preflight_agent_capability_endpoints(
-        issuer,
-        project_root,
-        session_id,
-        runtime_target,
-        container_runtime,
-    )?;
-    issue_preflighted_agent_capability_env(
-        env,
-        issuer,
-        project_root,
-        session_id,
-        execution_binding.map_or(
-            AgentCapabilityLaunchAuthority::Unbound,
-            AgentCapabilityLaunchAuthority::Active,
-        ),
-        endpoints,
-    )
-}
-
-struct PreflightedAgentCapabilityEndpoints {
-    forward_url: String,
-    pane_websocket_url: String,
-}
-
-fn preflight_agent_capability_endpoints(
-    issuer: &AgentCapabilityIssuer,
-    project_root: &Path,
-    session_id: &str,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
-) -> Result<PreflightedAgentCapabilityEndpoints, String> {
-    issuer.preflight_issue(project_root, session_id)?;
-    let runtime_kind = container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind);
-    let pane_websocket_url = gwt_agent::pane_websocket_url_for_launch_runtime(
-        issuer.pane_websocket_url(),
-        issuer.agent_pane_websocket_url(),
-        runtime_target,
-        runtime_kind,
-    )?;
-    let forward_url = gwt_agent::hook_forward_url_for_launch_runtime(
-        issuer.hook_forward_url(),
-        runtime_target,
-        runtime_kind,
-    )?;
-    Ok(PreflightedAgentCapabilityEndpoints {
-        forward_url,
-        pane_websocket_url,
-    })
-}
-
-fn issue_preflighted_agent_capability_env(
-    env: &mut HashMap<String, String>,
-    issuer: &AgentCapabilityIssuer,
-    project_root: &Path,
-    session_id: &str,
-    execution_authority: AgentCapabilityLaunchAuthority<'_>,
-    endpoints: PreflightedAgentCapabilityEndpoints,
-) -> Result<(), String> {
-    let target = match execution_authority {
-        AgentCapabilityLaunchAuthority::Unbound => issuer.issue(project_root, session_id)?,
-        AgentCapabilityLaunchAuthority::Prepared(binding) => {
-            issuer.issue_prepared(project_root, session_id, binding.clone())?
-        }
-        AgentCapabilityLaunchAuthority::Active(binding) => {
-            issuer.issue_bound(project_root, session_id, binding.clone())?
-        }
-    };
-    env.insert(
-        gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(),
-        endpoints.forward_url,
-    );
-    env.insert(
-        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
-        target.token,
-    );
-    env.insert(
-        gwt_agent::GWT_PANE_WS_URL_ENV.to_string(),
-        endpoints.pane_websocket_url,
-    );
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum AgentCapabilityLaunchAuthority<'a> {
-    Unbound,
-    Prepared(&'a gwt_agent::SessionExecutionBinding),
-    Active(&'a gwt_agent::SessionExecutionBinding),
-}
-
 /// Issue #3759: best-effort republication of a lost worktree pointer/projection
 /// pair from the committed owner ledger, run before a strict authority read.
 ///
@@ -741,134 +625,6 @@ pub(crate) fn heal_lost_generation_publication_best_effort(
             "execution generation publication heal failed; the strict authority read decides"
         ),
     }
-}
-
-/// Issue #3423 / Issue #4207: install a continuation whose generation is
-/// already current and Active.
-///
-/// Both answers of the resume coordinator land here. `ReboundCurrent`
-/// re-validated the predecessor Session against the generation it already
-/// held; `SuccessorCreated` minted the next generation *and activated it* in
-/// the same lease (`activate_successor_with_session_rebind`). Neither leaves a
-/// Prepared attempt behind, so neither can be validated as one — the authority
-/// they carry is re-proved against the live owner ledger instead.
-struct ActiveContinuationInstall<'a> {
-    issuer: Option<&'a AgentCapabilityIssuer>,
-    sessions_dir: &'a Path,
-    session: &'a gwt_agent::Session,
-    project_root: &'a Path,
-    worktree: &'a Path,
-    owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    binding: &'a gwt_agent::SessionExecutionBinding,
-    runtime_target: gwt_agent::LaunchRuntimeTarget,
-    container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
-    /// How a refusal names this continuation, so the message keeps saying
-    /// which launch shape was actually being installed.
-    label: &'a str,
-}
-
-impl ActiveContinuationInstall<'_> {
-    fn install(
-        self,
-        env: &mut HashMap<String, String>,
-    ) -> Result<Option<gwt_agent::SessionActiveLaunchHandshake>, AgentLaunchError> {
-        let Self {
-            issuer,
-            sessions_dir,
-            session,
-            project_root,
-            worktree,
-            owner,
-            binding,
-            runtime_target,
-            container_runtime,
-            label,
-        } = self;
-        if gwt::cli::execution_state::current_execution_binding(worktree, owner)
-            .map_err(|error| AgentLaunchError::authority_rejected(error.to_string()))?
-            .as_ref()
-            != Some(&binding.identity)
-        {
-            return Err(AgentLaunchError::authority_rejected(format!(
-                "{label} no longer matches the current execution generation"
-            )));
-        }
-        if session.execution_binding.as_ref() != Some(binding) {
-            return Err(AgentLaunchError::authority_rejected(format!(
-                "{label} Session binding changed before capability issuance"
-            )));
-        }
-        let expected = gwt_agent::SessionExecutionIdentity::for_binding(session, binding)
-            .map_err(AgentLaunchError::authority_rejected)?;
-        let handshake = match gwt::cli::execution_state::begin_active_session_launch_handshake_classified(
-            sessions_dir,
-            &expected,
-        )
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                AgentLaunchError::active_conflict(error.to_string())
-            } else {
-                AgentLaunchError::authority_rejected(error.to_string())
-            }
-        })?
-        {
-            gwt::cli::execution_state::ActiveSessionLaunchHandshakeOutcome::Acquired(handshake) => *handshake,
-            gwt::cli::execution_state::ActiveSessionLaunchHandshakeOutcome::Conflict => {
-                return Err(AgentLaunchError::active_conflict(format!(
-                    "{label} lost the exact Active launch handshake race"
-                )));
-            }
-            gwt::cli::execution_state::ActiveSessionLaunchHandshakeOutcome::AuthorityRejected => {
-                return Err(AgentLaunchError::authority_rejected(format!(
-                    "{label} no longer holds exact Active launch authority"
-                )));
-            }
-        };
-        if let Err(error) = install_agent_capability_env_with_binding(
-            env,
-            issuer,
-            project_root,
-            &session.id,
-            Some(binding),
-            runtime_target,
-            container_runtime,
-        ) {
-            let _ = gwt::cli::execution_state::finish_active_session_launch_handshake(
-                sessions_dir,
-                &handshake,
-            );
-            return Err(error.into());
-        }
-        Ok(Some(handshake))
-    }
-}
-
-/// Issue #3625 / SPEC #3393 FR-026: install an authenticated Active resume
-/// binding on the Session before capability issuance.
-///
-/// The continuation coordinator already activated and persisted this exact
-/// binding for the owner it names. A Session that lost its linked owner is
-/// repaired from the binding; a Session that names a different owner is left
-/// untouched and the launch fails closed.
-fn install_authenticated_active_resume_binding(
-    session: &mut gwt_agent::Session,
-    launch_linked_issue_number: &mut Option<u64>,
-    binding: &gwt_agent::SessionExecutionBinding,
-) -> Result<(), String> {
-    if session
-        .linked_issue_number
-        .is_some_and(|owner_number| owner_number != binding.owner_number)
-    {
-        return Err(
-            "Authenticated Resume owner does not match the linked Session owner".to_string(),
-        );
-    }
-
-    session.id = binding.session_id.clone();
-    session.linked_issue_number = Some(binding.owner_number);
-    session.set_execution_binding(Some(binding.clone()))?;
-    *launch_linked_issue_number = Some(binding.owner_number);
-    Ok(())
 }
 
 /// SPEC #3248 FR-239 / AS-216: drop the producing owner when this launch opens
@@ -3142,6 +2898,19 @@ pub(super) struct PreparedIssueMonitorSpawnAdmission {
 }
 
 impl PreparedIssueMonitorSpawnAdmission {
+    pub(super) fn can_refresh_capacity(&self, host_project_roots: &[PathBuf]) -> bool {
+        let capacity_path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+        self.host_project_roots == host_project_roots.iter().cloned().collect()
+            && self
+                .dependencies
+                .iter()
+                .filter(|expected| expected.path != capacity_path)
+                .all(|expected| {
+                    IssueMonitorAdmissionFileStamp::read(&expected.path)
+                        .is_ok_and(|current| current == *expected)
+                })
+    }
+
     /// Metadata checks preserve worker admission when another project or the
     /// shared machine observation changes before the GUI creates its pane.
     pub(super) fn is_current(&self, host_project_roots: &[PathBuf]) -> bool {
@@ -3158,6 +2927,25 @@ impl PreparedIssueMonitorSpawnAdmission {
 
 impl IssueMonitorSpawnAdmissionInput {
     pub(super) fn prepare(&self) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
+        self.prepare_with_identity(None)
+    }
+
+    pub(super) fn refresh(
+        &self,
+        previous: &PreparedIssueMonitorSpawnAdmission,
+    ) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
+        let refreshed = self.prepare_with_identity(Some(previous))?;
+        // Keep the original source/policy fence across the queued refresh too.
+        if !previous.can_refresh_capacity(&self.host_project_roots) {
+            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
+        }
+        Ok(refreshed)
+    }
+
+    fn prepare_with_identity(
+        &self,
+        previous: Option<&PreparedIssueMonitorSpawnAdmission>,
+    ) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
         let mut phase_started = std::time::Instant::now();
         let mut paths = self
             .host_project_roots
@@ -3167,13 +2955,6 @@ impl IssueMonitorSpawnAdmissionInput {
             .collect::<std::collections::BTreeSet<_>>();
         paths.insert(gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json"));
         paths.insert(gwt::machine_agent_settings::path());
-        if let Some(cache_root) =
-            gwt::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
-        {
-            let source = cache_root.join(self.issue_number.to_string());
-            paths.insert(source.join("meta.json"));
-            paths.insert(source.join("body.md"));
-        }
         let pending_manifest = gwt_core::update::pending_update_manifest_path();
         paths.insert(pending_manifest.clone());
         // Manifest admission also depends on its payload's existence. Resolve
@@ -3187,7 +2968,7 @@ impl IssueMonitorSpawnAdmissionInput {
             };
             paths.insert(payload_path);
         }
-        let dependencies = paths
+        let mut dependencies = paths
             .iter()
             .map(|path| IssueMonitorAdmissionFileStamp::read(path))
             .collect::<std::io::Result<Vec<_>>>()
@@ -3212,7 +2993,11 @@ impl IssueMonitorSpawnAdmissionInput {
         if let Some(hold) = hold {
             return Err(hold);
         }
-        let monitor = prepare_issue_monitor_spawn_capacity(&self.project_root, self.issue_number)?;
+        let monitor = prepare_issue_monitor_spawn_capacity(
+            &self.project_root,
+            self.issue_number,
+            &mut dependencies,
+        )?;
         tracing::info!(
             target: "gwt.launch.timing",
             phase = "monitor_shared_capacity",
@@ -3225,40 +3010,51 @@ impl IssueMonitorSpawnAdmissionInput {
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
-        let purpose_title = agent_launch_purpose_title(
-            &self.project_root,
-            Some(self.issue_number),
-            Some(&self.target_branch),
-            &self.issue_link_cache_dir,
-        )
-        .map_err(|error| error.to_string())?;
-        tracing::info!(
-            target: "gwt.launch.timing",
-            phase = "monitor_purpose",
-            elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-            thread = "worker",
-            "Issue Monitor launch phase"
-        );
-        phase_started = std::time::Instant::now();
-        let language = gwt_config::Settings::load()
-            .map(|settings| settings.ai.effective_language())
-            .unwrap_or("en");
-        let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
-            .join("agent-names.jsonl");
-        let reserved_agent_name = gwt::agent_names::allocate(
-            &history,
-            language,
-            &self.active_agent_names,
-            &self.known_agent_names,
-        );
-        tracing::info!(
-            target: "gwt.launch.timing",
-            phase = "monitor_agent_name",
-            elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-            thread = "worker",
-            "Issue Monitor launch phase"
-        );
-        let prepared = PreparedIssueMonitorSpawnAdmission {
+        let (purpose_title, reserved_agent_name) = if let Some(previous) = previous {
+            (
+                previous.purpose_title.clone(),
+                previous.reserved_agent_name.clone(),
+            )
+        } else {
+            let purpose_title = agent_launch_purpose_title(
+                &self.project_root,
+                Some(self.issue_number),
+                Some(&self.target_branch),
+                &self.issue_link_cache_dir,
+            )
+            .map_err(|error| error.to_string())?;
+            tracing::info!(
+                target: "gwt.launch.timing",
+                phase = "monitor_purpose",
+                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
+                thread = "worker",
+                "Issue Monitor launch phase"
+            );
+            phase_started = std::time::Instant::now();
+            let language = gwt_config::Settings::load()
+                .map(|settings| settings.ai.effective_language())
+                .unwrap_or("en");
+            let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
+                .join("agent-names.jsonl");
+            let reserved_agent_name = gwt::agent_names::allocate(
+                &history,
+                language,
+                &self.active_agent_names,
+                &self.known_agent_names,
+            );
+            tracing::info!(
+                target: "gwt.launch.timing",
+                phase = "monitor_agent_name",
+                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
+                thread = "worker",
+                "Issue Monitor launch phase"
+            );
+            (purpose_title, reserved_agent_name)
+        };
+        // The GUI checks is_current before applying this result and again at
+        // pane creation. Keep stale observations available for a narrow refresh
+        // instead of discarding their already prepared identity and launch facts.
+        Ok(PreparedIssueMonitorSpawnAdmission {
             project_root: self.project_root.clone(),
             issue_number: self.issue_number,
             monitor,
@@ -3268,32 +3064,55 @@ impl IssueMonitorSpawnAdmissionInput {
             host_project_roots: self.host_project_roots.iter().cloned().collect(),
             dependencies,
             capacity_expires_at,
-        };
-        if !prepared.is_current(&self.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
-        }
-        Ok(prepared)
+        })
     }
 }
 
 fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
     issue_number: u64,
+    dependencies: &mut Vec<IssueMonitorAdmissionFileStamp>,
 ) -> Result<gwt::IssueMonitorState, String> {
     let prefs =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     gwt::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, project_root);
-    if let Some(issue) =
-        gwt::issue_cache::issue_cache_root_for_repo_path(project_root).and_then(|cache_root| {
-            gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
-                &cache_root,
-                issue_number,
-            )
-        })
-    {
-        monitor.record_candidate(issue);
+    if let Some(cache_root) = gwt::issue_cache::issue_cache_root_for_repo_path(project_root) {
+        let issues = gwt::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates(
+            &cache_root,
+            issue_number,
+            |number| {
+                let source = cache_root.join(number.to_string());
+                for path in [source.join("meta.json"), source.join("body.md")] {
+                    dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
+                        |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                    )?);
+                }
+                // Cache::load_entry hydrates only metadata-declared comments.
+                // Stamp missing declarations too: their later arrival changes
+                // SPEC readiness and the composed dependency source.
+                if let Some(meta) = std::fs::read(source.join("meta.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<gwt_github::CacheMeta>(&bytes).ok())
+                {
+                    for id in meta.comment_ids {
+                        let path = source.join("comments").join(format!("{id}.md"));
+                        dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
+                            |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                        )?);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        monitor.observe_dependency_candidates(&issues);
+        if let Some(issue) = issues
+            .into_iter()
+            .find(|issue| issue.number == issue_number)
+        {
+            monitor.record_candidate(issue);
+        }
     }
     monitor.refresh_agent_capacity(project_root);
     Ok(monitor)
@@ -6280,7 +6099,11 @@ impl AppRuntime {
                     (prepared.monitor, prepared.host_started_at)
                 }
                 None => (
-                    prepare_issue_monitor_spawn_capacity(&project_root_path, issue_number)?,
+                    prepare_issue_monitor_spawn_capacity(
+                        &project_root_path,
+                        issue_number,
+                        &mut Vec::new(),
+                    )?,
                     gwt::process::host_process_start_time(std::process::id()),
                 ),
             };
@@ -6321,6 +6144,13 @@ impl AppRuntime {
                 return Err(format!(
                     "Issue Monitor source admission refused Issue #{issue_number}: {reason}"
                 ));
+            }
+            if !review_dispatch {
+                if let Some(reason) = monitor.launch_dependency_exclusion(issue_number) {
+                    return Err(format!(
+                        "Issue Monitor dependency admission refused Issue #{issue_number}: {reason}"
+                    ));
+                }
             }
             if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
                 let status = monitor.agent_status_at(&now);
@@ -8085,80 +7915,6 @@ mod agent_endpoint_env_tests {
                 std::env::remove_var(self.key);
             }
         }
-    }
-
-    #[test]
-    fn authenticated_active_resume_binding_repairs_missing_owner_before_install() {
-        let mut session = gwt_agent::Session::new(
-            PathBuf::from("missing-owner-session-worktree"),
-            "work/issue-42",
-            gwt_agent::AgentId::Codex,
-        );
-        session.id = "predecessor-session".to_string();
-        session.repo_hash = Some("trusted-repository".to_string());
-        let binding = gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: "successor-session".to_string(),
-            repo_hash: "trusted-repository".to_string(),
-            owner_kind: "issue".to_string(),
-            owner_number: 42,
-            identity: gwt_agent::ExecutionBindingIdentity {
-                generation_id: "generation-42".to_string(),
-                binding_id: "binding-42".to_string(),
-                ledger_head_hash: "ledger-head-42".to_string(),
-            },
-            capability_generation: 1,
-        };
-        let mut launch_owner = None;
-
-        install_authenticated_active_resume_binding(&mut session, &mut launch_owner, &binding)
-            .expect("authenticated binding must repair a missing launch owner");
-
-        assert_eq!(session.id, binding.session_id);
-        assert_eq!(session.linked_issue_number, Some(42));
-        assert_eq!(session.execution_binding.as_ref(), Some(&binding));
-        assert_eq!(launch_owner, Some(42));
-    }
-
-    #[test]
-    fn authenticated_active_resume_binding_rejects_foreign_owner_without_mutation() {
-        let mut session = gwt_agent::Session::new(
-            PathBuf::from("foreign-owner-session-worktree"),
-            "work/issue-41",
-            gwt_agent::AgentId::Codex,
-        );
-        session.id = "foreign-owner-session".to_string();
-        session.linked_issue_number = Some(41);
-        let original_id = session.id.clone();
-        let original_owner = session.linked_issue_number;
-        let original_binding = session.execution_binding.clone();
-        let binding = gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: "trusted-owner-session".to_string(),
-            repo_hash: "trusted-repository".to_string(),
-            owner_kind: "issue".to_string(),
-            owner_number: 42,
-            identity: gwt_agent::ExecutionBindingIdentity {
-                generation_id: "generation-42".to_string(),
-                binding_id: "binding-42".to_string(),
-                ledger_head_hash: "ledger-head-42".to_string(),
-            },
-            capability_generation: 1,
-        };
-        let mut launch_owner = Some(41);
-
-        let error =
-            install_authenticated_active_resume_binding(&mut session, &mut launch_owner, &binding)
-                .expect_err("a trusted foreign owner must not overwrite Session authority");
-
-        assert!(
-            error.contains("does not match the linked Session owner"),
-            "{error}"
-        );
-        assert_eq!(session.id, original_id);
-        assert_eq!(session.linked_issue_number, original_owner);
-        assert_eq!(session.execution_binding, original_binding);
-        assert_eq!(launch_owner, Some(41));
     }
 
     fn init_execution_repo(repo: &Path, branch: &str) {
