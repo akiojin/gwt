@@ -1356,6 +1356,61 @@ fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
 }
 
 #[test]
+fn materialized_issue_relationship_output_contract_is_shared_by_both_callers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+
+    let mut contracts = Vec::new();
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        let work = fs::read_to_string(skills.join("gwt-coordination/references/work.md"))
+            .expect("materialized Work guidance");
+        let contract = markdown_block(
+            &work,
+            "## Issue relationship markers",
+            Some("## Git environment"),
+        );
+        for required in [
+            "| `bundled-required` | Primary | `Bundle-with: #701` |",
+            "| `dependent-follow-up` | Dependent | `Blocked-by: #700` |",
+            "| `reference-only` | Neither | No marker |",
+            "outside Markdown fences and HTML comments",
+            "positive, unique Issue numbers",
+            "`issue.edit`",
+            "`issue.spec.edit`",
+            "`issue.spec.section`",
+            "do not grant execution or mutation authority",
+        ] {
+            assert!(
+                contract.contains(required),
+                "{provider}: missing {required}"
+            );
+        }
+        for caller in [
+            "gwt-register-issue/references/workflow.md",
+            "gwt-discussion/references/state-lifecycle.md",
+        ] {
+            let path = skills.join(caller);
+            let text = fs::read_to_string(&path).expect("materialized caller");
+            let target = "../../gwt-coordination/references/work.md#issue-relationship-markers";
+            assert!(
+                text.contains(target),
+                "{provider}/{caller}: missing contract link"
+            );
+            assert!(path
+                .parent()
+                .unwrap()
+                .join(target.split('#').next().unwrap())
+                .is_file());
+        }
+        contracts.push(contract.to_string());
+    }
+    assert_eq!(contracts[0], contracts[1], "provider contract parity");
+}
+
+#[test]
 fn generated_coordination_reads_gwt_assigned_name_before_work() {
     let dir = tempfile::tempdir().expect("tempdir");
     generate_coordination_guidance(dir.path()).expect("generate guidance");

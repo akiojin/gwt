@@ -41,7 +41,12 @@ Do not use this for an existing Issue. Use `gwt-execute #N` instead.
    - inject the `spec` body with JSON operation `issue.spec.edit`
    - perform a roundtrip read with JSON operation `issue.spec.section`
    - return the Issue number and next step
-8. Return the chosen owner and next step in the current user's language.
+8. When multiple owners are involved, apply the shared
+   [Issue relationship markers](../../gwt-coordination/references/work.md#issue-relationship-markers)
+   contract before handoff: persist the classified relationships on the correct
+   owners and read each changed body or SPEC section back. Keep the existing
+   PM registration and mutation authority boundaries.
+9. Return the chosen owner and next step in the current user's language.
 
 ## Spec Status
 

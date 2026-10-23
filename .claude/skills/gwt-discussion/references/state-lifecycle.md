@@ -24,6 +24,13 @@ related owner is classified (SPEC-3248 Multi-Issue Primary Owner Bundle):
   blocker notes; never a hidden Primary completion requirement
 - `reference-only` — background reading, not part of the PR's completion
 
+Persist that classification using the shared
+[Issue relationship markers](../../gwt-coordination/references/work.md#issue-relationship-markers)
+contract before declaring the artifact update complete. Read back every changed
+owner body or SPEC section; prose in the discussion or Primary alone does not
+establish a dependent's `Blocked-by:` relationship. Existing mutation authority
+and discussion approval boundaries still apply.
+
 `Discussion TODO` is not an implementation task list. It tracks unresolved
 questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
 the next question to ask, and the depth state for the active proposal.
