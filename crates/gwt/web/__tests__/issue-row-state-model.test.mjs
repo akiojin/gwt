@@ -225,7 +225,7 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
         { id: "project-1", workspace: { windows } },
         { id: "project-2", workspace: { windows: otherProjectWindows } },
       ] } } }),
-      subscribe: () => () => {},
+      subscribeFrame: () => () => {},
     },
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset: () => kind,
