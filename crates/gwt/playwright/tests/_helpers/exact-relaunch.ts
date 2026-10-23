@@ -64,6 +64,10 @@ const args = process.argv.slice(2);
 if (args.includes('--version') || args.includes('-V')) {
   console.log('codex-cli 0.116.0'); process.exit(0);
 }
+// Configuration preflight is not an interactive provider session.
+if (args.at(-2) === 'features' && args.at(-1) === 'list') {
+  process.exit(0);
+}
 const option = name => {
   const index = args.indexOf(name);
   return index < 0 ? (args.find(a => a.startsWith(name + '='))?.slice(name.length + 1) ?? null)
