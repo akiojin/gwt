@@ -88,6 +88,7 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 pub enum AgentFrontendRequest {
     Ready,
     ListWindows,
+    ListFleetPanes,
     CloseWork {
         work_id: String,
         close_kind: String,
@@ -100,6 +101,13 @@ pub enum AgentFrontendRequest {
         id: String,
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
+    },
+    CloseFleetPane {
+        request_id: String,
+        id: String,
+        session_id: String,
+        child_pid: Option<u32>,
+        child_started_at: Option<u64>,
     },
     RecoverRestoredWindow {
         id: String,
@@ -126,12 +134,16 @@ impl std::fmt::Debug for AgentFrontendRequest {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
             Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
+            Self::ListFleetPanes => formatter.write_str("AgentFrontendRequest::ListFleetPanes"),
             Self::CloseWork { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
             }
             Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
+            }
+            Self::CloseFleetPane { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseFleetPane(<redacted>)")
             }
             Self::RecoverRestoredWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
@@ -156,6 +168,7 @@ impl AgentFrontendRequest {
             Self::Name { .. }
                 | Self::CloseWork { .. }
                 | Self::CloseWindow { .. }
+                | Self::CloseFleetPane { .. }
                 | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }

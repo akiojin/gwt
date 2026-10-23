@@ -1,6 +1,27 @@
 //! Session launch preparation and persistence without a GUI dependency.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const DURABLE_LAUNCH_RECOVERY_DIR: &str = "execution-launch-recovery";
+
+/// Directory containing pending launch-recovery receipts.
+pub fn durable_launch_recovery_dir(sessions_dir: &Path) -> PathBuf {
+    sessions_dir.join(DURABLE_LAUNCH_RECOVERY_DIR)
+}
+
+/// Resolve an exact Session receipt after validating its path component.
+pub fn durable_launch_recovery_path(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    gwt_agent::validate_session_id_path_component(session_id)?;
+    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
+}
+
+/// Whether an exact Session has a pending launch-recovery receipt.
+pub fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
+    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
+}
 
 /// Why a restored Session cannot be handed to the agent CLI as `--resume`
 /// (SPEC-3966 AC-4).

@@ -820,6 +820,115 @@ async fn request_window_list(
     request_window_list_with_timeout(ws_url, project_root, BACKEND_RESPONSE_TIMEOUT).await
 }
 
+/// Fleet requests have one short absolute budget and never fall back to a
+/// legacy listing or close, whose runtime identity is not strong enough.
+pub(super) fn fleet_windows(project_root: &str) -> Result<Vec<Value>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            send_frontend_event(&mut socket, json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] == "fleet_pane_list" {
+                    let observed_root = value["project_root"]
+                        .as_str()
+                        .filter(|root| !root.is_empty())
+                        .ok_or_else(|| {
+                            "fleet pane snapshot omitted its project scope".to_string()
+                        })?;
+                    let expected_root =
+                        gwt_core::paths::resolve_main_worktree_root(Path::new(project_root));
+                    if !same_pane_scope_path(Path::new(observed_root), &expected_root) {
+                        return Err("fleet pane snapshot belongs to a different project".into());
+                    }
+                    return value["panes"]
+                        .as_array()
+                        .cloned()
+                        .ok_or_else(|| "invalid fleet pane snapshot".to_string());
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            "fleet pane snapshot unavailable: backend timed out or lacks fleet support".to_string()
+        })?
+    })
+}
+
+pub(super) fn fleet_close(
+    id: &str,
+    session_id: &str,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+) -> Result<Value, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            // The scoped fleet snapshot primes this connection's target
+            // allowlist. A new socket has no authorized peer window IDs.
+            send_frontend_event(&mut socket,json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] != "fleet_pane_list" { continue; }
+                if !value["panes"].as_array().is_some_and(|panes| panes.iter().any(|pane| pane["window_id"]==id)) {
+                    return Err("fleet target is absent from the authenticated project snapshot".into());
+                }
+                break;
+            }
+            let request_id = uuid::Uuid::new_v4().to_string();
+            send_frontend_event(&mut socket,json!({
+                "kind":"close_fleet_pane","request_id":request_id,"id":id,
+                "session_id":session_id,"child_pid":child_pid,"child_started_at":child_started_at,
+            })).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if let Some(result) = fleet_close_reply(&value,&request_id,id) {
+                    let mut receipt = result?;
+                    if let (Some(pid),Some(started_at)) = (child_pid,child_started_at) {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        while crate::process::exact_pty_process_tree_is_alive(pid,started_at) {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err("pane removed, but process-tree termination is unconfirmed; re-inventory before retry".into());
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        receipt["process_tree_terminated"] = json!(true);
+                    }
+                    return Ok(receipt);
+                }
+            }
+        }).await.map_err(|_| "fleet close receipt unavailable: outcome unknown; re-inventory before retry (no legacy fallback)".to_string())?
+    })
+}
+
+fn fleet_close_reply(value: &Value, request_id: &str, id: &str) -> Option<Result<Value, String>> {
+    if value["kind"] != "fleet_pane_close_result"
+        || value["request_id"] != request_id
+        || value["window_id"] != id
+    {
+        return None;
+    }
+    Some(if value["ok"].as_bool() == Some(true) {
+        Ok(value.clone())
+    } else {
+        Err(value["reason"]
+            .as_str()
+            .or_else(|| value["error"].as_str())
+            .unwrap_or("fleet close refused without a reason")
+            .to_string())
+    })
+}
+
 async fn request_window_list_with_timeout(
     ws_url: &str,
     project_root: &str,
@@ -4451,6 +4560,85 @@ mod tests {
             let transport = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
             assert!(transport.starts_with("network error:"), "{transport}");
         });
+    }
+
+    #[test]
+    fn fleet_close_accepts_only_matching_correlated_receipts() {
+        let unrelated = json!({"kind":"pane_close_result","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&unrelated, "request-a", "pane-a").is_none());
+        let mismatch = json!({"kind":"fleet_pane_close_result","request_id":"request-b","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&mismatch, "request-a", "pane-a").is_none());
+        let refusal = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":false,"error":"runtime changed"});
+        assert!(fleet_close_reply(&refusal, "request-a", "pane-a")
+            .unwrap()
+            .unwrap_err()
+            .contains("runtime changed"));
+        let success = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&success, "request-a", "pane-a")
+            .unwrap()
+            .is_ok());
+    }
+
+    #[test]
+    fn fleet_windows_rejects_foreign_empty_snapshot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            persist_runtime_evidence(home.path()),
+        );
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "fleet-scope-capability",
+        );
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let snapshots = [
+            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
+            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                for snapshot in snapshots {
+                    let (stream, _) =
+                    // test-hygiene: allow-wall-clock-deadline Bound fixture startup if the real WebSocket client never connects; scope assertions depend only on the received snapshot.
+                        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert_eq!(next_frontend_kind(&mut socket).await, "list_fleet_panes");
+                    socket
+                        .send(Message::Text(snapshot.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let wrong_project = fleet_windows(&project.path().to_string_lossy());
+        let own_project = fleet_windows(&project.path().to_string_lossy());
+        server.join().unwrap();
+        assert!(
+            wrong_project.is_err(),
+            "an unrelated empty inventory is not a complete pane observation"
+        );
+        assert!(own_project.unwrap().is_empty());
     }
 
     #[test]

@@ -16660,7 +16660,7 @@ impl IssueMonitorState {
                 )
             });
         // Issue #4783 AC-R2: execution settlement ends one delivery, not the
-        // Issue's remaining acceptance criteria. Reconsider the fresh payload
+        // Issue's remaining work. Reconsider the fresh payload
         // on the next scan without charging or resetting its retry budget.
         if existing.as_ref().is_some_and(|item| {
             item.state == MonitorInboxState::Launched && item.launched_window_id.is_none()
@@ -16686,11 +16686,18 @@ impl IssueMonitorState {
             let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                 issue.body.as_deref().unwrap_or(""),
             );
-            if criteria.machine_checkable && !criteria.unchecked.is_empty() {
+            // SPEC task readiness owns slice completion, even when the
+            // recognized acceptance block describes an already delivered slice.
+            let remaining_work = if has_gwt_spec_label(&issue.labels) {
+                Self::issue_completion_decision(&issue) == IssueCompletionDecision::Incomplete
+            } else {
+                !criteria.unchecked.is_empty()
+            };
+            if criteria.machine_checkable && remaining_work {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
                 self.fence_automatic_relaunch(
                     issue_number,
-                    "settled delivery; remaining acceptance criteria",
+                    "settled delivery; remaining work",
                     &format_rfc3339_utc(chrono::Utc::now()),
                 );
                 existing = self.inbox_item(issue_number).cloned();
@@ -18351,6 +18358,7 @@ impl IssueMonitorState {
                 item.state == MonitorInboxState::Queued
                     && !self.cancelled_claim_awaits_runtime(issue_number)
                     && !self.launch_admission_is_held_at(now)
+                    && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_monitor_pane_for_issue(issue_number)
@@ -20405,13 +20413,9 @@ impl IssueMonitorState {
                 None,
             ),
         };
-        // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
-        // pool is now held; another candidate can still honor them.
-        let every_pool_provider_held =
-            provider.is_some() && self.provider_quota_hold_at(now).is_some();
         self.release_provider_limited_source_tracking(issue_number);
-        if every_pool_provider_held {
-            self.compensate_uncommitted_provider_claims();
+        if provider.is_some() {
+            self.compensate_uncommitted_provider_claims(now);
         }
         let record = self.autonomous_record_mut(issue_number);
         record.retry_not_before = floor;
@@ -20452,13 +20456,25 @@ impl IssueMonitorState {
     /// Attempting tuples stay in the journal until their late result arrives;
     /// exact ReleaseClaim companions make that result harmless without
     /// invalidating unrelated effect authority.
-    fn compensate_uncommitted_provider_claims(&mut self) {
-        let mut cancelled_issues = self
+    fn compensate_uncommitted_provider_claims(&mut self, now: &str) {
+        let every_pool_provider_held = self.provider_quota_hold_at(now).is_some();
+        let cancelled_issues = self
             .pending_effects
             .iter()
             .filter_map(|effect| match &effect.payload {
                 IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(*issue_number),
                 _ => None,
+            })
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .filter(|delivery| delivery.materializer_id.is_none())
+                    .map(|delivery| delivery.issue_number),
+            )
+            // A healthy lower tier cannot honor an Issue's higher tier floor.
+            // Preserve work that still has an eligible provider in its pool.
+            .filter(|issue_number| {
+                every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
             })
             .collect::<BTreeSet<_>>();
         let attempting_claims = self
@@ -20468,7 +20484,8 @@ impl IssueMonitorState {
                 effect.state == IssueMonitorEffectState::Attempting
                     && matches!(
                         effect.payload,
-                        IssueMonitorEffectPayload::AcquireClaim { .. }
+                        IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                            if cancelled_issues.contains(&issue_number)
                     )
             })
             .cloned()
@@ -20477,7 +20494,8 @@ impl IssueMonitorState {
             effect.state != IssueMonitorEffectState::Prepared
                 || !matches!(
                     effect.payload,
-                    IssueMonitorEffectPayload::AcquireClaim { .. }
+                    IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                        if cancelled_issues.contains(&issue_number)
                 )
         });
         for effect in attempting_claims {
@@ -20502,13 +20520,16 @@ impl IssueMonitorState {
         let cancelled_deliveries = self
             .pending_launch_deliveries
             .iter()
-            .filter(|delivery| delivery.materializer_id.is_none())
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && cancelled_issues.contains(&delivery.issue_number)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        self.pending_launch_deliveries
-            .retain(|delivery| delivery.materializer_id.is_some());
+        self.pending_launch_deliveries.retain(|delivery| {
+            delivery.materializer_id.is_some() || !cancelled_issues.contains(&delivery.issue_number)
+        });
         for delivery in cancelled_deliveries {
-            cancelled_issues.insert(delivery.issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -22176,8 +22197,8 @@ impl IssueMonitorState {
     /// again" — a settled delivery is a success: the active slot is released
     /// in this mutation, no retry attempt is spent, and the row initially stays
     /// `Launched` out of the queue. The next scan reconsiders an Open Issue with
-    /// unchecked acceptance criteria; otherwise the ordinary completion probe
-    /// (merged PR / closed Issue) ends it. The window is unbound so the later
+    /// unfinished SPEC tasks or unchecked Issue acceptance; otherwise the ordinary
+    /// completion probe (merged PR / closed Issue) ends it. The window is unbound so the later
     /// vanished-window reconciliation cannot mistake the runtime's own close
     /// for a failed attempt.
     ///
@@ -23232,7 +23253,7 @@ impl IssueMonitorState {
                         let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                             issue.body.as_deref().unwrap_or(""),
                         );
-                        criteria.machine_checkable && !criteria.unchecked.is_empty()
+                        criteria.machine_checkable
                     }
             });
         if next_slice {
@@ -28525,6 +28546,116 @@ mod tests {
     }
 
     #[test]
+    fn auto_tiers_recheck_provider_availability_after_claim_acquisition() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_auto: true,
+            max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            launch_tiers: vec![
+                vec![test_launch_profile("codex")],
+                vec![test_launch_profile("claude")],
+            ],
+            ..Default::default()
+        };
+        prefs.record_tier_launch(42, 1);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(44));
+        monitor.complete_active_launch(44, "tab-1::agent-44");
+        monitor.require_fresh_launch_session(42);
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 2, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                44,
+                "tab-1::agent-44",
+                "claude",
+                "Claude quota exhausted",
+                Some("2026-10-24T00:00:00Z"),
+                None,
+                now,
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert!(
+            !monitor.launch_admission_is_held_at(now),
+            "the lower tier remains healthy"
+        );
+        assert!(
+            monitor.retry_ready_for_saved_profile(43, now),
+            "other Issues can still use it"
+        );
+        assert!(!monitor.retry_ready_for_saved_profile(42, now));
+        let queued = monitor.queued_issue_numbers();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected an acquisition");
+        };
+        monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .unwrap();
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), queued);
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(
+            monitor.queued_launch_session_strategies[&42],
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(monitor.pending_effects().len(), 1, "one exact compensation");
+        let release = monitor.pending_effects()[0].clone();
+        assert!(
+            matches!(&release.payload, IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42, claim_id: released, owner: released_owner,
+        } if released == claim_id && released_owner == owner)
+        );
+        assert!(monitor.mark_pending_effect_attempting(&release.attempt_key()));
+        monitor
+            .complete_pending_effect(&release.attempt_key())
+            .unwrap();
+        monitor.clear_provider_quota_hold("claude", "quota recovered", now);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 1, |_| false),
+            1
+        );
+        let fresh = monitor.pending_effects()[0].clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &fresh.payload
+        else {
+            panic!("expected a fresh acquisition");
+        };
+        assert!(monitor.apply_confirmed_claim(42, claim_id, owner, &fresh.effect_id, now));
+        assert_eq!(
+            monitor.take_pending_launch_requests()[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.prefs().issue_tiers[&42].floor, 1);
+    }
+
+    #[test]
     fn auto_tiers_classify_failures_without_changing_the_retry_ladder() {
         let mut monitor = launched_monitor(42, "tab-1::agent-42");
         let mut prefs = monitor.prefs();
@@ -30238,26 +30369,36 @@ mod tests {
 
     #[test]
     fn provider_hold_restores_fresh_required_from_an_unclaimed_delivery() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_auto: true,
+            max_active_agents: 4,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            launch_tiers: vec![
+                vec![test_launch_profile("codex")],
+                vec![test_launch_profile("claude")],
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.record_tier_launch(43, 1);
         let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 4,
                 ..IssueMonitorConfig::default()
             },
-            IssueMonitorPrefs {
-                enabled: true,
-                max_active_agents: 4,
-                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
-                launch_profile: Some(test_launch_profile("codex")),
-                ..IssueMonitorPrefs::default()
-            },
+            prefs,
         );
-        for number in [42, 43] {
+        monitor.set_gui_connected(true);
+        for number in [42, 43, 44] {
             monitor.terminal_queue_push(&[number], "test", "2026-08-01T00:00:00Z");
             monitor.record_candidate(issue(number));
         }
         monitor.complete_active_launch(42, "tab-1::agent-42");
         monitor.require_fresh_launch_session(43);
+        monitor.record_attempt(43);
+        monitor.set_autonomous_phase(43, AutonomousPhase::Implementing);
         assert!(monitor.apply_confirmed_claim(
             43,
             "claim-43",
@@ -30269,20 +30410,75 @@ mod tests {
             monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
         );
+        let cancelled_delivery = monitor.pending_launch_delivery_id(43).unwrap();
+        assert!(monitor.apply_confirmed_claim(
+            44,
+            "claim-44",
+            "host/session",
+            "claim-effect-44",
+            "2026-08-22T02:00:00Z",
+        ));
 
         monitor.try_hold_provider_usage_limit(
             42,
             "tab-1::agent-42",
-            "codex",
-            "Codex quota exhausted",
+            "claude",
+            "Claude quota exhausted",
             Some("2026-08-22T04:00:00Z"),
             None,
             "2026-08-22T02:01:00Z",
         );
 
+        assert!(!monitor.launch_admission_is_held_at("2026-08-22T02:01:00Z"));
+        assert_eq!(monitor.pending_launch_delivery_id(43), None);
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_issue_numbers().contains(&43));
+        assert_eq!(
+            monitor.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(monitor.prefs().issue_tiers[&43].floor, 1);
         assert_eq!(
             monitor.prefs().queued_launch_session_strategies.get(&43),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(
+            &monitor.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        let requests = monitor.take_pending_launch_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].issue_number, 44,
+            "the healthy lower tier still launches"
+        );
+        let release = monitor.pending_effects()[0].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&release));
+        monitor.complete_pending_effect(&release).unwrap();
+        monitor.clear_provider_quota_hold("claude", "recovered", "2026-08-22T02:02:00Z");
+        assert_eq!(
+            monitor.prepare_claim_effects_with_observations(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                4,
+                &BTreeMap::from([(43, false)]),
+            ),
+            1,
+            "the cancelled Issue returns through ordinary admission"
         );
     }
 
@@ -43706,7 +43902,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
+    fn issue_5876_next_scan_requeues_settled_spec_with_open_tasks() {
         let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
@@ -43718,8 +43914,18 @@ mod tests {
 
         assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
         assert!(monitor.queued_issue_numbers().is_empty());
-        let mut candidate = issue(42);
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into());
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-06-26T00:01:00Z",
+        );
+        // Issue #5016: the recognized block is checked, while later SPEC
+        // amendments and the task artifact still contain unfinished work.
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: remaining work\n"
+                .into(),
+        );
         scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
 
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
@@ -43798,18 +44004,28 @@ mod tests {
 
     #[test]
     fn issue_4783_next_scan_does_not_requeue_checked_settled_delivery() {
-        let candidate = checked_issue(42);
-        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
-        let target = stop_target(&monitor, 42);
-        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
-
-        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
-
-        assert!(monitor.queued_issue_numbers().is_empty());
-        assert_eq!(
-            monitor.inbox_item(42).unwrap().state,
-            MonitorInboxState::Launched
+        let mut completed_spec = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-06-26T00:00:00Z",
         );
+        completed_spec.body = checked_issue(42).body;
+        let mut unknown_spec = completed_spec.clone();
+        unknown_spec.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        unknown_spec.updated_at = None;
+        for candidate in [checked_issue(42), completed_spec, unknown_spec] {
+            let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+            let target = stop_target(&monitor, 42);
+            assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+            scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Launched
+            );
+        }
     }
 
     #[test]
@@ -47743,7 +47959,11 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-09-07T03:00:00Z",
         );
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: next slice\n"
+                .into(),
+        );
         let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
         observed.get_mut(&42).unwrap().holder_host_dead = true;
