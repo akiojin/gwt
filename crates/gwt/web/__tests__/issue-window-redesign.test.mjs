@@ -140,7 +140,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
   assert.equal(pill.dataset.tone, "active");
-  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 1/2");
+  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 0/2", "no Issue cards are loaded");
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));

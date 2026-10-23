@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862"),
+    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -602,6 +602,69 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1/2");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
+});
+
+test("Issue #6141 closed issues follow live sessions and explain cleanup, counts and errors", async ({ page }) => {
+  const activeMetric = page.locator('[data-metric="active"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([{ number: 5, title: "Closed issue awaiting session cleanup", state: "closed", labels: [] }]);
+    fixture.__queueConfirm([], { enabled: true, state: "active", active_count: 7, max_active_agents: 8 });
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "launched" }]);
+  });
+  for (const [status, label] of [["running", "Running"], ["idle", "Idle"], ["waiting", "Needs input"], ["starting", "Starting"]]) {
+    await page.evaluate(status => {
+      const fixture = window as any;
+      fixture.__queueAgentState(status);
+    }, status);
+    await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1");
+    await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+    await expect(column(page, "done").locator('[data-issue-number="5"]')).toHaveCount(0);
+    await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText(label);
+    await expect(row(page, 5).locator('[data-key="closed"]')).toHaveText("Closed");
+    await expect(row(page, 5)).toContainText("Session cleanup pending");
+    await expect(activeMetric).toHaveText("Active 1/8");
+  }
+  await activeMetric.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText(/capacity.*7\/8/i);
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueAgentState("stopped");
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "released" }]);
+  });
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0");
+  await expect(activeMetric).toHaveText("Active 0/8");
+  await expect(row(page, 5)).not.toContainText("Session cleanup pending");
+
+  const cause = "Agent process exited with code 17 during session cleanup";
+  await page.evaluate(cause => {
+    const fixture = window as any;
+    fixture.__queueAgentState("error");
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "agent_failed", error_message: cause }]);
+  }, cause);
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  const badge = row(page, 5).locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Error");
+  await badge.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText(cause);
+  await page.mouse.move(1590, 1090);
+  await page.keyboard.press("Tab");
+  await row(page, 5).locator(".knowledge-row-select").focus();
+  await expect(popup).toContainText(cause);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5, state: "closed" }, state: "agent_failed" }]));
+  await badge.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).not.toContainText(cause);
+  await expect(popup).toContainText(/no.*(?:cause|detail|reason)|not.*reported/i);
 });
 
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
