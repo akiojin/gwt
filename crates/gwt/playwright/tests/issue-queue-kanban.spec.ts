@@ -1002,6 +1002,9 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await drag(page,1,column(page,"queued").locator("h3"));
   await expect.poll(()=>messages(page)).toEqual([{kind:"issue_monitor_queue_push",issue_numbers:[1,2]}]);
   await expect(column(page,"backlog").locator('[data-issue-number="1"]')).toHaveCount(1);
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"push",issue_numbers:[1,2],error:null}));
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #1, Issue #2: added to the queue.");
   await confirm(page,[3,4,1,2]);
   await expect(column(page,"queued").locator(".knowledge-row")).toHaveCount(4);
   await row(page,1).getByRole("checkbox").uncheck();
@@ -1013,7 +1016,10 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await expect(column(page,"queued").locator(".knowledge-row").first()).toHaveAttribute("data-issue-number","2");
   await drag(page,2,column(page,"backlog").locator("h3"));
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"issue_monitor_queue_remove",issue_numbers:[2]});
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"remove",issue_numbers:[2],error:null}));
   await confirm(page,[3,4,1]);
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: removed from the queue.");
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
   const before=(await messages(page)).length;
   for(const phase of ["active","done"]) {
@@ -1022,10 +1028,24 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   }
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
-  await confirm(page,[3,4,1],{last_error:"Queue change rejected: issue is on hold"});
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"push",issue_numbers:[2],error:"Queue change rejected: issue is on hold"}));
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
-  await page.locator("#op-notifications-button").click();
-  await expect(page.locator("#notification-center")).toContainText("Queue change rejected: issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: issue is on hold");
+  await confirm(page,[3,4,1]);
+  await expect(page.locator(".issue-queue-feedback")).toContainText("issue is on hold");
+});
+
+test("Issue #4499 a card missing at drop time explains why it cannot move", async ({ page }) => {
+  const transfer = await page.evaluateHandle(() => new DataTransfer());
+  await row(page,1).dispatchEvent("dragstart",{dataTransfer:transfer});
+  await page.evaluate(() => (window as any).__queueSetEntries([{number:2,title:"Remaining issue",state:"open",labels:[]}]));
+  await expect(row(page,1)).toHaveCount(0);
+  const before = (await messages(page)).length;
+  await column(page,"queued").dispatchEvent("drop",{dataTransfer:transfer});
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #1 is no longer on this board. Refresh and try again.");
+  expect((await messages(page)).length).toBe(before);
+  await transfer.dispose();
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {

@@ -1370,6 +1370,17 @@ export function createKnowledgeKanbanSurface({
         issueMonitorModel.update(model => ({ ...model, inboxByIssue }));
       }
 
+      function applyIssueMonitorQueueResult(event) {
+        const action = {push:"added to the queue", remove:"removed from the queue", move:"queue order updated"}[event.operation];
+        if (!action) return;
+        const issues = (event.issue_numbers || []).map(number => `Issue #${number}`).join(", ");
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (state.kind !== "issue") continue;
+          state.queueFeedback = event.error ? `${issues}: ${event.error}` : `${issues}: ${action}.`;
+          issueWindowViewModel.update(() => ({windowId}));
+        }
+      }
+
       function scheduleIssueMonitorProjectionRefresh() {
         knowledgeEventRefreshModel.update(model => ({ kind: "monitor", revision: model.revision + 1 }));
       }
@@ -3208,6 +3219,7 @@ export function createKnowledgeKanbanSurface({
       function renderIssueQueueBoard(windowId, state, list, entries) {
         const feedback = list.querySelector(".issue-queue-feedback") || createNode("div", "issue-queue-feedback");
         feedback.setAttribute("role", "status");
+        feedback.textContent = state.queueFeedback || "";
         const board = list.querySelector(".issue-queue-board") || createNode("div", "issue-queue-board");
         if (!board.parentNode) list.prepend(feedback, board);
         // Drop handlers read this current snapshot, never a previous render's array.
@@ -3331,31 +3343,56 @@ export function createKnowledgeKanbanSurface({
           column.addEventListener("dragover", event => event.preventDefault());
           column.addEventListener("drop", event => {
             event.preventDefault();
-            const number = Number.parseInt(event.dataTransfer?.getData("text/plain"), 10);
-            const currentEntries = state.queueBoardEntries;
+            const explain = message => {
+              state.queueFeedback = message;
+              issueWindowViewModel.update(() => ({windowId}));
+            };
+            const raw = event.dataTransfer?.getData("text/plain") || "";
+            const number = /^\d+$/.test(raw) ? Number(raw) : NaN;
+            if (!Number.isSafeInteger(number) || number <= 0) {
+              explain("Drop an issue card into Backlog or Queued.");
+              return;
+            }
+            const currentEntries = state.queueBoardEntries || [];
             const entry = currentEntries.find(item => item.number === number);
-            if (!entry) return;
+            if (!entry) {
+              explain(`Issue #${number} is no longer on this board. Refresh and try again.`);
+              return;
+            }
             if (phase === "active" || phase === "done") {
-              feedback.textContent = `${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`;
+              explain(`${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`);
               return;
             }
             const origin = issueQueueColumnForEntry(entry, windowId);
             if (origin !== "backlog" && origin !== "queued") {
-              feedback.textContent = "Active and Done issues cannot be moved into the queue.";
+              explain("Active and Done issues cannot be moved into the queue.");
               return;
             }
+            let message;
             if (phase === "queued" && origin === "queued") {
               const target = event.target?.closest?.("[data-issue-number]");
               const queued = canonicalQueuedKnowledgeEntries(state);
               const targetIndex = queued.findIndex(item => item.number === Number(target?.dataset.issueNumber));
-              send({kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex});
+              message = {kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex};
             } else if (origin !== phase) {
               const numbers = state.queueSelection.has(number)
                 ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item, windowId) === origin).map(item => item.number)
                 : [number];
-              send({kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers});
-            } else return;
-            feedback.textContent = "Queue change requested; waiting for server confirmation.";
+              message = {kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers};
+            } else {
+              explain(`Issue #${number} is already in ${label}.`);
+              return;
+            }
+            try {
+              const outcome = send(message);
+              explain(outcome === "unavailable" || outcome === false
+                ? "Queue change could not be sent. Reconnect and try again."
+                : outcome === "queued"
+                  ? "Queue change is waiting for reconnection; it has not been confirmed."
+                  : "Queue change requested; waiting for server confirmation.");
+            } catch (error) {
+              explain(`Queue change could not be sent: ${error.message || error}`);
+            }
           });
           board.appendChild(column);
         }
@@ -5740,6 +5777,7 @@ export function createKnowledgeKanbanSurface({
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
         applyIssueMonitorInbox,
+        applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
