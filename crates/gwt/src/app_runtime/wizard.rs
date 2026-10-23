@@ -4424,6 +4424,66 @@ impl AppRuntime {
             correlation_delivery_id.as_deref(),
             Some(prefs_stamp_elapsed_ms),
         );
+        // A five-second host sample renewal must not restart Git/base/prompt
+        // preparation. Recheck admission on its worker while all other facts
+        // retain their original freshness/claim fences on the returned event.
+        if admission_stale
+            && !session_changed
+            && !source_changed
+            && !prefs_changed
+            && !provider_changed
+            && delivery.unsubmitted_handoff_attempt().is_none()
+            && delivery.claim.as_ref().is_none_or(|(window_id, _)| {
+                self.tab(&context.tab_id).is_some_and(|tab| {
+                    *window_id
+                        == combined_window_id(
+                            &context.tab_id,
+                            &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+                        )
+                })
+            })
+        {
+            if let Some(previous) = delivery
+                .admission
+                .as_ref()
+                .and_then(|admission| admission.as_ref().ok())
+                .filter(|admission| admission.can_refresh_capacity(&roots))
+            {
+                let previous = previous.clone();
+                let branch = knowledge_launch_target_branch_name(
+                    request.linked_issue_kind,
+                    request.issue_number,
+                );
+                let input = self.capture_issue_monitor_spawn_admission(
+                    &request.project_root,
+                    request.issue_number,
+                    &branch,
+                );
+                let mut refreshed = IssueMonitorLaunchPrepared {
+                    context: context.clone(),
+                    request: request.clone(),
+                    prefs_stamp,
+                    provider_usage: provider_usage.clone(),
+                    delivery: delivery.clone(),
+                };
+                let proxy = self.proxy.clone();
+                let span = tracing::Span::current();
+                self.issue_monitor_launch_preparations.insert(key.clone());
+                let scheduled = self.blocking_tasks.try_spawn(move || {
+                    let _span = span.enter();
+                    let mut started = std::time::Instant::now();
+                    refreshed.delivery.admission = Some(input.refresh(&previous));
+                    record_issue_monitor_worker_phase("monitor_admission_refresh", &mut started);
+                    proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(refreshed)));
+                });
+                if let Err(error) = scheduled {
+                    self.issue_monitor_launch_preparations.remove(&key);
+                    return self
+                        .schedule_issue_monitor_launch_failure(context, request, error, None);
+                }
+                return Vec::new();
+            }
+        }
         if session_changed || source_changed || admission_stale || prefs_changed || provider_changed
         {
             if let Some(attempt) = delivery.unsubmitted_handoff_attempt() {

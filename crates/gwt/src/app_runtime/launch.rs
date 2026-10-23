@@ -2898,6 +2898,19 @@ pub(super) struct PreparedIssueMonitorSpawnAdmission {
 }
 
 impl PreparedIssueMonitorSpawnAdmission {
+    pub(super) fn can_refresh_capacity(&self, host_project_roots: &[PathBuf]) -> bool {
+        let capacity_path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+        self.host_project_roots == host_project_roots.iter().cloned().collect()
+            && self
+                .dependencies
+                .iter()
+                .filter(|expected| expected.path != capacity_path)
+                .all(|expected| {
+                    IssueMonitorAdmissionFileStamp::read(&expected.path)
+                        .is_ok_and(|current| current == *expected)
+                })
+    }
+
     /// Metadata checks preserve worker admission when another project or the
     /// shared machine observation changes before the GUI creates its pane.
     pub(super) fn is_current(&self, host_project_roots: &[PathBuf]) -> bool {
@@ -2914,6 +2927,25 @@ impl PreparedIssueMonitorSpawnAdmission {
 
 impl IssueMonitorSpawnAdmissionInput {
     pub(super) fn prepare(&self) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
+        self.prepare_with_identity(None)
+    }
+
+    pub(super) fn refresh(
+        &self,
+        previous: &PreparedIssueMonitorSpawnAdmission,
+    ) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
+        let refreshed = self.prepare_with_identity(Some(previous))?;
+        // Keep the original source/policy fence across the queued refresh too.
+        if !previous.can_refresh_capacity(&self.host_project_roots) {
+            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
+        }
+        Ok(refreshed)
+    }
+
+    fn prepare_with_identity(
+        &self,
+        previous: Option<&PreparedIssueMonitorSpawnAdmission>,
+    ) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
         let mut phase_started = std::time::Instant::now();
         let mut paths = self
             .host_project_roots
@@ -2978,40 +3010,51 @@ impl IssueMonitorSpawnAdmissionInput {
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
-        let purpose_title = agent_launch_purpose_title(
-            &self.project_root,
-            Some(self.issue_number),
-            Some(&self.target_branch),
-            &self.issue_link_cache_dir,
-        )
-        .map_err(|error| error.to_string())?;
-        tracing::info!(
-            target: "gwt.launch.timing",
-            phase = "monitor_purpose",
-            elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-            thread = "worker",
-            "Issue Monitor launch phase"
-        );
-        phase_started = std::time::Instant::now();
-        let language = gwt_config::Settings::load()
-            .map(|settings| settings.ai.effective_language())
-            .unwrap_or("en");
-        let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
-            .join("agent-names.jsonl");
-        let reserved_agent_name = gwt::agent_names::allocate(
-            &history,
-            language,
-            &self.active_agent_names,
-            &self.known_agent_names,
-        );
-        tracing::info!(
-            target: "gwt.launch.timing",
-            phase = "monitor_agent_name",
-            elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-            thread = "worker",
-            "Issue Monitor launch phase"
-        );
-        let prepared = PreparedIssueMonitorSpawnAdmission {
+        let (purpose_title, reserved_agent_name) = if let Some(previous) = previous {
+            (
+                previous.purpose_title.clone(),
+                previous.reserved_agent_name.clone(),
+            )
+        } else {
+            let purpose_title = agent_launch_purpose_title(
+                &self.project_root,
+                Some(self.issue_number),
+                Some(&self.target_branch),
+                &self.issue_link_cache_dir,
+            )
+            .map_err(|error| error.to_string())?;
+            tracing::info!(
+                target: "gwt.launch.timing",
+                phase = "monitor_purpose",
+                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
+                thread = "worker",
+                "Issue Monitor launch phase"
+            );
+            phase_started = std::time::Instant::now();
+            let language = gwt_config::Settings::load()
+                .map(|settings| settings.ai.effective_language())
+                .unwrap_or("en");
+            let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
+                .join("agent-names.jsonl");
+            let reserved_agent_name = gwt::agent_names::allocate(
+                &history,
+                language,
+                &self.active_agent_names,
+                &self.known_agent_names,
+            );
+            tracing::info!(
+                target: "gwt.launch.timing",
+                phase = "monitor_agent_name",
+                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
+                thread = "worker",
+                "Issue Monitor launch phase"
+            );
+            (purpose_title, reserved_agent_name)
+        };
+        // The GUI checks is_current before applying this result and again at
+        // pane creation. Keep stale observations available for a narrow refresh
+        // instead of discarding their already prepared identity and launch facts.
+        Ok(PreparedIssueMonitorSpawnAdmission {
             project_root: self.project_root.clone(),
             issue_number: self.issue_number,
             monitor,
@@ -3021,11 +3064,7 @@ impl IssueMonitorSpawnAdmissionInput {
             host_project_roots: self.host_project_roots.iter().cloned().collect(),
             dependencies,
             capacity_expires_at,
-        };
-        if !prepared.is_current(&self.host_project_roots) {
-            return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
-        }
-        Ok(prepared)
+        })
     }
 }
 

@@ -7,6 +7,54 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn rest_issue(issue: &serde_json::Value) -> serde_json::Value {
+    let mut issue = issue.clone();
+    issue["state"] = serde_json::json!("open");
+    issue["updated_at"] = issue["updatedAt"].clone();
+    issue["html_url"] = issue["url"].clone();
+    issue["user"] = serde_json::json!({"login":"fixture"});
+    issue
+}
+
+fn rest_read(path: &str, issues: &serde_json::Value) -> Option<serde_json::Value> {
+    let path = path.trim_start_matches('/').split('?').next()?;
+    let route = path
+        .strip_prefix("repos/fixture/launch-perf/")
+        .or_else(|| path.strip_prefix("repos/{owner}/{repo}/"))?;
+    let parts = route.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["issues"] => Some(serde_json::Value::Array(
+            issues.as_array()?.iter().map(rest_issue).collect(),
+        )),
+        ["issues", number] => issues
+            .as_array()?
+            .iter()
+            .find(|issue| issue["number"].as_u64() == number.parse().ok())
+            .map(rest_issue),
+        ["issues", number, "comments"] => {
+            let issue = issues
+                .as_array()?
+                .iter()
+                .find(|issue| issue["number"].as_u64() == number.parse().ok())?;
+            Some(serde_json::Value::Array(
+                issue["comments"]
+                    .as_array()?
+                    .iter()
+                    .map(|comment| {
+                        serde_json::json!({
+                            "id":comment["databaseId"], "body":comment["body"],
+                            "created_at":comment["createdAt"], "updated_at":comment["updatedAt"],
+                            "user":{"login":"fixture"}
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        ["pulls"] | ["commits"] => Some(serde_json::json!([])),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap();
@@ -65,7 +113,14 @@ fn main() {
                     .iter()
                     .any(|a| ["--method", "-X"].contains(&a.as_str())) =>
             {
-                serde_json::json!([])
+                let Some(result) = args.get(1).and_then(|path| rest_read(path, &issues)) else {
+                    eprintln!("unsupported offline gh read endpoint");
+                    std::process::exit(64);
+                };
+                if args.iter().any(|arg| arg == "--include") {
+                    print!("HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+                }
+                result
             }
             _ => {
                 eprintln!("unsupported offline gh command");
