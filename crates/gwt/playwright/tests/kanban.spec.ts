@@ -116,14 +116,15 @@ test.describe("Issue Bridge load recovery", () => {
         terminal_queue: [{ number: 3273 }, { number: 3095 }],
       } });
       window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_inbox", items: [{
-        issue: { number: 3273 }, state: "blocked_by_dependency", exclusion_reason: "Blocked by #44 (hold)",
-        dependency: { blocked_by: [{ number: 44, hold: true }], cycle: false, bundle_with: [] },
+        issue: { number: 3273 }, state: "blocked_by_dependency", exclusion_reason: "Blocked by #44",
+        dependency: { blocked_by: [{ number: 44 }], cycle: false, bundle_with: [] },
       }] });
     });
     const row = page.locator('.surface-knowledge [data-queue-column="queued"] [data-issue-number="3273"]');
     await expect(row.locator(".knowledge-row-badge")).toHaveText("Blocked by dependency");
     await expect(row.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
-    await expect(row).toContainText("Blocked by #44 (hold)");
+    await expect(row).toContainText("Blocked by #44");
+    await expect(row).not.toContainText("(hold)");
     expect(errors, "zero console/page errors").toEqual([]);
     await page.screenshot({ path: testInfo.outputPath("dependency-blocked.png") });
   });
@@ -428,9 +429,9 @@ test.describe("Issue Bridge load recovery", () => {
     ).toHaveText("Needs human");
     await expect(
       issueSurface.locator('[data-issue-number="3097"] .knowledge-row-badge'),
-    ).toHaveText("On hold");
+    ).toHaveText("Needs triage");
     await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
-      "Excluded by label: hold",
+      "untrusted external Issue; PM triage required; use a separate curated execution owner",
     );
     await expect(issueSurface.locator("button button")).toHaveCount(0);
     await expect(issueSurface.locator('.knowledge-monitor-bar [data-metric="queue"]')).toHaveText(
@@ -2182,15 +2183,15 @@ async function installIssueBridgeBackend(
           title: "Issue excluded from autonomous launch",
           state: "open",
           meta: "Excluded fixture",
-          labels: ["hold"],
+          labels: ["bug"],
           linked_branch_count: 0,
           match_score: 93,
           phase: null,
           has_unknown_phase: false,
           is_spec: false,
-          monitor_state: "hold_excluded",
+          monitor_state: "source_excluded",
           queue_position: null,
-          exclusion_reason: "Excluded by label: hold",
+          exclusion_reason: "untrusted external Issue; PM triage required; use a separate curated execution owner",
         },
       ];
       if (shouldBlackOutFleet) {

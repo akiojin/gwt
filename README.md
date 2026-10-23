@@ -528,6 +528,16 @@ them, or reorder items within Queued. Selecting multiple items sends one queue
 change. Active and Done follow the execution lifecycle and cannot be changed by
 dragging. Queued items show who added them, including `auto-refill`.
 
+Move an Issue to Backlog to exclude it from this host's automatic launch queue.
+The `hold` label has no effect on queue admission, readiness, dependencies, or
+launches. Raw feedback and Issues from untrusted authors still require source
+triage; their rows show **Needs triage** with the exclusion reason.
+
+For maintenance, `issue.monitor.queue.remove` with `all_terminals:true` removes
+the requested `numbers` from every terminal queue saved in this machine's project
+store and preserves their manual auto-refill exclusions. Omit the option to affect
+only this host. It does not change another machine's independent project store.
+
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
@@ -545,8 +555,8 @@ queue limit. An empty queue starts no new work; already-running work continues.
 
 To wait for prerequisite Issues, add a line such as `Blocked-by: #123 #456` to
 the Issue body. The Monitor keeps that Issue in its queue position, shows
-**Blocked by dependency** with the unresolved Issue numbers (and `(hold)` when
-applicable), and starts the next ready entry. A known blocker releases the wait
+**Blocked by dependency** with the unresolved Issue numbers, and starts the next
+ready entry. A known blocker releases the wait
 after its Issue closes or its work is confirmed complete. Missing or inconclusive
 blocker information allows scheduling; cycles show a warning and ignore
 only the cyclic links. Removing the marker also removes the wait on the next scan.

@@ -937,6 +937,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|_| required_u64_vec(params, "expected_queue_order"))
                 .transpose()?,
             issue_numbers: required_u64_vec(params, "numbers")?,
+            all_terminals: optional_bool(params, "all_terminals")?.unwrap_or(false),
         }),
         "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
             project_root: optional_path(params, "project_root")?,

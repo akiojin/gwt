@@ -1570,7 +1570,7 @@ mod tests {
         monitor.active_launches = vec![3, 3, 5];
         monitor.inbox = serde_json::from_value(json!([
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
-            {"issue_number":2,"state":"hold_excluded","attempts":0},
+            {"issue_number":2,"state":"source_excluded","attempts":0},
             {"issue_number":2,"state":"needs_human","attempts":0},
             {"issue_number":4,"state":"blocked_by_claim","attempts":0},
             {"issue_number":5,"state":"agent_failed","attempts":0},
@@ -1603,7 +1603,7 @@ mod tests {
         assert_eq!(row(&report, 1)["observed_inbox_states"], json!([]));
         assert_eq!(
             row(&report, 2)["observed_inbox_states"],
-            json!(["needs_human", "hold_excluded"])
+            json!(["needs_human", "source_excluded"])
         );
         assert_eq!(
             row(&report, 4)["observed_inbox_states"],
@@ -1646,7 +1646,7 @@ mod tests {
             {"issue_number":1,"state":"launched","attempts":0},
             {"issue_number":1,"state":"needs_human","attempts":0},
             {"issue_number":1,"state":"launched","attempts":0},
-            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":3,"state":"source_excluded","attempts":0},
             {"issue_number":5,"state":"merged","attempts":0}
         ]))
         .unwrap();
@@ -1657,7 +1657,7 @@ mod tests {
             rows[0]["observed_issue_states"],
             json!([
                 {"issue_number":1,"states":["launched","needs_human"]},
-                {"issue_number":3,"states":["hold_excluded"]}
+                {"issue_number":3,"states":["source_excluded"]}
             ])
         );
         assert_eq!(rows[0]["unobserved_issues"], json!([2]));
@@ -2225,7 +2225,7 @@ mod tests {
             {"issue_number":1,"state":"blocked_by_claim","attempts":0},
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
             {"issue_number":2,"state":"needs_human","attempts":0},
-            {"issue_number":2,"state":"hold_excluded","attempts":0},
+            {"issue_number":2,"state":"source_excluded","attempts":0},
             {"issue_number":3,"state":"queued","attempts":0},
             {"issue_number":4,"state":"merged","attempts":0},
             {"issue_number":5,"state":"released","attempts":0},
@@ -2241,7 +2241,7 @@ mod tests {
             milestone["observed_issue_states"],
             json!([
                 {"issue_number":1,"states":["blocked_by_claim"]},
-                {"issue_number":2,"states":["needs_human","hold_excluded"]},
+                {"issue_number":2,"states":["needs_human","source_excluded"]},
                 {"issue_number":3,"states":["queued"]},
                 {"issue_number":4,"states":["merged"]},
                 {"issue_number":5,"states":["released"]},
@@ -2292,7 +2292,7 @@ mod tests {
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
             {"issue_number":2,"state":"needs_human","attempts":0},
             {"issue_number":2,"state":"merged","attempts":0},
-            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":3,"state":"source_excluded","attempts":0},
             {"issue_number":99,"state":"released","attempts":0}
         ]))
         .unwrap();
@@ -2305,7 +2305,7 @@ mod tests {
                 "observed_issue_states":[
                     {"issue_number":1,"states":["queued"]},
                     {"issue_number":2,"states":["needs_human","merged"]},
-                    {"issue_number":3,"states":["hold_excluded"]}
+                    {"issue_number":3,"states":["source_excluded"]}
                 ],
                 "unobserved_issues":[5], "missing_inputs":["metric_evidence",
                     "outcome","metric","target","horizon","owner","status"]

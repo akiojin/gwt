@@ -1153,11 +1153,51 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
   await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
-    operation:"push",issue_numbers:[2],error:"Queue change rejected: issue is on hold"}));
+    operation:"push",issue_numbers:[2],error:"Queue change rejected: queue is unavailable"}));
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
-  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: queue is unavailable");
   await confirm(page,[3,4,1]);
-  await expect(page.locator(".issue-queue-feedback")).toContainText("issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toContainText("queue is unavailable");
+});
+
+test("Issue #4499 hold labels preserve queue controls while source exclusions explain triage", async ({ page }) => {
+  const reason = "untrusted feedback; PM triage required; use a separate curated execution owner";
+  await page.evaluate(reason => (window as any).__queueSetEntries([
+    { number: 1, title: "Hold-labeled backlog issue", state: "open", labels: ["hold"] },
+    { number: 3, title: "Hold-labeled queued issue", state: "open", labels: ["hold"], monitor_state: "queued" },
+    { number: 7, title: "Raw feedback awaiting triage", state: "open", labels: ["gwt-feedback"],
+      monitor_state: "source_excluded", exclusion_reason: reason },
+  ]), reason);
+  await confirm(page, [3]);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
+  await expect(row(page, 7)).toContainText(reason);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-issue-explanation", /source.*trust.*triage/i);
+  await page.evaluate(() => (window as any).__queueInbox([
+    { issue: { number: 7 }, state: "hold_excluded", exclusion_reason: "hold label: hold" },
+  ]));
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  const staleReason = "This exclusion was reported by an older monitor. Refresh to confirm queue membership.";
+  await expect(row(page, 7)).toContainText(staleReason);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-issue-explanation", staleReason);
+  await expect(row(page, 7)).not.toContainText("hold label: hold");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 7 }, state: "hold_excluded" }]));
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  await expect(row(page, 7)).toContainText("Source trust review is required before automatic launches.");
+  await expect(row(page, 7)).not.toContainText(/On hold|Unknown/);
+
+  await expect(row(page, 1).locator(".knowledge-row-badge")).toHaveText("Open");
+  await expect(row(page, 3).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await drag(page, 1, column(page, "queued").locator("h3"));
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({ kind: "issue_monitor_queue_push", issue_numbers: [1] });
+  await confirm(page, [3, 1]);
+  await expect(column(page, "queued").locator('[data-issue-number="1"]')).toBeVisible();
+  await expect(row(page, 1).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await drag(page, 3, column(page, "backlog").locator("h3"));
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({ kind: "issue_monitor_queue_remove", issue_numbers: [3] });
+  await confirm(page, [1]);
+  await expect(column(page, "backlog").locator('[data-issue-number="3"]')).toBeVisible();
+  await expect(row(page, 3).locator(".knowledge-row-badge")).toHaveText("Open");
 });
 
 test("Issue #4499 a card missing at drop time explains why it cannot move", async ({ page }) => {

@@ -173,7 +173,7 @@ function reconcileKnowledgeList(host, entries, options) {
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
-  hold_excluded: Object.freeze({ label: "On hold", tone: "needs-input" }),
+  source_excluded: Object.freeze({ label: "Needs triage", tone: "needs-input" }),
   launching: Object.freeze({ label: "Launching", tone: "active" }),
   launched: Object.freeze({ label: "Launched", tone: "active" }),
   merged: Object.freeze({ label: "Merged", tone: "done" }),
@@ -187,7 +187,8 @@ const MONITOR_STATE_VIEWS = Object.freeze({
 });
 
 export function monitorStateView(value) {
-  const state = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const reported = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const state = reported === "hold_excluded" ? "source_excluded" : reported;
   if (!state) return null;
   const known = MONITOR_STATE_VIEWS[state];
   return known
@@ -402,12 +403,19 @@ function issueQueuePriorityLabel(entry) {
   return entry.priority === "urgent" ? "Urgent" : "Normal";
 }
 
+function legacyMonitorExclusionReason(entry) {
+  return monitorStateView(entry?.monitor_state)?.state === "source_excluded" &&
+    ["hold label: hold", "excluded by label: hold"].includes(String(entry?.exclusion_reason || "").trim().toLowerCase())
+    ? "This exclusion was reported by an older monitor. Refresh to confirm queue membership." : "";
+}
+
 function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, canvasWindow }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
   }
-  const exclusion = String(entry?.exclusion_reason || "").trim();
+  const exclusion = legacyMonitorExclusionReason(entry) || String(entry?.exclusion_reason || "").trim() ||
+    (primary.key === "monitor:source_excluded" ? "Source trust review is required before automatic launches." : "");
   const stopReason = issueStopReason(entry);
   const recovery = stopReason === null ? issueLaunchRecovery(entry) : "";
   const failureReason = stopReason ?? (["launch_failed", "agent_failed", "needs_human"].includes(entry?.monitor_state) || recovery
@@ -960,10 +968,12 @@ export function createKnowledgeKanbanSurface({
           const cause = String(entry?.error_message || "").trim();
           return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issue Monitor."}`;
         }
+        const legacyReason = legacyMonitorExclusionReason(entry);
+        if (primary.key === "monitor:source_excluded" && legacyReason) return legacyReason;
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
-          "monitor:hold_excluded": "A hold label excludes this issue from automatic launches.",
+          "monitor:source_excluded": "This issue requires source trust triage before automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",
           "monitor:launched": "The monitor launched an agent for this issue.",
           "monitor:merged": "The current execution is complete; the GitHub issue may remain open until release.",

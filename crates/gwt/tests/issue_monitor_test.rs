@@ -431,7 +431,7 @@ fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contrac
 fn exclusion_states_are_snake_case_and_non_terminal_for_requeue() {
     for (state, wire_state) in [
         (MonitorInboxState::NotReady, "not_ready"),
-        (MonitorInboxState::HoldExcluded, "hold_excluded"),
+        (MonitorInboxState::SourceExcluded, "source_excluded"),
     ] {
         let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
@@ -1066,7 +1066,7 @@ fn scan_candidates_queues_all_open_issues_without_claiming_at_scan_time() {
 }
 
 #[test]
-fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slots() {
+fn scan_candidates_preserves_readiness_exclusion_with_retired_hold_labels() {
     let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
@@ -1108,13 +1108,8 @@ fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slot
         Some("plan/tasks の整備が必要（gwt-plan-spec）")
     );
     let held = monitor.inbox_item(42).expect("held item remains visible");
-    assert_eq!(held.state, MonitorInboxState::HoldExcluded);
-    assert!(
-        held.exclusion_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("HoLd")),
-        "hold reason must preserve the matched source label"
-    );
+    assert_eq!(held.state, MonitorInboxState::NotReady);
+    assert_eq!(held.exclusion_reason, not_ready.exclusion_reason);
     for number in [43, 45, 46] {
         assert_eq!(
             monitor
@@ -1135,7 +1130,7 @@ fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slot
 }
 
 #[test]
-fn scan_candidates_requeues_when_readiness_or_hold_exclusion_is_removed() {
+fn scan_candidates_requeues_when_ready_and_ignores_hold_label_changes() {
     let mut monitor = test_monitor(IssueMonitorConfig {
         enabled: true,
         ..IssueMonitorConfig::default()
@@ -1171,10 +1166,10 @@ fn scan_candidates_requeues_when_readiness_or_hold_exclusion_is_removed() {
         std::slice::from_ref(&candidate),
         "2026-08-05T10:02:00Z",
     );
-    assert_eq!(monitor.queue_len(), 0);
+    assert_eq!(monitor.queue_len(), 1);
     assert_eq!(
         monitor.inbox_item(42).expect("held item").state,
-        MonitorInboxState::HoldExcluded
+        MonitorInboxState::Queued
     );
 
     candidate.labels.retain(|label| label != "hold");
@@ -1266,13 +1261,15 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
 
 #[test]
 fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
-    for exclusion in ["not-ready", "hold"] {
+    for exclusion in ["not-ready", "source"] {
         let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()
         });
         monitor.set_gui_connected(true);
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
         let mut candidate = issue(42, &["gwt-spec"]);
+        candidate.author_login = Some("akiojin".into());
         candidate.readiness = IssueMonitorReadiness::Ready;
         scan_queued_candidates(
             &mut monitor,
@@ -1297,8 +1294,8 @@ fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
             other => panic!("expected acquire claim, got {other:?}"),
         };
 
-        if exclusion == "hold" {
-            candidate.labels.push("hold".to_string());
+        if exclusion == "source" {
+            candidate.author_login = Some("external-reporter".into());
         } else {
             candidate.readiness = IssueMonitorReadiness::NotReady;
         }
@@ -1340,9 +1337,9 @@ fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
 }
 
 #[test]
-fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
+fn autonomous_pre_gate_keeps_not_ready_and_source_exclusions_non_terminal() {
     let protection = gwt_git::branch_protection::BranchProtectionStatus::Absent;
-    for exclusion in ["not-ready", "hold"] {
+    for exclusion in ["not-ready", "source"] {
         let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
@@ -1354,9 +1351,11 @@ fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
             },
         );
         let mut candidate = issue(42, &["gwt-spec", "auto-merge"]);
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
+        candidate.author_login = Some("akiojin".into());
         candidate.readiness = IssueMonitorReadiness::NotReady;
-        if exclusion == "hold" {
-            candidate.labels.push("hold".to_string());
+        if exclusion == "source" {
+            candidate.author_login = Some("external-reporter".into());
         }
         scan_queued_candidates(
             &mut monitor,
@@ -1371,7 +1370,7 @@ fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
         assert!(monitor.autonomous_record(42).is_none());
         assert!(matches!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded)
+            Some(MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded)
         ));
     }
 }
