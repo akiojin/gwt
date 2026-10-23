@@ -81,7 +81,7 @@ fn write_for_event_with_pending_discussion(
 ) -> Result<(), HookError> {
     let status =
         status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
-    write_state_with_status(path, event, status, pending_discussion)
+    write_state_with_status(path, event, status, pending_discussion, None)
 }
 
 fn write_state_with_status(
@@ -89,8 +89,30 @@ fn write_state_with_status(
     event: &str,
     status: &str,
     pending_discussion: Option<PendingDiscussionResume>,
+    tool_use_id: Option<&str>,
 ) -> Result<(), HookError> {
+    let _writer = gwt_agent::session::runtime_writer_lease(path)?;
     let _publication = gwt_agent::session::runtime_publication_lease(path)?;
+    let previous = SessionRuntimeState::load(path).ok();
+    let mut active_tool_calls = previous
+        .as_ref()
+        .and_then(|state| state.active_tool_calls.clone());
+    match (event, tool_use_id) {
+        ("SessionStart" | "Stop", _) => active_tool_calls = Some(Default::default()),
+        ("PreToolUse", Some(id)) => {
+            active_tool_calls
+                .get_or_insert_with(Default::default)
+                .insert(id.to_string());
+        }
+        ("PostToolUse", Some(id)) => {
+            if let Some(calls) = active_tool_calls.as_mut() {
+                calls.remove(id);
+            }
+        }
+        // Providers without call ids cannot establish a complete active set.
+        ("PreToolUse" | "PostToolUse", None) => active_tool_calls = None,
+        _ => {}
+    }
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let state = RuntimeState {
         status: status.to_string(),
@@ -101,10 +123,16 @@ fn write_state_with_status(
     };
 
     let mut value = serde_json::to_value(&state)?;
-    if let Ok(previous) = SessionRuntimeState::load(path) {
-        let object = value
-            .as_object_mut()
-            .expect("RuntimeState serializes as an object");
+    let object = value
+        .as_object_mut()
+        .expect("RuntimeState serializes as an object");
+    if let Some(calls) = active_tool_calls {
+        object.insert(
+            "active_tool_calls".to_string(),
+            serde_json::to_value(calls)?,
+        );
+    }
+    if let Some(previous) = previous {
         if let Some(identity) = previous.execution_identity {
             object.insert(
                 "execution_identity".to_string(),
@@ -158,10 +186,17 @@ pub(crate) fn record_hook_event_completed_from_env() {
         return;
     };
     let runtime_path = PathBuf::from(runtime_path);
-    let Ok(_publication) = gwt_agent::session::runtime_publication_lease(&runtime_path) else {
+    record_hook_event_completed(&runtime_path);
+}
+
+fn record_hook_event_completed(runtime_path: &Path) {
+    let Ok(_writer) = gwt_agent::session::runtime_writer_lease(runtime_path) else {
         return;
     };
-    let Ok(raw) = std::fs::read_to_string(&runtime_path) else {
+    let Ok(_publication) = gwt_agent::session::runtime_publication_lease(runtime_path) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(runtime_path) else {
         return;
     };
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -175,7 +210,7 @@ pub(crate) fn record_hook_event_completed_from_env() {
         serde_json::Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
     );
     if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
-        let _ = gwt_github::cache::write_atomic(&runtime_path, &bytes);
+        let _ = gwt_github::cache::write_atomic(runtime_path, &bytes);
     }
 }
 
@@ -389,7 +424,15 @@ pub(crate) fn handle_with_input_prepared(
             .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten())
     });
     timed_substage(event, "runtime-state/state-write", || {
-        write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+        let status =
+            status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
+        write_state_with_status(
+            &runtime_path,
+            event,
+            status,
+            pending_discussion,
+            hook_event.as_ref().and_then(RawHookEvent::tool_use_id),
+        )
     })
     .map(|_| session)
 }
@@ -501,7 +544,7 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
             .ok()
             .flatten()
     });
-    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion)
+    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion, None)
 }
 
 fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
@@ -722,6 +765,83 @@ mod tests {
         assert_eq!(status_for_event("PreToolUse"), Some("Running"));
         assert_eq!(status_for_event("PostToolUse"), Some("Running"));
         assert_eq!(status_for_event("Stop"), Some("Idle"));
+    }
+
+    #[test]
+    fn active_tool_calls_follow_identified_provider_lifecycle() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-state.json");
+        env.set(GWT_SESSION_ID_ENV, "tool-lifecycle");
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+
+        for (event, id, expected) in [
+            ("UserPromptSubmit", None, "null"),
+            ("SessionStart", None, "[]"),
+            ("PreToolUse", Some("a"), r#"["a"]"#),
+            ("PreToolUse", Some("a"), r#"["a"]"#),
+            ("PreToolUse", Some("b"), r#"["a","b"]"#),
+            ("PostToolUse", Some("other"), r#"["a","b"]"#),
+            ("PostToolUse", Some("a"), r#"["b"]"#),
+            ("UserPromptSubmit", None, r#"["b"]"#),
+            ("PostToolUse", Some("b"), "[]"),
+            ("PreToolUse", Some("c"), r#"["c"]"#),
+            ("Stop", None, "[]"),
+            ("PreToolUse", None, "null"),
+            ("PostToolUse", Some("c"), "null"),
+            ("PreToolUse", Some("d"), r#"["d"]"#),
+            ("PostToolUse", None, "null"),
+        ] {
+            let input = serde_json::json!({"tool_use_id": id}).to_string();
+            handle_with_input(event, &input).unwrap();
+            let state: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                state["active_tool_calls"].to_string(),
+                expected,
+                "{event} {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_tool_hooks_and_completion_share_the_runtime_writer_lease() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = gwt_agent::runtime_state_path(dir.path(), "parallel-tools");
+        env.set(GWT_SESSION_ID_ENV, "parallel-tools");
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+        write_for_event(&path, "SessionStart").unwrap();
+        let ready = std::sync::Barrier::new(4);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = gwt_agent::session::runtime_writer_lease(&path).unwrap();
+            for id in [Some("a"), Some("b"), None] {
+                let (path, ready, done) = (&path, &ready, done_tx.clone());
+                scope.spawn(move || {
+                    ready.wait();
+                    if let Some(id) = id {
+                        write_state_with_status(path, "PreToolUse", "Running", None, Some(id))
+                            .unwrap();
+                    } else {
+                        record_hook_event_completed_from_env();
+                    }
+                    done.send(()).unwrap();
+                });
+            }
+            ready.wait();
+            // test-hygiene: allow-wall-clock-deadline This negative receipt probe checks native writer-lock exclusion; successful publication is joined after releasing the lock.
+            assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            drop(writer);
+        });
+        let state = SessionRuntimeState::load(&path).unwrap();
+        assert_eq!(
+            state.active_tool_calls,
+            Some(["a".into(), "b".into()].into())
+        );
+        assert!(state.last_completed_hook_event_at.is_some());
     }
 
     #[test]

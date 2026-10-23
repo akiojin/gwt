@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::Path,
     sync::{Mutex, OnceLock},
@@ -936,6 +936,12 @@ pub(crate) struct ActivitySessionRoot {
 }
 
 pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<ActivitySessionRoot> {
+    activity_session_observation(session).map(|(root, _)| root)
+}
+
+fn activity_session_observation(
+    session: &gwt_agent::Session,
+) -> Option<(ActivitySessionRoot, Option<BTreeSet<String>>)> {
     let identity = gwt_agent::SessionExecutionIdentity::from_session(session).ok()??;
     let inventory =
         crate::session_inventory::observe_session(session, &gwt_core::paths::gwt_sessions_dir());
@@ -970,15 +976,19 @@ pub(crate) fn activity_session_root(session: &gwt_agent::Session) -> Option<Acti
     {
         return None;
     }
-    Some(ActivitySessionRoot {
-        process,
-        host: (observed.host_pid, host_started),
-        incarnation,
-    })
+    Some((
+        ActivitySessionRoot {
+            process,
+            host: (observed.host_pid, host_started),
+            incarnation,
+        },
+        runtime.active_tool_calls,
+    ))
 }
 
-/// Background scan only: measure owned child work once for all bound panes.
-/// Root-agent CPU/liveness and unrelated Host panes cannot extend this clock.
+/// Background scan only: observe accepted provider tool lifetimes, falling
+/// back to measured child progress for legacy sidecars. Helpers alone cannot
+/// extend the clock once the provider has supplied lifecycle evidence.
 pub fn refresh_issue_monitor_child_activity(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
@@ -1032,14 +1042,14 @@ pub fn refresh_issue_monitor_child_activity(
         let Some(session) = load_current_activity_session(&identity) else {
             continue;
         };
-        let Some(root) = activity_session_root(&session) else {
+        let Some((root, tools)) = activity_session_observation(&session) else {
             continue;
         };
         // An ambiguous shared provider root cannot lend progress to two owners.
         roots
             .entry(root.process)
             .and_modify(|entry| *entry = None)
-            .or_insert(Some((issue, identity, root)));
+            .or_insert(Some((issue, identity, root, tools)));
     }
     if gwt_core::operation_deadline::ensure_remaining("child progress observation").is_err() {
         return;
@@ -1047,18 +1057,39 @@ pub fn refresh_issue_monitor_child_activity(
     let advancing = crate::cli::verification_lease::holder_activity::progressing_descendants(
         &roots
             .iter()
-            .filter_map(|(root, owner)| owner.as_ref().map(|_| *root))
+            .filter_map(|(root, owner)| {
+                // Once lifecycle events are available, helper CPU/turnover
+                // cannot substitute for a currently accepted tool call.
+                owner
+                    .as_ref()
+                    .filter(|(_, _, _, tools)| tools.is_none())
+                    .map(|_| *root)
+            })
             .collect::<Vec<_>>(),
     );
     let sampled_at = chrono::Utc::now().to_rfc3339();
-    for root in advancing {
-        let Some(Some((issue, identity, observed))) = roots.get(&root) else {
+    for (root, owner) in &roots {
+        let Some((issue, identity, observed, tools)) = owner else {
             continue;
         };
+        if !tools
+            .as_ref()
+            .map_or_else(|| advancing.contains(root), |calls| !calls.is_empty())
+        {
+            continue;
+        }
         let Some(session) = load_current_activity_session(identity) else {
             continue;
         };
-        if activity_session_root(&session) == Some(*observed) {
+        let Some((current_root, current_tools)) = activity_session_observation(&session) else {
+            continue;
+        };
+        let still_active = match (tools, current_tools.as_ref()) {
+            (Some(before), Some(after)) => before.intersection(after).next().is_some(),
+            (None, None) => true,
+            _ => false,
+        };
+        if current_root == *observed && still_active {
             monitor.record_bound_process_activity(
                 *issue,
                 &identity.session_id,
@@ -3818,6 +3849,82 @@ pub(crate) mod tests {
         UpdatedAt,
     };
     use std::path::PathBuf;
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn issue_6076_silent_provider_tool_lifetime_does_not_credit_persistent_helpers() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let (session, mut monitor, now) = issue_3809_bound_activity_fixture(repo.path());
+        let mut helper_monitor = monitor.clone();
+        let previous = helper_monitor
+            .autonomous_record(3809)
+            .unwrap()
+            .last_heartbeat
+            .clone();
+        let path = gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session.id);
+        let mut runtime: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        runtime["active_tool_calls"] = serde_json::json!(["silent-command"]);
+        runtime["source_event"] = serde_json::json!("PreToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+
+        let outcome = reconcile_issue_monitor_windows(&mut monitor, repo.path(), &now);
+        assert!(outcome.released.is_empty());
+        assert!(outcome.requeued.is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_ne!(
+            monitor.autonomous_record(3809).unwrap().last_heartbeat,
+            previous,
+            "an accepted silent tool must remain active without CPU or process turnover"
+        );
+
+        struct Helper(std::process::Child);
+        impl Drop for Helper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[cfg(windows)]
+        let mut command = gwt_core::process::hidden_command("powershell.exe");
+        #[cfg(windows)]
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+        ]);
+        #[cfg(unix)]
+        let mut command = gwt_core::process::hidden_command("sh");
+        #[cfg(unix)]
+        command.args(["-c", "while :; do :; done"]);
+        let _helper = Helper(
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        runtime["active_tool_calls"] = serde_json::json!([]);
+        runtime["source_event"] = serde_json::json!("PostToolUse");
+        gwt_github::cache::write_atomic(&path, &serde_json::to_vec(&runtime).unwrap()).unwrap();
+        refresh_issue_monitor_child_activity(&mut helper_monitor, repo.path(), &now);
+        assert_eq!(
+            helper_monitor
+                .autonomous_record(3809)
+                .unwrap()
+                .last_heartbeat,
+            previous,
+            "after tool completion even a busy persistent helper cannot extend RUN/activity"
+        );
+    }
 
     #[test]
     #[cfg(any(windows, unix))]

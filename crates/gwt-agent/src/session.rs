@@ -1,6 +1,7 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io,
     io::Write,
@@ -513,6 +514,11 @@ pub struct SessionRuntimeState {
     pub child_started_at: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
+    /// Accepted provider tool calls awaiting a matching completion event.
+    /// `None` preserves legacy/unknown observation; an empty set confirms
+    /// that no identified tool call remains in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tool_calls: Option<BTreeSet<String>>,
     /// When the most recent managed hook event finished successfully,
     /// protocol output included (Issue #3541). `hook.health` compares it with
     /// the newest hook failure to tell "recovered" from "unresolved".
@@ -1971,6 +1977,7 @@ impl SessionRuntimeState {
             child_pid: None,
             child_started_at: None,
             source_event: None,
+            active_tool_calls: None,
             last_completed_hook_event_at: None,
             pending_discussion: None,
         }
@@ -2089,6 +2096,48 @@ pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
         }
     }
     Ok(publication)
+}
+
+/// Serialize one runtime sidecar's read-modify-write without waiting on the
+/// durable Session metadata lease. Acquire after any Session lease and before
+/// the shared GC publication lease. Keep lock files outside PID namespaces.
+pub fn runtime_writer_lease(path: &Path) -> io::Result<File> {
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime sidecar has no filename",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut lock_name = std::ffi::OsString::from(".runtime-writer-");
+    let lock_dir = match parent
+        .parent()
+        .filter(|root| root.file_name().is_some_and(|name| name == "runtime"))
+    {
+        Some(root) => {
+            lock_name.push(parent.file_name().unwrap_or_default());
+            lock_name.push("-");
+            root.parent().unwrap_or(parent)
+        }
+        None => parent,
+    };
+    lock_name.push(filename);
+    lock_name.push(".lock");
+    fs::create_dir_all(lock_dir)?;
+    let writer = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_dir.join(lock_name))?;
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + SESSION_LEASE_WAIT,
+    );
+    gwt_core::operation_deadline::lock_exclusive(&writer)?;
+    Ok(writer)
 }
 
 /// Return the JSON sidecar path for a session runtime state record.
@@ -2579,15 +2628,28 @@ fn persist_session_running_state_if_execution_identity_matches_under_lease(
     if exact_durable_session_under_lease(sessions_dir, expected)?.is_none() {
         return Ok(false);
     }
-    SessionRuntimeState::for_execution_process(
+    let runtime_path = runtime_state_path(sessions_dir, &expected.session_id);
+    let _writer = runtime_writer_lease(&runtime_path)?;
+    let _publication = runtime_publication_lease(&runtime_path)?;
+    let mut runtime = SessionRuntimeState::for_execution_process(
         AgentStatus::Running,
         expected,
         runtime_incarnation,
         host_started_at,
         child_pid,
         child_started_at,
-    )
-    .save(&runtime_state_path(sessions_dir, &expected.session_id))?;
+    );
+    if let Ok(previous) = SessionRuntimeState::load(&runtime_path) {
+        if previous.execution_identity.as_ref() == Some(expected)
+            && previous.runtime_incarnation == Some(runtime_incarnation)
+            && previous.host_started_at == Some(host_started_at)
+            && previous.child_pid == Some(child_pid)
+            && previous.child_started_at == Some(child_started_at)
+        {
+            runtime.active_tool_calls = previous.active_tool_calls;
+        }
+    }
+    runtime.save(&runtime_path)?;
     Ok(true)
 }
 
@@ -5438,6 +5500,7 @@ display_name = "Claude Code"
         assert!(runtime.execution_identity.is_none());
         assert!(runtime.runtime_incarnation.is_none());
         assert!(runtime.host_started_at.is_none());
+        assert!(runtime.active_tool_calls.is_none());
     }
 
     #[test]
@@ -5966,6 +6029,42 @@ display_name = "Claude Code"
             malformed_bytes,
         );
         assert!(!active_launch_handshake_path(dir.path(), &session.id).exists());
+    }
+
+    #[test]
+    fn exact_running_runtime_preserves_active_tools_only_for_the_same_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, identity) = save_bound_session_for_fence_test(dir.path());
+        let path = runtime_state_path(dir.path(), &session.id);
+        let mut runtime = SessionRuntimeState::for_execution_process(
+            AgentStatus::Running,
+            &identity,
+            17,
+            101,
+            std::process::id(),
+            1,
+        );
+        let calls = Some(["tool-call".to_string()].into());
+        runtime.active_tool_calls = calls.clone();
+
+        for (incarnation, child_started_at, expected) in
+            [(17, 1, calls), (18, 1, None), (17, 2, None)]
+        {
+            runtime.save(&path).unwrap();
+            assert!(persist_session_running_state_if_execution_identity_matches(
+                dir.path(),
+                &identity,
+                incarnation,
+                101,
+                std::process::id(),
+                child_started_at,
+            )
+            .unwrap());
+            assert_eq!(
+                SessionRuntimeState::load(&path).unwrap().active_tool_calls,
+                expected
+            );
+        }
     }
 
     #[test]
