@@ -47746,6 +47746,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_config_preflight_requeues_without_consuming_an_attempt() {
+        let now = "2026-10-23T00:00:00Z";
+        let message = format!(
+            "codex_config_preflight: invalid config.toml; {}",
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        );
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(4153, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        monitor.complete_active_launch(4153, "codex-config-preflight");
+
+        monitor.record_launch_failed_at(4153, &message, now);
+
+        assert_eq!(monitor.attempt_count(4153), 0);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(!monitor.failed_issues.contains_key(&4153));
+        let item = monitor.inbox_item(4153).expect("inbox item");
+        assert_eq!(item.state, MonitorInboxState::Queued);
+        assert_eq!(item.error_message.as_deref(), Some(message.as_str()));
+        assert!(!monitor.retry_ready(4153, now));
+    }
+
+    #[test]
     fn transient_launch_failure_requeues_without_consuming_an_attempt() {
         // A concurrent fetch ref race is not an agent failure.
         // It goes back to the queue behind a backoff, keeps its

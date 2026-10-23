@@ -60,13 +60,15 @@ pub use permission_mode::{
     ProviderSkipMapping,
 };
 pub use prepare::{
-    branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
-    install_launch_gwt_bin_env_with_lookup, is_transient_launch_failure,
-    missing_launcher_binary_detail, pane_websocket_url_for_launch_runtime, prepare_agent_launch,
+    branch_worktree_path, check_codex_config, hook_forward_url_for_launch_runtime,
+    install_launch_gwt_bin_env, install_launch_gwt_bin_env_with_lookup,
+    is_codex_config_preflight_failure, is_transient_launch_failure, missing_launcher_binary_detail,
+    pane_websocket_url_for_launch_runtime, prepare_agent_launch,
     resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe,
     resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
     HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
-    PreparedAgentLaunch, PreparedProcessLaunch, TRANSIENT_LAUNCH_RETRY_HINT,
+    PreparedAgentLaunch, PreparedProcessLaunch, CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX,
+    TRANSIENT_LAUNCH_RETRY_HINT,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
