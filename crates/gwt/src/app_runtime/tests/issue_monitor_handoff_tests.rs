@@ -1882,6 +1882,9 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         &[("GROK_HOME", grok_home.to_str().expect("UTF-8 Grok home"))],
     );
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
+    // Own static claim inputs so this fixture reaches the real PTY submission.
+    let _projection =
+        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let holder_window_id = fixture
         .holder_window_id
         .clone()
