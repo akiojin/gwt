@@ -1220,6 +1220,90 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
 }
 
 #[test]
+fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "capacity-renewal",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let reserved_names = fs::read(&history).expect("worker reserved identity");
+    // The host sampler creates/renews this file independently of launch facts.
+    let capacity = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+    fs::create_dir_all(capacity.parent().unwrap()).unwrap();
+    fs::write(&capacity, b"{}").unwrap();
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    let before = gwt_core::process::thread_git_spawn_count();
+    drain_queued_blocking_tasks(&queued);
+    assert_eq!(
+        fs::read(&history).unwrap(),
+        reserved_names,
+        "capacity renewal must retain the prepared identity"
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        1,
+        "only final admission may validate Git; claim/base/prompt facts stay prepared"
+    );
+    // A refreshed completion is queued, without creating a pane on the worker.
+    let refreshed = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(refreshed);
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "refreshed admission must reach pane creation, not another preparation"
+    );
+
+    let input = fixture.runtime.capture_issue_monitor_spawn_admission(
+        &fixture.project_root,
+        3165,
+        "work/issue-3165",
+    );
+    let previous = input.prepare().unwrap();
+    gwt::machine_agent_settings::set(
+        Some(1),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        input
+            .refresh(&previous)
+            .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+        "a policy edit while the refresh is queued must retain the original fence"
+    );
+}
+
+#[test]
 fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let _env_lock = env_test_lock()
         .lock()
@@ -1407,6 +1491,12 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         true,
     );
     seed_resumed_autonomous_handoff(&fixture, "Continue the asking conversation");
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("allow the exact holder and the unrelated live pane");
     let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
     insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();

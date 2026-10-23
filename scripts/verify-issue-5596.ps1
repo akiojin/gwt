@@ -3,6 +3,7 @@
 param(
   [ValidateSet('baseline','after')][string]$Phase = 'after',
   [string]$EvidenceDirectory,
+  [switch]$Sequential,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
 )
 Set-StrictMode -Version Latest
@@ -13,7 +14,10 @@ $gwt = Join-Path $repoRoot 'target/debug/gwt.exe'
 $gwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
 foreach ($binary in @($gwt,$gwtd)) { if (-not (Test-Path -LiteralPath $binary)) { throw 'Build this checkout: cargo build -p gwt --bin gwt --bin gwtd' } }
 $checkHome = Join-Path ([IO.Path]::GetTempPath()) ('gwt-launch-5596-' + [guid]::NewGuid())
-if (-not $EvidenceDirectory) { $EvidenceDirectory = Join-Path $repoRoot "target/verification/issue-5596/$Phase" }
+if (-not $EvidenceDirectory) {
+  $owner = if ($Sequential) { 'issue-6096' } else { 'issue-5596' }
+  $EvidenceDirectory = Join-Path $repoRoot "target/verification/$owner/$Phase"
+}
 $EvidenceDirectory = [IO.Path]::GetFullPath($EvidenceDirectory)
 foreach ($folder in @($checkHome,$EvidenceDirectory,"$checkHome/.gwt","$checkHome/.codex","$checkHome/tmp","$checkHome/bin","$checkHome/project")) {
   [void](New-Item -ItemType Directory -Path $folder -Force)
@@ -110,6 +114,77 @@ try {
   if ($cargoConfig -match '(?s)\[target\.x86_64-pc-windows-msvc\].*?linker\s*=\s*"([^"]+)"') { $rustArgs += @('-C',"linker=$($Matches[1])") }
   [void](Invoke-Owned $rustc $rustArgs)
   foreach ($command in @('codex','gh','git')) { Copy-Item -LiteralPath "$checkHome/bin/provider.exe" -Destination "$checkHome/bin/$command.exe" }
+  if ($Sequential) {
+    # Use the production prefs lock and atomic mutation rather than racing a
+    # read/replace against the daemon. This helper accepts only this fixture's
+    # already-confirmed delivery identities; it never creates upstream claims.
+    $enqueueSource = @'
+use std::{io::{self, Read}, path::PathBuf};
+fn request_scan(project: &std::path::Path) -> io::Result<()> {
+    let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+        "control", serde_json::json!({"scan_now":{}}), std::process::id(),
+    );
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(project, payload)
+        .map_err(|error| io::Error::other(error.to_string()))
+}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("missing fixture HOME")?);
+    let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("fixture.json"))?)?;
+    let project = home.join("project");
+    if fixture["sequential"] != true || PathBuf::from(fixture["project"].as_str().ok_or("missing fixture project")?) != project {
+        return Err("enqueue requires the isolated sequential fixture".into());
+    }
+    if std::env::args().any(|argument| argument == "--ready") {
+        request_scan(&project)?;
+        return Ok(());
+    }
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    let delivery: gwt::issue_monitor::PendingIssueMonitorLaunchDelivery = serde_json::from_str(&input)?;
+    let expected = fixture["expected_deliveries"].as_array().ok_or("missing fixture deliveries")?;
+    let index = expected.iter().position(|row| row["issue_number"] == delivery.issue_number
+        && row["delivery_id"] == delivery.delivery_id && row["claim_id"] == delivery.claim_id)
+        .ok_or("delivery is not owned by this fixture")?;
+    if delivery.claim_owner != "fixture" || delivery.branch_name != format!("work/issue-{}", delivery.issue_number) {
+        return Err("foreign delivery refused".into());
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        if !prefs.pending_launch_deliveries.is_empty() || !prefs.failed_issues.is_empty()
+            || prefs.launch_confirmations.len() != index
+            || expected[..index].iter().any(|row| {
+                let number = row["issue_number"].as_u64().unwrap();
+                prefs.launch_confirmations.get(&number).is_none_or(|ack|
+                    ack.delivery_id.as_deref() != row["delivery_id"].as_str()
+                    || ack.claim_id.as_deref() != row["claim_id"].as_str())
+            }) {
+            return Err(io::Error::other("previous fixture delivery is not durably acknowledged"));
+        }
+        prefs.pending_launch_deliveries.push(delivery.clone());
+        Ok(())
+    })?;
+    // Match the ordinary CLI path: wake the owning daemon and require its ACK.
+    // A publish error is returned; do not replay or silently wait for a tick.
+    request_scan(&project)?;
+    println!("{}", serde_json::json!({"issue_number": delivery.issue_number, "enqueued_at": delivery.created_at, "scan_acknowledged":true}));
+    Ok(())
+}
+'@
+    [IO.File]::WriteAllText("$checkHome/enqueue.rs", $enqueueSource)
+    $gwtLibrary = Get-ChildItem -LiteralPath $deps -Filter 'libgwt-*.rlib' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $gwtLibrary) { throw 'Build checkout gwt first (gwt rlib missing).' }
+    $enqueueArgs = @('--edition=2021','--crate-name','issue_monitor_fixture_enqueue',"$checkHome/enqueue.rs",'-L',"dependency=$deps",'--extern',"serde_json=$($jsonLibrary.FullName)",'--extern',"gwt=$($gwtLibrary.FullName)",'-o',"$checkHome/bin/enqueue.exe")
+    # rustc does not replay Cargo build-script metadata from an rlib. Reuse
+    # the native search paths recorded by this checkout's compiled dependencies.
+    $nativePaths = Get-ChildItem -LiteralPath (Join-Path $repoRoot 'target/debug/build') -Filter output -File -Recurse | ForEach-Object {
+      foreach ($line in [IO.File]::ReadAllLines($_.FullName)) {
+        if ($line -match '^cargo::?rustc-link-search=native=(.+)$' -and (Test-Path -LiteralPath $Matches[1] -PathType Container)) { $Matches[1] }
+      }
+    } | Sort-Object -Unique
+    foreach ($nativePath in $nativePaths) { $enqueueArgs += @('-L',"native=$nativePath") }
+    if ($cargoConfig -match '(?s)\[target\.x86_64-pc-windows-msvc\].*?linker\s*=\s*"([^"]+)"') { $enqueueArgs += @('-C',"linker=$($Matches[1])") }
+    [void](Invoke-Owned $rustc $enqueueArgs)
+  }
   # Only this disposable repository is materialized. Git network protocols are disabled.
   foreach ($gitArgs in @(@('init','--quiet','-b','develop','--separate-git-dir',"$checkHome/project.git"),@('commit','--allow-empty','--quiet','-m','chore: initialize offline fixture'),@('init','--bare','--quiet',"$checkHome/origin.git"),@('remote','add','origin',"$checkHome/origin.git"),@('push','--quiet','origin','develop'),@('symbolic-ref','refs/remotes/origin/HEAD','refs/remotes/origin/develop'))) {
     [void](Invoke-Owned $realGit $gitArgs)
@@ -117,7 +192,8 @@ try {
   $environment.PATH = "$checkHome/bin;$($environment.PATH)"
   $environment.GWT_TEST_GH = "$checkHome/bin/gh.exe"
   $environment.GWT_TEST_GH_SANDBOX = '1'
-  $issues = @(1..12 | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
+  $launchCount = if ($Sequential) { 10 } else { 12 }
+  $issues = @(1..$launchCount | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 5 -AsArray))
   # Read-only loopback owner API. Every unsupported/mutating request fails locally.
   $serverSource = @'
@@ -152,6 +228,10 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $environment.GWT_OWNER_GITHUB_REST_BASE = $endpoint
   $environment.GWT_OWNER_GITHUB_GRAPHQL_URL = "$endpoint/graphql"
   $environment.GWT_OWNER_GITHUB_TOKEN = 'fixture-only'
+  # Admission now reads the machine policy, rather than legacy project fields.
+  # Seed only this disposable HOME before the first status/migration read.
+  [void](New-Item -ItemType Directory -Path "$checkHome/.gwt/machine-state" -Force)
+  [IO.File]::WriteAllText("$checkHome/.gwt/machine-state/agent-settings.json", '{"mode":"manual","manual_limit":12,"last_change":null}')
   $status = Invoke-IsolatedGwtd 'issue.monitor.status'
   $key = $status.project_store.hash
   if ($key -notmatch '^[a-zA-Z0-9_-]+$') { throw 'Canonical fixture ProjectKey unavailable.' }
@@ -179,7 +259,8 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   }
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 8 -AsArray))
   # Queue admission and upstream claim creation are outside this acceptance run.
-  [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=$deliveries} | ConvertTo-Json -Depth 8))
+  $initialDeliveries = if ($Sequential) { @() } else { $deliveries }
+  [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)} | ConvertTo-Json -Depth 8))
   $start = New-OwnedProcess $gwt @('--no-tray','--no-open')
   # The agent launch pipeline injects checkout gwtd; the GUI keeps only the
   # stable public hook fallback audited above.
@@ -195,7 +276,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
     @{path=$_;blob_sha=$blobSha;source= $(if ($fromCommit) { $sourceRevision } else { 'working-tree' })}
   }
   $expectedDeliveries = @($deliveries | ForEach-Object { @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id} })
-  $fixture = @{phase=$Phase;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
+  $fixture = @{phase=$Phase;sequential=[bool]$Sequential;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
   $fixture.checkout_daemon = $gwtd
   $fixture.daemon_sha256 = (Get-FileHash -LiteralPath $gwtd -Algorithm SHA256).Hash
   [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
@@ -228,6 +309,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $start = New-OwnedProcess $node (@($cli,'test','--config',"$repoRoot/crates/gwt/playwright/playwright.config.ts",'--workers=1','--retries=0','--timeout','600000','--output',"$EvidenceDirectory/playwright",'issue-monitor-launch-perf-live.spec.ts') + $extraPlaywrightArgs) $repoRoot
   $start.Environment['GWT_PLAYWRIGHT_BASE_URL'] = $url
   $start.Environment['GWT5596_HOME'] = $checkHome
+  if ($Sequential) { $start.Environment['GWT5596_SEQUENTIAL'] = '1' }
   $start.Environment['GWT_PLAYWRIGHT_NODE_MODULES'] = Join-Path $depsRoot 'node_modules'
   $start.Environment['NODE_OPTIONS'] = "--require `"$($resolver.Replace('\','/'))`""
   if ($env:GWT_HEADED_E2E_REPORT) { $start.Environment['GWT_HEADED_E2E_REPORT'] = $env:GWT_HEADED_E2E_REPORT }
