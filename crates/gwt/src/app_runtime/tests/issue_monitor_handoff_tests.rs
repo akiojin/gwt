@@ -8,6 +8,11 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().unwrap();
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -86,10 +91,21 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             responder: None,
         },
     );
-    drain_queued_blocking_tasks(&close_tasks);
-    assert!(closed
+    assert!(!closed
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. })));
+        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
+    drain_queued_blocking_tasks(&close_tasks);
+    assert!(fixture.recorded_events.lock().unwrap().iter().any(|event| {
+        match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => events.iter().any(|event| {
+                event.target == DispatchTarget::Client("operator".into())
+                    && matches!(&event.event,
+                        BackendEvent::PaneCloseResult { window_id: closed, ok: true, reason: None, .. }
+                            if closed == &window_id)
+            }),
+            _ => false,
+        }
+    }));
     assert!(!fixture.runtime.runtimes.contains_key(&window_id));
 
     // Reuse the production authenticated bridge. Its scan ACK and the Host
@@ -4786,8 +4802,15 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
             &mut fixture,
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-        let mut completion = take_monitor_launch_complete(case, &fixture.recorded_events);
+        let (prepared_window_id, mut completion) =
+            take_monitor_launch_complete_event(case, &fixture.recorded_events);
         assert_monitor_exact_resume(completion.clone(), &fixture);
+        // This fixture routes the completion into an in-place restart below.
+        // Consume the original placeholder's worker as the GUI handler would.
+        fixture
+            .runtime
+            .initial_launch_workers
+            .remove(&prepared_window_id);
         assert!(fixture.runtime.window_lookup.contains_key(&window_id));
         assert!(fixture
             .runtime
@@ -4797,6 +4820,22 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         assert!(!events.iter().any(|event| matches!(&event.event,
             BackendEvent::IssueMonitorToast { message, .. } if message.contains("held by window")
         )));
+
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        fixture.runtime.blocking_tasks = spawner;
+        // Capture another delivery before restart begins, then apply its worker
+        // facts after the reservation appears to exercise GUI revalidation too.
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                3165,
+                LinkedIssueKind::Spec,
+                None,
+                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+            );
+        drain_queued_blocking_tasks(&tasks);
+        let delayed_delivery = take_issue4803_monitor_preparation(&fixture.recorded_events);
 
         // An in-place restart reuses this ID before replacing the exited Pane.
         // Its current launch, rather than the old exit receipt, owns the writer.
@@ -4818,8 +4857,30 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                 .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
             Some(window_id.clone()),
         );
-        let (spawner, tasks) = BlockingTaskSpawner::queued();
-        fixture.runtime.blocking_tasks = spawner;
+        let windows_before_delivery = fixture.runtime.window_lookup.len();
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(delayed_delivery);
+        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
+        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                3165,
+                LinkedIssueKind::Spec,
+                None,
+                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+            );
+        assert_eq!(
+            fixture.runtime.issue_monitor_launch_queue.len(),
+            1,
+            "a reserved restart cannot acknowledge or launch another delivery",
+        );
+        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
+        fixture.runtime.advance_issue_monitor_launch_queue_events();
+        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
+        assert_eq!(fixture.runtime.window_lookup.len(), windows_before_delivery);
         // Fail before spawning a replacement child, so the test can also prove
         // the failed attempt releases its reservation without closing the pane.
         completion.as_mut().unwrap().0.command = temp
@@ -4855,6 +4916,9 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                 .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
             Some(window_id.clone()),
         );
+        assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 1);
+        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
+        assert_eq!(fixture.runtime.window_lookup.len(), windows_before_delivery);
         drain_queued_blocking_tasks(&tasks);
         let prepared = take_prepared_agent_launch(&fixture.recorded_events);
         fixture.runtime.handle_agent_launch_prepared(prepared);
@@ -4870,6 +4934,9 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
             "a failed restart must release the writer reservation",
         );
         assert!(fixture.runtime.window_lookup.contains_key(&window_id));
+        assert!(fixture.runtime.issue_monitor_launch_queue.is_empty());
+        assert_eq!(fixture.runtime.issue_monitor_launch_preparations.len(), 1);
+        assert!(fixture.runtime.pending_launch_delivery_acks.is_empty());
         assert_eq!(fs::read_to_string(&unfinished).unwrap(), "uncommitted work");
     }
 }

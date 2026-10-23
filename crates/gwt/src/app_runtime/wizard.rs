@@ -3451,6 +3451,54 @@ impl AppRuntime {
         })
     }
 
+    fn queue_issue_monitor_launch(
+        &mut self,
+        context: super::ProjectContext,
+        request: super::DeferredIssueMonitorLaunch,
+        reusable: Option<IssueMonitorLaunchPreparation>,
+        queue_head: bool,
+    ) {
+        let key = issue_monitor_launch_preparation_key(&context, &request);
+        if !self.issue_monitor_launch_queue.iter().any(|pending| {
+            issue_monitor_launch_preparation_key(&pending.context, &pending.request) == key
+        }) {
+            let index = if queue_head {
+                self.issue_monitor_launch_queue
+                    .iter()
+                    .position(|pending| pending.context.project_key == context.project_key)
+                    .unwrap_or(self.issue_monitor_launch_queue.len())
+            } else {
+                self.issue_monitor_launch_queue.len()
+            };
+            self.issue_monitor_launch_queue.insert(
+                index,
+                PendingIssueMonitorLaunch {
+                    context,
+                    request,
+                    reusable,
+                    prefetch: IssueMonitorFactsPrefetch::NotStarted,
+                },
+            );
+        }
+        self.prefetch_issue_monitor_launch_facts();
+    }
+
+    fn issue_monitor_issue_launch_pending(
+        &mut self,
+        context: &super::ProjectContext,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> bool {
+        self.issue_agent_windows_matching(
+            &context.tab_id,
+            issue_number,
+            &knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
+            |window_id| self.issue_monitor_window_launch_pending(window_id),
+        )
+        .into_iter()
+        .any(|window_id| self.has_pending_agent_launch_worker(&window_id))
+    }
+
     /// Speculate only on the current FIFO prefix. Pending completions keep their
     /// slot until the GUI consumes them, even after the worker has returned.
     fn prefetch_issue_monitor_launch_facts(&mut self) {
@@ -3563,6 +3611,11 @@ impl AppRuntime {
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
             if self.project_context_is_current(&pending.context) {
                 if self.issue_monitor_launch_lane_busy(&pending.context)
+                    || self.issue_monitor_issue_launch_pending(
+                        &pending.context,
+                        pending.request.issue_number,
+                        pending.request.linked_issue_kind,
+                    )
                     || waiting.contains(&pending.context.project_key)
                     || matches!(pending.prefetch, IssueMonitorFactsPrefetch::Pending(_))
                 {
@@ -3611,6 +3664,12 @@ impl AppRuntime {
         };
         if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
             deferred.push(request);
+            return Vec::new();
+        }
+        // A reserved writer has not started its replacement Pane yet. Keep
+        // this delivery pending instead of acknowledging the prior runtime.
+        if self.issue_monitor_issue_launch_pending(&context, issue_number, linked_issue_kind) {
+            self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
         if let Some(delivery_id) = request.delivery_id.as_deref() {
@@ -3671,28 +3730,7 @@ impl AppRuntime {
                         && self.project_context_is_current(&pending.context)
                 }))
         {
-            if !self.issue_monitor_launch_queue.iter().any(|pending| {
-                issue_monitor_launch_preparation_key(&pending.context, &pending.request) == key
-            }) {
-                let index = if queue_head {
-                    self.issue_monitor_launch_queue
-                        .iter()
-                        .position(|pending| pending.context.project_key == context.project_key)
-                        .unwrap_or(self.issue_monitor_launch_queue.len())
-                } else {
-                    self.issue_monitor_launch_queue.len()
-                };
-                self.issue_monitor_launch_queue.insert(
-                    index,
-                    PendingIssueMonitorLaunch {
-                        context,
-                        request,
-                        reusable,
-                        prefetch: IssueMonitorFactsPrefetch::NotStarted,
-                    },
-                );
-            }
-            self.prefetch_issue_monitor_launch_facts();
+            self.queue_issue_monitor_launch(context, request, reusable, queue_head);
             return Vec::new();
         }
         self.issue_monitor_launch_preparations.insert(key.clone());
@@ -3794,7 +3832,9 @@ impl AppRuntime {
             });
             record_issue_monitor_worker_phase("monitor_launch_facts", &mut phase_started);
             if let Ok(IssueMonitorLaunchPreparation::Launch(facts)) = result.as_ref() {
-                if let Some(tier) = facts.choice.tier {
+                // Adoption does not launch the selected profile. Keep the
+                // tier facts established by the delivery claim instead.
+                if let Some(tier) = facts.choice.tier.filter(|_| live_window_id.is_none()) {
                     if claim.as_ref().is_none_or(|(_, claim)| matches!(claim, Ok(true)))
                     {
                         if let Err(error) = gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
@@ -4399,6 +4439,32 @@ impl AppRuntime {
             });
             return Vec::new();
         }
+        // A launch may have begun while the delivery's worker was preparing.
+        // Recheck before replay/adoption can ACK it. Ready answer attempts keep
+        // their existing exact delivery and failure-settlement paths.
+        if self.issue_monitor_issue_launch_pending(&context, issue_number, linked_issue_kind)
+            && prepared.as_ref().is_none_or(|delivery| {
+                !delivery.answered_handoff_pending
+                    && delivery.unsubmitted_handoff_attempt().is_none()
+            })
+        {
+            let reusable = prepared
+                .as_ref()
+                .and_then(|delivery| delivery.reusable_fresh_launch(launch_session_strategy));
+            self.queue_issue_monitor_launch(
+                context,
+                super::DeferredIssueMonitorLaunch {
+                    project_root: project_root.to_path_buf(),
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                    launch_session_strategy,
+                },
+                reusable,
+                true,
+            );
+            return Vec::new();
+        }
         let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
             match self
@@ -4740,7 +4806,23 @@ impl AppRuntime {
         issue_number: u64,
         target_branch: &str,
     ) -> Option<String> {
-        let tab = self.tab(tab_id)?;
+        self.issue_agent_windows_matching(tab_id, issue_number, target_branch, |window_id| {
+            self.issue_monitor_window_is_live(window_id)
+        })
+        .into_iter()
+        .next()
+    }
+
+    fn issue_agent_windows_matching(
+        &self,
+        tab_id: &str,
+        issue_number: u64,
+        target_branch: &str,
+        window_matches: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let Some(tab) = self.tab(tab_id) else {
+            return Vec::new();
+        };
         let target_branch = normalize_branch_name(target_branch);
         tab.workspace
             .persisted()
@@ -4748,7 +4830,7 @@ impl AppRuntime {
             .iter()
             .filter(|window| window.preset == WindowPreset::Agent)
             .map(|window| (combined_window_id(tab_id, &window.id), window))
-            .find(|(window_id, window)| {
+            .filter(|(window_id, window)| {
                 let pending =
                     self.issue_monitor_pending_feedback_for_window(window_id, &tab.project_root);
                 let linked_issue = pending
@@ -4771,9 +4853,10 @@ impl AppRuntime {
                     && !self
                         .issue_monitor_review_dispatch_windows
                         .contains(window_id)
-                    && self.issue_monitor_window_is_live(window_id)
+                    && window_matches(window_id)
             })
             .map(|(window_id, _)| window_id)
+            .collect()
     }
 
     /// Issue #4802 AC-2: acknowledge a launch onto the pane that is already
@@ -6062,12 +6145,15 @@ impl AppRuntime {
         self.issue_monitor_native_conversation_holder_excluding(candidate, None)
     }
 
+    fn issue_monitor_window_launch_pending(&self, window_id: &str) -> bool {
+        self.initial_launch_workers.contains_key(window_id)
+            || self.pending_launch_completions.contains_key(window_id)
+    }
+
     fn issue_monitor_window_is_live(&self, window_id: &str) -> bool {
         // In-place restart retains the prior runtime until the new Pane is
         // installed. Its exit receipt cannot release the current launch's writer.
-        if self.initial_launch_workers.contains_key(window_id)
-            || self.pending_launch_completions.contains_key(window_id)
-        {
+        if self.issue_monitor_window_launch_pending(window_id) {
             return true;
         }
         // Display overlays can keep an exited quota/recovery pane Waiting or
