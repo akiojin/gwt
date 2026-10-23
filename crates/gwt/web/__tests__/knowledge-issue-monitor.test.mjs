@@ -432,6 +432,7 @@ test("Issue Monitor renders the JSON gui_status contract and follows updated lim
     },
   };
   surface.applyIssueMonitorStatus(response.gui_status);
+  surface.applyIssueMonitorInbox([{ issue: { number: 44, title: "Running issue", state: "open" }, state: "launched" }]);
   assert.match(monitorBand(body).text(),
     new RegExp(`Queue ${response.queue.length} \\| Active ${response.active_launches.length}/${response.max_active}`));
   surface.applyIssueMonitorStatus({ ...response.gui_status, max_active_agents: 5 });
@@ -593,6 +594,7 @@ test("Issue Monitor band preserves higher-priority states around quota-hold meta
   assert.equal(band.text(), "Stopped | Queue 3 | Active 0/2");
   assert.equal(band.pill.title, "");
 
+  surface.applyIssueMonitorInbox([{ issue: { number: 44, title: "Running issue", state: "open" }, state: "launched" }]);
   for (const state of ["active", "launching"]) {
     surface.applyIssueMonitorStatus({
       enabled: true,

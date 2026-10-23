@@ -399,7 +399,7 @@ test.describe("Issue Bridge load recovery", () => {
 
   test("projects monitor state and controls through the canonical Issue surface", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -407,10 +407,12 @@ test.describe("Issue Bridge load recovery", () => {
     });
     page.on("pageerror", (error) => pageErrors.push(String(error)));
 
-    await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
 
-    await page.goto(APP_URL);
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
 
     const issueSurface = page.locator(".surface-knowledge");
     await expect(issueSurface).toBeVisible();
@@ -435,7 +437,11 @@ test.describe("Issue Bridge load recovery", () => {
       "Queue 3",
     );
     await expect(issueSurface.locator('.knowledge-monitor-bar [data-metric="active"]')).toHaveText(
-      "Active 1/2",
+      "Active 0/2",
+    );
+    await expect(issueSurface.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
+    await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
+      "aria-description", /Monitor agent capacity: 1\/2/,
     );
 
     await issueSurface
@@ -487,6 +493,10 @@ test.describe("Issue Bridge load recovery", () => {
       });
     });
     await expect(autonomous).toHaveAttribute("aria-checked", "true");
+    await expect(issueSurface.locator('[data-metric="active"]')).toHaveText("Active 0/4");
+    await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
+      "aria-description", /Monitor agent capacity: 1\/4/,
+    );
     await expect(autonomousState).toHaveText("On");
     // The track color animates (motion-fast transition), so poll until the
     // computed value has left the Off color instead of sampling once.

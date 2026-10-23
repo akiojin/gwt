@@ -353,7 +353,12 @@ function issueLaunchRecovery(entry) {
 }
 
 export function issueQueueColumn(entry, work = null, liveWindow = null) {
-  if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) return "done";
+  if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) {
+    // Closing an Issue does not stop its agent or release a monitor launch.
+    const live = liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status);
+    return live || Number(work?.active_agents) > 0 || ["launching", "launched"].includes(entry.monitor_state)
+      ? "active" : "done";
+  }
   if (issueStopReason(entry) !== null) return "backlog";
   if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
   // Judgment holds are not live launches; Work activity can outlast the agent.
@@ -397,7 +402,7 @@ function issueQueuePriorityLabel(entry) {
   return entry.priority === "urgent" ? "Urgent" : "Normal";
 }
 
-function issueRowSecondaryItems({ entry, work, attention, primary }) {
+function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, canvasWindow }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
@@ -409,7 +414,10 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     ? String(entry?.error_message || "").trim() : "");
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+  const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
+    issueQueueColumn(entry, work, inlineWindow || canvasWindow) === "active";
+  const reason = cleanupPending ? "Session cleanup pending"
+    : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -947,7 +955,11 @@ export function createKnowledgeKanbanSurface({
         return chips;
       }
 
-      function issueStateExplanation(primary) {
+      function issueStateExplanation(primary, entry) {
+        if (primary.key === "agent:error") {
+          const cause = String(entry?.error_message || "").trim();
+          return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issue Monitor."}`;
+        }
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
@@ -1258,7 +1270,7 @@ export function createKnowledgeKanbanSurface({
         return badge;
       }
 
-      function renderIssueMonitorControls(element) {
+      function renderIssueMonitorControls(element, windowId) {
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
         const maxActive = Math.max(
@@ -1294,8 +1306,11 @@ export function createKnowledgeKanbanSurface({
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
-          active.textContent = `Active ${issueMonitorModel.read().status.active_count || 0}/${maxActive}`;
-          explainIssueControl(active, "Running issue agents / maximum agents the monitor may run at once.");
+          const bridgeState = knowledgeBridgeStateMap.get(windowId);
+          const count = bridgeState ? filteredIssueEntries(bridgeState)
+            .filter(entry => issueQueueColumnForEntry(entry, windowId) === "active").length : 0;
+          active.textContent = `Active ${count}/${maxActive}`;
+          explainIssueControl(active, `Issues in the Active column. Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
@@ -1489,7 +1504,7 @@ export function createKnowledgeKanbanSurface({
         return issueNewPopover;
       }
 
-      function wireIssueMonitorControls(body) {
+      function wireIssueMonitorControls(body, windowId) {
         body
           .querySelector('[data-action="issue-new"]')
           ?.addEventListener("click", (event) => {
@@ -1542,7 +1557,7 @@ export function createKnowledgeKanbanSurface({
               enabled: !Boolean(issueMonitorModel.read().status.autonomous_mode),
             });
           });
-        renderIssueMonitorControls(body);
+        renderIssueMonitorControls(body, windowId);
         send({ kind: "list_issue_monitor" });
       }
 
@@ -3591,7 +3606,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-monitor-chip", statusView.label);
         badge.dataset.tone = statusView.tone;
         badge.dataset.status = statusView.status;
-        explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }), `preview-state-${target.id}`);
+        explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }, entry), `preview-state-${target.id}`);
         header.appendChild(badge);
 
         const action = faces.canvasWindow ? "focus-canvas-window" : "windowize-issue-preview";
@@ -3745,7 +3760,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
-        explainIssueControl(badge, issueStateExplanation(model.primary), `split-state-${entry.number}`);
+        explainIssueControl(badge, issueStateExplanation(model.primary, entry), `split-state-${entry.number}`);
         header.appendChild(badge);
         const elapsed = createNode("span", "issue-split-elapsed", issueAgentElapsedLabel(target));
         elapsed.title = elapsed.textContent
@@ -4093,7 +4108,7 @@ export function createKnowledgeKanbanSurface({
         const pill = createNode("span", "knowledge-row-badge", row.primary.label);
         pill.dataset.tone = row.primary.tone;
         pill.dataset.stateKey = row.primary.key;
-        explainIssueControl(pill, issueStateExplanation(row.primary), `detail-state-${number}`);
+        explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
@@ -4623,8 +4638,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function issueProjectWindows(windowId) {
-        const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
-        const tabs = windowCatalogModel?.read().catalog?.appState?.tabs;
+        const catalog = windowCatalogModel?.read().catalog;
+        const windows = (typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [])
+          .map(windowData => Object.hasOwn(catalog?.runtimeStates || {}, windowData.id)
+            ? { ...windowData, status: catalog.runtimeStates[windowData.id] } : windowData);
+        const tabs = catalog?.appState?.tabs;
         if (!tabs) return windows;
         const project = tabs.find(tab => tab.workspace?.windows?.some(window => window.id === windowId));
         const ids = new Set((project?.workspace?.windows || []).map(window => window.id));
@@ -4693,7 +4711,7 @@ export function createKnowledgeKanbanSurface({
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
         badge.dataset.stateKey = model.primary.key;
-        explainIssueControl(badge, issueStateExplanation(model.primary), `row-state-${entry.number}`, false);
+        explainIssueControl(badge, issueStateExplanation(model.primary, entry), `row-state-${entry.number}`, false);
         main.appendChild(badge);
         select.appendChild(main);
 
@@ -4718,7 +4736,7 @@ export function createKnowledgeKanbanSurface({
           select.appendChild(secondary);
         }
         explainIssueControl(select,
-          [issueStateExplanation(model.primary), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : "",
+          [issueStateExplanation(model.primary, entry), Number.isFinite(entry.queue_position) ? issueQueueSourceExplanation(entry) : "",
             ...tierChips.map(item => item.explanation)].filter(Boolean).join("\n"),
           `issue-${entry.number}`);
 
@@ -4808,6 +4826,7 @@ export function createKnowledgeKanbanSurface({
           child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
+        renderIssueMonitorControls(element, windowId);
         if (state.error) {
           list.insertBefore(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error), other);
         } else if (state.loading && state.loadSlow && knowledgeEntriesAreEmpty(state)) {
@@ -5111,7 +5130,7 @@ export function createKnowledgeKanbanSurface({
             let mounted = false;
             state.monitorSubscriptions = [
               issueMonitorModel.subscribe(model => model.status, () => {
-                if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id));
+                if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id), windowData.id);
               }),
               issueMonitorModel.subscribe(model => model, () => {
                 if (mounted) renderKnowledgeBridge(windowData.id);
@@ -5209,7 +5228,7 @@ export function createKnowledgeKanbanSurface({
                 closeIssuePreview(windowData.id, state);
               }
             });
-            wireIssueMonitorControls(body);
+            wireIssueMonitorControls(body, windowData.id);
           }
           // SPEC-2017 — Hide done toggle persists via localStorage so
           // reloads honour the user preference. The hidden state hides
