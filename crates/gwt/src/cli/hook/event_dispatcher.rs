@@ -535,12 +535,6 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
-    run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
-    })?;
-    run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward_for_event(event, input)
-    })?;
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
@@ -551,9 +545,20 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     if question_guard != HookOutput::Silent {
         return Ok(question_guard);
     }
-    run_step(event, "workflow-policy", || {
+    let output = run_step(event, "workflow-policy", || {
         workflow_policy::handle_with_input(input)
-    })
+    })?;
+    // A refused call never starts. Publish its lifetime only after the gwt
+    // policies accept it, otherwise no matching completion will arrive.
+    if !matches!(output, HookOutput::PreToolUsePermission { .. }) {
+        run_step(event, "runtime-state", || {
+            crate::daemon_runtime::handle_runtime_state(event, input)
+        })?;
+        run_step(event, "forward", || {
+            crate::daemon_runtime::handle_forward_for_event(event, input)
+        })?;
+    }
+    Ok(output)
 }
 
 fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -1847,7 +1852,10 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
         let session_id = "session-question-guard";
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, session_id);
-        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let runtime_path = worktree.path().join("runtime.json");
+        let before = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Idle);
+        before.save(&runtime_path).unwrap();
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
@@ -1858,10 +1866,17 @@ mod tests {
 
         let input = serde_json::json!({
             "tool_name": "AskUserQuestion",
+            "tool_use_id": "rejected-question",
             "tool_input": {"questions": [{"question": "Delete the release tag?"}]}
         });
         let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
             .expect("PreToolUse output");
+
+        assert_eq!(
+            gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap(),
+            before,
+            "a rejected tool must not publish an accepted tool start"
+        );
 
         let HookOutput::PreToolUsePermission { summary, .. } = output else {
             panic!("expected the autonomous question to be denied");
