@@ -12188,6 +12188,37 @@ fn session_bound_update_validates_event_store_before_pre_persist_and_transaction
 }
 
 #[test]
+fn work_event_shards_preserve_legacy_path_bound_audit_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = "legacy-audit-parent";
+    let id = successor_work_id(parent);
+    let mut audit = WorkEvent::new(
+        WorkEventKind::Discard,
+        &id,
+        Utc.with_ymd_and_hms(2026, 10, 23, 0, 0, 0).unwrap(),
+    );
+    audit.id = format!("superseded-{id}");
+    audit.related_work_item_id = Some(parent.into());
+    audit.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-6127".into()),
+        worktree_path: Some(root.path().to_path_buf()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    audit.bind_successor_supersession_identity().unwrap();
+    let events_dir = gwt_repo_local_work_events_dir(root.path());
+    write_workspace_work_event_shards_to_dir(&events_dir, std::slice::from_ref(&audit)).unwrap();
+    let path = gwt_work_event_shard_path(&events_dir, &audit.id);
+    let reloaded: WorkEvent = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(reloaded.is_successor_supersession());
+    assert_eq!(reloaded, audit, "legacy payloads remain path-bound");
+    let mut tampered = reloaded;
+    tampered.execution_container.as_mut().unwrap().worktree_path = Some(PathBuf::from("."));
+    assert!(!tampered.is_successor_supersession());
+}
+
+#[test]
 fn work_event_shards_resolve_portable_containers_and_preserve_legacy_absolute_paths() {
     let _guard = crate::test_support::env_lock()
         .lock()
