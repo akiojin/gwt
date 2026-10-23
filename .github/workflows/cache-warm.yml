@@ -96,7 +96,7 @@ jobs:
       # is only the outer net and must stay above it so the script, not GitHub,
       # reports a dependency-install failure.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2

@@ -85,6 +85,8 @@
 #   GWT_APT_ACQUIRE_RETRIES  apt's own per-item retries (default: 3)
 #   GWT_APT_CONF_DIR         apt drop-in directory (default: /etc/apt/apt.conf.d)
 #   GWT_APT_CACHE_DIR        .deb archive dir reused across CI runs
+#   GWT_APT_OFFLINE_CACHE    1 enables complete GTK cache replay (exact runner image key only)
+#   GWT_APT_ETC_DIR          apt source root (default: /etc/apt; test override)
 #   GWT_APT_GET              apt-get binary (default: apt-get)
 #   GWT_APT_DPKG             dpkg binary (default: dpkg)
 #   GWT_APT_DPKG_QUERY       dpkg-query binary (default: dpkg-query)
@@ -102,6 +104,7 @@ ACQUIRE_TIMEOUT="${GWT_APT_ACQUIRE_TIMEOUT:-30}"
 ACQUIRE_RETRIES="${GWT_APT_ACQUIRE_RETRIES:-3}"
 APT_CONF_DIR="${GWT_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
 CACHE_DIR="${GWT_APT_CACHE_DIR:-}"
+OFFLINE_CACHE="${GWT_APT_OFFLINE_CACHE:-0}"
 APT_GET="${GWT_APT_GET:-apt-get}"
 DPKG="${GWT_APT_DPKG:-dpkg}"
 DPKG_QUERY="${GWT_APT_DPKG_QUERY:-dpkg-query}"
@@ -220,6 +223,33 @@ CONF
   log "apt-hardening=applied conf=${conf} acquire_timeout=${ACQUIRE_TIMEOUT}s acquire_retries=${ACQUIRE_RETRIES}"
 }
 
+# GitHub's runner includes unrelated Microsoft feeds that can return 403 or
+# expired signatures. Keep Ubuntu entries, including mixed .list files and
+# deb822 files. Local installs do not modify the user's source configuration.
+sanitize_ci_sources() {
+  # An injected apt binary is a test fixture and must not edit host sources.
+  [[ ( "${GITHUB_ACTIONS:-}" == "true" && -z "${GWT_APT_GET:-}" ) || -n "${GWT_APT_ETC_DIR:-}" ]] || return 0
+  local apt_dir="${GWT_APT_ETC_DIR:-/etc/apt}"
+  local source filtered
+  for source in "${apt_dir}/sources.list" "${apt_dir}/sources.list.d/"*.list "${apt_dir}/sources.list.d/"*.sources; do
+    [[ -f "${source}" ]] || continue
+    grep -qi 'packages\.microsoft\.com' "${source}" || continue
+    filtered="$(mktemp)"
+    if [[ "${source}" == *.sources ]]; then
+      awk 'BEGIN { RS=""; ORS="\n\n" } tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
+    else
+      awk 'tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
+    fi
+    if [[ -w "${source}" ]]; then
+      cat "${filtered}" >"${source}"
+    else
+      run_as_root tee "${source}" <"${filtered}" >/dev/null
+    fi
+    rm -f "${filtered}"
+    log "source-filter=removed-microsoft source=${source}"
+  done
+}
+
 lock_is_held() {
   if [[ -n "${GWT_APT_LOCK_PROBE:-}" ]]; then
     held_lock_path="probe"
@@ -295,6 +325,9 @@ apt_options() {
   if [[ -n "${CACHE_DIR}" ]]; then
     APT_OPTIONS+=(-o "Dir::Cache::archives=${CACHE_DIR}")
   fi
+  if [[ "${OFFLINE_CACHE}" == 1 ]]; then
+    APT_OPTIONS+=(-o APT::Keep-Downloaded-Packages=true)
+  fi
 }
 
 count_archives() {
@@ -331,6 +364,42 @@ publish_cache_dir() {
   local saved
   saved="$(count_archives)"
   log "cache=${CACHE_DIR} cache_state=saved archives=${saved} fetched=$((saved - CACHE_ARCHIVES))"
+}
+
+# A complete cache is valid only for the exact runner image and package set.
+# CI keys include ImageOS/ImageVersion/arch and this script, with no fallback.
+# Never restore a filesystem tree or dpkg database: apt still configures every
+# package normally, but --no-download refuses any missing dependency.
+prepare_offline_cache() {
+  [[ "${OFFLINE_CACHE}" == 1 && "${MODE}" == gtk-deps ]] || return 0
+  if [[ -z "${CACHE_DIR}" ]]; then
+    log "offline-cache=refused reason=GWT_APT_CACHE_DIR is required"
+    return 1
+  fi
+  OFFLINE_ARCHIVES=()
+  [[ -f "${CACHE_DIR}/.gwt-complete" ]] || return 0
+  if ! (cd "${CACHE_DIR}" && sha256sum --check .gwt-complete) ||
+    [[ "$(cat "${CACHE_DIR}/.gwt-packages")" != "${PACKAGES[*]}" ]]; then
+    log "offline-cache=invalid reason=incomplete or changed contents; rebuilding online"
+    rm -f "${CACHE_DIR}/.gwt-complete"
+    return 0
+  fi
+  local checksum archive
+  while read -r checksum archive; do
+    [[ "${archive}" == *.deb ]] && OFFLINE_ARCHIVES+=("${CACHE_DIR}/${archive}")
+  done <"${CACHE_DIR}/.gwt-complete"
+  CACHE_STATE=offline
+  log "cache=${CACHE_DIR} cache_state=offline archives=${#OFFLINE_ARCHIVES[@]}"
+}
+
+save_complete_cache() {
+  [[ "${OFFLINE_CACHE}" == 1 && "${MODE}" == gtk-deps && "${CACHE_STATE}" != offline ]] || return 0
+  (
+    cd "${CACHE_DIR}"
+    printf '%s\n' "${PACKAGES[*]}" >.gwt-packages
+    shopt -s nullglob
+    sha256sum .gwt-packages *.deb >.gwt-complete
+  )
 }
 
 # Issue #4268 AC-1: turns the captured apt output into the one line a reviewer
@@ -440,6 +509,17 @@ recover_interrupted_install() {
 run_once() {
   local status=0
   if [[ "${MODE}" == "gtk-deps" ]]; then
+    if [[ "${CACHE_STATE}" == offline ]]; then
+      run_apt_get install -y --no-download --no-remove "${OFFLINE_ARCHIVES[@]}" "${PACKAGES[@]}" || status=$?
+      if ((status != 0)); then
+        # Background runner upgrades can change the package baseline. Let the
+        # existing retry/recovery loop rebuild instead of replaying it again.
+        CACHE_STATE=warm
+        rm -f "${CACHE_DIR}/.gwt-complete"
+        log "offline-cache=incompatible status=${status}; next attempt rebuilds online"
+      fi
+      return "${status}"
+    fi
     run_apt_get update || return $?
     run_apt_get install -y "${PACKAGES[@]}" || return $?
     return 0
@@ -550,6 +630,7 @@ fi
 # Exposed on its own so a caller that spawns apt-get itself can still get the
 # acquire bounds without routing the install through this script.
 if [[ "${MODE}" == "harden" ]]; then
+  sanitize_ci_sources
   harden_apt
   exit 0
 fi
@@ -568,10 +649,13 @@ fi
 
 ATTEMPT_LOG="$(mktemp "${TMPDIR:-/tmp}/ci-apt-attempt.XXXXXX")"
 apt_options
+sanitize_ci_sources
 harden_apt
 prepare_cache_dir
+prepare_offline_cache
 
 if run_with_retries; then
+  save_complete_cache
   publish_cache_dir
   exit 0
 fi
