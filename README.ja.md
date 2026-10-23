@@ -634,7 +634,12 @@ idle になったエージェント窓はスロットを自動的に解放しま
 判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
-プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+プールを置き換えます。両応答は opaque な `profiles_token` を返します。
+更新時は直前に読み取った token を `expected_profiles_token` に渡します。競合時は
+preferences を変更せず拒否するので、profiles を再読して変更を再評価し、成功後も
+読み戻してください。token の対象は保存プールと継承元の先頭候補であり、他の設定、
+runtime 状態、ABA 履歴は対象外です。guard を省略した既存呼び出しは互換です。
+候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold と `prefer_for` routing が適格性を決め、provider は
 使用率の読み値による予測ではなく、起動を拒否した時点でプールから外れる。
 詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
