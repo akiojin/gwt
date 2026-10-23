@@ -335,10 +335,15 @@ test("Logs snapshots and live appends retain the latest 1000 entries without ext
   const entries = Array.from({ length: 1002 }, (_, id) => ({
     id, project_scope: "project-alpha", severity: "info", message: `log-${id}`,
   }));
+  entries.at(-1).fields = { context: { label: "original" } };
   surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
   const state = surface.ensureLogState("logs-1");
   assert.equal(state.entries.length, 1000);
   assert.deepEqual(state.entries.map(entry => entry.id), entries.slice(2).map(entry => entry.id));
+  entries.at(-1).message = "changed by caller";
+  entries.at(-1).fields.context.label = "changed by caller";
+  assert.equal(state.entries.at(-1).message, "log-1001");
+  assert.equal(state.entries.at(-1).fields.context.label, "original");
 
   surface.applyBoardLogsReceiveEvent({
     kind: "log_entry_appended",
