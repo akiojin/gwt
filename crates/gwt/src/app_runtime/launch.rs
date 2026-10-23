@@ -1275,6 +1275,30 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         // PTY and burns the Issue Monitor retry budget. A heal failure is
         // logged and the strict read reports the real state.
         heal_lost_generation_publication_best_effort(worktree, owner);
+        // Issue #6118: retain a legacy Active owner in the generation ledger
+        // before refusing a Monitor duplicate. This grants no new producer:
+        // Live preserves the holder and Active status, so owner diagnostics
+        // and the existing operator stop recovery can see the same authority.
+        if session.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && gwt::cli::execution_state::load_owner_generation_ledger(worktree, owner)
+                .map_err(|error| error.to_string())?
+                .is_none()
+            && gwt::cli::execution_state::load(worktree)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|record| {
+                    record.owner_kind == owner.kind
+                        && record.owner_number == owner.number
+                        && record.status
+                            == gwt::cli::execution_state::ExecutionControlStatus::Active
+                })
+        {
+            gwt::cli::execution_state::ensure_generation_ledger(
+                worktree,
+                owner,
+                gwt::cli::execution_state::LegacyActiveDisposition::Live,
+            )
+            .map_err(|error| error.to_string())?;
+        }
         // Issue #5288 / #5840: reconcile exited children and stopped holders
         // before the duplicate gate, including an audited reaper commit whose
         // publication was interrupted. The scanner and reaper validate exact
@@ -8350,6 +8374,104 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
+    fn autonomous_fresh_launch_imports_legacy_active_for_operator_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+        launch.session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        gwt::cli::execution_state::materialize_at_launch(
+            &launch.project,
+            launch.owner.kind,
+            launch.owner.number,
+            "legacy-july-holder",
+            "$gwt-execute #2359",
+            false,
+        )
+        .expect("materialize legacy Active execution");
+        let projection = gwt::cli::trusted_store::read(&launch.project, "execution-control.json")
+            .expect("read legacy projection")
+            .expect("legacy projection");
+        let mut legacy: serde_json::Value = serde_json::from_str(&projection).unwrap();
+        legacy.as_object_mut().unwrap().remove("content_hash");
+        legacy["launched_at"] = serde_json::json!("2026-07-28T00:00:00Z");
+        gwt::cli::trusted_store::write(
+            &launch.project,
+            "execution-control.json",
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .expect("write generation-less July record");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let install = |session: &mut gwt_agent::Session, env: &mut HashMap<String, String>| {
+            FinalizedAgentCapabilityLaunch {
+                issuer: Some(&issuer),
+                sessions_dir: &launch.sessions_dir,
+                session,
+                project_root: &launch.project,
+                worktree: &launch.project,
+                producing_owner: Some(launch.owner),
+                prepared_continuation: None,
+                rebound_continuation: None,
+                execution_entrypoint: "$gwt-execute #2359",
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                container_runtime: None,
+                permission_decision: None,
+            }
+            .install(env)
+        };
+        let mut env = HashMap::new();
+        let error = install(&mut launch.session, &mut env)
+            .expect_err("unknown legacy holder must still prevent duplicate production");
+        assert!(error.contains("already has an Active execution"), "{error}");
+        assert!(env.is_empty());
+        assert!(launch.session.execution_binding.is_none());
+        let diagnosis = gwt::cli::execution_state::diagnose_owner(&launch.project, launch.owner);
+        assert_eq!(diagnosis.recommended_recovery, "issue.monitor.stop");
+        assert_eq!(
+            diagnosis.holder_session_id.as_deref(),
+            Some("legacy-july-holder")
+        );
+        let imported = gwt::cli::execution_state::load(&launch.project)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            imported.status,
+            gwt::cli::execution_state::ExecutionControlStatus::Active
+        );
+        assert_eq!(
+            imported.launched_at.to_rfc3339(),
+            "2026-07-28T00:00:00+00:00"
+        );
+        assert!(matches!(
+            gwt::cli::execution_state::release_revoked_launch_generation(
+                &launch.project,
+                launch.owner,
+                "operator releases stranded legacy execution",
+            )
+            .unwrap(),
+            gwt::cli::execution_state::LaunchGenerationRelease::Released { .. }
+        ));
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        install(&mut relaunch, &mut env).expect("launch after operator recovery");
+        assert!(relaunch.execution_binding.is_some());
+        assert!(!env.is_empty());
+    }
+
+    #[test]
     fn autonomous_fresh_launch_refuses_active_owner_with_or_without_generation() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -8472,6 +8594,17 @@ mod agent_endpoint_env_tests {
                     .expect("read preserved Active projection"),
                 projection
             );
+            if state == "legacy" {
+                let imported = gwt::cli::execution_state::load_owner_generation_ledger(
+                    &launch.project,
+                    launch.owner,
+                )
+                .expect("read imported ledger")
+                .expect("legacy Active is visible to operator recovery");
+                assert_eq!(imported.generations.len(), 1);
+                assert!(imported.takeovers.is_empty());
+                continue;
+            }
             assert_eq!(
                 gwt::cli::trusted_store::read(&launch.project, "execution-generation-pointer.json")
                     .expect("read preserved generation pointer"),
