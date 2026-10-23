@@ -3887,7 +3887,11 @@ fn local_probe_batch<'a>(
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
 /// observed, keyed by Issue number (Issue #3528).
-type LocalClaimObservation = (String, std::collections::BTreeMap<u64, bool>);
+type LocalClaimObservation = (
+    String,
+    std::collections::BTreeMap<u64, bool>,
+    std::collections::BTreeMap<u64, gwt::issue_monitor::IssueMonitorDependencyObservation>,
+);
 
 type LocalIssueMonitorFallbackProjection = (
     Vec<gwt::IssueMonitorIssue>,
@@ -3922,16 +3926,47 @@ fn observe_local_claim_candidates(
     } else {
         0
     };
-    let (available, candidates) = monitor.claim_probe_plan(claimable_cap);
-    // SPEC #4093 FR-005: one bulk linked-PR read for the whole frontier.
+    let (available, _) = monitor.claim_probe_plan(claimable_cap);
+    let dependencies = monitor.dependency_probe_candidates(claimable_cap);
+    if available == 0 && dependencies.is_empty() {
+        return Ok(Some((
+            gwt::process::current_claim_owner(),
+            Default::default(),
+            Default::default(),
+        )));
+    }
+    let (_, queued) = monitor.claim_candidate_refresh_plan(claimable_cap);
+    // One batch also covers candidates that dependency completion may release.
     let batch = local_probe_batch(
         owner,
         repo,
         loaded
             .issues
             .iter()
-            .filter(|issue| candidates.contains(&issue.number)),
+            .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
     );
+    let mut dependency_observations = std::collections::BTreeMap::new();
+    for issue_number in dependencies {
+        let observation = match loaded
+            .issues
+            .iter()
+            .find(|issue| issue.number == issue_number)
+        {
+            Some(issue) => {
+                let completed = observe_local_issue_completion(owner, repo, issue, &batch)?;
+                Some(gwt::issue_monitor::IssueMonitorDependencyObservation::new(
+                    issue, completed,
+                ))
+            }
+            None => monitor.dependency_observation(issue_number, None),
+        };
+        if let Some(observation) = observation {
+            dependency_observations.insert(issue_number, observation);
+        }
+    }
+    let mut ready_monitor = monitor.clone();
+    ready_monitor.observe_dependency_completions(&dependency_observations);
+    let (available, candidates) = ready_monitor.claim_probe_plan(claimable_cap);
     let observations =
         claim_candidate_completion_observations(available, candidates, |issue_number| {
             let Some(issue) = loaded
@@ -3941,29 +3976,34 @@ fn observe_local_claim_candidates(
             else {
                 return Ok(false);
             };
-            observe_claim_candidate_completion(owner, repo, issue, &batch)
+            observe_local_issue_completion(owner, repo, issue, &batch)
+                .map(|completed| completed.unwrap_or(false))
         });
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
-    Ok(Some((gwt::process::current_claim_owner(), observations)))
+    Ok(Some((
+        gwt::process::current_claim_owner(),
+        observations,
+        dependency_observations,
+    )))
 }
 
 /// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): the deadline boundary of one
 /// completion probe. An ordinary readback error returned while the observation
 /// deadline is still valid keeps #3165's fail-open compatibility as an explicit
-/// negative outcome for that Issue; an expired deadline escapes as the typed
-/// stage failure so the caller discards the whole claim proposal.
-fn observe_claim_candidate_completion(
+/// inconclusive outcome. Candidates treat it as negative; dependencies disable
+/// that edge for this scan. An expired deadline discards the whole proposal.
+fn observe_local_issue_completion(
     owner: &str,
     repo: &str,
     issue: &gwt::IssueMonitorIssue,
     batch: &gwt::issue_monitor_worker::LinkedPrProbeBatch,
-) -> Result<bool, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
+) -> Result<Option<bool>, gwt::issue_monitor_worker::IssueMonitorScanFailure> {
     use gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure;
 
     match local_completion_probe(owner, repo, issue, Some(batch)) {
-        Ok(completed) => Ok(completed),
+        Ok(completed) => Ok(Some(completed)),
         Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => Err(failure),
         Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
             gwt::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
@@ -3972,7 +4012,7 @@ fn observe_claim_candidate_completion(
                 error = %failure,
                 "issue monitor completion probe failed within budget (fail-open)"
             );
-            Ok(false)
+            Ok(None)
         }
     }
 }
@@ -4475,7 +4515,8 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             if latest.config.enabled {
                 latest.set_gui_connected(true);
             }
-            if let Some((monitor_owner, observations)) = &local_claim_proposal {
+            if let Some((monitor_owner, observations, dependencies)) = &local_claim_proposal {
+                latest.observe_dependency_completions(dependencies);
                 prepare_local_issue_monitor_claim_proposals(
                     latest,
                     loaded,
@@ -9735,7 +9776,9 @@ impl AppRuntime {
                         &now,
                     );
                     #[cfg(not(unix))]
-                    if let Some((monitor_owner, observations)) = &local_claim_proposal {
+                    if let Some((monitor_owner, observations, dependencies)) = &local_claim_proposal
+                    {
+                        monitor.observe_dependency_completions(dependencies);
                         prepare_local_issue_monitor_claim_proposals(
                             monitor,
                             loaded,

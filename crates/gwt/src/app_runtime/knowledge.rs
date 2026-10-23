@@ -568,6 +568,7 @@ mod monitor_snapshot_cache_tests {
         exclusion_reason: Option<&str>,
     ) -> gwt::IssueMonitorInboxItem {
         gwt::IssueMonitorInboxItem {
+            dependency: None,
             issue: gwt::IssueMonitorIssue {
                 author_login: None,
                 number,

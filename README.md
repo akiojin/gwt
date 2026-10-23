@@ -543,6 +543,14 @@ wait until the active count falls below the limit. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
+To wait for prerequisite Issues, add a line such as `Blocked-by: #123 #456` to
+the Issue body. The Monitor keeps that Issue in its queue position, shows
+**Blocked by dependency** with the unresolved Issue numbers (and `(hold)` when
+applicable), and starts the next ready entry. A known blocker releases the wait
+after its Issue closes or its work is confirmed complete. Missing or inconclusive
+blocker information allows scheduling; cycles show a warning and ignore
+only the cyclic links. Removing the marker also removes the wait on the next scan.
+
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
 agent's read-only output. **Windowize** opens the agent in an individual Agents

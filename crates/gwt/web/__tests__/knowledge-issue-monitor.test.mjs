@@ -283,6 +283,7 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
     ["launch_failed", ["Launch failed", "blocked"]],
     ["agent_failed", ["Agent failed", "blocked"]],
     ["blocked_by_claim", ["Blocked by claim", "needs-input"]],
+    ["blocked_by_dependency", ["Blocked by dependency", "needs-input"]],
     ["skipped", ["Skipped", "idle"]],
     ["needs_human", ["Needs human", "needs-input"]],
   ]);
@@ -1062,6 +1063,24 @@ test("terminal queue broadcasts control membership, provenance and confirmed ord
   assert.deepEqual(queued(),[2,1],"server confirmation controls order");
   surface.applyIssueMonitorStatus({terminal_queue:[{number:1,queued_by:"operator"},{number:2,queued_by:"auto-refill"}]});
   assert.deepEqual(queued(),[1,2]);
+});
+
+test("Issue #3165: dependency-blocked rows retain their queue position and explain the blocker", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(42, "queued", 1), knowledgeEntry(43, "queued", 2)],
+    refresh_enabled: true });
+  surface.applyIssueMonitorStatus({ terminal_queue: [{ number: 42 }, { number: 43 }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "blocked_by_dependency",
+    exclusion_reason: "Blocked by #44 (hold)", dependency: { blocked_by: [{ number: 44, hold: true }], cycle: [] } }]);
+  const row = body.querySelector('[data-queue-column="queued"] [data-issue-number="42"]');
+  assert.ok(row);
+  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
+  assert.equal(row.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
+  assert.match(row.textContent, /Blocked by #44 \(hold\)/);
+  assert.deepEqual([...body.querySelectorAll('[data-queue-column="queued"] .knowledge-row')]
+    .map(item => Number(item.dataset.issueNumber)), [42, 43]);
 });
 
 test("latest inbox launch state moves a cached queued row to Active while retaining terminal queue operations", async (t) => {

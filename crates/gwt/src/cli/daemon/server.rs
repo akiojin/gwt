@@ -6646,7 +6646,11 @@ fn scan_issue_monitor_once_blocking(
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
-    use crate::issue_monitor_worker::{IssueMonitorScanContinuation, IssueMonitorScanStage};
+    use crate::issue_monitor::IssueMonitorDependencyObservation;
+    use crate::issue_monitor_worker::{
+        try_issue_completed_by_merged_pr_classified_with, IssueMonitorCompletionProbeFailure,
+        IssueMonitorScanContinuation, IssueMonitorScanStage,
+    };
 
     let span =
         tracing::info_span!("issue_monitor_scan", project_root = %scope.project_root.display());
@@ -6747,7 +6751,7 @@ fn scan_issue_monitor_once_blocking(
         } else {
             0
         };
-        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+        let (_, claimable) = monitor.claim_candidate_refresh_plan(claimable_cap);
         let mut confirmed = std::collections::BTreeSet::new();
         let mut deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> = None;
         for issue_number in claimable
@@ -6974,7 +6978,8 @@ fn scan_issue_monitor_once_blocking(
         } else {
             0
         };
-        if monitor.active_count() < active_cap {
+        let dependencies = monitor.dependency_probe_candidates(active_cap);
+        if monitor.claim_probe_plan(active_cap).0 > 0 || !dependencies.is_empty() {
             // Issue #3933 AC-2 (review follow-up) / Issue #3928 AC-2: on a
             // previous-result pass only the candidates re-read authoritatively
             // above may authorize a claim. Passing them as an allowlist keeps
@@ -6990,18 +6995,53 @@ fn scan_issue_monitor_once_blocking(
             let mut probe_deferred = std::collections::BTreeSet::new();
             let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
                 None;
-            // SPEC #4093 FR-005: read the linked PRs of the whole claim
-            // frontier in one bulk query; the per-candidate probe below
-            // answers from it and only spawns for a candidate it missed.
-            let (_, probe_frontier) = monitor.claim_probe_plan(active_cap);
+            // Include queued candidates that a completed dependency may release
+            // so the re-evaluated frontier still shares one linked-PR batch.
+            let (_, queued) = monitor.claim_candidate_refresh_plan(active_cap);
             let probe_batch = crate::issue_monitor_worker::LinkedPrProbeBatch::prefetch(
                 &owner,
                 &repo,
-                loaded
+                loaded.issues.iter().filter(|issue| {
+                    queued.contains(&issue.number) || dependencies.contains(&issue.number)
+                }),
+            );
+            let mut dependency_observations = std::collections::BTreeMap::new();
+            for issue_number in dependencies {
+                let observation = match loaded
                     .issues
                     .iter()
-                    .filter(|issue| probe_frontier.contains(&issue.number)),
-            );
+                    .find(|issue| issue.number == issue_number)
+                {
+                    Some(issue) => {
+                        let completed = match try_issue_completed_by_merged_pr_classified_with(
+                            &owner,
+                            &repo,
+                            issue,
+                            Some(&probe_batch),
+                        ) {
+                            Ok(completed) => Some(completed),
+                            Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => {
+                                return Err(failure)
+                            }
+                            Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
+                                crate::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
+                                tracing::debug!(
+                                    issue = issue_number,
+                                    error = %failure,
+                                    "dependency completion probe failed within budget (fail-open)"
+                                );
+                                None
+                            }
+                        };
+                        Some(IssueMonitorDependencyObservation::new(issue, completed))
+                    }
+                    None => monitor.dependency_observation(issue_number, None),
+                };
+                if let Some(observation) = observation {
+                    dependency_observations.insert(issue_number, observation);
+                }
+            }
+            monitor.observe_dependency_completions(&dependency_observations);
             let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,

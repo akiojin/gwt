@@ -7130,6 +7130,7 @@ mod tests {
         launched_window_id: Option<&str>,
     ) -> crate::issue_monitor::IssueMonitorInboxSummary {
         crate::issue_monitor::IssueMonitorInboxSummary {
+            dependency: None,
             launch_tier: None,
             landing_tier: None,
             non_agent_attempts: 0,
@@ -11776,6 +11777,7 @@ mod tests {
             needs_human: vec![2338],
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                dependency: None,
                 launch_tier: None,
                 landing_tier: None,
                 non_agent_attempts: 0,
@@ -11928,6 +11930,7 @@ mod tests {
                 needs_human: vec![2338],
                 released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                    dependency: None,
                     launch_tier: None,
                     landing_tier: None,
                     non_agent_attempts: 0,
@@ -16033,6 +16036,7 @@ command = "my-agent-cli"
             needs_human: Vec::new(),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
+                dependency: None,
                 launch_tier: None,
                 landing_tier: None,
                 non_agent_attempts: 0,
