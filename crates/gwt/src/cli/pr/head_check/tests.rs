@@ -214,6 +214,7 @@ impl RemoteFixture {
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
         env.seed_current_pr(Some(pr.clone()));
         env.seed_pr(5278, pr);
+        let check = self.check();
         if let Some(base) = base {
             let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
                 &format!("[{value}]"),
@@ -226,7 +227,7 @@ impl RemoteFixture {
                 5278,
                 gwt_git::pr_status::PrCompletionSnapshot {
                     state: gwt_git::pr_status::PrState::Open,
-                    head_sha: self.check().remote_head,
+                    head_sha: check.remote_head.clone(),
                     inventory,
                 },
             );
@@ -235,7 +236,7 @@ impl RemoteFixture {
             5278,
             crate::cli::pr::PrQuarantineContext {
                 number: 5278,
-                body: self.check().body_note().unwrap(),
+                body: check.body_note().unwrap(),
                 comments: Vec::new(),
             },
         );
@@ -290,8 +291,7 @@ fn source_identical_merge_cannot_hide_reverted_product_history() {
     );
 }
 
-#[test]
-fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
+fn changed_pr_base_fixture() -> RemoteFixture {
     let fixture = RemoteFixture::new();
     fixture.canonical_record();
     git(
@@ -300,6 +300,12 @@ fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
     );
     git(&fixture.other_clone, &["push", "origin", "release"]);
     fixture.sync_changed_base();
+    fixture
+}
+
+#[test]
+fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
+    let fixture = changed_pr_base_fixture();
     let check = compare(
         &fixture.verified_repo,
         "origin",
@@ -311,6 +317,11 @@ fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
     assert_eq!(check.classification, "unverified_product");
     let view = fixture.view_for_base(Some("release"));
     assert!(view.contains("classification=unverified_product"), "{view}");
+}
+
+#[test]
+fn view_does_not_reuse_the_retained_base_when_the_current_base_is_unavailable() {
+    let fixture = changed_pr_base_fixture();
     let unavailable = fixture.view_for_base(None);
     assert!(
         unavailable.contains("classification=drift"),
@@ -377,8 +388,7 @@ fn all_four_routes_share_the_bookkeeping_freshness_rule() {
     );
 }
 
-#[test]
-fn bookkeeping_and_product_heads_agree_across_view_head_check_and_freshness() {
+fn assert_heads_agree_across_view_head_check_and_freshness(product: bool) {
     use crate::cli::verification_record as verification;
     let fixture = RemoteFixture::new();
     let record = fixture.canonical_record();
@@ -389,55 +399,65 @@ fn bookkeeping_and_product_heads_agree_across_view_head_check_and_freshness() {
         "chore(work): receipt",
     );
     fixture.push_head();
-    for product in [false, true] {
-        if product {
-            fixture.commit_other("src.txt", "unverified source\n", "fix: product");
-            fixture.push_head();
-        }
-        git(&fixture.verified_repo, &["fetch", "origin", HEAD_BRANCH]);
-        git(
-            &fixture.verified_repo,
-            &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
-        );
-        let (code, report) = fixture.read_check();
-        assert_eq!(code, 0, "{report}");
-        let classification = if product {
-            "unverified_product"
-        } else {
-            "bookkeeping_or_base_sync"
-        };
-        assert_eq!(report["classification"], classification);
-        assert_eq!(report["local_verification_fresh"], !product);
-        let out = fixture.view();
-        assert!(
-            out.contains(&format!("classification={classification}")),
-            "{out}"
-        );
-        assert!(
-            out.contains(&format!("local_verification_fresh={}", !product)),
-            "{out}"
-        );
-        assert_eq!(out.contains("PR head drift detected"), product, "{out}");
-        assert_eq!(out.contains("fast-forward locally"), product, "{out}");
-        assert_eq!(
-            out.contains("rerun verify.plan / verify.run"),
-            product,
-            "{out}"
-        );
-        let unavailable = fixture.view_for_base(None);
-        assert_eq!(unavailable.contains("PR head drift detected"), product,
-            "canonical shards remain provable without a live base, while product history stays protected: {unavailable}");
-        assert_eq!(
-            verification::load(&fixture.verified_repo).unwrap().unwrap(),
-            record,
-            "diagnostics must preserve the original verification evidence"
-        );
+    if product {
+        fixture.commit_other("src.txt", "unverified source\n", "fix: product");
+        fixture.push_head();
     }
+    git(&fixture.verified_repo, &["fetch", "origin", HEAD_BRANCH]);
+    git(
+        &fixture.verified_repo,
+        &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
+    );
+    let (code, report) = fixture.read_check();
+    assert_eq!(code, 0, "{report}");
+    let classification = if product {
+        "unverified_product"
+    } else {
+        "bookkeeping_or_base_sync"
+    };
+    assert_eq!(report["classification"], classification);
+    assert_eq!(report["local_verification_fresh"], !product);
+    let out = fixture.view();
+    assert!(
+        out.contains(&format!("classification={classification}")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("local_verification_fresh={}", !product)),
+        "{out}"
+    );
+    assert_eq!(out.contains("PR head drift detected"), product, "{out}");
+    assert_eq!(out.contains("fast-forward locally"), product, "{out}");
+    assert_eq!(
+        out.contains("rerun verify.plan / verify.run"),
+        product,
+        "{out}"
+    );
+    let unavailable = fixture.view_for_base(None);
+    assert_eq!(unavailable.contains("PR head drift detected"), product,
+        "canonical shards remain provable without a live base, while product history stays protected: {unavailable}");
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record,
+        "diagnostics must preserve the original verification evidence"
+    );
 }
 
 #[test]
-fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
-    use crate::cli::verification_record as verification;
+fn bookkeeping_heads_agree_across_view_head_check_and_freshness() {
+    assert_heads_agree_across_view_head_check_and_freshness(false);
+}
+
+#[test]
+fn product_heads_agree_across_view_head_check_and_freshness() {
+    assert_heads_agree_across_view_head_check_and_freshness(true);
+}
+
+fn stale_base_sync_fixture() -> (
+    RemoteFixture,
+    crate::cli::verification_record::VerificationRunRecord,
+    String,
+) {
     let fixture = RemoteFixture::new();
     let record = fixture.canonical_record();
     fixture.sync_changed_base();
@@ -447,6 +467,13 @@ fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
         &["merge", "--ff-only", &format!("origin/{HEAD_BRANCH}")],
     );
     let local_head = git(&fixture.verified_repo, &["rev-parse", "HEAD"]);
+    (fixture, record, local_head)
+}
+
+#[test]
+fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
+    use crate::cli::verification_record as verification;
+    let (fixture, record, local_head) = stale_base_sync_fixture();
     let (code, report) = fixture.read_check();
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["canonical_record_state"], "passed");
@@ -462,7 +489,16 @@ fn head_check_read_diagnoses_stale_base_sync_without_refreshing_evidence() {
         verification::load(&fixture.verified_repo).unwrap().unwrap(),
         record
     );
+    assert_eq!(
+        git(&fixture.verified_repo, &["rev-parse", "HEAD"]),
+        local_head
+    );
+}
 
+#[test]
+fn head_check_read_diagnoses_product_after_stale_base_sync_without_refreshing_evidence() {
+    use crate::cli::verification_record as verification;
+    let (fixture, record, local_head) = stale_base_sync_fixture();
     let product_commit = fixture.commit_other("src.txt", "unverified source\n", "fix: product");
     fixture.push_head();
     let (code, report) = fixture.read_check();
