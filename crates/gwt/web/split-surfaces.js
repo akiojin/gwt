@@ -18,6 +18,7 @@ export function createSplitSurfaces({
   let active = 0;
   let selections = ["issues", "board"];
   let selectedWindowIds = [null, null];
+  let renderedCatalog = null;
   const parking = document.createElement("section");
   parking.className = "surface-cache";
   parking.hidden = true;
@@ -69,15 +70,20 @@ export function createSplitSurfaces({
     onChange(selections[active]);
   }
 
-  function sync() {
-    const catalog = windowCatalogModel.read().catalog;
-    const windows = getWindows(catalog);
-    host.dataset.catalogVersion = String(catalog.version);
+  function settleRequested(windows) {
     for (const [surface, existingIds] of requested) {
       if (windows.some(data => matchesSurface(data, surface) && !existingIds.has(data.id))) {
         requested.delete(surface);
       }
     }
+  }
+
+  function sync() {
+    const catalog = windowCatalogModel.read().catalog;
+    renderedCatalog = catalog;
+    const windows = getWindows(catalog);
+    host.dataset.catalogVersion = String(catalog.version);
+    settleRequested(windows);
     if (!opened) return;
     for (const [index, id] of selectedWindowIds.entries()) {
       if (!id) continue;
@@ -268,9 +274,15 @@ export function createSplitSurfaces({
     onChange(null);
   }
 
-  const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
+  // Launch completion must consume intermediate catalogs even when their DOM
+  // presentation is superseded before the next frame.
+  const unsubscribeRequests = windowCatalogModel.subscribe(state => state.catalog,
+    catalog => settleRequested(getWindows(catalog)));
+  const unsubscribe = windowCatalogModel.subscribeFrame(state => state.catalog, () => {
+    if (windowCatalogModel.read().catalog !== renderedCatalog) sync();
+  });
   return {
-    dispose: unsubscribe,
+    dispose() { unsubscribeRequests(); unsubscribe(); },
     open, show, showWindow, close, collapse, sync, park, select: choose,
     isOpen: () => opened && split,
     get hasLayout() { return true; },
