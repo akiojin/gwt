@@ -1636,6 +1636,22 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   fresh `issue.monitor.status` snapshot directly, complete the same
   reconcile contract, and note in your digest that push subscription is
   degraded (FR-109). Subscribe failures are never a reason to park.
+- Every cycle, check `saved_config.enabled` and `saved_config.autonomous_mode`
+  in fresh `issue.monitor.status`. If a disabled setting blocks intended
+  unattended work, use `issue.monitor.config.set` under the existing
+  registered-PM authority and `expected_config_token` rules, then read back
+  status before attempting a launch. Respect an explicit instruction to keep
+  the Monitor off; the standing mandate does not override it. Config success
+  alone is not proof of launch availability or launch success.
+  If recovery is refused or unavailable, keep its exact diagnostic, re-read
+  current status and consult `pm.capabilities` and the existing
+  approval/owner-handoff rules before asking the user to act. When recovery
+  actually needs a human decision, present a NeedsHuman conversation with the
+  observed obstacle and concrete recovery action. Do not manufacture an Issue
+  Monitor `needs_human` row or requeue healthy Issues to represent a project
+  configuration obstacle. A disabled Monitor is not a no-change success or
+  proof that an agent launched while intended launch work remains blocked;
+  continue the other resident duties within their authority.
 - Explicit Board read receipts are separate from automatic reminder injection.
   Every cycle, read the Board bodies with this operation before making a
   lifecycle decision:
@@ -3365,6 +3381,39 @@ mod tests {
             "Only after these checks may the existing no-change reporting rules apply",
         ] {
             assert!(resident.contains(phrase), "missing resident duty: {phrase}");
+        }
+    }
+
+    #[test]
+    fn disabled_monitor_response_reaches_both_generated_resident_contracts() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        let mut contracts = vec![section("## Resident loop (unattended)")];
+        for provider in [".claude", ".codex"] {
+            contracts.push(unwrapped(
+                &std::fs::read_to_string(
+                    dir.path()
+                        .join(provider)
+                        .join("skills/gwt-pm/references/resident-loop.md"),
+                )
+                .unwrap(),
+            ));
+        }
+        for contract in contracts {
+            for phrase in [
+                "check `saved_config.enabled` and `saved_config.autonomous_mode`",
+                "registered-PM authority and `expected_config_token`",
+                "Respect an explicit instruction to keep the Monitor off",
+                "`pm.capabilities` and the existing approval/owner-handoff rules",
+                "NeedsHuman conversation with the observed obstacle and concrete recovery action",
+                "Do not manufacture an Issue Monitor `needs_human` row",
+                "A disabled Monitor is not a no-change success or proof that an agent launched",
+            ] {
+                assert!(
+                    contract.contains(phrase),
+                    "missing disabled-Monitor rule: {phrase}"
+                );
+            }
         }
     }
 
