@@ -1648,6 +1648,26 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Before `pane.close` or `issue.monitor.stop`, read recent target-owner Board
   evidence. A new owner post requires another read before retrying the stop.
   Unavailable Board/receipt diagnostics mean unknown reading state, never zero.
+- After fresh Board and Monitor reconciliation, evaluate the standing mandate
+  every cycle, including the first cold start with zero signal differences and
+  no new user request. Before concluding that nothing needs action:
+  1. Check semantic priority against the current understanding; correct a
+     mismatch through `issue.monitor.priority.set` / `priority.move`, using
+     the existing observation, conflict detection, reason and readback rules.
+  2. Curate the backlog: evaluate duplicates, obsolete work, scope/acceptance
+     corrections and label consistency through the existing search-first
+     curation and safe-mutation rules.
+  3. Supervise running launches through the existing health, Board, steering
+     and error-disposition contracts below.
+  4. Decompose and register unprocessed conversational work through the
+     existing intake, owner-search and source-authority rules.
+  Act only where the evaluation finds work. Do not manufacture writes or
+  duplicate Issues to satisfy the checklist. Signal differences help identify
+  work; their absence never skips these duties. Never ask whether to perform
+  the standing mandate or stop at a choice menu. Irreversible or product
+  decisions and NeedsHuman still follow the existing decision and permission
+  boundaries. Only after these checks may the existing no-change reporting
+  rules apply.
 - Before judging branch divergence or stagnation, run `git fetch origin` in
   the target repository during this cycle, then inspect the branch again.
   A previous cycle's fetch is not current evidence. The advisory is warning-only;
@@ -3330,6 +3350,24 @@ mod tests {
         assert!(body().contains("check the agents that are running"));
     }
 
+    #[test]
+    fn contract_evaluates_standing_mandate_on_cold_start() {
+        let resident = section("## Resident loop (unattended)");
+        for phrase in [
+            "including the first cold start with zero signal differences and no new user request",
+            "Check semantic priority",
+            "Curate the backlog",
+            "Supervise running launches",
+            "Decompose and register unprocessed conversational work",
+            "Do not manufacture writes or duplicate Issues",
+            "Never ask whether to perform the standing mandate or stop at a choice menu",
+            "Irreversible or product decisions and NeedsHuman still follow the existing decision and permission boundaries",
+            "Only after these checks may the existing no-change reporting rules apply",
+        ] {
+            assert!(resident.contains(phrase), "missing resident duty: {phrase}");
+        }
+    }
+
     /// Issue #3834 AC-9: both generated providers supervise from one health
     /// snapshot, while keeping disposition behind the existing authority gates.
     #[test]
@@ -4322,6 +4360,12 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "including the first cold start with zero signal differences and no new user request",
+            "Check semantic priority",
+            "Curate the backlog",
+            "Supervise running launches",
+            "Decompose and register unprocessed conversational work",
+            "Never ask whether to perform the standing mandate or stop at a choice menu",
             "For `issue.monitor.profiles.set`, read fresh `issue.monitor.profiles`",
             "`profiles_token` as `expected_profiles_token`",
             "The profile token covers the saved pool and inheritance head only",
