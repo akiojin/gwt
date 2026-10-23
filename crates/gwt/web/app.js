@@ -1295,6 +1295,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           },
         });
         projectPageMetadata.resetConnection();
+        // A restarted backend has its own restore gate, even when this page survives.
+        startupAutoResumeReadySent = false;
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         if (socketProjectKey) projectPageMetadata.reportAttention();
@@ -2034,13 +2036,22 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         startupAutoResumeReadySent = true;
-        requestAnimationFrame(() => {
-          if (routeProjectMissing) return;
+        const generation = socketReceiveDispatcherGeneration;
+        let delivered = false;
+        const notify = () => {
+          if (delivered) return;
+          delivered = true;
+          clearTimeout(timer);
+          cancelAnimationFrame(frame);
+          if (routeProjectMissing || generation !== socketReceiveDispatcherGeneration) return;
           send({
             kind: "startup_auto_resume_ready",
             bounds: visibleBounds(),
           });
-        });
+        };
+        // Background tabs may suspend frames; readiness must still reach the backend.
+        const timer = setTimeout(notify, 100);
+        const frame = requestAnimationFrame(notify);
       }
 
       function cycleFocus(direction) {
