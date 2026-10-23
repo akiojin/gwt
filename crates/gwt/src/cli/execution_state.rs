@@ -33914,6 +33914,21 @@ exit 1
                         .active,
                     "successful execution.complete must also finish the matching build"
                 );
+                let completed_bytes = record_contents(dir.path()).unwrap();
+                let build_path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+                let build_bytes = fs::read(&build_path).unwrap();
+                let mut env = TestEnv::new(dir.path().to_path_buf());
+                let (code, out) = run_collect(
+                    &mut env,
+                    CliCommand::Build(crate::cli::SkillStateAction::Complete {
+                        spec: 3248,
+                        pr: None,
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "build.complete after execution.complete: {out}");
+                assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                assert_eq!(fs::read(&build_path).unwrap(), build_bytes);
                 assert_eq!(
                     crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
                         dir.path(),
