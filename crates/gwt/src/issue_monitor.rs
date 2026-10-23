@@ -20344,13 +20344,9 @@ impl IssueMonitorState {
                 None,
             ),
         };
-        // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
-        // pool is now held; another candidate can still honor them.
-        let every_pool_provider_held =
-            provider.is_some() && self.provider_quota_hold_at(now).is_some();
         self.release_provider_limited_source_tracking(issue_number);
-        if every_pool_provider_held {
-            self.compensate_uncommitted_provider_claims();
+        if provider.is_some() {
+            self.compensate_uncommitted_provider_claims(now);
         }
         let record = self.autonomous_record_mut(issue_number);
         record.retry_not_before = floor;
@@ -20391,13 +20387,25 @@ impl IssueMonitorState {
     /// Attempting tuples stay in the journal until their late result arrives;
     /// exact ReleaseClaim companions make that result harmless without
     /// invalidating unrelated effect authority.
-    fn compensate_uncommitted_provider_claims(&mut self) {
-        let mut cancelled_issues = self
+    fn compensate_uncommitted_provider_claims(&mut self, now: &str) {
+        let every_pool_provider_held = self.provider_quota_hold_at(now).is_some();
+        let cancelled_issues = self
             .pending_effects
             .iter()
             .filter_map(|effect| match &effect.payload {
                 IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(*issue_number),
                 _ => None,
+            })
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .filter(|delivery| delivery.materializer_id.is_none())
+                    .map(|delivery| delivery.issue_number),
+            )
+            // A healthy lower tier cannot honor an Issue's higher tier floor.
+            // Preserve work that still has an eligible provider in its pool.
+            .filter(|issue_number| {
+                every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
             })
             .collect::<BTreeSet<_>>();
         let attempting_claims = self
@@ -20407,7 +20415,8 @@ impl IssueMonitorState {
                 effect.state == IssueMonitorEffectState::Attempting
                     && matches!(
                         effect.payload,
-                        IssueMonitorEffectPayload::AcquireClaim { .. }
+                        IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                            if cancelled_issues.contains(&issue_number)
                     )
             })
             .cloned()
@@ -20416,7 +20425,8 @@ impl IssueMonitorState {
             effect.state != IssueMonitorEffectState::Prepared
                 || !matches!(
                     effect.payload,
-                    IssueMonitorEffectPayload::AcquireClaim { .. }
+                    IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                        if cancelled_issues.contains(&issue_number)
                 )
         });
         for effect in attempting_claims {
@@ -20441,13 +20451,16 @@ impl IssueMonitorState {
         let cancelled_deliveries = self
             .pending_launch_deliveries
             .iter()
-            .filter(|delivery| delivery.materializer_id.is_none())
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && cancelled_issues.contains(&delivery.issue_number)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        self.pending_launch_deliveries
-            .retain(|delivery| delivery.materializer_id.is_some());
+        self.pending_launch_deliveries.retain(|delivery| {
+            delivery.materializer_id.is_some() || !cancelled_issues.contains(&delivery.issue_number)
+        });
         for delivery in cancelled_deliveries {
-            cancelled_issues.insert(delivery.issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -30287,26 +30300,36 @@ mod tests {
 
     #[test]
     fn provider_hold_restores_fresh_required_from_an_unclaimed_delivery() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_auto: true,
+            max_active_agents: 4,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            launch_tiers: vec![
+                vec![test_launch_profile("codex")],
+                vec![test_launch_profile("claude")],
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.record_tier_launch(43, 1);
         let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 4,
                 ..IssueMonitorConfig::default()
             },
-            IssueMonitorPrefs {
-                enabled: true,
-                max_active_agents: 4,
-                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
-                launch_profile: Some(test_launch_profile("codex")),
-                ..IssueMonitorPrefs::default()
-            },
+            prefs,
         );
-        for number in [42, 43] {
+        monitor.set_gui_connected(true);
+        for number in [42, 43, 44] {
             monitor.terminal_queue_push(&[number], "test", "2026-08-01T00:00:00Z");
             monitor.record_candidate(issue(number));
         }
         monitor.complete_active_launch(42, "tab-1::agent-42");
         monitor.require_fresh_launch_session(43);
+        monitor.record_attempt(43);
+        monitor.set_autonomous_phase(43, AutonomousPhase::Implementing);
         assert!(monitor.apply_confirmed_claim(
             43,
             "claim-43",
@@ -30318,20 +30341,75 @@ mod tests {
             monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
         );
+        let cancelled_delivery = monitor.pending_launch_delivery_id(43).unwrap();
+        assert!(monitor.apply_confirmed_claim(
+            44,
+            "claim-44",
+            "host/session",
+            "claim-effect-44",
+            "2026-08-22T02:00:00Z",
+        ));
 
         monitor.try_hold_provider_usage_limit(
             42,
             "tab-1::agent-42",
-            "codex",
-            "Codex quota exhausted",
+            "claude",
+            "Claude quota exhausted",
             Some("2026-08-22T04:00:00Z"),
             None,
             "2026-08-22T02:01:00Z",
         );
 
+        assert!(!monitor.launch_admission_is_held_at("2026-08-22T02:01:00Z"));
+        assert_eq!(monitor.pending_launch_delivery_id(43), None);
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_issue_numbers().contains(&43));
+        assert_eq!(
+            monitor.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(monitor.prefs().issue_tiers[&43].floor, 1);
         assert_eq!(
             monitor.prefs().queued_launch_session_strategies.get(&43),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(
+            &monitor.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        let requests = monitor.take_pending_launch_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].issue_number, 44,
+            "the healthy lower tier still launches"
+        );
+        let release = monitor.pending_effects()[0].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&release));
+        monitor.complete_pending_effect(&release).unwrap();
+        monitor.clear_provider_quota_hold("claude", "recovered", "2026-08-22T02:02:00Z");
+        assert_eq!(
+            monitor.prepare_claim_effects_with_observations(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                4,
+                &BTreeMap::from([(43, false)]),
+            ),
+            1,
+            "the cancelled Issue returns through ordinary admission"
         );
     }
 
