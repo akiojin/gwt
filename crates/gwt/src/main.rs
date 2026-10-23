@@ -1563,6 +1563,7 @@ struct BoardDaemonSubscriberRegistry {
         PathBuf,
         (
             app_runtime::ProjectContext,
+            bool,
             gwt::daemon_subscriber::DaemonSubscriber,
         ),
     >,
@@ -1570,6 +1571,7 @@ struct BoardDaemonSubscriberRegistry {
 
 impl BoardDaemonSubscriberRegistry {
     fn sync(&mut self, app: &AppRuntime, proxy: AppEventProxy) {
+        let materializer_ready = app.issue_monitor_materializer_ready();
         let mut active_roots = HashSet::new();
         for tab in &app.tabs {
             let Some(context) = app.project_context(&tab.id) else {
@@ -1581,15 +1583,19 @@ impl BoardDaemonSubscriberRegistry {
             if self
                 .subscribers
                 .get(&key)
-                .is_some_and(|(owner, _)| owner != &context)
+                .is_some_and(|(owner, ready, _)| owner != &context || *ready != materializer_ready)
             {
                 self.subscribers.remove(&key);
             }
             if let std::collections::hash_map::Entry::Vacant(entry) = self.subscribers.entry(key) {
-                if let Some(subscriber) =
-                    spawn_board_daemon_subscriber(context.clone(), proxy.clone())
-                {
-                    entry.insert((context, subscriber));
+                if let Some(subscriber) = spawn_board_daemon_subscriber(
+                    context.clone(),
+                    proxy.clone(),
+                    materializer_ready,
+                ) {
+                    tracing::info!(project_root = %context.project_root.display(), materializer_ready,
+                        "Issue Monitor subscriber role changed");
+                    entry.insert((context, materializer_ready, subscriber));
                 }
             }
         }
@@ -1605,6 +1611,7 @@ impl BoardDaemonSubscriberRegistry {
 fn spawn_board_daemon_subscriber(
     context: app_runtime::ProjectContext,
     proxy: AppEventProxy,
+    materializer_ready: bool,
 ) -> Option<gwt::daemon_subscriber::DaemonSubscriber> {
     use gwt_core::daemon::{RuntimeScope, RuntimeTarget};
 
@@ -1635,21 +1642,28 @@ fn spawn_board_daemon_subscriber(
     };
 
     let proxy_for_callback = proxy;
-    Some(
+    let on_event = move |channel: String, payload| {
+        dispatch_daemon_project_event(
+            &proxy_for_callback,
+            &context,
+            &channel,
+            payload,
+            std::process::id(),
+        );
+    };
+    Some(if materializer_ready {
         gwt::daemon_subscriber::DaemonSubscriber::spawn_materializer_with_resolver(
             resolver,
             daemon_subscriber_channels(),
-            move |channel, payload| {
-                dispatch_daemon_project_event(
-                    &proxy_for_callback,
-                    &context,
-                    &channel,
-                    payload,
-                    std::process::id(),
-                );
-            },
-        ),
-    )
+            on_event,
+        )
+    } else {
+        gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+            resolver,
+            daemon_subscriber_channels(),
+            on_event,
+        )
+    })
 }
 
 fn dispatch_daemon_project_event(
@@ -11244,6 +11258,7 @@ fn main() -> std::io::Result<()> {
                 let completed_at = std::time::Instant::now();
                 if canvas_ready {
                     record_startup_perf_route_once();
+                    board_daemon_subscribers.sync(app, proxy.clone());
                 }
                 log_frontend_timing(
                     dispatch_kind,
@@ -11414,6 +11429,7 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::StartupGenerationReaperCompleted) => {
                 let events = app.handle_startup_generation_reaper_completed();
+                board_daemon_subscribers.sync(app, proxy.clone());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {
@@ -11891,6 +11907,7 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::SupportedAgentMaintenanceComplete(completion)) => {
                 clients.dispatch(app.handle_supported_agent_maintenance_complete(*completion));
+                board_daemon_subscribers.sync(app, proxy.clone());
             }
             Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
                 client_id,
