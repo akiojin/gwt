@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn issue_restart_can_replace_its_own_initial_when_every_initial_is_reserved() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut settings = Settings::default();
+    settings.ai.language = Some("en".into());
+    settings
+        .save(&Settings::global_config_path().unwrap())
+        .unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let placeholders: Vec<_> = ('A'..='Z')
+        .map(|initial| (format!("agent-{initial}"), format!("session-{initial}")))
+        .collect();
+    let mut tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    for initial in 'A'..='Z' {
+        tab.workspace.set_agent_name(
+            &format!("agent-{initial}"),
+            Some(format!("{initial}Legacy")),
+        );
+    }
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/restart", gwt_agent::AgentId::Codex);
+    session.id = "session-F".into();
+    session.agent_session_id = Some("native-restart".into());
+    session.agent_name = Some("FLegacy".into());
+    session.linked_issue_number = Some(3824);
+
+    runtime.spawn_restored_agent_session(
+        "tab-1",
+        session,
+        None,
+        canvas_bounds(),
+        super::super::startup::RestoreOrigin::UserRequested,
+    );
+
+    assert_eq!(
+        runtime.pending_auto_resume_sources.len(),
+        1,
+        "restart admitted"
+    );
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert_eq!(windows.len(), 26);
+    let replacement = windows
+        .iter()
+        .filter_map(|window| window.agent_name.as_deref())
+        .find(|name| name.starts_with('F'))
+        .expect("replacement uses the only available initial");
+    assert_ne!(replacement, "FLegacy");
+    assert!(!replacement.chars().any(|ch| ch.is_ascii_digit()));
+}
+
+#[test]
 fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_window() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -114,6 +166,7 @@ fn restore_name_allocation_failure_notifies_automatically_and_keeps_manual_error
             session.id = "restore-session".into();
             session.agent_session_id = Some("native-restore".into());
             session.agent_name = Some("モナ".into());
+            session.linked_issue_number = Some(3824);
             // Make the existing allocator fail after detecting the collision.
             fs::create_dir_all(
                 gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl"),

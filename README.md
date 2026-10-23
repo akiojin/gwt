@@ -504,7 +504,9 @@ choose `Back to latest entries` to resume the latest updates.
 gwt assigns each worker Agent a random memorable name in the output language
 when it starts. Its badge, window title, Fleet, Kanban, and Board show that
 name, and the PM uses it when reporting work. Names are unique across the
-project's history and survive restore and in-place restart. Issue comments
+project's history and never receive numeric suffixes; exhausted catalogs expand
+with localized family names. Automatic restoration keeps the existing name;
+explicitly restarting an Issue's Agent assigns a fresh name. Issue comments
 record assignments, handovers, PR creation, and completion; PR bodies also
 include the responsible name. The resident PM keeps its own fixed identity.
 

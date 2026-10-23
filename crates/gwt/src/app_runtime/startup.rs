@@ -1763,28 +1763,42 @@ impl AppRuntime {
                     .and_then(|window| window.agent_name.clone())
             })
             .or_else(|| session.agent_name.clone());
-        if let Some(name) = &agent_name {
-            let (_, active) = self.agent_name_reservations(Some(&session.id));
-            if gwt::agent_names::ensure_available_initial(name, &active).is_err() {
-                // Issue #5866: a persisted identity must not prevent restore.
-                // Reserve a replacement before removing its diagnostic placeholder.
-                let replacement = self
-                    .tab(tab_id)
-                    .ok_or_else(|| "Project is closed".to_string())
-                    .and_then(|tab| self.allocate_agent_name(&tab.project_root, None));
-                match replacement {
-                    Ok(replacement) => {
-                        tracing::info!(
-                            session_id = %session.id,
-                            previous_name = %name,
-                            agent_name = %replacement,
-                            "reassigned restored Agent name with an occupied initial"
-                        );
-                        agent_name = Some(replacement);
-                    }
-                    Err(error) => {
-                        return self.restore_launch_error_events(tab_id, &session, origin, error);
-                    }
+        let fresh_issue_restart =
+            origin == RestoreOrigin::UserRequested && session.linked_issue_number.is_some();
+        let (mut known, active) = self.agent_name_reservations(Some(&session.id));
+        if fresh_issue_restart
+            || agent_name.as_ref().is_some_and(|name| {
+                gwt::agent_names::ensure_available_initial(name, &active).is_err()
+            })
+        {
+            // Reserve the replacement before removing the diagnostic placeholder.
+            // A legacy identity may exist only in the saved Session, so remember
+            // both sources before assigning a new lifetime's name (Issue #3824).
+            known.extend(session.agent_name.iter().chain(agent_name.iter()).cloned());
+            let replacement = self
+                .tab(tab_id)
+                .ok_or_else(|| "Project is closed".to_string())
+                .and_then(|tab| {
+                    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root)
+                        .join("agent-names.jsonl");
+                    let language = gwt_config::Settings::load()
+                        .map(|settings| settings.ai.effective_language())
+                        .unwrap_or("en");
+                    gwt::agent_names::allocate(&history, language, &active, &known)
+                });
+            match replacement {
+                Ok(replacement) => {
+                    tracing::info!(
+                        session_id = %session.id,
+                        previous_name = ?agent_name,
+                        agent_name = %replacement,
+                        fresh_issue_restart,
+                        "assigned a fresh restored Agent name"
+                    );
+                    agent_name = Some(replacement);
+                }
+                Err(error) => {
+                    return self.restore_launch_error_events(tab_id, &session, origin, error);
                 }
             }
         }

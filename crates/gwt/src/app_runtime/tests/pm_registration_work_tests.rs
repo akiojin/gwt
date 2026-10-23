@@ -2774,6 +2774,8 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             ));
         let mut source = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
         source.agent_session_id = Some("conversation-4217-restart".to_string());
+        source.linked_issue_number = Some(3824);
+        source.agent_name = Some("Flora".into());
         source.launch_route = gwt_agent::LaunchRoute::Autonomous;
         source.save(&runtime.sessions_dir).expect("save source");
         let source_session_id = source.id.clone();
@@ -2803,17 +2805,36 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         runtime.register_window("tab-1", &placeholder.id);
 
         runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
-        assert_eq!(
-            runtime
-                .tab("tab-1")
-                .unwrap()
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .find_map(|window| window.agent_name.as_deref()),
-            Some("Falcon-2")
-        );
+        let assigned_name = runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find_map(|window| window.agent_name.as_deref())
+            .expect("assigned name");
+        if origin == super::super::startup::RestoreOrigin::Automatic {
+            assert_eq!(
+                assigned_name, "Falcon-2",
+                "automatic restore retains identity"
+            );
+        } else {
+            assert_ne!(
+                assigned_name, "Falcon-2",
+                "Issue restart receives a fresh identity"
+            );
+            assert!(!assigned_name.chars().any(|ch| ch.is_ascii_digit()));
+            let history =
+                gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl");
+            let history = fs::read_to_string(history).unwrap();
+            assert!(history.contains("Falcon-2"));
+            assert!(
+                history.contains("\"Flora\""),
+                "reserve the Session-only legacy name"
+            );
+        }
+        let assigned_name = assigned_name.to_string();
         assert_eq!(
             runtime
                 .tab("tab-1")
@@ -2852,6 +2873,10 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
                 .expect("load restored Session");
         assert_eq!(successor.launch_route, expected_route, "{origin:?}");
+        assert_eq!(
+            successor.agent_name.as_deref(),
+            Some(assigned_name.as_str())
+        );
         drop(recorded);
         runtime.handle_launch_complete_and_drain(window_id, result);
         let successor =
