@@ -454,6 +454,7 @@ impl TerminalPersistence {
 
 /// Finalize on a background thread, including an already-exited child: acquiring
 /// owner/Session leases and syncing a diagnostic must never block the GUI.
+/// Returns `false` because persistence is never completed synchronously.
 pub fn persist_terminal_after_exit(
     pty: Arc<PtyHandle>,
     sessions_dir: PathBuf,

@@ -372,7 +372,7 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
         Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some("feature/current".to_string()),
-                worktree_path: Some(current_worktree),
+                worktree_path: Some(current_worktree.clone()),
                 pr_number: None,
                 pr_url: None,
                 pr_state: None,
@@ -408,6 +408,22 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
     assert!(
         current.board_refs.iter().any(|id| id == &entry.id),
         "the latest assigned duplicate row must receive the Board event"
+    );
+    let event = current
+        .events
+        .iter()
+        .find(|event| event.board_entry_id.as_deref() == Some(entry.id.as_str()))
+        .expect("Board milestone event");
+    let shard = gwt_core::paths::gwt_repo_local_work_event_shard_path(&current_worktree, &event.id);
+    let published: gwt_core::workspace_projection::WorkEvent =
+        serde_json::from_slice(&fs::read(shard).expect("read owning Work shard"))
+            .expect("parse owning Work shard");
+    let container = published.execution_container.expect("portable container");
+    assert_eq!(container.worktree_path.as_deref(), Some(Path::new(".")));
+    assert_eq!(container.branch.as_deref(), Some("feature/current"));
+    assert!(
+        !gwt_core::paths::gwt_repo_local_work_event_shard_path(&repo, &event.id).exists(),
+        "the project root must not publish another Worktree's event"
     );
 }
 

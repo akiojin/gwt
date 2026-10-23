@@ -2842,8 +2842,13 @@ fn production_bound_agent_spawn_failure_never_publishes_exact_runtime_proof() {
 
 #[test]
 fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
+    // The detached finalizer resolves owner authority on another thread.
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
