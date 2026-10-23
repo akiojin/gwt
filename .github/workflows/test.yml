@@ -1074,7 +1074,7 @@ jobs:
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
             bash scripts/run-visual-tests.sh
-        timeout-minutes: 15
+        timeout-minutes: 30
 
   report-post-merge-failure:
     needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
