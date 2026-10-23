@@ -536,6 +536,12 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("three canonical machine admission slots for FIFO prefetch");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read monitor prefs");
     prefs.max_active_agents = 3;
@@ -625,6 +631,13 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     fixture.runtime.issue_monitor_provider_auth_probe = auth_probe;
     // Reap the real first materialization before assertions can unwind.
     // Its PTY preparation is never applied, so this test starts no provider.
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "first materialization not started: preparations={:?}, deliveries={:?}, queued={}",
+        fixture.runtime.issue_monitor_launch_preparations,
+        fixture.runtime.issue_monitor_launch_deliveries,
+        queued.lock().expect("queued workers").len()
+    );
     let (first_window, first_result) =
         take_monitor_launch_complete_event("facts-prefetch", &fixture.recorded_events);
     assert!(first_result.is_ok(), "first launch: {first_result:?}");
