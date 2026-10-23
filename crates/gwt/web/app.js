@@ -3741,6 +3741,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyIssueMonitorQueueResult,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
@@ -5269,6 +5270,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
+            break;
+          case "issue_monitor_queue_result":
+            applyIssueMonitorQueueResult(event);
             break;
           case "issue_monitor_inbox":
             applyKnowledgeIssueMonitorInbox(event.items);

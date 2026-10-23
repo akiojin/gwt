@@ -9031,33 +9031,50 @@ impl AppRuntime {
         operation: &'static str,
         apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_control_result_events_with_queue_result(
+            context,
+            client_id,
+            publication,
+            operation,
+            None,
+            apply_fallback,
+        )
+    }
+
+    fn issue_monitor_control_result_events_with_queue_result(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        operation: &'static str,
+        queue_result: Option<(&'static str, Vec<u64>)>,
+        apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
         let project_root = Some(context.project_root.clone());
-        match publication {
+        let outcome = match publication {
             // The daemon ACK confirms the canonical control transaction
             // committed. Persisting it again here would advance authority
             // twice and leave the daemon's generation stale.
-            Ok(()) => Vec::new(),
+            Ok(()) => Ok(None),
             Err(error) if error.allows_local_fallback() => {
                 tracing::debug!(
                     error = %error,
                     operation,
                     "issue monitor control daemon publish failed; using local fallback"
                 );
-                match self.commit_local_issue_monitor_control(context, apply_fallback) {
-                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(
-                        Some(client_id),
-                        project_root.as_deref(),
-                        monitor,
-                    ),
-                    Err(local_error) => self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        Some(client_id),
-                        local_error,
-                        operation,
-                        None,
-                    ),
-                }
+                self.commit_local_issue_monitor_control(context, apply_fallback)
+                    .map(|(monitor, ())| Some(monitor))
             }
+            Err(error) => Err(error),
+        };
+        let queue_error = outcome.as_ref().err().map(ToString::to_string);
+        let mut events = match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                project_root.as_deref(),
+                monitor,
+            ),
             Err(error) => self.issue_monitor_control_error_events(
                 Some(&context.project_root),
                 Some(client_id),
@@ -9065,7 +9082,18 @@ impl AppRuntime {
                 operation,
                 None,
             ),
+        };
+        if let Some((operation, issue_numbers)) = queue_result {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorQueueResult {
+                    operation: operation.to_string(),
+                    issue_numbers,
+                    error: queue_error,
+                },
+            ));
         }
+        events
     }
 
     fn issue_monitor_allowed_labels_result_events(
@@ -13386,11 +13414,12 @@ impl AppRuntime {
                     }),
                 );
                 let now = chrono::Utc::now().to_rfc3339();
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-push",
+                    Some(("push", issue_numbers.clone())),
                     |monitor| {
                         monitor.terminal_queue_push(&issue_numbers, "operator", &now);
                     },
@@ -13404,11 +13433,12 @@ impl AppRuntime {
                     }),
                 );
                 let now = chrono::Utc::now().to_rfc3339();
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-remove",
+                    Some(("remove", issue_numbers.clone())),
                     |monitor| {
                         monitor.terminal_queue_remove(&issue_numbers, &now);
                     },
@@ -13422,11 +13452,12 @@ impl AppRuntime {
                     context,
                     serde_json::json!({"terminal_queue_move": {"issue_number": issue_number, "position": position}}),
                 );
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_control_result_events_with_queue_result(
                     context,
                     &client_id,
                     publication,
                     "queue-move",
+                    Some(("move", vec![issue_number])),
                     |monitor| {
                         monitor.terminal_queue_move(
                             issue_number,

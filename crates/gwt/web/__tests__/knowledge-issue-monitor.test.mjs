@@ -1046,6 +1046,49 @@ test("Issue queue drops send one bulk request and retain server projection", asy
   assert.deepEqual(sent.at(-1),{kind:"issue_monitor_queue_remove",issue_numbers:[3]});
 });
 
+test("Issue #4499 queue drops explain missing cards, invalid data and unchanged columns", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind:"knowledge_entries", id:"win-1", knowledge_kind:"issue",
+    request_id:load.request_id, entries:[knowledgeEntry(1,null)], refresh_enabled:true });
+  const drop = (phase, raw) => {
+    const event = new window.Event("drop", {bubbles:true,cancelable:true});
+    event.dataTransfer = {getData:() => raw};
+    body.querySelector(`[data-queue-column="${phase}"]`).dispatchEvent(event);
+  };
+  const before = sent.length;
+  drop("queued", "99");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #99.*no longer.*Refresh/i);
+  drop("queued", "1-not-an-issue");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Drop an issue card/i);
+  drop("backlog", "1");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*already.*Backlog/);
+  assert.equal(sent.length, before, "invalid and unchanged drops send no queue mutation");
+});
+
+test("Issue #4499 queue receipts show accepted changes and exact server refusal reasons", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind:"knowledge_entries", id:"win-1", knowledge_kind:"issue",
+    request_id:load.request_id, entries:[knowledgeEntry(1,null)], refresh_enabled:true });
+  const event = new window.Event("drop", {bubbles:true,cancelable:true});
+  event.dataTransfer = {getData:() => "1"};
+  body.querySelector('[data-queue-column="queued"]').dispatchEvent(event);
+  assert.deepEqual(sent.at(-1), {kind:"issue_monitor_queue_push",issue_numbers:[1]});
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1],
+    error:"Queue change rejected: issue is on hold" });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*Queue change rejected: issue is on hold/);
+  assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'));
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1], error:null });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*added to.*queue/i);
+  assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'), "the receipt does not invent membership");
+  surface.applyIssueMonitorStatus({terminal_queue:[{number:1,queued_by:"operator"}]});
+  assert.ok(body.querySelector('[data-queue-column="queued"] [data-issue-number="1"]'));
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /added to.*queue/i, "projection updates retain the result");
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"remove", issue_numbers:[1], error:null });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*removed from.*queue/i);
+});
+
 test("terminal queue broadcasts control membership, provenance and confirmed order", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
