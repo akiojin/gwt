@@ -30,6 +30,15 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
       window.WebSocket = new Proxy(window.WebSocket, {
         construct(Target, args) {
           const socket = new Target(...args as ConstructorParameters<typeof WebSocket>);
+          socket.addEventListener("message", event => {
+            // During the controlled retention check, ordinary server logs
+            // would evict fixture rows from the same bounded Global buffer.
+            if (!(window as any).__logsRetentionCheck || !event.isTrusted) return;
+            const payload = JSON.parse(String(event.data));
+            if (["log_entries", "log_entry_appended", "log_error"].includes(payload.kind)) {
+              event.stopImmediatePropagation();
+            }
+          });
           (window as any).__logsScopeSocket = socket;
           return socket;
         },
@@ -125,6 +134,30 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
     await expect(root).not.toContainText(`${marker}-project-live`);
     await expect(root).not.toContainText(`${marker}-foreign-live`);
     await expect(selector).toHaveValue("global");
+
+    const search = root.locator(".logs-search-input");
+    await search.fill(`${marker}-retained-`);
+    const windowId = await root.getAttribute("data-id");
+    await page.evaluate(({ id, marker }) => {
+      (window as any).__logsRetentionCheck = true;
+      (window as any).__logsScopeSocket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+        kind: "log_entries", id,
+        entries: Array.from({ length: 1002 }, (_, index) => ({
+          id: 10000000 + index, timestamp: new Date().toISOString(), severity: "info",
+          source: "gwt.playwright.scope", message: `${marker}-retained-${index}`, fields: {},
+        })),
+      }) }));
+    }, { id: windowId, marker });
+    await expect(rows).toHaveCount(1000);
+    await expect(rows.first().locator(".logs-entry-message")).toHaveText(`${marker}-retained-1001`);
+    await expect(rows.last().locator(".logs-entry-message")).toHaveText(`${marker}-retained-2`);
+    await inject(`${marker}-retained-1002`);
+    await expect(rows).toHaveCount(1000);
+    await expect(rows.first().locator(".logs-entry-message")).toHaveText(`${marker}-retained-1002`);
+    await expect(rows.last().locator(".logs-entry-message")).toHaveText(`${marker}-retained-3`);
+    await expect(root.locator(".logs-status")).toHaveText("1000 visible / 1000 total");
+    await expect(search).toBeFocused();
+    await search.hover();
     await page.screenshot({ path: testInfo.outputPath("logs-scope.png") });
     expect(errors, "console and page errors").toEqual([]);
   });
