@@ -1066,6 +1066,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })?;
             CliCommand::Issue(IssueCommand::MonitorTiersSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 auto,
                 tiers,
             })
@@ -1662,6 +1665,35 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reject_unknown_params(params, &["min_reset_wait_secs"], "provider.reset.proposals")?;
             CliCommand::ProviderReset(super::provider_reset::ProviderResetCommand::Proposals {
                 min_reset_wait_secs: optional_u64(params, "min_reset_wait_secs")?.unwrap_or(86400),
+            })
+        }
+        "fleet.inventory" | "fleet.orphans" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::Fleet(if envelope.operation == "fleet.orphans" {
+                super::fleet_disposition::FleetCommand::Orphans
+            } else {
+                super::fleet_disposition::FleetCommand::Inventory
+            })
+        }
+        "fleet.disposition" | "fleet.orphan.terminate" => {
+            reject_unknown_params(params, &["targets", "allow_unknown"], &envelope.operation)?;
+            let targets =
+                super::fleet_disposition::parse_targets(lookup(params, "targets").ok_or_else(
+                    || CliParseError::InvalidJson("fleet targets are required".into()),
+                )?)?;
+            if envelope.operation == "fleet.orphan.terminate"
+                && targets
+                    .iter()
+                    .any(|target| !target.id.starts_with("process:"))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "orphan termination accepts only explicit process targets".into(),
+                ));
+            }
+            CliCommand::Fleet(super::fleet_disposition::FleetCommand::Disposition {
+                targets,
+                allow_unknown: optional_bool(params, "allow_unknown")?.unwrap_or(false),
+                orphan_only: envelope.operation == "fleet.orphan.terminate",
             })
         }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
@@ -4963,12 +4995,106 @@ mod tests {
             "issue.monitor.tiers.set",
             json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
         );
+        ok(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "expected_config_token": "observed-config"}),
+        );
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.tiers.set",
+                json!({"auto": true, "expected_config_token": invalid}),
+            );
+        }
         ok("issue.monitor.tier.set", json!({"number":4774, "tier":1}));
         assert!(
             !err("issue.monitor.tier.set", json!({"number":4774, "tier":256}))
                 .to_string()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn issue_monitor_tiers_set_refuses_stale_config_and_returns_saved_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let initial = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(observed["saved_config"], initial.config_observation());
+        assert_eq!(observed["config_token"], initial.config_token());
+        invoke("issue.monitor.tiers.set", json!({"auto": true})).unwrap();
+        let auto_token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        assert_ne!(auto_token, initial.config_token());
+        invoke(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
+        )
+        .unwrap();
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_ne!(changed.config_token(), auto_token);
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.tiers.set",
+            json!({
+                "auto": false, "expected_config_token": observed["config_token"]
+            }),
+        )
+        .expect_err("stale tier configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let fresh: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.tiers.set",
+                json!({
+                    "auto": false, "expected_config_token": fresh["config_token"]
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.launch_auto);
+        assert!(
+            saved.launch_tiers.is_empty(),
+            "omitted tiers restore defaults"
+        );
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["auto"], false);
+        assert_eq!(reply["configured_tiers"], json!([]));
+        assert_eq!(reply["tiers"], json!(saved.effective_launch_tiers()));
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], fresh["config_token"]);
     }
 
     #[test]
@@ -6500,6 +6626,22 @@ mod tests {
             ok("issue.comment", json!({"number": 1, "body": "b"})),
             CliCommand::Issue(IssueCommand::CommentBody { .. })
         ));
+    }
+
+    #[test]
+    fn fleet_operations_accept_only_explicit_generation_targets() {
+        let inventory = ok("fleet.inventory", json!({}));
+        assert!(!format!("{inventory:?}").is_empty());
+        let target = json!({"id":"pane:agent-1","session_id":"session-1",
+            "child_pid":123,"child_started_at":456});
+        let disposition = ok("fleet.disposition", json!({"targets":[target]}));
+        assert!(!format!("{disposition:?}").is_empty());
+        assert!(err("fleet.disposition", json!({"state":"delivered"}))
+            .to_string()
+            .contains("state"));
+        assert!(err("fleet.disposition", json!({"targets":[]}))
+            .to_string()
+            .contains("target"));
     }
 
     #[test]

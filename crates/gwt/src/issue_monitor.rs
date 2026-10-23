@@ -14511,6 +14511,20 @@ impl IssueMonitorState {
                 Some((item.issue.number, deliveries.get(branch)?.clone()))
             })
             .collect();
+        // Use the same current-launch delivery boundary as completion_anomaly.
+        // Keep the verdict/SHA (including a failed review's veto) intact; only
+        // the old failure message and its hook remediation are now obsolete.
+        let delivered: Vec<_> = self
+            .merged_deliveries
+            .keys()
+            .copied()
+            .filter(|number| self.merged_delivery_postdates_launch(*number))
+            .collect();
+        for number in delivered {
+            if let Some(record) = self.autonomous_records.get_mut(&number) {
+                record.last_failure_message = None;
+            }
+        }
     }
 
     /// Whether `delivery` may still be settled for `issue_number`. Fail-closed:
@@ -16577,7 +16591,7 @@ impl IssueMonitorState {
                 )
             });
         // Issue #4783 AC-R2: execution settlement ends one delivery, not the
-        // Issue's remaining acceptance criteria. Reconsider the fresh payload
+        // Issue's remaining work. Reconsider the fresh payload
         // on the next scan without charging or resetting its retry budget.
         if existing.as_ref().is_some_and(|item| {
             item.state == MonitorInboxState::Launched && item.launched_window_id.is_none()
@@ -16603,11 +16617,18 @@ impl IssueMonitorState {
             let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                 issue.body.as_deref().unwrap_or(""),
             );
-            if criteria.machine_checkable && !criteria.unchecked.is_empty() {
+            // SPEC task readiness owns slice completion, even when the
+            // recognized acceptance block describes an already delivered slice.
+            let remaining_work = if has_gwt_spec_label(&issue.labels) {
+                Self::issue_completion_decision(&issue) == IssueCompletionDecision::Incomplete
+            } else {
+                !criteria.unchecked.is_empty()
+            };
+            if criteria.machine_checkable && remaining_work {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
                 self.fence_automatic_relaunch(
                     issue_number,
-                    "settled delivery; remaining acceptance criteria",
+                    "settled delivery; remaining work",
                     &format_rfc3339_utc(chrono::Utc::now()),
                 );
                 existing = self.inbox_item(issue_number).cloned();
@@ -22093,8 +22114,8 @@ impl IssueMonitorState {
     /// again" — a settled delivery is a success: the active slot is released
     /// in this mutation, no retry attempt is spent, and the row initially stays
     /// `Launched` out of the queue. The next scan reconsiders an Open Issue with
-    /// unchecked acceptance criteria; otherwise the ordinary completion probe
-    /// (merged PR / closed Issue) ends it. The window is unbound so the later
+    /// unfinished SPEC tasks or unchecked Issue acceptance; otherwise the ordinary
+    /// completion probe (merged PR / closed Issue) ends it. The window is unbound so the later
     /// vanished-window reconciliation cannot mistake the runtime's own close
     /// for a failed attempt.
     ///
@@ -22313,55 +22334,87 @@ impl IssueMonitorState {
     }
 
     fn record_pane_output_activity(&mut self, snapshot: &IssueMonitorWindowSnapshot) {
-        let Some(observed_at) = parse_rfc3339_utc(&snapshot.observed_at) else {
-            return;
-        };
         for pane in &snapshot.windows {
-            let Some(issue) = pane.issue_number else {
-                continue;
-            };
-            if !pane.monitor_owned
-                || pane.review_dispatch
-                || !idle_window_is_alive(pane.status)
-                || pane.status == WindowState::Interrupted
-                || !self.active_launches.contains(&issue)
-                || self.launched_windows.get(&issue) != Some(&pane.window_id)
-            {
-                continue;
-            }
-            let Some(output_at) = pane.last_output_at.as_deref().and_then(parse_rfc3339_utc) else {
-                continue;
-            };
-            if output_at > observed_at
-                || self.launch_confirmations.get(&issue).is_some_and(|ack| {
-                    ack.window_id != pane.window_id
-                        || parse_rfc3339_utc(&ack.confirmed_at)
-                            .is_none_or(|confirmed_at| output_at < confirmed_at)
-                })
-            {
-                continue;
-            }
-            let Some(record) = self.autonomous_records.get_mut(&issue) else {
-                continue;
-            };
-            if record
-                .last_heartbeat
-                .as_deref()
-                .and_then(parse_rfc3339_utc)
-                .is_some_and(|current| current >= output_at)
-            {
-                continue;
-            }
-            // Issue #3809: a long tool call can emit PTY output without hooks.
-            // Use the output time, never the scan time, for the shared clock.
-            record.last_heartbeat = pane.last_output_at.clone();
-            if record.steering.as_ref().is_some_and(|steering| {
-                parse_rfc3339_utc(&steering.requested_at)
-                    .is_some_and(|requested_at| output_at >= requested_at)
-            }) {
-                record.steering = None;
+            if let Some(at) = pane.last_output_at.as_deref() {
+                self.record_owned_pane_activity(pane, at, &snapshot.observed_at);
             }
         }
+    }
+
+    /// Join measured work into the PTY/hook activity clock without inventing output.
+    pub(crate) fn record_bound_process_activity(
+        &mut self,
+        issue_number: u64,
+        session_id: &str,
+        at: &str,
+        now: &str,
+    ) -> bool {
+        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+            return false;
+        };
+        let mut panes = snapshot.windows.iter().filter(|pane| {
+            pane.issue_number == Some(issue_number)
+                && pane.session_id.as_deref() == Some(session_id)
+        });
+        let Some(pane) = panes.next() else {
+            return false;
+        };
+        if session_id.is_empty() || panes.next().is_some() {
+            return false;
+        }
+        let pane = pane.clone();
+        self.record_owned_pane_activity(&pane, at, now)
+    }
+
+    fn record_owned_pane_activity(
+        &mut self,
+        pane: &IssueMonitorWindowObservation,
+        at: &str,
+        observed_at: &str,
+    ) -> bool {
+        let Some(issue) = pane.issue_number else {
+            return false;
+        };
+        let Some((activity_at, observed_at)) =
+            parse_rfc3339_utc(at).zip(parse_rfc3339_utc(observed_at))
+        else {
+            return false;
+        };
+        if !pane.monitor_owned
+            || pane.review_dispatch
+            || !idle_window_is_alive(pane.status)
+            || pane.status == WindowState::Interrupted
+            || !self.active_launches.contains(&issue)
+            || self.launched_windows.get(&issue) != Some(&pane.window_id)
+            || activity_at > observed_at
+            || self.launch_confirmations.get(&issue).is_some_and(|ack| {
+                ack.window_id != pane.window_id
+                    || parse_rfc3339_utc(&ack.confirmed_at)
+                        .is_none_or(|confirmed_at| activity_at < confirmed_at)
+            })
+        {
+            return false;
+        }
+        let Some(record) = self.autonomous_records.get_mut(&issue) else {
+            return false;
+        };
+        if record
+            .last_heartbeat
+            .as_deref()
+            .and_then(parse_rfc3339_utc)
+            .is_some_and(|current| current >= activity_at)
+        {
+            return false;
+        }
+        // Use actual output/progress time, never a scan-time heartbeat.
+        record.last_heartbeat = Some(at.to_string());
+        if record.steering.as_ref().is_some_and(|steering| {
+            parse_rfc3339_utc(&steering.requested_at)
+                .is_some_and(|requested_at| activity_at >= requested_at)
+        }) {
+            record.steering = None;
+        }
+        true
     }
 
     fn park_unbound_live_monitor_panes(&mut self, now: &str) {
@@ -23117,7 +23170,7 @@ impl IssueMonitorState {
                         let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
                             issue.body.as_deref().unwrap_or(""),
                         );
-                        criteria.machine_checkable && !criteria.unchecked.is_empty()
+                        criteria.machine_checkable
                     }
             });
         if next_slice {
@@ -31347,6 +31400,7 @@ mod tests {
                 AcceptanceSnapshot {
                     ids: vec!["AC-1".into()],
                     visual_surface: false,
+                    criterion_texts: Some(vec![("AC-1".into(), "original".into())]),
                 },
             );
             monitor.begin_review(5248, 5260, "reviewed-head");
@@ -40128,6 +40182,7 @@ mod tests {
         use gwt_git::branch_protection::BranchProtectionStatus;
         let ok = AcceptanceCriteria {
             ids: vec!["AC-1".to_string()],
+            criterion_texts: vec![("AC-1".into(), "requirement".into())],
             machine_checkable: true,
             visual_surface: false,
             unchecked: vec!["AC-1".to_string()],
@@ -40135,6 +40190,7 @@ mod tests {
         };
         let no_criteria = AcceptanceCriteria {
             ids: vec![],
+            criterion_texts: vec![],
             machine_checkable: false,
             visual_surface: false,
             unchecked: vec![],
@@ -42342,6 +42398,72 @@ mod tests {
     }
 
     #[test]
+    fn issue_3809_bound_child_progress_joins_the_clock_and_fences_silent_recovery() {
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        let mut snapshot = silent_pane_snapshot(
+            "2026-06-29T01:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:00:00Z"),
+            None,
+        );
+        snapshot.windows[0].session_id = Some("current-holder".into());
+        monitor.record_window_snapshot(snapshot);
+        let silent_scan = monitor.clone();
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "predecessor",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T01:00:01Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        monitor.request_autonomous_steering(42, "check progress", "2026-06-29T01:00:00Z");
+        assert!(monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(monitor.autonomous_record(42).unwrap().steering.is_some());
+        assert!(monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T01:00:00Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(monitor.autonomous_record(42).unwrap().steering.is_none());
+        assert!(!monitor.record_bound_process_activity(
+            42,
+            "current-holder",
+            "2026-06-29T00:59:59Z",
+            "2026-06-29T01:00:00Z"
+        ));
+        assert!(!monitor.scan_observations_compatible_with(&silent_scan, "2026-06-29T01:00:00Z"));
+        assert!(monitor
+            .recover_stuck_autonomous("2026-06-29T01:00:00Z")
+            .is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert!(monitor.active_issue_numbers().contains(&42));
+        let row = monitor
+            .agent_status_at("2026-06-29T01:00:00Z")
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(
+            row.last_activity_at.as_deref(),
+            Some("2026-06-29T01:00:00Z")
+        );
+    }
+
+    #[test]
     fn issue_5644_census_refresh_is_compatible_only_while_contents_are_unchanged() {
         let now = "2026-10-22T00:01:00Z";
         let mut previous = IssueMonitorState::new(IssueMonitorConfig::default());
@@ -43428,7 +43550,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
+    fn issue_5876_next_scan_requeues_settled_spec_with_open_tasks() {
         let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
         monitor.record_attempt(42);
         monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
@@ -43440,8 +43562,18 @@ mod tests {
 
         assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
         assert!(monitor.queued_issue_numbers().is_empty());
-        let mut candidate = issue(42);
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into());
+        let mut candidate = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithOpenTasks,
+            "2026-06-26T00:01:00Z",
+        );
+        // Issue #5016: the recognized block is checked, while later SPEC
+        // amendments and the task artifact still contain unfinished work.
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: remaining work\n"
+                .into(),
+        );
         scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
 
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
@@ -43520,18 +43652,28 @@ mod tests {
 
     #[test]
     fn issue_4783_next_scan_does_not_requeue_checked_settled_delivery() {
-        let candidate = checked_issue(42);
-        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
-        let target = stop_target(&monitor, 42);
-        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
-
-        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
-
-        assert!(monitor.queued_issue_numbers().is_empty());
-        assert_eq!(
-            monitor.inbox_item(42).unwrap().state,
-            MonitorInboxState::Launched
+        let mut completed_spec = spec_issue(
+            42,
+            IssueMonitorReadiness::ReadyWithCompletedTasks,
+            "2026-06-26T00:00:00Z",
         );
+        completed_spec.body = checked_issue(42).body;
+        let mut unknown_spec = completed_spec.clone();
+        unknown_spec.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        unknown_spec.updated_at = None;
+        for candidate in [checked_issue(42), completed_spec, unknown_spec] {
+            let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+            let target = stop_target(&monitor, 42);
+            assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+            scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::Launched
+            );
+        }
     }
 
     #[test]
@@ -46400,6 +46542,14 @@ mod tests {
             &[checked_issue(42), checked_issue(43)],
             "2026-09-01T00:00:00Z",
         );
+        let failure = "acceptance criteria changed after launch";
+        for issue in [42, 43] {
+            let record = monitor.autonomous_record_mut(issue);
+            record.phase = AutonomousPhase::Implementing;
+            record.reviewed_sha = Some("old-head".into());
+            record.review_passed = Some(true);
+            record.last_failure_message = Some(failure.into());
+        }
         let mut deliveries = BTreeMap::new();
         deliveries.insert(
             "work/issue-42".to_string(),
@@ -46417,6 +46567,39 @@ mod tests {
             delivered.completion_reason.as_deref(),
             Some("delivered_by_pr_7")
         );
+        assert_eq!(delivered.last_failure_message, None);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().last_failure_message,
+            None
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(true)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .reviewed_sha
+                .as_deref(),
+            Some("old-head")
+        );
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .gate_remediation_reason()
+            .is_none());
+        assert_eq!(
+            monitor
+                .prefs()
+                .autonomous_records
+                .iter()
+                .find(|record| record.issue_number == 42)
+                .unwrap()
+                .last_failure_message,
+            None,
+            "Issue #6061: the persisted delivery also clears stale failure state"
+        );
         let undelivered = status
             .inbox
             .iter()
@@ -46424,6 +46607,7 @@ mod tests {
             .expect("undelivered row");
         assert!(!undelivered.recoverable_merged);
         assert_eq!(undelivered.completion_reason, None);
+        assert_eq!(undelivered.last_failure_message.as_deref(), Some(failure));
 
         // Issue #5002 AC-1/4: delivery is only an annotation. Explain the
         // actual planner exclusion even with free capacity and remaining work.
@@ -47423,7 +47607,11 @@ mod tests {
             IssueMonitorReadiness::ReadyWithOpenTasks,
             "2026-09-07T03:00:00Z",
         );
-        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-2: next slice\n".into());
+        candidate.body = Some(
+            "## Acceptance Criteria\n- [x] AC-1: delivered slice\n\n\
+             ## Later amendment\n- [ ] AC-2: next slice\n"
+                .into(),
+        );
         let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
         observed.get_mut(&42).unwrap().holder_host_dead = true;
@@ -49108,6 +49296,8 @@ mod tests {
             .next_launch_request("2026-10-01T10:00:00Z")
             .is_some());
         monitor.complete_active_launch_at(4740, "tab-1::agent-1", "2026-10-01T10:00:05Z");
+        monitor.autonomous_record_mut(4740).last_failure_message =
+            Some("current launch failure".into());
         let branch = monitor.active_launched_branches()[0].1.clone();
         let merged = BTreeSet::from([branch.clone()]);
 
@@ -49117,6 +49307,15 @@ mod tests {
             merged_delivery(4808, "aaa", "2026-09-30T12:00:00Z"),
         );
         monitor.record_merged_deliveries(&deliveries);
+        assert_eq!(
+            monitor
+                .autonomous_record(4740)
+                .unwrap()
+                .last_failure_message
+                .as_deref(),
+            Some("current launch failure"),
+            "Issue #6061: a previous launch's delivery cannot clear this failure"
+        );
         assert!(
             monitor
                 .reconcile_merged_branches_at(&merged, "2026-10-01T10:00:30Z")
