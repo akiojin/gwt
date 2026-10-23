@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     path::Path,
     sync::{Mutex, OnceLock},
@@ -3394,6 +3394,35 @@ pub fn load_cached_issue_monitor_candidate(
         .map(cached_issue_monitor_candidate)
 }
 
+/// Read only the target's cached dependency evidence, recording each source
+/// before it is read so launch admission can reject changes to that evidence.
+pub fn load_cached_issue_monitor_dependency_candidates(
+    cache_root: &Path,
+    issue_number: u64,
+    mut before_load: impl FnMut(u64) -> Result<(), String>,
+) -> Result<Vec<IssueMonitorIssue>, String> {
+    let mut pending = BTreeSet::from([issue_number]);
+    let mut seen = BTreeSet::new();
+    let mut issues = Vec::new();
+    while let Some(number) = pending.pop_first() {
+        if !seen.insert(number) {
+            continue;
+        }
+        before_load(number)?;
+        if let Some(issue) = load_cached_issue_monitor_candidate(cache_root, number) {
+            pending.extend(
+                crate::issue_monitor::parse_issue_monitor_dependencies(
+                    issue.body.as_deref().unwrap_or(""),
+                    number,
+                )
+                .blocked_by,
+            );
+            issues.push(issue);
+        }
+    }
+    Ok(issues)
+}
+
 fn cached_issue_monitor_candidate(entry: CacheEntry) -> IssueMonitorIssue {
     let is_spec = entry
         .snapshot
@@ -5063,6 +5092,7 @@ pub(crate) mod tests {
             },
         );
         monitor.inbox.push(crate::IssueMonitorInboxItem {
+            dependency: None,
             issue: issue(42),
             state: MonitorInboxState::Launched,
             claim_id: None,
@@ -7510,6 +7540,41 @@ pub(crate) mod tests {
         let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)
             .expect("fresh cache is left alone");
         assert!(!within_ttl, "a fresh cache does not spend a list call");
+    }
+
+    #[test]
+    fn cached_dependency_candidates_follow_blockers_once_and_preserve_body_and_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut target = github_issue(42);
+        target.body = "Blocked-by: #43 #44\nBundle-with: #99".into();
+        let mut blocker = github_issue(43);
+        blocker.body = "Blocked-by: #44 #45".into();
+        blocker.labels = vec!["hold".into()];
+        let mut cycle = github_issue(44);
+        cycle.body = "Blocked-by: #42".into();
+        let unrelated = github_issue(99);
+        for snapshot in [&target, &blocker, &cycle, &unrelated] {
+            cache.write_snapshot(snapshot).expect("write cached issue");
+        }
+        let mut read_numbers = Vec::new();
+        let candidates =
+            load_cached_issue_monitor_dependency_candidates(dir.path(), 42, |number| {
+                read_numbers.push(number);
+                Ok(())
+            })
+            .expect("read cached dependency closure");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|issue| issue.number)
+                .collect::<Vec<_>>(),
+            vec![42, 43, 44]
+        );
+        assert_eq!(candidates[0].body.as_deref(), Some(target.body.as_str()));
+        assert_eq!(candidates[1].labels, vec!["hold"]);
+        read_numbers.sort_unstable();
+        assert_eq!(read_numbers, vec![42, 43, 44, 45]);
     }
 
     #[test]

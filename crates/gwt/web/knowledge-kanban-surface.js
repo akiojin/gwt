@@ -181,6 +181,7 @@ const MONITOR_STATE_VIEWS = Object.freeze({
   launch_failed: Object.freeze({ label: "Launch failed", tone: "blocked" }),
   agent_failed: Object.freeze({ label: "Agent failed", tone: "blocked" }),
   blocked_by_claim: Object.freeze({ label: "Blocked by claim", tone: "needs-input" }),
+  blocked_by_dependency: Object.freeze({ label: "Blocked by dependency", tone: "needs-input" }),
   skipped: Object.freeze({ label: "Skipped", tone: "idle" }),
   needs_human: Object.freeze({ label: "Needs human", tone: "needs-input" }),
 });
@@ -3177,7 +3178,8 @@ export function createKnowledgeKanbanSurface({
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
+        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
+          exclusion_reason: live.exclusion_reason ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
           readiness_diagnosis: typeof diagnosis === "string" &&

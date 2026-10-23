@@ -8796,6 +8796,7 @@ fn commit_pm_worktree_change(worktree: &Path, file: &str, contents: &str, messag
 
 fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueMonitorInboxItem {
     gwt::IssueMonitorInboxItem {
+        dependency: None,
         issue: gwt::IssueMonitorIssue {
             author_login: None,
             number,

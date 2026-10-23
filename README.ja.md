@@ -498,6 +498,13 @@ Queued 内では順序を変更でき、複数選択の移動は 1 回のキュ�
 Active と Done は実行ライフサイクルに従うため、ドラッグでは変更できません。
 Queued には `auto-refill` などの追加元も表示されます。
 
+前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
+Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号
+（hold 中なら `(hold)`）を表示して、次の実行可能な Issue を起動します。
+前提 Issue の close または作業の完了を確認すると待機を解除します。
+前提の情報が無い場合や判定できない場合は依存待機を適用せず、循環は警告を表示して
+循環する辺だけを無効にします。マーカーを削除した場合も次の scan で待機を解除します。
+
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、

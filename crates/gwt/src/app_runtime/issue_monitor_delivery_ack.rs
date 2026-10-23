@@ -37,6 +37,7 @@ mod startup_tests {
         let window_id = "tab-1::agent-1";
         let materializer = "gui-5694";
         let pending = gwt::issue_monitor::PendingIssueMonitorLaunchDelivery {
+            dependency_observations: Vec::new(),
             issue_number: issue,
             delivery_id: delivery_id.into(),
             branch_name: "work/issue-5694".into(),

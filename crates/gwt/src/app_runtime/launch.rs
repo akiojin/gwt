@@ -3143,13 +3143,6 @@ impl IssueMonitorSpawnAdmissionInput {
             .collect::<std::collections::BTreeSet<_>>();
         paths.insert(gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json"));
         paths.insert(gwt::machine_agent_settings::path());
-        if let Some(cache_root) =
-            gwt::issue_cache::issue_cache_root_for_repo_path(&self.project_root)
-        {
-            let source = cache_root.join(self.issue_number.to_string());
-            paths.insert(source.join("meta.json"));
-            paths.insert(source.join("body.md"));
-        }
         let pending_manifest = gwt_core::update::pending_update_manifest_path();
         paths.insert(pending_manifest.clone());
         // Manifest admission also depends on its payload's existence. Resolve
@@ -3163,7 +3156,7 @@ impl IssueMonitorSpawnAdmissionInput {
             };
             paths.insert(payload_path);
         }
-        let dependencies = paths
+        let mut dependencies = paths
             .iter()
             .map(|path| IssueMonitorAdmissionFileStamp::read(path))
             .collect::<std::io::Result<Vec<_>>>()
@@ -3188,7 +3181,11 @@ impl IssueMonitorSpawnAdmissionInput {
         if let Some(hold) = hold {
             return Err(hold);
         }
-        let monitor = prepare_issue_monitor_spawn_capacity(&self.project_root, self.issue_number)?;
+        let monitor = prepare_issue_monitor_spawn_capacity(
+            &self.project_root,
+            self.issue_number,
+            &mut dependencies,
+        )?;
         tracing::info!(
             target: "gwt.launch.timing",
             phase = "monitor_shared_capacity",
@@ -3255,21 +3252,48 @@ impl IssueMonitorSpawnAdmissionInput {
 fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
     issue_number: u64,
+    dependencies: &mut Vec<IssueMonitorAdmissionFileStamp>,
 ) -> Result<gwt::IssueMonitorState, String> {
     let prefs =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
             .map_err(|error| format!("Monitor capacity read failed: {error}"))?;
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
     gwt::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, project_root);
-    if let Some(issue) =
-        gwt::issue_cache::issue_cache_root_for_repo_path(project_root).and_then(|cache_root| {
-            gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
-                &cache_root,
-                issue_number,
-            )
-        })
-    {
-        monitor.record_candidate(issue);
+    if let Some(cache_root) = gwt::issue_cache::issue_cache_root_for_repo_path(project_root) {
+        let issues = gwt::issue_monitor_worker::load_cached_issue_monitor_dependency_candidates(
+            &cache_root,
+            issue_number,
+            |number| {
+                let source = cache_root.join(number.to_string());
+                for path in [source.join("meta.json"), source.join("body.md")] {
+                    dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
+                        |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                    )?);
+                }
+                // Cache::load_entry hydrates only metadata-declared comments.
+                // Stamp missing declarations too: their later arrival changes
+                // SPEC readiness and the composed dependency source.
+                if let Some(meta) = std::fs::read(source.join("meta.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<gwt_github::CacheMeta>(&bytes).ok())
+                {
+                    for id in meta.comment_ids {
+                        let path = source.join("comments").join(format!("{id}.md"));
+                        dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
+                            |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                        )?);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        monitor.observe_dependency_candidates(&issues);
+        if let Some(issue) = issues
+            .into_iter()
+            .find(|issue| issue.number == issue_number)
+        {
+            monitor.record_candidate(issue);
+        }
     }
     monitor.refresh_agent_capacity(project_root);
     Ok(monitor)
@@ -6256,7 +6280,11 @@ impl AppRuntime {
                     (prepared.monitor, prepared.host_started_at)
                 }
                 None => (
-                    prepare_issue_monitor_spawn_capacity(&project_root_path, issue_number)?,
+                    prepare_issue_monitor_spawn_capacity(
+                        &project_root_path,
+                        issue_number,
+                        &mut Vec::new(),
+                    )?,
                     gwt::process::host_process_start_time(std::process::id()),
                 ),
             };
@@ -6297,6 +6325,13 @@ impl AppRuntime {
                 return Err(format!(
                     "Issue Monitor source admission refused Issue #{issue_number}: {reason}"
                 ));
+            }
+            if !review_dispatch {
+                if let Some(reason) = monitor.launch_dependency_exclusion(issue_number) {
+                    return Err(format!(
+                        "Issue Monitor dependency admission refused Issue #{issue_number}: {reason}"
+                    ));
+                }
             }
             if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
                 let status = monitor.agent_status_at(&now);
