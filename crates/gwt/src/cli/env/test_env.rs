@@ -49,6 +49,7 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub completion_pr_candidates_call_count: usize,
     pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
     pub pr_quarantine_contexts: HashMap<u64, crate::cli::pr::PrQuarantineContext>,
@@ -118,6 +119,7 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            completion_pr_candidates_call_count: 0,
             pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
             pr_quarantine_contexts: HashMap::new(),
@@ -300,6 +302,7 @@ impl CliEnv for TestEnv {
         &mut self,
         number: Option<u64>,
     ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        self.completion_pr_candidates_call_count += 1;
         Ok(self
             .completion_prs
             .values()
