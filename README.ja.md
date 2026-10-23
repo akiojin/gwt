@@ -629,6 +629,12 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 読み戻して確認します。明示的な `[]` は保存順序が空の場合だけ一致し、`null` は拒否します。
 引数を省略すると従来の挙動を維持します。比較対象は現在の順序の値であり、途中の変更履歴や
 他の設定変更は検出しません。
+priority.set/move に空でない `reason` を渡すと、理由と適用後の全順序を同時に保存します。
+応答と status の `priority_reason_note`（reason、priority_order、recorded_at）で読み戻せます。
+reason 省略時は最後の理由付き決定を履歴として保持します。
+`priority_reason_matches_order` は保存された順序と現在順序の値の比較だけであり、
+鮮度や理由が今も適用できることを証明しません。記録が無い場合は null です。
+reason の null、空文字、異なる型は拒否します。
 `issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。条件付きで設定を変更する場合は、
 `issue.monitor.status` の `saved_config` と `config_token` を読み、同じトークンを

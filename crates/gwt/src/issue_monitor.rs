@@ -978,6 +978,13 @@ pub struct IssueMonitorScanError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPriorityReasonNote {
+    pub reason: String,
+    pub priority_order: Vec<u64>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
@@ -993,6 +1000,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     pub priority_order: Vec<u64>,
+    /// Latest explicitly reasoned order, retained as history after later unreasoned writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
     pub allowed_labels: Vec<String>,
@@ -1326,6 +1336,7 @@ impl Default for IssueMonitorPrefs {
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
             max_active_last_change: None,
             priority_order: Vec::new(),
+            priority_reason_note: None,
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
             monitor_runtime_stop_requests: Vec::new(),
@@ -5058,6 +5069,8 @@ pub struct IssueMonitorState {
     monitor_runtime_stop_requests: Vec<IssueMonitorRuntimeStopRequest>,
     retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
     urgent_queue: IssueMonitorUrgentQueue,
@@ -7925,6 +7938,7 @@ impl IssueMonitorState {
             allowed_labels: Vec::new(),
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
+            priority_reason_note: None,
             monitor_runtime_counts: BTreeMap::new(),
             monitor_runtime_stop_requests: Vec::new(),
             retired_completed_sessions: BTreeSet::new(),
@@ -8021,6 +8035,7 @@ impl IssueMonitorState {
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
+        state.priority_reason_note = prefs.priority_reason_note;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
         state.monitor_runtime_stop_requests = prefs.monitor_runtime_stop_requests;
         state.retired_completed_sessions = prefs.retired_completed_sessions;
@@ -8194,6 +8209,7 @@ impl IssueMonitorState {
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
+            priority_reason_note: self.priority_reason_note.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
             monitor_runtime_stop_requests: self.monitor_runtime_stop_requests.clone(),
@@ -11415,6 +11431,7 @@ impl IssueMonitorState {
         self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
         self.priority_order = disk.priority_order.clone();
+        self.priority_reason_note = disk.priority_reason_note.clone();
         self.terminal_queues = disk.terminal_queues.clone();
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
@@ -25180,6 +25197,37 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_reason_note_survives_state_roundtrip_and_disk_rebase() {
+        let legacy = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        assert!(legacy.get("priority_reason_note").is_none());
+        let note = serde_json::json!({
+            "reason":"Unblock the release", "priority_order":[2,1],
+            "recorded_at":"2026-10-23T00:00:00Z"
+        });
+        let mut raw = legacy;
+        raw["priority_order"] = serde_json::json!([2, 1]);
+        raw["priority_reason_note"] = note.clone();
+        let disk: IssueMonitorPrefs = serde_json::from_value(raw).unwrap();
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert_eq!(
+            serde_json::to_value(restored.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(
+            serde_json::to_value(stale.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+        let mut stale_gui = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale_gui.rebase_gui_observer_prefs(&disk);
+        assert_eq!(
+            serde_json::to_value(stale_gui.prefs()).unwrap()["priority_reason_note"],
+            note
+        );
+    }
 
     #[test]
     fn agent_capacity_new_preferences_retain_saved_limit_before_measurement() {

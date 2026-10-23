@@ -679,7 +679,13 @@ before queue admission, hold clearing, or a scan request; read status again and 
 the order, then confirm a successful update by reading it back. An explicit `[]`
 matches only an empty saved order; `null` is rejected. Omitting the parameter keeps
 the existing behavior. The comparison protects the current order value, without
-tracking intervening history or other configuration changes. The
+tracking intervening history or other configuration changes. For priority.set/move,
+pass a nonempty `reason` to save the rationale and its applied full order together.
+The reply and status expose `priority_reason_note` (reason, priority_order,
+recorded_at). Omitting reason preserves this latest reasoned decision as history.
+`priority_reason_matches_order` compares its saved order with the current order;
+it does not prove freshness or continued applicability and is null without a note.
+Null, blank and non-string reasons are rejected. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For a conditional settings change,
 read `saved_config` and `config_token` from `issue.monitor.status`, then pass that
