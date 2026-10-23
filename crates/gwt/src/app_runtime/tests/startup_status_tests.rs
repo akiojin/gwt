@@ -2532,7 +2532,8 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     );
     // Only queued bootstrap work is run here. The restore's initial worker
     // uses sample_runtime's fixture runner, and no LaunchComplete is applied.
-    // Delivery preparation queued after canvas-ready remains unexecuted.
+    // After canvas-ready the delivery stays in the per-Issue FIFO until the
+    // restore's initial launch completion is applied.
     let queued = std::mem::take(
         &mut *tasks
             .lock()
@@ -2570,10 +2571,12 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
     assert!(runtime.deferred_issue_monitor_launches.is_none());
     assert_eq!(
-        runtime.issue_monitor_launch_preparations.len(),
+        runtime.issue_monitor_launch_queue.len(),
         1,
-        "both startup conditions release the sentinel delivery exactly once"
+        "both startup conditions release the sentinel delivery to the FIFO exactly once"
     );
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
+    assert!(runtime.pending_launch_delivery_acks.is_empty());
     assert!(runtime.runtimes.is_empty());
     // LaunchComplete consumes this source map before AgentLaunchPrepared
     // attaches the new Session; the automatic restore marker still owns it.
