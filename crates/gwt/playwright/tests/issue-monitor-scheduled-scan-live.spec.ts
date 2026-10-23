@@ -78,3 +78,64 @@ async function dispatchSamples(): Promise<Record<string, number[]>> {
   }
   return samples;
 }
+
+// Run each theme against a fresh browser-check instance: the startup drain is
+// process-wide, so a reload of an already-ready backend cannot test this gate.
+test("Issue #5876 canvas readiness precedes materializer admission", async ({ page }, testInfo) => {
+  const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
+  test.skip(!BASE || !home, "requires an isolated checkout browser-check instance");
+  test.setTimeout(120_000);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const roles = async () => {
+    const projects = join(home, ".gwt/projects");
+    const roots = [join(home, ".gwt/logs"), ...(await readdir(projects).catch(() => []))
+      .map(project => join(projects, project, "logs"))];
+    const rows: any[] = [];
+    for (const root of roots) for (const file of (await readdir(root).catch(() => [])).filter(name => name.startsWith("gwt.log"))) {
+      for (const line of (await readFile(join(root, file), "utf8")).split("\n")) {
+        try {
+          const row = JSON.parse(line);
+          if (row.fields?.message === "Issue Monitor subscriber role changed") rows.push(row.fields);
+        } catch { /* retry partial log writes */ }
+      }
+    }
+    return rows;
+  };
+  await page.addInitScript(() => {
+    const send = WebSocket.prototype.send;
+    const held: { socket: WebSocket; data: string }[] = [];
+    (window as any).__gwtHeldCanvas = held;
+    WebSocket.prototype.send = function (data) {
+      if (typeof data === "string" && JSON.parse(data).kind === "startup_auto_resume_ready") {
+        held.push({ socket: this, data });
+        return;
+      }
+      return send.call(this, data);
+    };
+    (window as any).__gwtReleaseCanvas = () => {
+      for (const { socket, data } of held) send.call(socket, data);
+    };
+  });
+  await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+  await page.waitForFunction(() => (window as any).__gwtHeldCanvas.length > 0);
+  await expect.poll(async () => (await roles()).some(row => row.materializer_ready === false)).toBe(true);
+  expect((await roles()).filter(row => row.materializer_ready === true), "canvas preparation must not advertise launch readiness").toHaveLength(0);
+  await page.evaluate(() => (window as any).__gwtReleaseCanvas());
+  await expect.poll(async () => (await roles()).filter(row => row.materializer_ready === true).length,
+    { timeout: 90_000 }).toBe(1);
+  // A repeated readiness event must preserve the already-live subscription.
+  await page.evaluate(() => (window as any).__gwtReleaseCanvas());
+  await sendLiveGwtEvent(page, { kind: "list_windows" });
+  await page.waitForFunction(() => (window as any).__gwtPlaywrightMessages.some(
+    (entry: any) => entry.payload.kind === "window_list"));
+  expect((await roles()).filter(row => row.materializer_ready === true)).toHaveLength(1);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+  const screenshot = testInfo.outputPath("canvas-ready.png");
+  await page.screenshot({ path: screenshot, animations: "disabled" });
+  await testInfo.attach(`canvas-readiness-${testInfo.project.name}`, {
+    path: screenshot, contentType: "image/png",
+  });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
