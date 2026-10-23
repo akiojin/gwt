@@ -370,10 +370,12 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
             expected_priority_order,
+            expected_queue_order,
         } => run_monitor_launch_now(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            expected_queue_order.as_deref(),
             number,
             out,
         )?,
@@ -2174,6 +2176,7 @@ fn run_monitor_launch_now<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    expected_queue_order: Option<&[u64]>,
     number: u64,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -2219,6 +2222,7 @@ fn run_monitor_launch_now<E: CliEnv>(
     }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
+        check_expected_queue_order(prefs, expected_queue_order)?;
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
         // Issue #3616 AC-5: priority alone cannot beat `retry_ready`. A
@@ -9585,6 +9589,7 @@ mod tests {
         let without_profile_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9602,6 +9607,7 @@ mod tests {
         let disabled_code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9616,6 +9622,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9680,6 +9687,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9728,6 +9736,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9776,6 +9785,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -9887,6 +9897,7 @@ mod tests {
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 5061,
@@ -10005,7 +10016,7 @@ mod tests {
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
         assert_eq!(
-            run_monitor_launch_now(&env, None, None, 5061, &mut out).unwrap(),
+            run_monitor_launch_now(&env, None, None, None, 5061, &mut out).unwrap(),
             1
         );
         let response: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -10612,7 +10623,7 @@ mod tests {
                 .unwrap();
         let mut out = String::new();
         assert_eq!(
-            run_monitor_launch_now(&env, None, None, 481002, &mut out).unwrap(),
+            run_monitor_launch_now(&env, None, None, None, 481002, &mut out).unwrap(),
             1
         );
         let refused: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -10658,8 +10669,15 @@ mod tests {
             assert_eq!(refused["refused"], serde_json::json!([481003]));
             let mut launch_out = String::new();
             assert_eq!(
-                run_monitor_launch_now(&client_env, Some(&repo), None, 481003, &mut launch_out)
-                    .unwrap(),
+                run_monitor_launch_now(
+                    &client_env,
+                    Some(&repo),
+                    None,
+                    None,
+                    481003,
+                    &mut launch_out
+                )
+                .unwrap(),
                 1
             );
             let refused: serde_json::Value = serde_json::from_str(&launch_out).unwrap();
@@ -10878,6 +10896,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -10937,15 +10956,21 @@ mod tests {
             },
         )
         .expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            Default::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        monitor.terminal_queue_push(&[7, 42], "operator", "2026-08-03T00:00:00Z");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
         let mut env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
 
         let before = std::fs::read(&prefs_path).unwrap();
-        let command = |expected| {
+        let command = |expected, queue| {
             let super::super::CliCommand::Issue(command) =
                 super::super::json_envelope::parse_operation(
-                    "issue.monitor.launch_now",
-                    &serde_json::json!({"number": 42, "expected_priority_order": expected}),
+                    "issue.monitor.launch-now",
+                    &serde_json::json!({"number": 42, "expected_priority_order": expected, "expected_queue_order": queue}),
                 )
                 .unwrap()
             else {
@@ -10953,13 +10978,25 @@ mod tests {
             };
             command
         };
-        let error = run(&mut env, command(vec![7]), &mut out)
+        let error = run(&mut env, command(vec![7], vec![7, 42]), &mut out)
             .expect_err("stale launch must preserve queue and holds")
             .to_string();
         assert!(error.contains("priority_order changed"), "{error}");
         assert!(out.is_empty(), "no scan delivery result on conflict");
         assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
-        let _ = run(&mut env, command(vec![42]), &mut out).expect("launch_now result");
+        for stale_queue in [vec![42, 7], vec![]] {
+            let error = run(&mut env, command(vec![42], stale_queue), &mut out)
+                .expect_err("stale queue must preserve priority, queue and holds before scan")
+                .to_string();
+            assert!(error.contains("queue_order changed"), "{error}");
+            assert!(
+                error.contains("re-read issue.monitor.queue.list"),
+                "{error}"
+            );
+            assert!(out.is_empty(), "no scan delivery result on queue conflict");
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        }
+        let _ = run(&mut env, command(vec![42], vec![7, 42]), &mut out).expect("launch_now result");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
         assert_eq!(result["hold_cleared"], true);
@@ -11005,11 +11042,11 @@ mod tests {
         let mut out = String::new();
 
         let before = std::fs::read(&prefs_path).unwrap();
-        let command = |expected| {
+        let command = |expected, queue| {
             let super::super::CliCommand::Issue(command) =
                 super::super::json_envelope::parse_operation(
                     "issue.monitor.launch_now",
-                    &serde_json::json!({"number": 42, "expected_priority_order": expected}),
+                    &serde_json::json!({"number": 42, "expected_priority_order": expected, "expected_queue_order": queue}),
                 )
                 .unwrap()
             else {
@@ -11017,13 +11054,23 @@ mod tests {
             };
             command
         };
-        let error = run(&mut env, command(vec![7]), &mut out)
+        let error = run(&mut env, command(vec![7], vec![]), &mut out)
             .expect_err("stale launch must preserve queue and holds")
             .to_string();
         assert!(error.contains("priority_order changed"), "{error}");
         assert!(out.is_empty(), "no scan delivery result on conflict");
         assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
-        let _ = run(&mut env, command(vec![]), &mut out).expect("launch_now result");
+        let error = run(&mut env, command(vec![], vec![42, 7]), &mut out)
+            .expect_err("stale queue must preserve priority, queue and holds before scan")
+            .to_string();
+        assert!(error.contains("queue_order changed"), "{error}");
+        assert!(
+            error.contains("re-read issue.monitor.queue.list"),
+            "{error}"
+        );
+        assert!(out.is_empty(), "no scan delivery result on queue conflict");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let _ = run(&mut env, command(vec![], vec![]), &mut out).expect("launch_now result");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
 
         assert_eq!(result["hold_cleared"], true);
@@ -16313,6 +16360,7 @@ command = "my-agent-cli"
         let code = run(
             &mut env,
             IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: Some(repo),
                 number: 42,
