@@ -1835,6 +1835,26 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut seeded = gwt::IssueMonitorPrefs::default();
     seeded.set_launch_profile_pool(vec![claude_issue_monitor_launch_profile()]);
+    // Saving the manual pool must leave Auto's valid tier-1 SPEC delivery intact.
+    seeded.launch_auto = true;
+    seeded.launch_tiers = vec![vec![pool_profile("openclaw")], vec![pool_profile("codex")]];
+    let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), seeded);
+    let now = chrono::Utc::now().to_rfc3339();
+    monitor.terminal_queue_push(&[3165], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
+        number: 3165,
+        title: "Auto tier SPEC delivery".into(),
+        labels: vec!["gwt-spec".into()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(3165, "claim-auto", "host/session", "effect-auto", &now));
+    let delivery_id = monitor.pending_launch_delivery_id(3165).unwrap();
+    let seeded = monitor.prefs();
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -1883,6 +1903,106 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
         Some("codex"),
         "the compatibility mirror follows the pool head"
     );
+    assert!(persisted.launch_auto);
+    assert_eq!(persisted.launch_tiers, seeded.launch_tiers);
+    assert_eq!(
+        persisted
+            .pending_launch_deliveries
+            .first()
+            .map(|delivery| &delivery.delivery_id),
+        Some(&delivery_id),
+        "manual pool saving must preserve Auto's supported SPEC delivery"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_profile_save_compensates_unowned_unsupported_deliveries() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
+    monitor.set_launch_profile_pool(vec![pool_profile("codex")]);
+    monitor.terminal_queue_push(&[3165], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        author_login: None,
+        number: 3165,
+        title: "Profile save admission".into(),
+        labels: vec![],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    monitor.record_attempt(3165);
+    monitor.set_autonomous_phase(3165, gwt::AutonomousPhase::Implementing);
+    assert!(monitor.apply_confirmed_claim(3165, "claim-3165", "host/session", "effect-3165", &now));
+    let delivery = monitor.pending_launch_delivery_id(3165).unwrap();
+    let original = monitor.prefs();
+
+    // Both the per-Issue head save and whole-pool settings use this transaction.
+    for whole_pool in [false, true] {
+        gwt::save_issue_monitor_prefs(&prefs_path, &original).unwrap();
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
+        let request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenClaw)
+                .branch("develop")
+                .build(),
+        ));
+        let events = {
+            // Test persistence independently of the GUI's filesystem deadline.
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+            runtime.save_issue_monitor_profile_from_launch_request(
+                session,
+                IssueMonitorProfileSaveContext {
+                    client_id: "client-1".into(),
+                    issue_number: Some(3165),
+                    pool: original.launch_profile_pool(),
+                    sets: whole_pool.then(|| crate::app_runtime::IssueMonitorAgentSettingsSets {
+                        profiles: vec![pool_profile("openclaw")],
+                        active: 0,
+                        opened_as: None,
+                    }),
+                },
+                request,
+            )
+        };
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, .. }
+                    if message == "Issue Monitor settings saved"
+            )),
+            "{events:?}"
+        );
+        let saved = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(saved.launch_profile_pool()[0].agent_id, "openclaw");
+        assert!(
+            saved.pending_launch_deliveries.is_empty(),
+            "whole_pool={whole_pool}"
+        );
+        assert_eq!(saved.pending_effects.iter().filter(|effect| matches!(
+            &effect.payload,
+            gwt::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 3165, claim_id, owner }
+                if claim_id == "claim-3165" && owner == "host/session"
+        )).count(), 1);
+        let mut stale = monitor.clone();
+        stale.rebase_daemon_driver_prefs(&saved);
+        assert_eq!(stale.active_count(), 0);
+        assert_eq!(stale.attempt_count(3165), 1);
+        assert!(stale.autonomous_in_flight_issues().is_empty());
+        assert!(stale.take_pending_launch_requests().is_empty());
+        assert!(!stale.claim_launch_delivery(3165, &delivery, "gui", 123, "tab::agent", |_| true));
+    }
 }
 
 #[test]
