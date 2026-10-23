@@ -185,8 +185,13 @@ fn handle_user_prompt_submit(
     // every lock/write. Their timing records are emitted after join in the
     // historical handler order, keeping the exact profile contract stable.
     let event_deadline = gwt_core::operation_deadline::current();
+    #[cfg(test)]
+    let operation_clock = gwt_core::operation_deadline::ScopedOperationClock::current();
     std::thread::scope(|scope| {
         let pm_delivery_ack = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
             let _deadline =
                 event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
             let started = Instant::now();
@@ -194,6 +199,9 @@ fn handle_user_prompt_submit(
             started.elapsed()
         });
         let action_obligation = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
             let _deadline =
                 event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
             let started = Instant::now();
@@ -201,6 +209,9 @@ fn handle_user_prompt_submit(
             started.elapsed()
         });
         let pm_loop_reset = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
             let _deadline =
                 event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
             let started = Instant::now();
@@ -1605,6 +1616,10 @@ mod tests {
             "cwd": worktree,
         })
         .to_string();
+        // This fixture gates CPU work. Keep scheduler/coverage pauses from
+        // expiring a separate wall deadline before the CPU assertion. The
+        // scoped prompt workers inherit this explicit test clock as well.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
         handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
             .expect("warm prompt read");
         assert_eq!(
