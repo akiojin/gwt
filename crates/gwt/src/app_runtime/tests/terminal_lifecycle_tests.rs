@@ -4092,9 +4092,9 @@ fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
         feedback,
         prepared.clone(),
     );
-    assert!(rejected
-        .is_err_and(|reason| reason
-            .contains("dependency admission refused Issue #42: Blocked by #43 (hold)")));
+    assert!(rejected.is_err_and(|reason| reason
+        .contains("dependency admission refused Issue #42: Blocked by #43")
+        && !reason.contains("(hold)")));
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
     fs::write(cache_root.join("43/body.md"), "Blocked-by: #42").unwrap();
     assert!(
