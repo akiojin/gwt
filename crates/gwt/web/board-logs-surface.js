@@ -173,7 +173,7 @@ export function createBoardLogsSurface({
       // `project_board_config` backend event; read by the Board window's
       // destination chip + config popover.
       const boardConfigModel = createUiStateStore({});
-      boardConfigModel.subscribe(configs => configs, configs => {
+      boardConfigModel.subscribeFrame(configs => configs, configs => {
         if (Object.keys(configs).length === 0) return;
         for (const windowId of activeBoardWindowIds()) {
           boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));

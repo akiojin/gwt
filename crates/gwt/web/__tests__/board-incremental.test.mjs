@@ -33,11 +33,22 @@ function entry(id, body = id) {
   return { id, body, created_at: `2026-10-15T00:00:0${id}Z` };
 }
 
-test("Board mount reads the cached destination for its project without refetching", t => {
-  const { document } = parseHTML('<div id="board"><div class="window-body"></div></div>');
+test("Board destination batches settings while mount and popover read the latest cache", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { document } = parseHTML('<div id="board"><div class="window-body"></div></div><div id="second"><div class="window-body"></div></div>');
   const previousDocument = globalThis.document;
   globalThis.document = document;
   t.after(() => { globalThis.document = previousDocument; });
+  const frames = new Map();
+  const previousRequestFrame = globalThis.requestAnimationFrame;
+  const previousCancelFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { frames.set(callback, callback); return callback; };
+  globalThis.cancelAnimationFrame = callback => frames.delete(callback);
+  t.after(() => {
+    globalThis.requestAnimationFrame = previousRequestFrame;
+    globalThis.cancelAnimationFrame = previousCancelFrame;
+  });
+  const flush = () => { for (const callback of [...frames.values()]) callback(); };
   // Match the writable select.value browser contract (linkedom is getter-only).
   const selectPrototype = Object.getPrototypeOf(document.createElement("select"));
   const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
@@ -48,17 +59,20 @@ test("Board mount reads the cached destination for its project without refetchin
   });
   t.after(() => Object.defineProperty(selectPrototype, "value", selectValue));
   const sent = [];
+  const windows = [];
+  let destinationRenders = 0;
   let projectRoot = "/project-a";
   const surface = createBoardLogsSurface({
     send: event => sent.push(event),
     createNode: (tag, className, text) => {
+      if (className === "board-destination-text") destinationRenders++;
       const node = document.createElement(tag);
       node.className = className;
       if (text != null) node.textContent = text;
       return node;
     },
-    windowMap: new Map([["board", document.getElementById("board")]]),
-    activeWorkspace: () => ({ windows: [] }),
+    windowMap: new Map([["board", document.getElementById("board")], ["second", document.getElementById("second")]]),
+    activeWorkspace: () => ({ windows }),
     activeProjectTab: () => ({ project_root: projectRoot }),
     getActiveWorkProjection: () => null,
   });
@@ -72,7 +86,33 @@ test("Board mount reads the cached destination for its project without refetchin
     surface.mountBoardWindow({ id: "board", preset: "board" }, body);
     assert.equal(body.querySelector(".board-destination-text").textContent, `Slack ${channel}`);
   }
+  flush();
   assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
+  projectRoot = "/project-a";
+  surface.mountBoardWindow({ id: "second", preset: "board" }, document.querySelector("#second .window-body"));
+  windows.push({ id: "board", preset: "board" }, { id: "second", preset: "board" });
+  const before = [...document.querySelectorAll(".board-destination-text")];
+  destinationRenders = 0;
+  for (let index = 0; index < 50; index++) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: projectRoot, provider: "slack",
+      channel: `#burst-${index}`, resolved_provider: "slack", resolved_channel: `#burst-${index}` });
+  }
+  assert.equal(destinationRenders, 0, "receipt must not render before the frame");
+  assert.deepEqual([...document.querySelectorAll(".board-destination-text")], before);
+  assert.equal(frames.size, 1, "all updates share one scheduled frame");
+  document.querySelector("[data-action='board-destination']").click();
+  assert.equal(document.querySelector(".board-destination-popover input").value, "#burst-49",
+    "the model is already current before its render frame");
+  t.mock.timers.tick(0);
+  document.querySelector(".board-destination-popover-close").click();
+  flush();
+  assert.equal(destinationRenders, 2, "each Board renders once from the latest configuration");
+  assert.equal(frames.size, 0);
+  for (const chip of document.querySelectorAll(".board-destination-text")) {
+    assert.equal(chip.textContent, "Slack #burst-49");
+  }
+  surface.applyProjectBoardConfigEventToBoard({ project_root: "", resolved_channel: "#invalid" });
+  assert.equal(frames.size, 0);
 });
 
 test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
