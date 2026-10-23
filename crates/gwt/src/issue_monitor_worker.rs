@@ -5461,9 +5461,68 @@ pub(crate) mod tests {
 
         monitor.switch_launch_profile_agent("codex").unwrap();
         crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+        let mut prefs = monitor.prefs();
+        prefs
+            .queued_launch_session_strategies
+            .insert(42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired);
+        monitor.rebase_daemon_driver_prefs(&prefs);
         assert!(monitor.apply_confirmed_claim(42, "new-claim", owner, "new-effect", now));
         assert_eq!(monitor.active_count(), 1);
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+
+        // A successful claim is still unowned until a materializer takes it.
+        // Both the resident driver and the CLI's cold prefs fallback switch
+        // the profile inside the transaction that saves the compensation.
+        for cold_start in [false, true] {
+            let mut pending = if cold_start {
+                test_monitor_with_prefs(monitor.config.clone(), monitor.prefs())
+            } else {
+                monitor.clone()
+            };
+            let delivery = pending.pending_launch_delivery_id(42).unwrap();
+            pending.switch_launch_profile_agent("openclaw").unwrap();
+            let committed = pending.prefs();
+            pending.rebase_daemon_driver_prefs(&committed);
+            assert!(pending.take_pending_launch_requests().is_empty());
+            assert!(!pending.claim_launch_delivery(
+                42,
+                &delivery,
+                "gui",
+                123,
+                "tab::agent-42",
+                |_| true
+            ));
+            assert_eq!(pending.pending_launch_delivery_id(42), None);
+            assert_eq!(pending.active_count(), 0);
+            assert_eq!(pending.attempt_count(42), 1);
+            assert!(pending.autonomous_in_flight_issues().is_empty());
+            if !cold_start {
+                let item = pending.inbox_item(42).unwrap();
+                assert_eq!(item.state, MonitorInboxState::NotReady);
+                assert!(item.exclusion_reason.as_ref().unwrap().contains("openclaw"));
+            }
+            assert_eq!(pending.pending_effects().iter().filter(|effect| matches!(
+                &effect.payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner: released_owner }
+                    if claim_id == "new-claim" && released_owner == owner
+            )).count(), 1);
+            pending.switch_launch_profile_agent("codex").unwrap();
+            crate::scan_issue_monitor_candidates(&mut pending, &[issue(42)], now);
+            assert!(pending.apply_confirmed_claim(42, "recovered", owner, "recovered-effect", now));
+            let recovered = pending.take_pending_launch_requests();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(
+                recovered[0].launch_session_strategy,
+                crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+        }
+
+        // The cancellation boundary excludes materializer-owned work.
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
+        monitor.switch_launch_profile_agent("openclaw").unwrap();
+        assert_eq!(monitor.take_pending_launch_requests().len(), 1);
+        assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
     }
 
     /// A launch profile naming `agent_id`, with every other field at the value
