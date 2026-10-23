@@ -3995,13 +3995,20 @@ mod profiles_patch_contract_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
-        let initial = initial_prefs();
-        let patch = patch_control(
-            &initial,
-            serde_json::json!([{"agent_id": "codex", "skip_permissions": true}]),
-        );
+        let mut initial = initial_prefs();
+        initial.launching_issues = vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: Some("2026-07-02T00:00:10Z".into()),
+        }];
+        initial.pending_launch_deliveries = vec![serde_json::from_value(serde_json::json!({
+            "delivery_id": "pending", "issue_number": 42,
+            "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+            "claim_id": "claim", "claim_owner": "host:1", "created_at": "2026-07-02T00:00:10Z"
+        }))
+        .unwrap()];
+        let patch = patch_control(&initial, serde_json::json!([{"agent_id": "openclaw"}]));
         let mut replacement = initial.launch_profile_pool();
-        replacement[0].skip_permissions = true;
+        replacement[0].agent_id = "openclaw".into();
         let legacy = IssueMonitorControl::ProfilesSet {
             profiles: replacement,
             usage_threshold_percent: None,
@@ -4032,6 +4039,37 @@ mod profiles_patch_contract_tests {
             );
             let visible = crate::load_issue_monitor_prefs(&path).expect("visible renamed commit");
             assert_eq!(visible.effect_authority_epoch, 8);
+            assert!(visible.pending_launch_deliveries.is_empty());
+            assert!(visible.launching_issues.is_empty());
+            assert_eq!(
+                visible
+                    .pending_effects
+                    .iter()
+                    .filter(|effect| matches!(
+                        &effect.payload,
+                        crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number: 42, claim_id, owner
+                        } if claim_id == "claim" && owner == "host:1"
+                    ))
+                    .count(),
+                1
+            );
+            // A historical release cannot erase a different claim or work
+            // already owned by a materializer in this process.
+            for owned in [false, true] {
+                let mut protected = initial.clone();
+                if owned {
+                    protected.pending_launch_deliveries[0].materializer_id = Some("gui".into());
+                } else {
+                    protected.pending_launch_deliveries[0].claim_id = "successor".into();
+                }
+                let mut protected = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    protected,
+                );
+                protected.rebase_daemon_driver_prefs(&visible);
+                assert_eq!(protected.active_count(), 1);
+            }
             monitor = stale;
             assert!(matches!(
                 try_apply_accepted_issue_monitor_control_with_disk_migration(
@@ -4042,6 +4080,7 @@ mod profiles_patch_contract_tests {
                 IssueMonitorControlCommit::Committed { .. }
             ));
             assert_eq!(monitor.prefs(), visible);
+            assert!(monitor.take_pending_launch_requests().is_empty());
             assert_eq!(
                 crate::load_issue_monitor_prefs(&path).expect("receipt replay"),
                 visible

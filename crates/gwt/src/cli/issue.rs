@@ -4815,12 +4815,15 @@ fn apply_monitor_profiles_set(
     usage_threshold_percent: Option<u8>,
 ) -> io::Result<()> {
     validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    let mut candidate =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     // Same revocation the GUI save performs: proposals prepared against the
     // previous pool must not commit under the new one.
-    prefs
+    candidate
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.set_launch_profile_pool(profiles.to_vec());
+    candidate.set_launch_profile_pool(profiles.to_vec());
+    *prefs = candidate.prefs();
     Ok(())
 }
 
@@ -14057,6 +14060,51 @@ command = "my-agent-cli"
         assert!(changes.iter().any(|change| {
             change["index"] == 1 && change["field"] == "model" && change["action"] == "reset"
         }));
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_fallback_compensates_an_unusable_pending_delivery() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut initial = crate::IssueMonitorPrefs::default();
+        initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
+        initial.launching_issues = vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: Some("2026-07-02T00:00:10Z".into()),
+        }];
+        initial.pending_launch_deliveries = vec![serde_json::from_value(serde_json::json!({
+            "delivery_id": "pending", "issue_number": 42,
+            "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+            "claim_id": "claim", "claim_owner": "host:1", "created_at": "2026-07-02T00:00:10Z"
+        }))
+        .unwrap()];
+        crate::save_issue_monitor_prefs(&path, &initial).unwrap();
+
+        assert_eq!(set_monitor_profiles(
+            &repo, None, vec![pool_patch("openclaw", &[])], None, &mut String::new(),
+            |_, _| Err(crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable("offline".into())),
+        ).unwrap(), 0);
+        let committed = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(committed.effect_authority_epoch, 1);
+        assert_eq!(committed.launch_profile_pool()[0].agent_id, "openclaw");
+        assert!(committed.pending_launch_deliveries.is_empty());
+        assert!(committed.launching_issues.is_empty());
+        assert_eq!(
+            committed
+                .pending_effects
+                .iter()
+                .filter(|effect| matches!(
+                    &effect.payload,
+                    crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number: 42, claim_id, owner
+                    } if claim_id == "claim" && owner == "host:1"
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

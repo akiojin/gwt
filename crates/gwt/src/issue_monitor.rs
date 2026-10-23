@@ -11196,6 +11196,7 @@ impl IssueMonitorState {
     /// [`IssueMonitorPrefs::set_launch_profile_pool`]).
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
         self.launch_profiles = dedupe_launch_profile_pool(pool);
+        self.compensate_permission_blocked_launch_deliveries();
     }
 
     pub fn launch_usage_threshold_percent(&self) -> u8 {
@@ -11592,8 +11593,13 @@ impl IssueMonitorState {
         let profile = profile.clone();
         self.launch_profiles =
             dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
-        // ConfigSet commits this state under the prefs lock. Revoke unusable
-        // unowned deliveries here, before publication can replay them to a GUI.
+        self.compensate_permission_blocked_launch_deliveries();
+        Ok(profile)
+    }
+
+    /// Profile writers commit this compensation under the prefs lock, before
+    /// publication can replay an unusable unowned delivery to a GUI.
+    fn compensate_permission_blocked_launch_deliveries(&mut self) {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let blocked = self
             .pending_launch_deliveries
@@ -11616,7 +11622,6 @@ impl IssueMonitorState {
                 self.record_permission_readiness_block(issue, &record);
             }
         }
-        Ok(profile)
     }
 
     /// Issue #4908 A/D: the first refused launch holds its provider. Keep
@@ -12328,6 +12333,7 @@ impl IssueMonitorState {
         // an older reset in a stale disk snapshot may never erase newer local
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
+        self.adopt_compensated_launch_deliveries(disk);
         self.refresh_disk_owned_prefs(disk);
         self.enforce_provider_quota_hold_releases();
         for issue_number in restarted {
@@ -20502,6 +20508,75 @@ impl IssueMonitorState {
             })
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled_issues);
+    }
+
+    /// Adopt an exact cancellation before replacing the local delivery journal.
+    /// Otherwise the launch-reservation union can resurrect a committed pool
+    /// cancellation and prevent the control receipt from converging.
+    fn adopt_compensated_launch_deliveries(&mut self, disk: &IssueMonitorPrefs) {
+        if disk.effect_authority_epoch <= self.effect_authority_epoch {
+            return;
+        }
+        let protected = disk
+            .launched_issues
+            .iter()
+            .map(|launch| launch.issue_number)
+            .chain(
+                disk.launching_issues
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                disk.pending_launch_deliveries
+                    .iter()
+                    .map(|delivery| delivery.issue_number),
+            )
+            .chain(
+                self.pending_effects
+                    .iter()
+                    .chain(&disk.pending_effects)
+                    .filter_map(|effect| match effect.payload {
+                        IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => {
+                            Some(issue_number)
+                        }
+                        _ => None,
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        let cancelled = self
+            .pending_launch_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && delivery.materialized_window_id.is_none()
+                    && !protected.contains(&delivery.issue_number)
+                    && !self.launched_windows.contains_key(&delivery.issue_number)
+                    && !self.process_held_issues.contains(&delivery.issue_number)
+                    && !self.has_monitor_pane_for_issue(delivery.issue_number)
+                    && !self.pending_launch_deliveries.iter().any(|other| {
+                        other.issue_number == delivery.issue_number
+                            && other.delivery_id != delivery.delivery_id
+                    })
+                    && !self
+                        .claim_identities
+                        .values()
+                        .chain(disk.claim_identities.iter())
+                        .any(|identity| {
+                            identity.issue_number == delivery.issue_number
+                                && (identity.claim_id != delivery.claim_id
+                                    || identity.owner != delivery.claim_owner)
+                        }) && disk.pending_effects.iter().any(|effect| {
+                    matches!(
+                        &effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim { issue_number, claim_id, owner }
+                            if *issue_number == delivery.issue_number
+                                && claim_id == &delivery.claim_id && owner == &delivery.claim_owner
+                    )
+                })
+            })
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.compensate_uncommitted_claims(&cancelled);
     }
 
     /// Exact pre-materialization compensation shared by provider holds and
