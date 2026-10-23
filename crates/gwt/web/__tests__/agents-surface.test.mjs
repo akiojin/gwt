@@ -10,7 +10,11 @@ const windowDisplayTitle = data => titleFromApp(data, preset => ["agent", "claud
 
 async function fixture({ isMounted = () => true, storage } = {}) {
   const { createUiStateStore } = await import("../ui-state-store.js");
-  const model = createUiStateStore({ catalog: { windows: [], version: 0 } });
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const model = createUiStateStore({ catalog: { windows: [], version: 0 } }, {
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
+  });
   const { createAgentsSurface } = await import("../agents-surface.js");
   const { document, window } = parseHTML("<main></main>");
   Object.defineProperty(window, "localStorage", { configurable: true, get: () => storage });
@@ -30,7 +34,12 @@ async function fixture({ isMounted = () => true, storage } = {}) {
     onLayout: () => layouts.push(true),
   });
   document.querySelector("main").appendChild(surface.element);
-  return { surface, model, setWindows: windows => model.update(state => ({ catalog: { windows, version: state.catalog.version + 1 } })), document, window, focused, mounted, layouts, previews };
+  // Existing interaction cases observe a completed receive/render turn.
+  const setWindows = (windows, flushFrame = true) => {
+    model.update(state => ({ ...state, catalog: { windows, version: state.catalog.version + 1 } }));
+    if (flushFrame) flush();
+  };
+  return { surface, model, setWindows, frames, flush, document, window, focused, mounted, layouts, previews };
 }
 
 const agents = [
@@ -39,6 +48,67 @@ const agents = [
   { id: "three", preset: "agent", title: "Three", agent_name: "Three", status: "stopped" },
   { id: "pm", preset: "claude", is_pm: true },
 ];
+
+test("Agents batches catalog bursts, preserves synchronous navigation and cancels disposed frames", async () => {
+  let active = true;
+  const { surface, model, setWindows, frames, flush, document, mounted, focused } = await fixture({ isMounted: () => active });
+  setWindows([agents[0]]);
+  const terminal = surface.element.querySelector("textarea");
+  const host = document.createElement("aside");
+  document.querySelector("main").append(host);
+  surface.setPreviewHost(host);
+  const previewChip = host.querySelector(".status-chip");
+  const before = model.read();
+  const mounts = mounted.length;
+  const updates = Array.from({ length: 50 }, (_, index) => ({ ...agents[0], dynamic_title: `Burst ${index}` }));
+  for (const data of updates) {
+    setWindows([data], false);
+    surface.setPreviewHost(host); // Split synchronizes host ownership on receipt.
+  }
+  updates.at(-1).dynamic_title = "Uncommitted mutation";
+  assert.equal(model.read().catalog.windows[0].dynamic_title, "Burst 49");
+  assert.equal(before.catalog.windows[0].dynamic_title, undefined);
+  assert.equal(surface.element.querySelector("h3").textContent, "One", "receipt commits without rendering");
+  assert.equal(host.querySelector("h3").textContent, "One");
+  assert.ok(host.querySelector(".status-chip") === previewChip, "same-host synchronization must not bypass the frame");
+  assert.equal(mounted.length, mounts);
+  assert.equal(frames.size, 1);
+  flush();
+  assert.equal(mounted.length, mounts + 1, "one catalog sync mounts each retained terminal once");
+  for (const view of [surface.element, host.firstElementChild]) {
+    assert.equal(view.querySelector("h3").textContent, "One — Burst 49");
+    assert.equal(view.dataset.catalogVersion, String(model.read().catalog.version));
+  }
+  model.update(state => ({ ...state, unrelated: 1 }));
+  assert.equal(frames.size, 0, "unrelated slices do not schedule Agents");
+  assert.equal(surface.element.querySelector("textarea"), terminal);
+
+  setWindows(agents.slice(0, 2), false);
+  assert.equal(surface.openTab("two"), true, "new agents are selectable before the pending frame");
+  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
+  assert.equal(focused.at(-1), "two");
+  const afterNavigation = mounted.length;
+  flush();
+  assert.equal(mounted.length, afterNavigation, "the pending frame skips the synchronously rendered catalog");
+  // Rehosting terminals requires explicit sync even at the same catalog revision.
+  surface.sync();
+  assert.equal(mounted.length, afterNavigation + 2);
+
+  active = false;
+  setWindows([agents[0]]);
+  assert.equal(mounted.length, afterNavigation + 2, "inactive Agents do not rehost terminals");
+  active = true;
+  surface.sync();
+  assert.equal(surface.element.querySelectorAll(".agent-tile").length, 1);
+  setWindows(agents, false);
+  assert.equal(frames.size, 1);
+  surface.dispose();
+  assert.equal(frames.size, 0, "dispose cancels the reserved frame");
+  const disposedMounts = mounted.length;
+  flush();
+  assert.equal(mounted.length, disposedMounts);
+  assert.equal(host.childNodes.length, 0);
+});
 
 test("Agents titles preserve a fixed name and scrollable purpose in cards, tabs and previews", async () => {
   const { surface, setWindows, document } = await fixture();

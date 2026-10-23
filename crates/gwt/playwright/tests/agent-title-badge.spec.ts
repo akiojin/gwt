@@ -117,6 +117,51 @@ test.describe("Agent title role and worktree badges", () => {
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText(`${assignedName} — Fix cache`);
     await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Intake Agent");
+    const frameResults = [];
+    for (const suspended of [false, true]) {
+      const result = await page.evaluate(async ({ suspended, assignedName }) => {
+        const title = document.querySelector<HTMLElement>(".agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='agent-1'] .agent-title__purpose")!;
+        const before = title.textContent;
+        const label = suspended ? "Fallback" : "Frame";
+        const expected = ` — ${label} 49`;
+        const originalFrame = window.requestAnimationFrame;
+        let renders = 0;
+        let completed: () => void;
+        const changed = new Promise<void>(resolve => { completed = resolve; });
+        const observer = new MutationObserver(records => {
+          renders += records.length;
+          if (title.textContent === expected) completed();
+        });
+        observer.observe(title, { childList: true });
+        if (suspended) window.requestAnimationFrame = () => 0;
+        const started = performance.now();
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          for (let index = 0; index < 50; index++) (window as any).__injectAgentTitle(`${label} ${index}`);
+          const beforeFlush = title.textContent;
+          await Promise.race([changed, new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("Agents frame did not render within one second")), 1000);
+          })]);
+          return { before, beforeFlush, renders, elapsed: performance.now() - started,
+            title: title.closest("h3")!.textContent, expected: `${assignedName}${expected}` };
+        } finally {
+          clearTimeout(deadline);
+          observer.disconnect();
+          window.requestAnimationFrame = originalFrame;
+        }
+      }, { suspended, assignedName });
+      expect(result.beforeFlush, "receipts leave the displayed title intact until the frame").toBe(result.before);
+      expect(result.renders, "the burst renders the latest title once").toBe(1);
+      expect(result.title).toBe(result.expected);
+      expect(result.elapsed).toBeLessThan(1000);
+      frameResults.push({ suspended, ...result });
+    }
+    await info.attach("Agents frame results", { body: JSON.stringify(frameResults, null, 2), contentType: "application/json" });
+    const agentTitle = page.getByRole("tab", { name: `${assignedName} — Fallback 49`, exact: true });
+    await agentTitle.focus();
+    await agentTitle.hover();
+    await expect(agentTitle).toBeFocused();
+    await expect(agentTitle).toHaveAttribute("aria-label", `${assignedName} — Fallback 49`);
     await page.screenshot({ path: info.outputPath("agent-names.png") });
   });
 
@@ -315,6 +360,7 @@ async function installAgentTitleBadgeBackend(
   reviewScenario = false,
 ) {
   await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario }) => {
+    (window as any).__gwtPlaywrightTestBridge = true;
     const windows = [
       {
         id: "agent-1",
@@ -480,6 +526,12 @@ async function installAgentTitleBadgeBackend(
       workspaceState.workspace.tabs[0].workspace.windows[0].agent_name = name;
       windowListState.windows[0].agent_name = name;
       for (const socket of FixtureWebSocket.instances) socket.emit(workspaceState);
+    };
+    // Use the existing synchronous receive bridge to separate receipt from its
+    // presentation frame; websocket event batching is tested independently.
+    (window as any).__injectAgentTitle = (title: string) => {
+      workspaceState.workspace.tabs[0].workspace.windows[0].dynamic_title = title;
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
     };
     Object.defineProperty(window, "WebSocket", {
       configurable: true,

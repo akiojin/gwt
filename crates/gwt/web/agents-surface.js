@@ -29,6 +29,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
   let previewElement = null;
   let previewExplanations = null;
   let selectedId = null;
+  let renderedCatalog = null;
   function setTitle(node, title, name) {
     if (!node.classList.contains("agent-title")) {
       node.classList.add("agent-title");
@@ -114,6 +115,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
       previewElement = null;
       return;
     }
+    if (previewElement?.parentElement === host) return;
     if (!previewElement) {
       previewElement = document.createElement("section");
       previewElement.className = "agents-surface agents-surface--preview";
@@ -161,6 +163,8 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
     onLayout();
   }
   function openTab(id) {
+    // Navigation can arrive before the catalog's presentation frame.
+    if (windowCatalogModel.read().catalog !== renderedCatalog) sync();
     const tile = tiles.get(id);
     if (!tile) return false;
     if (!tabs.has(id)) {
@@ -285,8 +289,12 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
     if (restoreFocus) tabs.get(selectedId).focus();
     element.querySelector(".agents-empty").hidden = agents.length > 0;
     if (changed) onLayout();
+    renderedCatalog = catalog;
   }
-  const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
+  const unsubscribe = windowCatalogModel.subscribeFrame(state => state.catalog, catalog => {
+    // Explicit sync must still rehost terminals when returning to Agents.
+    if (catalog !== renderedCatalog) sync();
+  });
   return { element, sync, setPreviewHost, openTab,
     dispose() { unsubscribe(); explanations.dispose(); setPreviewHost(null); },
     contains: (id) => tiles.has(id),
