@@ -5174,7 +5174,7 @@ export function createKnowledgeKanbanSurface({
               }),
             ];
             if (windowCatalogModel && state.kind === "issue") {
-              state.monitorSubscriptions.push(windowCatalogModel.subscribe(model =>
+              state.monitorSubscriptions.push(windowCatalogModel.subscribeFrame(model =>
                 JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
                   .map(windowData => [windowData.id, windowData.linked_issue_number,
                     windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,

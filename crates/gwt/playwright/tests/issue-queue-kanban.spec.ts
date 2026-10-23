@@ -18,6 +18,9 @@ test.beforeEach(async ({ page }, info) => {
   page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
+  if (info.title.includes("Issue catalog bursts")) {
+    await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
+  }
   const narrowSettings = info.title.includes("Settings integrates");
   if (narrowSettings) await page.setViewportSize({ width: 1280, height: 1000 });
   if (!liveUrl) await installEmbeddedRoutes(page);
@@ -951,6 +954,64 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
     /^(set_|issue_monitor_queue_|update_viewport|input$)/.test(message.kind)), before);
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
+});
+
+test("T-7b.2b.2: Issue catalog bursts render once without delaying local selection", async ({ page }) => {
+  await confirm(page, [3, 4], { tier_facts: [{ issue_number: 5,
+    confirmed_launch: { tier: 0, window_id: "tab-queue::agent-5", delivery_id: "delivery-5" },
+  }] });
+  const chip = row(page, 5).locator('[data-key="tier-running"]');
+  await expect(chip).toHaveText("Running tier 0");
+  const result = await page.evaluate(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const board = document.querySelector(".issue-queue-board")!;
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancel = window.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 0;
+    window.requestAnimationFrame = run => { frames.set(++next, run); return next; };
+    window.cancelAnimationFrame = id => { frames.delete(id); };
+    const observer = new MutationObserver(() => {});
+    observer.observe(board, { childList: true, subtree: true });
+    const rowAdds = () => observer.takeRecords().reduce((count, record) => count +
+      [...record.addedNodes].filter(node => node instanceof Element && node.matches(".knowledge-row")).length, 0);
+    const inject = (status: string) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "terminal_status", id: "tab-queue::agent-5", status },
+    }));
+    try {
+      const initialRow = board.querySelector('[data-issue-number="5"]');
+      for (let index = 0; index < 50; index++) inject(index % 2 ? "idle" : "running");
+      const before = { rows: rowAdds(), same: initialRow === board.querySelector('[data-issue-number="5"]') };
+      for (const run of [...frames.values()]) run(performance.now());
+      return { before, rows: rowAdds(), running: !!board.querySelector('[data-key="tier-running"]') };
+    } finally {
+      observer.disconnect();
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+    }
+  });
+  expect(result).toEqual({ before: { rows: 0, same: true }, rows: 1, running: false });
+  await page.evaluate(() => {
+    (window as any).__icframeRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "terminal_status", id: "tab-queue::agent-5", status: "running" },
+    }));
+  });
+  try {
+    await expect(chip).toHaveText("Running tier 0", { timeout: 1000 });
+    await row(page, 5).locator(".knowledge-row-select").click();
+    await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #5");
+  } finally {
+    await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__icframeRaf;
+      delete (window as any).__icframeRaf;
+      delete (document as any).visibilityState;
+    });
+  }
+  await chip.hover();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).toContainText("Acknowledged launch tier");
 });
 
 test("T-7b.2b.2: Running tier uses exact live window and clears stale explanations", async ({page}) => {
