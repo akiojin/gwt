@@ -104,6 +104,7 @@ $gui = $null
 $github = $null
 $runner = $null
 $anchor = $null
+$state = $null
 $exitCode = 1
 $streams = @{}
 try {
@@ -282,7 +283,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()
   $streams.guiErr = $gui.StandardError.ReadToEndAsync()
   $sourceRevision = (& $realGit -C $repoRoot rev-parse HEAD).Trim()
-  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
+  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
     'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs') | ForEach-Object {
     $fromCommit = $Phase -eq 'baseline' -and $_.StartsWith('crates/gwt/src/')
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }
@@ -291,6 +292,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $expectedDeliveries = @($deliveries | ForEach-Object { @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id} })
   $fixture = @{phase=$Phase;sequential=[bool]$Sequential;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
   $fixture.checkout_daemon = $gwtd
+  $fixture.hook_generation_fallback = $hookBin
   $fixture.daemon_sha256 = (Get-FileHash -LiteralPath $gwtd -Algorithm SHA256).Hash
   [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
   [IO.File]::WriteAllText("$EvidenceDirectory/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
@@ -311,6 +313,29 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $anchorUrl.Scheme = 'ws'; $anchorUrl.Path = '/ws'
   $anchor.ConnectAsync($anchorUrl.Uri, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
   [void](Assert-Hooks (Invoke-IsolatedGwtd 'hook.health' $hookParams))
+  # The GUI must supervise this checkout's companion, independently of the
+  # stable hook-generation fallback. Observe the authority PID before timing.
+  $daemonDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  $daemonProof = $null
+  $daemonMatches = $false
+  do {
+    $fencePath = "$state/issue-monitor.shutdown-revoke"
+    if (Test-Path -LiteralPath $fencePath) {
+      $fence = [IO.File]::ReadAllText($fencePath) | ConvertFrom-Json
+      if ($fence -and $fence.PSObject.Properties['pid']) {
+        $daemonProcess = Get-Process -Id $fence.pid -ErrorAction SilentlyContinue
+        if ($daemonProcess) {
+          $daemonMatches = [string]::Equals($daemonProcess.Path, $gwtd, [StringComparison]::OrdinalIgnoreCase)
+          $daemonProof = @{pid=$daemonProcess.Id;actual_binary=$daemonProcess.Path;expected_binary=$gwtd;matches_checkout=$daemonMatches;observed_at=[DateTime]::UtcNow.ToString('o')}
+          [IO.File]::WriteAllText("$EvidenceDirectory/daemon-authority.json", ($daemonProof | ConvertTo-Json))
+          if ($daemonMatches) { break }
+        }
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $daemonDeadline)
+  if (-not $daemonProof) { throw 'Owned checkout daemon authority readiness timed out.' }
+  if (-not $daemonMatches) { throw 'Owned GUI selected a daemon outside this checkout; see daemon-authority.json.' }
   $version = [IO.File]::ReadAllText("$repoRoot/scripts/playwright-version.txt").Trim()
   $depsRoot = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version" }
   $cli = Join-Path $depsRoot 'node_modules/playwright/cli.js'
@@ -335,6 +360,10 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   Write-Output $streams.runnerErr.GetAwaiter().GetResult()
 } finally {
   $cleanupErrors = [Collections.Generic.List[string]]::new()
+  if ($state -and (Test-Path -LiteralPath "$state/issue-monitor.json")) {
+    try { Copy-Item -LiteralPath "$state/issue-monitor.json" -Destination "$EvidenceDirectory/issue-monitor-final.json" -ErrorAction Stop }
+    catch { $cleanupErrors.Add('Final Monitor prefs snapshot failed.') }
+  }
   if ($anchor) { $anchor.Abort(); $anchor.Dispose() }
   foreach ($entry in @(@{name='runner';process=$runner},@{name='gui';process=$gui},@{name='github';process=$github})) {
     if (-not $entry.process) { continue }

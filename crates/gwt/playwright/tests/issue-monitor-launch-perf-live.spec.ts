@@ -129,16 +129,16 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
       try {
         // The helper links this checkout's production locked prefs mutation.
         // No shell, external GitHub write or whole-file read/replace is used.
-        const child = execFile(join(HOME, 'bin/enqueue.exe'), [], {
-          cwd: fixture.project, timeout: 120_000, windowsHide: true,
-        });
-        child.stdin!.end(JSON.stringify({
-          ...expected, branch_name: `work/issue-${expected.issue_number}`, linked_issue_kind: 'issue',
-          claim_owner: 'fixture', launch_session_strategy: 'fresh_required', created_at: enqueuedAt,
-        }));
         await new Promise<void>((resolve, reject) => {
-          child.once('error', reject);
-          child.once('exit', code => code === 0 ? resolve() : reject(new Error(`fixture enqueue exited ${code}`)));
+          const child = execFile(join(HOME, 'bin/enqueue.exe'), [], {
+            cwd: fixture.project, timeout: 120_000, windowsHide: true,
+          }, (error, _stdout, stderr) => error
+            ? reject(new Error(`fixture enqueue failed: ${stderr.trim() || error.message}`))
+            : resolve());
+          child.stdin!.end(JSON.stringify({
+            ...expected, branch_name: `work/issue-${expected.issue_number}`, linked_issue_kind: 'issue',
+            claim_owner: 'fixture', launch_session_strategy: 'fresh_required', created_at: enqueuedAt,
+          }));
         });
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await expect.poll(async () => {

@@ -9,6 +9,8 @@ fn inputs(
     let existing = existing.into_iter().collect::<HashSet<_>>();
     GwtdResolutionInputs {
         explicit_bin_path: None,
+        companion_bin_path: None,
+        hook_bin_path: None,
         path_lookup: Box::new(move |command| {
             assert_eq!(command, "gwtd");
             path_candidate.clone()
@@ -24,6 +26,8 @@ fn explicit_gwt_bin_path_wins_over_path_and_fallbacks() {
     let mut inputs = inputs(
         [
             PathBuf::from("/explicit/gwtd"),
+            PathBuf::from("/checkout/gwtd"),
+            PathBuf::from("/stable/gwtd"),
             PathBuf::from("/path/gwtd"),
             PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
             PathBuf::from("/repo/target/debug/gwtd"),
@@ -31,6 +35,8 @@ fn explicit_gwt_bin_path_wins_over_path_and_fallbacks() {
         Some(PathBuf::from("/path/gwtd")),
     );
     inputs.explicit_bin_path = Some(PathBuf::from("/explicit/gwtd"));
+    inputs.companion_bin_path = Some(PathBuf::from("/checkout/gwtd"));
+    inputs.hook_bin_path = Some(PathBuf::from("/stable/gwtd"));
 
     let resolved = resolve_gwtd_path_with(inputs).expect("resolve explicit gwtd");
 
@@ -39,17 +45,53 @@ fn explicit_gwt_bin_path_wins_over_path_and_fallbacks() {
 
 #[test]
 fn path_gwtd_wins_when_explicit_path_is_missing() {
-    let resolved = resolve_gwtd_path_with(inputs(
+    let mut inputs = inputs(
         [
             PathBuf::from("/path/gwtd"),
             PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
             PathBuf::from("/repo/target/debug/gwtd"),
         ],
         Some(PathBuf::from("/path/gwtd")),
-    ))
-    .expect("resolve PATH gwtd");
+    );
+    inputs.explicit_bin_path = Some(PathBuf::from("/missing/runtime/gwtd"));
+    inputs.companion_bin_path = Some(PathBuf::from("/missing/companion/gwtd"));
+    inputs.hook_bin_path = Some(PathBuf::from("/missing/hook/gwtd"));
+
+    let resolved = resolve_gwtd_path_with(inputs).expect("resolve PATH gwtd");
 
     assert_eq!(resolved, PathBuf::from("/path/gwtd"));
+}
+
+#[test]
+fn running_companion_wins_over_stable_hook_and_path() {
+    let mut inputs = inputs(
+        [
+            PathBuf::from("/checkout/gwtd"),
+            PathBuf::from("/stable/gwtd"),
+            PathBuf::from("/path/gwtd"),
+        ],
+        Some(PathBuf::from("/path/gwtd")),
+    );
+    inputs.companion_bin_path = Some(PathBuf::from("/checkout/gwtd"));
+    inputs.hook_bin_path = Some(PathBuf::from("/stable/gwtd"));
+
+    let resolved = resolve_gwtd_path_with(inputs).expect("resolve running companion gwtd");
+
+    assert_eq!(resolved, PathBuf::from("/checkout/gwtd"));
+}
+
+#[test]
+fn stable_hook_fallback_wins_when_companion_is_missing() {
+    let mut inputs = inputs(
+        [PathBuf::from("/stable/gwtd"), PathBuf::from("/path/gwtd")],
+        Some(PathBuf::from("/path/gwtd")),
+    );
+    inputs.companion_bin_path = Some(PathBuf::from("/missing/companion/gwtd"));
+    inputs.hook_bin_path = Some(PathBuf::from("/stable/gwtd"));
+
+    let resolved = resolve_gwtd_path_with(inputs).expect("resolve stable hook fallback gwtd");
+
+    assert_eq!(resolved, PathBuf::from("/stable/gwtd"));
 }
 
 #[test]
