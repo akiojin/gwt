@@ -176,6 +176,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) {
             return Err(io::Error::other("previous fixture delivery is not durably acknowledged"));
         }
+        // Match the durable state produced by apply_confirmed_claim. A live
+        // daemon rebase imports active reservations from launching_issues.
+        prefs.launching_issues.push(gwt::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: delivery.issue_number,
+            claimed_at: Some(delivery.created_at.clone()),
+        });
+        prefs.claim_identities.push(gwt::issue_monitor::IssueMonitorClaimIdentity {
+            issue_number: delivery.issue_number,
+            claim_id: delivery.claim_id.clone(),
+            owner: delivery.claim_owner.clone(),
+        });
         prefs.pending_launch_deliveries.push(delivery.clone());
         Ok(())
     })?;
@@ -274,7 +285,10 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 8 -AsArray))
   # Queue admission and upstream claim creation are outside this acceptance run.
   $initialDeliveries = if ($Sequential) { @() } else { $deliveries }
-  [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)} | ConvertTo-Json -Depth 8))
+  $initialPrefs = @{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=@($initialDeliveries)}
+  $initialPrefs.launching_issues = @($initialDeliveries | ForEach-Object { @{issue_number=$_.issue_number;claimed_at=$_.created_at} })
+  $initialPrefs.claim_identities = @($initialDeliveries | ForEach-Object { @{issue_number=$_.issue_number;claim_id=$_.claim_id;owner=$_.claim_owner} })
+  [IO.File]::WriteAllText("$state/issue-monitor.json", ($initialPrefs | ConvertTo-Json -Depth 8))
   $start = New-OwnedProcess $gwt @('--no-tray','--no-open')
   # The agent launch pipeline injects checkout gwtd; the GUI keeps only the
   # stable public hook fallback audited above.
