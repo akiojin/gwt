@@ -17096,13 +17096,15 @@ fn run_impl<E: CliEnv>(
                 ));
                 return Ok(2);
             }
+            let record = load(&worktree).ok().flatten();
+            let completed_by_session = record.as_ref().is_some_and(|record| {
+                record.status == ExecutionControlStatus::Completed
+                    && record.primary_session_id == session_id
+            });
             let evidence = crate::cli::verification_record::evaluate_evidence(
                 &worktree,
                 &session_id,
-                load(&worktree)
-                    .ok()
-                    .flatten()
-                    .map(|record| record.owner_number),
+                record.as_ref().map(|record| record.owner_number),
             );
             let mut expected_verification_hash =
                 match super::completion_pr::admit(env, &session_id, None, None, out) {
@@ -17116,7 +17118,11 @@ fn run_impl<E: CliEnv>(
                         return Ok(2);
                     }
                 };
-            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+            // Completed replay confirms the pinned receipt through settle below;
+            // only a new completion depends on the current remote marker.
+            if !completed_by_session
+                && evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+            {
                 let verification = crate::cli::verification_record::load(&worktree)
                     .map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(

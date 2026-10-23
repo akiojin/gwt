@@ -2409,11 +2409,31 @@ format_version: Some(1),
             3854,
             crate::cli::pr::PrQuarantineContext {
                 number: 3854,
-                body: marker,
+                body: marker.clone(),
                 comments: Vec::new(),
             },
         );
         let mut out = String::new();
+        env.pr_quarantine_contexts
+            .get_mut(&3854)
+            .unwrap()
+            .body
+            .clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out,
+            )
+            .unwrap(),
+            2,
+            "active completion still requires its quarantine marker: {out}"
+        );
+        assert!(
+            out.contains("typed quarantine evidence is not current"),
+            "{out}"
+        );
+        env.pr_quarantine_contexts.get_mut(&3854).unwrap().body = marker;
         gwt_core::skill_state::save(
             repo.path(),
             SKILL_NAME,
@@ -2476,6 +2496,27 @@ format_version: Some(1),
             0,
             "completed lifecycle replay must not require the old PR marker: {out}"
         );
+        assert_eq!(
+            crate::cli::execution_state::record_contents(repo.path()).unwrap(),
+            completed_bytes
+        );
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_bytes);
+        assert_eq!(
+            crate::cli::verification_record::evaluate_evidence(repo.path(), session_id, Some(3248)),
+            crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+        );
+        out.clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "completed execution replay must not require the old PR marker: {out}"
+        );
+        assert!(out.contains("already settled"), "{out}");
         assert_eq!(
             crate::cli::execution_state::record_contents(repo.path()).unwrap(),
             completed_bytes
