@@ -523,6 +523,11 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert FIFO preparation independently of the native Git probe budget.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1237,10 +1242,21 @@ fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert capacity renewal independently of the native Git probe budget.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("manual admission slots independent of host observations");
     let mut fixture = monitor_relaunch_fixture_with_settlement(
         temp.path(),
         "capacity-renewal",
@@ -1321,10 +1337,21 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert facts reuse independently of the native Git probe budget.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("allow the unrelated pane and the pending launch");
     let mut fixture = monitor_relaunch_fixture_with_settlement(
         temp.path(),
         "reuse-fresh-facts",
@@ -1362,10 +1389,10 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     fixture.runtime.register_window("tab-1", &unrelated.id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-        prefs.max_active_agents = 3;
+        prefs.priority_order.push(3166);
         Ok(())
     })
-    .expect("change unrelated admission prefs");
+    .expect("change unrelated queue priority prefs");
     assert!(fixture
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
