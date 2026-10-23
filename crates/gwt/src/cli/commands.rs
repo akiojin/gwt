@@ -182,12 +182,14 @@ pub enum IssueCommand {
     MonitorPriorityMove {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         number: u64,
         position: IssueMonitorPriorityPosition,
     },
     MonitorPrioritySet {
         project_root: Option<std::path::PathBuf>,
         expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         issue_numbers: Vec<u64>,
     },
     MonitorQueueList {

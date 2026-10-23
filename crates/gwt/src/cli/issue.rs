@@ -240,12 +240,14 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorPriorityMove {
             project_root,
             expected_priority_order,
+            reason,
             number,
             position,
         } => run_monitor_priority_move(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            reason.as_deref(),
             number,
             position,
             out,
@@ -253,11 +255,13 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::MonitorPrioritySet {
             project_root,
             expected_priority_order,
+            reason,
             issue_numbers,
         } => run_monitor_priority_set(
             env,
             project_root.as_deref(),
             expected_priority_order.as_deref(),
+            reason.as_deref(),
             &issue_numbers,
             out,
         )?,
@@ -930,6 +934,7 @@ fn run_monitor_status<E: CliEnv>(
     ))
     .map_err(io_as_api_error)?;
     output["priority_order"] = serde_json::json!(prefs.priority_order);
+    attach_priority_reason_note(&mut output, &prefs);
     output["monitor_runtime_stop_requests"] =
         serde_json::json!(prefs.monitor_runtime_stop_requests);
     output["config_token"] = serde_json::json!(prefs.config_token());
@@ -1507,10 +1512,39 @@ fn check_expected_priority_order(current: &[u64], expected: Option<&[u64]>) -> i
     Ok(())
 }
 
+fn record_priority_reason(
+    prefs: &mut crate::IssueMonitorPrefs,
+    reason: Option<&str>,
+) -> io::Result<()> {
+    if let Some(reason) = reason {
+        if reason.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reason must not be empty",
+            ));
+        }
+        prefs.priority_reason_note = Some(crate::issue_monitor::IssueMonitorPriorityReasonNote {
+            reason: reason.to_string(),
+            priority_order: prefs.priority_order.clone(),
+            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
+    }
+    Ok(())
+}
+
+fn attach_priority_reason_note(output: &mut serde_json::Value, prefs: &crate::IssueMonitorPrefs) {
+    output["priority_reason_note"] = serde_json::json!(prefs.priority_reason_note);
+    output["priority_reason_matches_order"] = serde_json::json!(prefs
+        .priority_reason_note
+        .as_ref()
+        .map(|note| note.priority_order == prefs.priority_order));
+}
+
 fn run_monitor_priority_move<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    reason: Option<&str>,
     number: u64,
     position: IssueMonitorPriorityPosition,
     out: &mut String,
@@ -1535,12 +1569,11 @@ fn run_monitor_priority_move<E: CliEnv>(
         }
         prefs.priority_order.insert(index, number);
         reorder_local_terminal_queue_by_priority(prefs);
+        record_priority_reason(prefs, reason)?;
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(
-        &monitor_priority_reply(&project_root, &prefs.priority_order, &[number]).to_string(),
-    );
+    out.push_str(&monitor_priority_reply(&project_root, &prefs, &[number]).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -1575,13 +1608,14 @@ fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs
 /// call now would report a write that happened as one that did not.
 fn monitor_priority_reply(
     project_root: &std::path::Path,
-    priority_order: &[u64],
+    prefs: &crate::IssueMonitorPrefs,
     placed: &[u64],
 ) -> serde_json::Value {
     let mut reply = serde_json::json!({
-        "priority_order": priority_order,
+        "priority_order": prefs.priority_order,
         "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
     });
+    attach_priority_reason_note(&mut reply, prefs);
     if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
         let not_in_inbox = placed
             .iter()
@@ -1604,6 +1638,7 @@ fn run_monitor_priority_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
     expected_priority_order: Option<&[u64]>,
+    reason: Option<&str>,
     issue_numbers: &[u64],
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -1613,12 +1648,11 @@ fn run_monitor_priority_set<E: CliEnv>(
         check_expected_priority_order(&prefs.priority_order, expected_priority_order)?;
         prefs.priority_order = issue_numbers.to_vec();
         reorder_local_terminal_queue_by_priority(prefs);
+        record_priority_reason(prefs, reason)?;
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(
-        &monitor_priority_reply(&project_root, &prefs.priority_order, issue_numbers).to_string(),
-    );
+    out.push_str(&monitor_priority_reply(&project_root, &prefs, issue_numbers).to_string());
     out.push('\n');
     Ok(0)
 }
@@ -13053,6 +13087,7 @@ mod tests {
         for (command, expected) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
@@ -13061,6 +13096,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
@@ -13139,6 +13175,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![3, 1],
@@ -13152,6 +13189,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 4,
@@ -13187,6 +13225,7 @@ mod tests {
         for (command, expected_head) in [
             (
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![3, 1],
@@ -13195,6 +13234,7 @@ mod tests {
             ),
             (
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
@@ -13234,6 +13274,81 @@ mod tests {
                 "the next scan must select the priority head instead of FIFO issue 1"
             );
         }
+    }
+
+    #[test]
+    fn issue_monitor_priority_reason_note_roundtrips_without_claiming_freshness() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_monitor_test_repository(&repo, "https://github.com/example/repo.git");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let super::super::CliCommand::Issue(command) =
+                super::super::json_envelope::parse_operation(operation, &params).unwrap()
+            else {
+                panic!("expected Issue command")
+            };
+            let mut out = String::new();
+            run(&mut env, command, &mut out)
+                .map(|_| serde_json::from_str::<serde_json::Value>(&out).unwrap())
+        };
+        let reply = invoke(
+            "issue.monitor.priority.set",
+            serde_json::json!({
+                "issue_numbers":[1,2], "expected_priority_order":[], "reason":"Unblock the release"
+            }),
+        )
+        .unwrap();
+        let note = reply["priority_reason_note"].clone();
+        assert_eq!(note["reason"], "Unblock the release");
+        assert_eq!(note["priority_order"], serde_json::json!([1, 2]));
+        let at =
+            chrono::DateTime::parse_from_rfc3339(note["recorded_at"].as_str().unwrap()).unwrap();
+        assert_eq!(at.offset().local_minus_utc(), 0);
+        assert_eq!(reply["priority_reason_matches_order"], true);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["priority_reason_note"], note);
+
+        let before = std::fs::read(&path).unwrap();
+        for params in [
+            serde_json::json!({"number":2,"reason":"stale","expected_priority_order":[]}),
+            serde_json::json!({"number":2,"reason":"bad position","position":9}),
+        ] {
+            assert!(invoke("issue.monitor.priority.move", params).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let moved = invoke(
+            "issue.monitor.priority-move",
+            serde_json::json!({
+                "number":2, "expected_priority_order":[1,2], "reason":"Fix the blocker first"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            moved["priority_reason_note"]["priority_order"],
+            serde_json::json!([2, 1])
+        );
+        assert_eq!(
+            moved["priority_reason_note"]["reason"],
+            "Fix the blocker first"
+        );
+        let historical = moved["priority_reason_note"].clone();
+        let unreasoned = invoke(
+            "issue.monitor.priority-set",
+            serde_json::json!({
+                "issue_numbers":[1,2]
+            }),
+        )
+        .unwrap();
+        assert_eq!(unreasoned["priority_reason_note"], historical);
+        assert_eq!(unreasoned["priority_reason_matches_order"], false);
+        let status = invoke("issue.monitor.status", serde_json::json!({})).unwrap();
+        assert_eq!(status["priority_reason_note"], historical);
+        assert_eq!(status["priority_reason_matches_order"], false);
     }
 
     #[test]
@@ -13348,6 +13463,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 1,
@@ -13367,6 +13483,7 @@ mod tests {
         run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 issue_numbers: vec![1, 2, 3],
@@ -13380,6 +13497,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 2,
@@ -13402,6 +13520,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     issue_numbers: vec![8, 5],
@@ -13423,6 +13542,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPriorityMove {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo.clone()),
                     number: 13,
@@ -13445,6 +13565,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPriorityMove {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(repo.clone()),
                 number: 13,
@@ -13460,6 +13581,7 @@ mod tests {
             run(
                 &mut env,
                 IssueCommand::MonitorPrioritySet {
+                    reason: None,
                     expected_priority_order: None,
                     project_root: Some(repo),
                     issue_numbers: Vec::new(),
@@ -13478,6 +13600,7 @@ mod tests {
         assert!(run(
             &mut env,
             IssueCommand::MonitorPrioritySet {
+                reason: None,
                 expected_priority_order: None,
                 project_root: Some(tmp.path().join("missing-project")),
                 issue_numbers: vec![99],

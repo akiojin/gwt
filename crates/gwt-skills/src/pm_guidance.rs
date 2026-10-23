@@ -825,6 +825,12 @@ body cannot hold `plan` / `tasks` sections.
   the order instead of blindly retrying. Read back status after a successful write.
   Omitting the guard retains legacy behavior; value equality does not detect ABA
   history or guard other configuration changes.
+  Pass a nonempty `reason` with priority.set/move to persist the rationale with
+  its applied full order in the same transaction. `priority_reason_note` records the latest reasoned decision
+  (reason, priority_order, recorded_at); read it back in the reply and status.
+  Omitting reason preserves the historical note. `priority_reason_matches_order` is saved-value equality only,
+  not freshness, intervening history or proof that the rationale still applies;
+  it is null when there is no note. Null, blank and non-string reasons are invalid.
 - For `issue.monitor.queue.move` and `issue.monitor.queue.remove`, re-read
   `issue.monitor.queue.list` for the current terminal before writing. Pass its
   saved `queue_order`, not the urgent display order, as `expected_queue_order`.
@@ -4337,6 +4343,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "For `issue.monitor.queue.move` and `issue.monitor.queue.remove`",
             "saved `queue_order`, not the urgent display order",
             "`expected_priority_order`",
+            "Pass a nonempty `reason` with priority.set/move",
+            "`priority_reason_note` records the latest reasoned decision",
+            "`priority_reason_matches_order` is saved-value equality only",
             "For `issue.monitor.launch_now`, pass the same `expected_priority_order` guard",
             "also pass `expected_queue_order` from a fresh current-terminal",
             "Both order comparisons share the prefs lock",
