@@ -11364,7 +11364,18 @@ impl IssueMonitorState {
     /// [`IssueMonitorPrefs::set_launch_profile_pool`]).
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
         self.launch_profiles = dedupe_launch_profile_pool(pool);
-        self.compensate_permission_blocked_launch_deliveries();
+        self.compensate_permission_blocked_launch_deliveries(false);
+    }
+
+    /// Re-evaluate unowned deliveries when the effective tier policy changes.
+    pub(crate) fn set_launch_tiers(
+        &mut self,
+        auto: bool,
+        tiers: Vec<Vec<IssueMonitorLaunchProfile>>,
+    ) {
+        self.launch_auto = auto;
+        self.launch_tiers = tiers;
+        self.compensate_permission_blocked_launch_deliveries(true);
     }
 
     pub fn launch_usage_threshold_percent(&self) -> u8 {
@@ -11762,15 +11773,15 @@ impl IssueMonitorState {
         let profile = profile.clone();
         self.launch_profiles =
             dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
-        self.compensate_permission_blocked_launch_deliveries();
+        self.compensate_permission_blocked_launch_deliveries(false);
         Ok(profile)
     }
 
     /// Profile writers commit this compensation under the prefs lock, before
     /// publication can replay an unusable unowned delivery to a GUI.
-    fn compensate_permission_blocked_launch_deliveries(&mut self) {
-        // These writers change only the manual pool; Auto's tiers are unchanged.
-        if self.launch_auto {
+    fn compensate_permission_blocked_launch_deliveries(&mut self, reevaluate_auto: bool) {
+        // Manual profile writers leave Auto's effective tiers unchanged.
+        if self.launch_auto && !reevaluate_auto {
             return;
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -11978,7 +11989,14 @@ impl IssueMonitorState {
         let automatic = if self.launch_auto {
             let is_spec = self
                 .inbox_item(issue_number)
-                .is_some_and(|item| has_gwt_spec_label(&item.issue.labels));
+                .map(|item| has_gwt_spec_label(&item.issue.labels))
+                .unwrap_or_else(|| {
+                    // Cold settings writers have only the durable delivery.
+                    self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == issue_number
+                            && delivery.linked_issue_kind == LinkedIssueKind::Spec
+                    })
+                });
             self.prefs()
                 .select_auto_launch_profile(issue_number, is_spec, None, select)
         } else {

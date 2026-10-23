@@ -4670,8 +4670,10 @@ fn apply_monitor_tiers_set(
     prefs
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.launch_auto = auto;
-    prefs.launch_tiers = tiers.unwrap_or_default();
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.set_launch_tiers(auto, tiers.unwrap_or_default());
+    *prefs = monitor.prefs();
     Ok(())
 }
 
@@ -14044,6 +14046,26 @@ mod tests {
         let mut prefs = crate::IssueMonitorPrefs::default();
         prefs.set_launch_profile_pool(vec![pool_profile("claude", &[])]);
         let saved_pool = prefs.launch_profile_pool();
+        // All three claims were confirmed on the supported manual profile.
+        // The cold settings writer must use each delivery's saved Issue kind.
+        for (number, kind) in [(42, "issue"), (43, "spec"), (44, "issue")] {
+            prefs
+                .launching_issues
+                .push(crate::issue_monitor::IssueMonitorLaunchingIssue {
+                    issue_number: number,
+                    claimed_at: Some("2026-07-02T00:00:10Z".into()),
+                });
+            prefs.pending_launch_deliveries.push(
+                serde_json::from_value(serde_json::json!({
+                    "delivery_id": format!("pending-{number}"), "issue_number": number,
+                    "branch_name": format!("work/issue-{number}"), "linked_issue_kind": kind,
+                    "claim_id": format!("claim-{number}"), "claim_owner": "host:1",
+                    "materializer_id": (number == 44).then_some("gui"),
+                    "created_at": "2026-07-02T00:00:10Z"
+                }))
+                .unwrap(),
+            );
+        }
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -14053,7 +14075,7 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("codex", &[])],
+                vec![pool_profile("openclaw", &[])],
                 vec![pool_profile("claude", &["kind:spec"])],
             ]),
             &mut out,
@@ -14066,6 +14088,44 @@ mod tests {
         assert!(prefs.launch_auto);
         assert_eq!(prefs.tier_overrides[&4774], 1);
         assert_eq!(prefs.effective_launch_tiers().len(), 2);
+        assert_eq!(
+            prefs
+                .pending_launch_deliveries
+                .iter()
+                .map(|delivery| delivery.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44],
+            "cancel only the unowned unsupported Issue; keep the cold SPEC and owned delivery"
+        );
+        assert_eq!(
+            prefs
+                .launching_issues
+                .iter()
+                .map(|launch| launch.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44]
+        );
+        assert_eq!(prefs.pending_effects.len(), 1);
+        assert!(matches!(&prefs.pending_effects[0].payload,
+            crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                if claim_id == "claim-42" && owner == "host:1"));
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        assert!(restored.inbox_item(43).is_none());
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
         let before = fs::read(&path).unwrap();
         assert!(run_monitor_tier_set(&env, None, None, 4774, 2, &mut out).is_err());
         assert!(run_monitor_tiers_set(&env, None, None, true, Some(vec![]), &mut out).is_err());
