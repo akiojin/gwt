@@ -6129,7 +6129,9 @@ pub(super) fn queued_agent_completion_fixture(
     (runtime, recorded, tasks, window_id, result)
 }
 
-fn take_prepared_agent_launch(recorded: &Arc<Mutex<Vec<UserEvent>>>) -> super::PreparedAgentLaunch {
+pub(super) fn take_prepared_agent_launch(
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+) -> super::PreparedAgentLaunch {
     let mut events = recorded.lock().expect("event log");
     let index = events
         .iter()
