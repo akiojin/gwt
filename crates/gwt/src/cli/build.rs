@@ -63,7 +63,8 @@ fn run_action<E: CliEnv>(
     }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
-    if let SkillStateAction::Complete { spec, pr } = &action {
+    if let SkillStateAction::Complete { spec, .. } | SkillStateAction::Abort { spec, .. } = &action
+    {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
         let build_state = gwt_core::skill_state::load(&worktree, SKILL_NAME).map_err(|error| {
@@ -83,6 +84,9 @@ fn run_action<E: CliEnv>(
             ));
             return Ok(0);
         }
+        let SkillStateAction::Complete { pr, .. } = &action else {
+            return run_after_quarantine_precheck(env, action, out, None, None);
+        };
         let owning_active_build = build_state.is_some_and(|state| {
             state.active
                 && state.session_id.trim() == session_id.trim()
@@ -2908,6 +2912,42 @@ format_version: Some(1),
             "blocked verification cannot proceed"
         );
         assert!(abort_request.get("terminal_kind").is_none());
+
+        let history_paths = [
+            gwt_core::skill_state::state_path(&abort_fixture.git.repo, SKILL_NAME),
+            crate::cli::execution_state::state_path(&abort_fixture.git.repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&abort_fixture.git.repo),
+        ];
+        let history_before = history_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("terminal history"))
+            .collect::<Vec<_>>();
+        let (retry_code, retry_output) =
+            with_terminal_bridge_env(&abort_fixture, &abort_server, |_| {
+                let mut env = crate::cli::TestEnv::new(abort_fixture.git.repo.clone());
+                let mut output = String::new();
+                let code = run(
+                    &mut env,
+                    SkillStateAction::Abort {
+                        spec: 3327,
+                        reason: Some("retry after the original abort".to_string()),
+                    },
+                    &mut output,
+                )
+                .expect("replay build.abort");
+                (code, output)
+            });
+        assert_eq!(retry_code, 0, "{retry_output}");
+        for (path, before) in history_paths.iter().zip(history_before) {
+            assert_eq!(
+                std::fs::read(path).expect("replayed terminal history"),
+                before,
+                "build.abort replay must preserve {}",
+                path.display()
+            );
+        }
+        abort_server.assert_no_abort_request();
+        abort_server.assert_no_request();
 
         let complete_fixture = BoundTerminalFixture::new();
         assert!(matches!(

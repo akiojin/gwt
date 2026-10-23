@@ -252,6 +252,7 @@ pub enum IssueCommand {
     /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
+        expected_profiles_token: Option<String>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
         /// saved candidate's value instead of resetting to `Default`.
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
@@ -271,6 +272,7 @@ pub enum IssueCommand {
     /// Persist a non-decreasing tier override for one Issue.
     MonitorTierSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         number: u64,
         tier: u8,
     },

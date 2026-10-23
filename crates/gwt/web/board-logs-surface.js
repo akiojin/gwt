@@ -60,6 +60,7 @@ export function createBoardLogsSurface({
       const boardStateMap = new Map();
       const maxBoardEntries = 1000;
       const logStateMap = new Map();
+      const maxLogEntries = 1000;
       let pendingBoardEntryFocusId = null;
       const boardModel = createUiStateStore(null);
       boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
@@ -688,8 +689,8 @@ export function createBoardLogsSurface({
             continue;
           }
           state.entries.push(entry);
-          if (state.entries.length > 1000) {
-            state.entries = state.entries.slice(-1000);
+          if (state.entries.length > maxLogEntries) {
+            state.entries = state.entries.slice(-maxLogEntries);
           }
           if (logSeverityRank(entry.severity) >= logSeverityRank("warn")) {
             state.unreadAlerts += 1;
@@ -1881,7 +1882,7 @@ export function createBoardLogsSurface({
           case "log_entries": {
             if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
-            state.entries = event.entries || [];
+            state.entries = (event.entries || []).slice(-maxLogEntries);
             state.loading = false;
             state.error = "";
             state.unreadAlerts = 0;

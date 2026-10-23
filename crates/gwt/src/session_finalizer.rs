@@ -349,6 +349,41 @@ pub fn finalize_legacy_session(
     }
 }
 
+/// Disable restore for an exact historical view, without asserting process exit.
+/// Current-Host registration and live/uncertain observations reject this path.
+pub fn remove_restored_stopped_view(
+    sessions_dir: &Path,
+    expected: &gwt_agent::Session,
+) -> std::io::Result<bool> {
+    let expected_snapshot = serde_json::to_value(expected)?;
+    let mut refused = false;
+    let result = gwt_agent::update_session_if_changed(sessions_dir, &expected.id, |current| {
+        let current_runtime =
+            gwt_agent::runtime_state_path_for_pid(sessions_dir, std::process::id(), &expected.id);
+        let no_local_runtime = match std::fs::symlink_metadata(current_runtime) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+            Ok(_) => false,
+        };
+        let observations = crate::session_inventory::observe_session(current, sessions_dir);
+        if serde_json::to_value(&*current)? != expected_snapshot
+            || !no_local_runtime
+            || !observations.sessions.is_empty()
+            || !observations.uncertainties.is_empty()
+        {
+            refused = true;
+            return Err(std::io::Error::other("stopped view removal is unconfirmed"));
+        }
+        current.restore_window_on_startup = false;
+        Ok(())
+    });
+    if refused {
+        Ok(false)
+    } else {
+        result.map(|_| true)
+    }
+}
+
 /// Diagnose a slow exit without abandoning its terminal persistence.
 const PANE_CLOSE_EXIT_PROOF_WAIT: Duration = Duration::from_secs(30);
 
@@ -596,16 +631,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let descendant_alive = || {
-            let mut system = sysinfo::System::new();
-            let pid = sysinfo::Pid::from_u32(child_pid);
-            system.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::Some(&[pid]),
-                true,
-                sysinfo::ProcessRefreshKind::nothing(),
-            );
-            system
-                .process(pid)
-                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+            #[cfg(windows)]
+            {
+                crate::process::host_process_liveness(child_pid)
+                    .expect("native descendant liveness must be observable")
+            }
+            #[cfg(unix)]
+            {
+                let mut system = sysinfo::System::new();
+                let pid = sysinfo::Pid::from_u32(child_pid);
+                system.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing(),
+                );
+                system
+                    .process(pid)
+                    .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+            }
         };
         assert!(descendant_alive());
         assert!(kill_and_reap(pane.pty(), "close-descendants").unwrap());

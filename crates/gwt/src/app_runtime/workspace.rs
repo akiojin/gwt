@@ -610,7 +610,7 @@ pub(super) fn invalid_successor_supersession_event(
         Some("Superseded invalid successor occupancy by authenticated recovery".to_string());
     event.related_work_item_id = Some(predecessor.id.clone());
     event.execution_container = Some(container);
-    event.bind_successor_supersession_identity()?;
+    event.bind_portable_successor_supersession_identity()?;
     Ok(event)
 }
 

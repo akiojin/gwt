@@ -11592,6 +11592,30 @@ impl IssueMonitorState {
         let profile = profile.clone();
         self.launch_profiles =
             dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
+        // ConfigSet commits this state under the prefs lock. Revoke unusable
+        // unowned deliveries here, before publication can replay them to a GUI.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let blocked = self
+            .pending_launch_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && delivery.materialized_window_id.is_none()
+                    && !self.launched_windows.contains_key(&delivery.issue_number)
+                    && !self.process_held_issues.contains(&delivery.issue_number)
+                    && !self.has_monitor_pane_for_issue(delivery.issue_number)
+            })
+            .filter_map(|delivery| {
+                self.permission_readiness_block_for_launch(delivery.issue_number, &now)
+                    .map(|record| (delivery.issue_number, record))
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.compensate_uncommitted_claims(&blocked.keys().copied().collect());
+        for (number, record) in blocked {
+            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+                self.record_permission_readiness_block(issue, &record);
+            }
+        }
         Ok(profile)
     }
 
@@ -20477,6 +20501,12 @@ impl IssueMonitorState {
                 every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
             })
             .collect::<BTreeSet<_>>();
+        self.compensate_uncommitted_claims(&cancelled_issues);
+    }
+
+    /// Exact pre-materialization compensation shared by provider holds and
+    /// profile switches. Callers select only work their gate invalidates.
+    fn compensate_uncommitted_claims(&mut self, cancelled_issues: &BTreeSet<u64>) {
         let attempting_claims = self
             .pending_effects
             .iter()
@@ -20574,9 +20604,9 @@ impl IssueMonitorState {
             if !self
                 .pending_launch_deliveries
                 .iter()
-                .any(|delivery| delivery.issue_number == issue_number)
+                .any(|delivery| delivery.issue_number == *issue_number)
             {
-                self.clear_provisional_implementation(issue_number);
+                self.clear_provisional_implementation(*issue_number);
             }
         }
         self.apply_priority_order_to_queue();

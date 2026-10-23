@@ -1,6 +1,60 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.138.1] - 2026-10-23
+
+### Bug Fixes
+
+- **gwtd:** Protocolとschemaの不一致による誤った観測を拒否する
+- **monitor:** Recheck issue tier availability after claims
+- **build:** 終了済み lifecycle の再実行を読み取り確認にする
+- **monitor:** Compensate tier-limited unclaimed deliveries
+- **ci:** CI依存をimageとオフラインcacheで安定化
+- **ci:** コンテナ内のFrontend検証をNodeの既存経路で実行
+- **ci:** ブラウザE2EだけをPlaywright imageで実行
+- **ci:** Manifestで検証済みのarchiveだけを復元
+- **pane:** 遅延終了の永続化と Work shard の可搬性を修正
+- **workspace:** Preserve legacy work history during portable writes
+- **workspace:** Publish Board milestones in the assigned worktree
+- **launch:** 起動準備中の配信をFIFOで保留する
+- **launch:** 既存ペイン採用時の起動記録を保つ
+- **build:** Preserve terminal history on abort replay
+- **agent:** Assign fresh names without numeric suffixes
+- **pm:** Guard individual tier writes with saved config token
+- **logs:** 初回 snapshot にも既存の保持上限を適用
+- **monitor:** Canvas準備完了まで新規起動を保留する
+- **monitor:** Recover generation-less active executions
+
+### Miscellaneous Tasks
+
+- **work:** Accept delivered pane status task mirrors
+- **work:** PR #6079 の配信証跡を記録
+- **work:** Record Issue 3744 PR delivery
+- **work:** Record Issue #4222 delivery scope
+- **work:** Link Issue #4222 delivery PR
+- **work:** PR #6109の連携イベントを記録
+- **work:** Record tier configuration CAS PR
+- **work:** Record Issue 6118 PR delivery
+
+### Refactor
+
+- **runtime:** 起動 cache をGUI非依存の共有処理へ移す
+- **runtime:** 起動payloadをGUI非依存の共有libraryへ移す
+
+### Testing
+
+- **hooks:** Cover monitor wait across stop obligations
+- **fleet:** Windows で orphan handle の実行を必須にする
+- **monitor:** Isolate launch fixtures from Git observation latency
+- **monitor:** Stabilize the remaining delivery preparation fixture
+- **startup:** Assert delivery stays queued during restore
+- **monitor:** Scan workerの環境ロック契約を満たす
+- **execution:** Cover autonomous completion replay
+
+### Ci
+
+- **index:** Run alternating worker benchmark on Windows nightly
+
 ## [9.138.0] - 2026-10-22
 
 ### Bug Fixes

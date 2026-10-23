@@ -504,7 +504,9 @@ choose `Back to latest entries` to resume the latest updates.
 gwt assigns each worker Agent a random memorable name in the output language
 when it starts. Its badge, window title, Fleet, Kanban, and Board show that
 name, and the PM uses it when reporting work. Names are unique across the
-project's history and survive restore and in-place restart. Issue comments
+project's history and never receive numeric suffixes; exhausted catalogs expand
+with localized family names. Automatic restoration keeps the existing name;
+explicitly restarting an Issue's Agent assigns a fresh name. Issue comments
 record assignments, handovers, PR creation, and completion; PR bodies also
 include the responsible name. The resident PM keeps its own fixed identity.
 
@@ -685,7 +687,13 @@ decision once it has been idle for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
 every idle row, and `dry_run: true` reports the targets without touching
 anything. `issue.monitor.profiles` reads the launch
-candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidate pool and `issue.monitor.profiles.set` replaces it. Both replies include
+an opaque `profiles_token`. Pass a fresh read's token as `expected_profiles_token`
+when updating the pool; a conflict leaves preferences unchanged. Re-read profiles,
+reconsider the change, and read back the successful result. The token covers the
+saved pool and its inheritance head, excluding other configuration, runtime state,
+and ABA history. Omitting the guard preserves existing callers.
+With two or more
 candidates the Monitor launches each Issue with the first eligible candidate
 (rate-limit holds and `prefer_for` routing decide eligibility; a provider
 leaves the pool when it refuses a launch, not when a usage reading predicts it
@@ -737,7 +745,13 @@ from `issue.monitor.status` or `issue.monitor.tiers`, then pass the token as
 status and reconsider the change, then read back success. The token includes
 saved `launch_auto` and `launch_tiers`. Omitting the guard keeps existing behavior;
 null, blank and non-string guards are rejected. This value comparison does not
-track ABA history or guard individual `tier.set` writes.
+track ABA history.
+For a conditional `tier.set`, pass the same fresh configuration token as
+`expected_config_token`. This prevents applying a tier index after saved settings
+change. Conflicts preserve all preferences; re-read status and reconsider, then
+read back success. The same guard validation and omission behavior apply.
+This guards configuration, without versioning individual overrides or ABA history;
+the existing non-decreasing minimum-tier merge remains in effect.
 `issue.monitor.status` exposes `launch_tier`, `landing_tier`, total `attempts`,
 excluded `non_agent_attempts`, and their difference `tier_input` on each
 observed Issue row.

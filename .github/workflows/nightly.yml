@@ -189,6 +189,13 @@ jobs:
           "HF_HUB_OFFLINE=1" >> $env:GITHUB_ENV
           "TRANSFORMERS_OFFLINE=1" >> $env:GITHUB_ENV
         timeout-minutes: 15
+      - name: Measure alternating scope searches with real E5
+        working-directory: crates/gwt-core/runtime
+        env:
+          GWT_INDEX_REAL_SEARCH_BENCHMARK: "1"
+          HF_HUB_CACHE: ${{ env.HF_HOME }}/hub
+        run: python -m unittest discover -s tests -p test_search_multi_contract.py -k test_cli_searches_reuse_worker_and_reopen_published_store -v
+        timeout-minutes: 5
       - name: Build the real-model runtime harness
         run: cargo test -p gwt --test runtime_tests --no-run
         timeout-minutes: 45

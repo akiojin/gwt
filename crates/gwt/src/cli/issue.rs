@@ -520,19 +520,29 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::MonitorTierSet {
             project_root,
+            expected_config_token,
             number,
             tier,
-        } => run_monitor_tier_set(env, project_root.as_deref(), number, tier, out)?,
+        } => run_monitor_tier_set(
+            env,
+            project_root.as_deref(),
+            expected_config_token.as_deref(),
+            number,
+            tier,
+            out,
+        )?,
         IssueCommand::MonitorProfiles { project_root } => {
             run_monitor_profiles(env, project_root.as_deref(), out)?
         }
         IssueCommand::MonitorProfilesSet {
             project_root,
+            expected_profiles_token,
             profiles,
             usage_threshold_percent,
         } => run_monitor_profiles_set(
             env,
             project_root.as_deref(),
+            expected_profiles_token.as_deref(),
             profiles,
             usage_threshold_percent,
             out,
@@ -3055,9 +3065,9 @@ fn run_monitor_stop<E: CliEnv>(
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     // No active target means this is an idempotent stop or stranded-generation recovery.
     let observed_prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let observed_identity =
-        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs)
-            .launch_identity(number);
+    let mut observed_monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs);
+    let observed_identity = observed_monitor.launch_identity(number);
     let caller_session =
         crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
     let (target_session, mut board_warning) = if observed_identity.active {
@@ -3113,6 +3123,25 @@ fn run_monitor_stop<E: CliEnv>(
         tracing::warn!(%warning, "Monitor stop Board observation failed open");
     }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let settlement = monitor_execution_settlement(&project_root, number);
+    // Session/runtime and OS process inspection must not hold the shared prefs
+    // lock. Only capture a request the observed launch would actually accept.
+    let captured_runtime_stop_request = if observed_identity.active
+        && !matches!(
+            observed_monitor.stop_only_with_settlement(&target, reason, &now, settlement),
+            crate::IssueMonitorStopOutcome::Mismatch(_)
+        ) {
+        crate::monitor_duplicate_runtime::capture_stop_request(
+            &project_root,
+            number,
+            observed_identity.window_id.as_deref().unwrap_or_default(),
+            target_session.as_deref(),
+            &now,
+        )
+        .map_err(io_as_api_error)?
+    } else {
+        None
+    };
     let (_, (outcome, identity, runtime_stop_request)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -3122,23 +3151,15 @@ fn run_monitor_stop<E: CliEnv>(
             // Issue #3992 AC-3: read before mutating, so a refusal reports the
             // identity it disagreed with rather than one a later write changed.
             let identity = monitor.launch_identity(number);
-            let outcome = monitor.stop_only_with_settlement(
-                &target,
-                reason,
-                &now,
-                monitor_execution_settlement(&project_root, number),
-            );
+            if identity != observed_identity {
+                return Err(std::io::Error::other(
+                    "Monitor launch identity changed during stop inspection; refresh the snapshot before retrying",
+                ));
+            }
+            let outcome = monitor.stop_only_with_settlement(&target, reason, &now, settlement);
             let mut runtime_stop_request = None;
             if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
-                if identity.active {
-                    runtime_stop_request = crate::monitor_duplicate_runtime::capture_stop_request(
-                        &project_root,
-                        number,
-                        identity.window_id.as_deref().unwrap_or_default(),
-                        target_session.as_deref(),
-                        &now,
-                    )?;
-                }
+                runtime_stop_request = captured_runtime_stop_request.clone();
                 if remove_from_queue {
                     monitor.terminal_queue_remove(&[number], &now);
                 }
@@ -4658,6 +4679,7 @@ fn apply_monitor_tier_set(
 fn run_monitor_tier_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_config_token: Option<&str>,
     number: u64,
     tier: u8,
     out: &mut String,
@@ -4665,6 +4687,10 @@ fn run_monitor_tier_set<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        crate::issue_monitor::check_expected_issue_monitor_config_token(
+            prefs,
+            expected_config_token,
+        )?;
         apply_monitor_tier_set(prefs, number, tier)
     })
     .map_err(io_as_api_error)?;
@@ -4701,10 +4727,19 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
         })
         .collect::<Vec<_>>();
     serde_json::json!({
+        "profiles_token": monitor_profiles_token(prefs),
         "launch_profiles": launch_profiles,
         "launch_profile_summary": status.launch_profile_summary,
         "provider_quota_holds": status.provider_quota_holds,
     })
+}
+
+/// Exactly the read set compared by IssueMonitorProfilesSetRequest::resolve.
+fn monitor_profiles_token(prefs: &crate::IssueMonitorPrefs) -> String {
+    use sha2::Digest;
+    let observed = serde_json::to_vec(&(prefs.launch_profile_pool(), &prefs.launch_profile))
+        .expect("saved launch profiles serialize");
+    format!("profiles-v1:{:x}", sha2::Sha256::digest(observed))
 }
 
 fn run_monitor_profiles<E: CliEnv>(
@@ -4803,6 +4838,7 @@ fn apply_monitor_profiles_set(
 fn run_monitor_profiles_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_profiles_token: Option<&str>,
     profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
     usage_threshold_percent: Option<u8>,
     out: &mut String,
@@ -4810,6 +4846,7 @@ fn run_monitor_profiles_set<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     set_monitor_profiles(
         &project_root,
+        expected_profiles_token,
         profiles,
         usage_threshold_percent,
         out,
@@ -4819,6 +4856,7 @@ fn run_monitor_profiles_set<E: CliEnv>(
 
 fn set_monitor_profiles(
     project_root: &std::path::Path,
+    expected_profiles_token: Option<&str>,
     profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
     usage_threshold_percent: Option<u8>,
     out: &mut String,
@@ -4830,6 +4868,15 @@ fn set_monitor_profiles(
 ) -> Result<i32, SpecOpsError> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let saved = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    if expected_profiles_token.is_some_and(|expected| expected != monitor_profiles_token(&saved)) {
+        return Err(io_as_api_error(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Issue Monitor profiles changed since observation; re-read issue.monitor.profiles and reconsider the pool before retrying",
+        )));
+    }
+    // Capture exactly the token's pool/head. The unchanged daemon/fallback
+    // read-set comparison fences this observation under the writer lock;
+    // no new precondition is sent for an older daemon to silently ignore.
     let request = crate::issue_monitor::IssueMonitorProfilesSetRequest::capture(&saved, profiles)
         .map_err(io_as_api_error)?;
 
@@ -13778,15 +13825,15 @@ mod tests {
             &mut out,
         )
         .unwrap();
-        run_monitor_tier_set(&env, None, 4774, 1, &mut out).unwrap();
-        run_monitor_tier_set(&env, None, 4774, 0, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 4774, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 4774, 0, &mut out).unwrap();
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         assert_eq!(prefs.launch_profile_pool(), saved_pool);
         assert!(prefs.launch_auto);
         assert_eq!(prefs.tier_overrides[&4774], 1);
         assert_eq!(prefs.effective_launch_tiers().len(), 2);
         let before = fs::read(&path).unwrap();
-        assert!(run_monitor_tier_set(&env, None, 4774, 2, &mut out).is_err());
+        assert!(run_monitor_tier_set(&env, None, None, 4774, 2, &mut out).is_err());
         assert!(run_monitor_tiers_set(&env, None, None, true, Some(vec![]), &mut out).is_err());
         assert!(
             run_monitor_tiers_set(&env, None, None, true, Some(vec![vec![]]), &mut out).is_err()
@@ -13834,6 +13881,7 @@ mod tests {
             &mut env,
             IssueCommand::MonitorProfilesSet {
                 project_root: Some(repo.clone()),
+                expected_profiles_token: None,
                 profiles: vec![codex, pool_patch("claude", &["kind:spec"])],
                 usage_threshold_percent: Some(70),
             },
@@ -13921,6 +13969,7 @@ command = "my-agent-cli"
         run_monitor_profiles_set(
             &env,
             Some(&repo),
+            None,
             vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
             None,
             &mut String::new(),
@@ -13970,6 +14019,7 @@ command = "my-agent-cli"
             &mut env,
             IssueCommand::MonitorProfilesSet {
                 project_root: Some(repo.clone()),
+                expected_profiles_token: None,
                 profiles,
                 usage_threshold_percent: None,
             },
@@ -14030,27 +14080,41 @@ command = "my-agent-cli"
         let mut initial = crate::IssueMonitorPrefs::default();
         initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
         crate::save_issue_monitor_prefs(&path, &initial).unwrap();
-        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
-        let result = set_monitor_profiles(&repo, patches, None, &mut String::new(), |_, _| {
-            // A second writer commits after the first request captured its base,
-            // before the transport fails and the first enters local fallback.
-            let path = path.clone();
-            std::thread::spawn(move || {
-                crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
-                    let mut pool = prefs.launch_profile_pool();
-                    pool[0].model = Some("competing-model".into());
-                    apply_monitor_profiles_set(prefs, &pool, None)
+        let patches: Vec<crate::IssueMonitorLaunchProfilePatch> =
+            serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let before = fs::read(&path).unwrap();
+        let error = set_monitor_profiles(
+            &repo,
+            Some("stale-pool"),
+            patches.clone(),
+            None,
+            &mut String::new(),
+            |_, _| panic!("stale observation must refuse before publishing"),
+        )
+        .expect_err("stale pool");
+        assert!(error.to_string().contains("reconsider"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let result =
+            set_monitor_profiles(&repo, None, patches, None, &mut String::new(), |_, _| {
+                // A second writer commits after the first request captured its base,
+                // before the transport fails and the first enters local fallback.
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                        let mut pool = prefs.launch_profile_pool();
+                        pool[0].model = Some("competing-model".into());
+                        apply_monitor_profiles_set(prefs, &pool, None)
+                    })
+                    .unwrap();
                 })
+                .join()
                 .unwrap();
-            })
-            .join()
-            .unwrap();
-            Err(
+                Err(
                 crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
                     "offline".into(),
                 ),
             )
-        });
+            });
         assert!(
             result.is_err(),
             "stale fallback must explicitly refuse the competing write"
@@ -14079,7 +14143,7 @@ command = "my-agent-cli"
         crate::save_issue_monitor_prefs(&path, &initial).unwrap();
         let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
         let mut out = String::new();
-        set_monitor_profiles(&repo, patches, None, &mut out, |_, _| {
+        set_monitor_profiles(&repo, None, patches, None, &mut out, |_, _| {
             // Emulate the durable ACK, followed by a later independent commit
             // before the original caller resumes to render its response.
             crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
@@ -14097,6 +14161,18 @@ command = "my-agent-cli"
         })
         .unwrap();
         let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(response["profiles_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+        assert_eq!(
+            response["profiles_token"],
+            monitor_profiles_projection(&initial)["profiles_token"]
+        );
+        assert_ne!(
+            response["profiles_token"],
+            monitor_profiles_projection(&crate::load_issue_monitor_prefs(&path).unwrap())
+                ["profiles_token"]
+        );
         let model_change = response["changes"]
             .as_array()
             .unwrap()
@@ -14167,6 +14243,7 @@ command = "my-agent-cli"
             let mut out = String::new();
             let result = set_monitor_profiles(
                 &repo,
+                None,
                 profiles,
                 usage_threshold_percent,
                 &mut out,

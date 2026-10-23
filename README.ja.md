@@ -475,7 +475,9 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 
 gwt は作業 Agent の起動時に、出力言語に合う覚えやすい名前をランダムに割り当てます。
 バッジ・ウィンドウタイトル・Fleet・Kanban・Board に表示し、PM も名前で状況を報告します。
-名前はプロジェクトの過去の担当名と重複せず、復元・その場での再起動をまたいで維持します。
+名前はプロジェクトの過去の担当名と重複せず、番号の接尾辞は付けません。
+候補を使い切ると言語に合う姓を組み合わせて候補を広げます。
+自動復元では既存の名前を維持し、Issue を担当する Agent の明示的な再起動では新しい名前を割り当てます。
 担当開始・引継ぎ・PR 作成・完了は担当名付きで Issue のコメントに残り、PR 本文にも担当名を載せます。
 常駐 PM は独自の固定表示を維持します。
 
@@ -632,7 +634,12 @@ idle になったエージェント窓はスロットを自動的に解放しま
 判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
-プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+プールを置き換えます。両応答は opaque な `profiles_token` を返します。
+更新時は直前に読み取った token を `expected_profiles_token` に渡します。競合時は
+preferences を変更せず拒否するので、profiles を再読して変更を再評価し、成功後も
+読み戻してください。token の対象は保存プールと継承元の先頭候補であり、他の設定、
+runtime 状態、ABA 履歴は対象外です。guard を省略した既存呼び出しは互換です。
+候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold と `prefer_for` routing が適格性を決め、provider は
 使用率の読み値による予測ではなく、起動を拒否した時点でプールから外れる。
 詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
@@ -677,7 +684,12 @@ backoffに使う総試行回数には数えます。
 その token を `expected_config_token` として渡します。不一致なら設定ファイル全体を
 変更せず拒否するため、status を再読して変更を再判断し、成功後も読み戻して確認します。
 token は保存された `launch_auto` と `launch_tiers` を含みます。guard の省略は従来互換を保ち、
-null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴や個別の `tier.set` は保護しません。
+null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴は検知しません。
+条件付きの `tier.set` にも、同じ fresh な設定 token を `expected_config_token` として渡せます。
+保存設定が変わった後の tier 番号の適用を防ぎます。競合時は設定ファイル全体を変更せず拒否するため、
+status を再読して変更を再判断し、成功後も読み戻して確認します。guard の検証と省略時の互換性は同じです。
+これは保存設定の比較であり、個別 override の履歴や ABA 履歴は検知しません。
+既存の段の下限を下げない更新は維持します。
 `issue.monitor.status` の各行には `launch_tier` と `landing_tier` に加え、総試行回数の
 `attempts`、段に数えなかった `non_agent_attempts`、差分の `tier_input` が表示されます。
 着地は、担当Issueとセッションが一致するWorkの `done` 更新成功を指します。

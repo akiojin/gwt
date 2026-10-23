@@ -8506,6 +8506,11 @@ pub fn canonical_workspace_work_event_bytes(
             container.worktree_path = Some(PathBuf::from("."));
         }
     }
+    // Historical path-bound audits authenticate the absolute path too. Keep
+    // their payload intact rather than publishing a shard with an invalid ID.
+    if event.is_successor_supersession() && !portable.is_successor_supersession() {
+        return serialized_workspace_work_event_bytes(event);
+    }
     serialized_workspace_work_event_bytes(&portable)
 }
 

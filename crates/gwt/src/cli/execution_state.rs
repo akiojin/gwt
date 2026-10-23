@@ -3221,7 +3221,10 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     };
     let contents = match read_owner_ledger_from_dir(&context.owner_dir) {
         Ok(Some(contents)) => contents,
-        Ok(None) => return diagnosis,
+        Ok(None) => {
+            diagnose_legacy_active_owner(&context.worktree, owner, &mut diagnosis);
+            return diagnosis;
+        }
         Err(error) => {
             diagnosis.warnings.push(error.to_string());
             diagnosis.recommended_recovery = "unavailable".to_string();
@@ -3393,6 +3396,80 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         );
     }
     diagnosis
+}
+
+/// Read-only pre-generation diagnosis, including a PM in another worktree.
+fn diagnose_legacy_active_owner(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    diagnosis: &mut OwnerExecutionDiagnosis,
+) {
+    let inspect = |path: &Path, diagnosis: &mut OwnerExecutionDiagnosis| {
+        let contents = match read_record_contents(path) {
+            Ok(Some(contents)) => contents,
+            Ok(None) => return false,
+            Err(error) => {
+                diagnosis
+                    .warnings
+                    .push(format!("{}: {error}", path.display()));
+                return false;
+            }
+        };
+        let Ok(record) = serde_json::from_str::<ExecutionControlRecord>(&contents)
+            .map(hydrate_recovery_envelopes)
+        else {
+            return false;
+        };
+        if record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.status != ExecutionControlStatus::Active
+        {
+            return false;
+        }
+        // A damaged generation pointer is not a legacy execution.
+        let has_generation_pointer = generation_pointer_path(path).exists()
+            || crate::cli::trusted_store::trusted_dir_for_worktree(path)
+                .is_some_and(|dir| dir.join(GENERATION_POINTER_FILE).exists());
+        diagnosis.ecr_status = Some(record.status);
+        diagnosis.holder_session_id = Some(record.primary_session_id.clone());
+        diagnosis.holder_worktree = Some(
+            dunce::canonicalize(path)
+                .unwrap_or_else(|_| path.to_path_buf())
+                .display()
+                .to_string(),
+        );
+        diagnosis.generation_entrypoint = Some(record.entrypoint.clone());
+        diagnosis.generation_activated_at = Some(record.launched_at);
+        diagnosis.holder_runtime = Some("unknown".to_string());
+        diagnosis.recommended_recovery_reason =
+            "A legacy Active execution exists without a generation ledger. The next Issue Monitor launch will import it while preserving its holder and Active status, then refuse duplicate production. Read execution.status again after import and use its issue.monitor.stop recovery before requeueing."
+                .to_string();
+        if has_generation_pointer {
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "A generation pointer exists without its owner ledger; this is damaged generation authority, not a legacy execution."
+                    .to_string();
+        } else if !integrity_ok(&record) {
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The legacy Active execution failed integrity validation; it cannot be imported safely."
+                    .to_string();
+        }
+        true
+    };
+    if inspect(worktree, diagnosis) {
+        return;
+    }
+    match crate::worktree_inventory::enumerate_worktrees(worktree, None) {
+        Ok(worktrees) => {
+            for entry in worktrees {
+                if entry.path != worktree && inspect(&entry.path, diagnosis) {
+                    break;
+                }
+            }
+        }
+        Err(error) => diagnosis.warnings.push(error.to_string()),
+    }
 }
 
 fn owner_generation_ledger_exists(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<bool> {
@@ -5440,7 +5517,7 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     )
 }
 
-/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// Clean up one exact captured holder runtime, including a historical generation.
 /// The caller must recheck its captured runtime proof under this lease before
 /// signalling the PTY. This authority never permits producing operations.
 pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
@@ -5531,13 +5608,33 @@ fn with_current_session_execution_identity_lease<T>(
                 .as_ref()
                 != Some(expected)
                 || canonical_worktree != context.worktree
-                || !current_execution_binding_matches_context(
+            {
+                return Ok(None);
+            }
+            let binding_matches = match authority {
+                CurrentExecutionBindingAuthority::RuntimeCleanup => {
+                    let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+                        return Ok(None);
+                    };
+                    ledger.generations.iter().any(|generation| {
+                        generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                            && authority.allows(ledger.effective_status_for(generation))
+                            && execution_binding_matches_historical_prefix(
+                                &ledger,
+                                generation,
+                                &expected.session_id,
+                                &binding.identity,
+                            )
+                    })
+                }
+                _ => current_execution_binding_matches_context(
                     context,
                     &expected.session_id,
                     &binding.identity,
                     authority,
-                )?
-            {
+                )?,
+            };
+            if !binding_matches {
                 return Ok(None);
             }
             Ok(Some(operation()))
@@ -21975,6 +22072,73 @@ mod tests {
     }
 
     #[test]
+    fn issue_6118_owner_status_finds_legacy_active_in_another_worktree_without_writing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let project = tempfile::tempdir().unwrap();
+        let main = project.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&main);
+        let legacy_worktree = project.path().join("legacy");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "--detach", "-q"])
+            .arg(&legacy_worktree)
+            .arg("HEAD")
+            .current_dir(&main)
+            .status()
+            .unwrap();
+        assert!(status.success(), "create linked fixture worktree");
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 6118,
+        };
+        let mut legacy = active_record("legacy-july-holder");
+        legacy.owner_kind = owner.kind;
+        legacy.owner_number = owner.number;
+        legacy.launched_at = "2026-07-28T00:00:00Z".parse().unwrap();
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        let legacy_path = state_path(&legacy_worktree);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+        let diagnosis = diagnose_owner(&main, owner);
+
+        assert_eq!(diagnosis.ecr_status, Some(ExecutionControlStatus::Active));
+        assert_eq!(
+            diagnosis.holder_session_id.as_deref(),
+            Some("legacy-july-holder")
+        );
+        assert_eq!(
+            diagnosis.holder_worktree.as_deref().map(Path::new),
+            Some(dunce::canonicalize(&legacy_worktree).unwrap().as_path())
+        );
+        assert_eq!(diagnosis.generation_activated_at, Some(legacy.launched_at));
+        assert!(diagnosis.generation_id.is_none());
+        assert!(!diagnosis.reclaimable);
+        assert_eq!(diagnosis.recommended_recovery, "gwt-execute");
+        assert!(diagnosis.recommended_recovery_reason.contains("import"));
+        assert!(diagnosis
+            .recommended_recovery_reason
+            .contains("issue.monitor.stop"));
+        assert!(!diagnosis
+            .recommended_recovery_reason
+            .contains("a fresh launch can take it"));
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+        assert!(!generation_ledger_path(&legacy_worktree, owner)
+            .unwrap()
+            .exists());
+        assert!(!generation_pointer_path(&legacy_worktree).exists());
+        assert!(!crate::cli::trusted_store::under_trusted_management(
+            &legacy_worktree
+        ));
+    }
+
+    #[test]
     fn issue_5535_unknown_holder_names_the_pm_stop_recovery() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -23477,6 +23641,21 @@ mod tests {
             LegacyActiveDisposition::Unknown,
         )
         .unwrap();
+        let predecessor_binding = current_execution_binding(predecessor_dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            predecessor_dir.path(),
+            owner,
+            "session-original",
+            predecessor_binding,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor =
+            gwt_agent::Session::load(&sessions_dir.join("session-original.toml")).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&predecessor)
+            .unwrap()
+            .unwrap();
 
         let request = successor_request("operation-new-worktree", "principal-a", "continue-work");
         prepare_successor(successor_dir.path(), owner, &request).unwrap();
@@ -23494,6 +23673,38 @@ mod tests {
             !integrity_ok(&loaded),
             "a stale predecessor projection must fail closed instead of reviving completion"
         );
+        let ledger_before =
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap();
+        let successor_before = generation_authority_bytes(successor_dir.path(), owner);
+        assert!(
+            with_current_active_session_execution_identity_lease(&sessions_dir, &identity, || ())
+                .unwrap_or(None)
+                .is_none(),
+            "a historical predecessor must never regain producing authority"
+        );
+        assert_eq!(
+            with_current_runtime_cleanup_session_execution_identity_lease(
+                &sessions_dir,
+                &identity,
+                || "captured predecessor cleanup",
+            )
+            .expect("historical cleanup must not require the old worktree pointer"),
+            Some("captured predecessor cleanup"),
+        );
+        assert_eq!(
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap(),
+            ledger_before,
+            "cleanup authority must not change the owner ledger"
+        );
+        assert_eq!(
+            generation_authority_bytes(successor_dir.path(), owner),
+            successor_before,
+            "cleanup authority must not change successor projections"
+        );
+        assert!(!predecessor_trusted_dir
+            .join(GENERATION_POINTER_FILE)
+            .exists());
+        assert!(!generation_pointer_path(predecessor_dir.path()).exists());
     }
 
     #[test]

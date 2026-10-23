@@ -86,6 +86,7 @@ pub(crate) struct CloseWindowOutcome {
 pub(crate) struct PeerPaneCloseReply {
     pub(super) client_id: String,
     pub(super) session_id: Option<String>,
+    pub(super) stopped_husk: bool,
 }
 
 /// Issue #4234 AC-3: every `AppRuntime` map that is keyed by a combined window
@@ -771,6 +772,15 @@ impl AppRuntime {
             };
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        let stopped_husk = !self.runtimes.contains_key(id)
+            && !self.has_pending_agent_launch_worker(id)
+            && id
+                .strip_prefix(&format!("{}::", context.tab_id))
+                .and_then(|raw_id| self.tab(&context.tab_id)?.workspace.window(raw_id))
+                .is_some_and(|window| {
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && window.status == WindowProcessStatus::Stopped
+                });
         let peer_reply = peer_client_id.and_then(|client_id| {
             let session_id = self
                 .active_agent_sessions
@@ -787,6 +797,7 @@ impl AppRuntime {
             (self.runtimes.contains_key(id) || session_id.is_some()).then_some(PeerPaneCloseReply {
                 client_id,
                 session_id,
+                stopped_husk,
             })
         });
         let reply_deferred = peer_reply.is_some();

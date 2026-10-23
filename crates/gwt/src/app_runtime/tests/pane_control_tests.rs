@@ -2787,68 +2787,170 @@ fn agent_pane_close_removes_husk_window_missing_from_lookup() {
 
 #[test]
 fn agent_pane_close_removes_restored_session_husk_without_claiming_tree_exit() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-husk",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Stopped,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-husk", Some("restored-session".to_string())));
-    let (mut runtime, recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    runtime.window_lookup.remove("tab-project::agent-husk");
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+    for boundary in [
+        "restored",
+        "view_only",
+        "running",
+        "current_host",
+        "live",
+        "unknown",
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project");
+        let mut tab = sample_project_tab_with_window_at(
+            "tab-project",
+            "agent-husk",
+            project.clone(),
+            WindowPreset::Agent,
+            if boundary == "running" {
+                WindowProcessStatus::Running
+            } else {
+                WindowProcessStatus::Stopped
+            },
+        );
+        assert!(tab
+            .workspace
+            .set_session_id("agent-husk", Some("restored-session".to_string())));
+        let (mut runtime, recorded) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+        let mut session =
+            gwt_agent::Session::new(&project, "work/restored", gwt_agent::AgentId::Codex);
+        session.id = "restored-session".to_string();
+        session.status = gwt_agent::AgentStatus::Running;
+        session.restore_window_on_startup = true;
+        session
+            .save(&runtime.sessions_dir)
+            .expect("persist restored Session");
+        if boundary == "current_host" {
+            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+                .save(&gwt_agent::runtime_state_path_for_pid(
+                    &runtime.sessions_dir,
+                    std::process::id(),
+                    &session.id,
+                ))
+                .expect("publish current Host runtime");
+        } else if boundary == "live" {
+            let mut state = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            state.child_pid = Some(std::process::id());
+            state.child_started_at = gwt::process::host_process_start_time(std::process::id());
+            state
+                .save(&gwt_agent::runtime_state_path_for_pid(
+                    &runtime.sessions_dir,
+                    i32::MAX as u32,
+                    &session.id,
+                ))
+                .unwrap();
+        } else if boundary == "unknown" {
+            let path = gwt_agent::runtime_state_path_for_pid(
+                &runtime.sessions_dir,
+                i32::MAX as u32,
+                &session.id,
+            );
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"unreadable runtime evidence").unwrap();
+        }
+        runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+        let mut active = sample_active_agent_session("tab-project", "tab-project::agent-husk");
+        active.session_id = session.id.clone();
+        active.branch_name = session.branch.clone();
+        active.worktree_path = project.clone();
+        active.agent_project_root = project.display().to_string();
+        if boundary != "view_only" {
+            runtime
+                .active_agent_sessions
+                .insert(active.window_id.clone(), active);
+        }
+        runtime.window_lookup.remove("tab-project::agent-husk");
+        let (spawner, finalizers) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let principal =
+            AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
 
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-husk".to_string(),
-            request_id: None,
-            responder: None,
-        },
-    );
+        let events = runtime.handle_agent_frontend_event(
+            "pane-client".to_string(),
+            principal,
+            AgentFrontendRequest::CloseWindow {
+                id: "tab-project::agent-husk".to_string(),
+                request_id: None,
+                responder: None,
+            },
+        );
 
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-    assert!(runtime
-        .tab("tab-project")
-        .expect("project tab")
-        .workspace
-        .window("agent-husk")
-        .is_none());
-    let queued = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain(..)
-        .collect::<Vec<_>>();
-    assert_eq!(queued.len(), 1);
-    for finalizer in queued {
-        finalizer();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
+        assert!(runtime
+            .tab("tab-project")
+            .expect("project tab")
+            .workspace
+            .window("agent-husk")
+            .is_none());
+        let queued = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect::<Vec<_>>();
+        assert_eq!(queued.len(), 1);
+        for finalizer in queued {
+            finalizer();
+        }
+        let durable =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+                .expect("reload restored Session");
+        if matches!(boundary, "restored" | "view_only") {
+            assert_eq!(durable.status, gwt_agent::AgentStatus::Running);
+            assert!(!durable.restore_window_on_startup);
+        } else {
+            assert_eq!(
+                durable.status,
+                gwt_agent::AgentStatus::Running,
+                "{boundary}"
+            );
+            assert!(durable.restore_window_on_startup, "{boundary}");
+        }
+        let recorded = recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reply = recorded
+            .iter()
+            .find_map(|event| {
+                match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => events.iter().find(|event| {
+                matches!(&event.target, DispatchTarget::Client(id) if id == "pane-client")
+            }),
+            _ => None,
+        }
+            })
+            .expect("client-scoped close result");
+        let payload = serde_json::to_value(&reply.event).unwrap();
+        assert_eq!(payload["window_id"], "tab-project::agent-husk");
+        if matches!(boundary, "restored" | "view_only") {
+            assert_eq!(payload["kind"], "pane_husk_removed");
+            assert!(
+                payload.get("ok").is_none(),
+                "view removal is not exit proof"
+            );
+            let reference_policy = BackendEvent::PaneCloseResult {
+                ok: false,
+                window_id: String::new(),
+                reason: None,
+            }
+            .delivery_policy();
+            assert_eq!(
+                reply.event.delivery_policy().delivery,
+                reference_policy.delivery
+            );
+            assert_eq!(
+                reply.event.delivery_policy().backpressure,
+                reference_policy.backpressure
+            );
+        } else {
+            assert_eq!(payload["kind"], "pane_close_result", "{boundary}");
+            assert_eq!(payload["ok"], false, "{boundary}");
+        }
     }
-    let recorded = recorded
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(recorded.iter().any(|event| match recorded_project_payload(event) {
-        UserEvent::Dispatch(events) => events.iter().any(|event| matches!(event,
-            OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::PaneCloseResult { ok: false, window_id, reason: Some(reason) },
-                ..
-            } if client_id == "pane-client" && window_id == "tab-project::agent-husk" && reason.contains("not confirmed")
-        )),
-        _ => false,
-    }));
 }
 
 #[test]
