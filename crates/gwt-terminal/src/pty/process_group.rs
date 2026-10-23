@@ -427,9 +427,23 @@ mod imp {
 
     #[cfg(target_os = "linux")]
     fn native_process(pid: libc::pid_t) -> Result<Option<NativeProcess>, String> {
-        let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+        native_process_from_stat(pid, std::fs::read(format!("/proc/{pid}/stat")))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_process_from_stat(
+        pid: libc::pid_t,
+        stat: std::io::Result<Vec<u8>>,
+    ) -> Result<Option<NativeProcess>, String> {
+        let stat = match stat {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            // A procfs file opened before exit can return ESRCH when read.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(format!("observe PTY session process {pid}: {error}")),
         };
         let fields = stat
@@ -451,6 +465,27 @@ mod imp {
             started: [started, 0],
             running: !matches!(fields[0], "Z" | "X"),
         }))
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    #[test]
+    fn native_process_stat_distinguishes_disappearance_from_observation_failure() {
+        for code in [libc::ENOENT, libc::ESRCH] {
+            let result =
+                native_process_from_stat(4242, Err(std::io::Error::from_raw_os_error(code)));
+            assert!(
+                result.unwrap().is_none(),
+                "process disappeared: errno {code}"
+            );
+        }
+        for code in [libc::EACCES, libc::EPERM, libc::EIO] {
+            let result =
+                native_process_from_stat(4242, Err(std::io::Error::from_raw_os_error(code)));
+            assert!(
+                result.is_err(),
+                "observation failure must remain an error: errno {code}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
