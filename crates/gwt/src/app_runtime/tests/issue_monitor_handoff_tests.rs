@@ -156,6 +156,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         let launched = gwt::cli::run(
             &mut env,
             gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 project_root: Some(project),
                 expected_priority_order: None,
                 number: 3165,

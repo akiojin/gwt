@@ -807,6 +807,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: lookup(params, "expected_queue_order")
+                    .map(|_| required_u64_vec(params, "expected_queue_order"))
+                    .transpose()?,
                 project_root: optional_path(params, "project_root")?,
                 number: required_u64(params, "number")?,
                 expected_priority_order: lookup(params, "expected_priority_order")
@@ -5807,6 +5810,7 @@ mod tests {
         assert_eq!(
             ok("issue.monitor.launch_now", json!({"number": 42})),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: None,
                 number: 42,
@@ -5818,6 +5822,7 @@ mod tests {
                 json!({"project_root": "/tmp/project", "number": 7})
             ),
             CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 expected_priority_order: None,
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
@@ -6372,11 +6377,24 @@ mod tests {
                 json!({"number":42,"position":0}),
             ),
             ("issue.monitor.queue.remove", json!({"numbers":[42]})),
+            ("issue.monitor.launch_now", json!({"number":42})),
+            ("issue.monitor.launch-now", json!({"number":42})),
         ] {
             let unconditional = ok(operation, params.clone());
             params["expected_queue_order"] = json!([]);
             assert_ne!(ok(operation, params.clone()), unconditional);
-            for invalid in [Value::Null, json!("1,2")] {
+            params["expected_queue_order"] = json!([42]);
+            let numeric = ok(operation, params.clone());
+            params["expected_queue_order"] = json!(["42"]);
+            assert_eq!(ok(operation, params.clone()), numeric);
+            for invalid in [
+                Value::Null,
+                json!("1,2"),
+                json!([null]),
+                json!([true]),
+                json!([1.5]),
+                json!([-1]),
+            ] {
                 params["expected_queue_order"] = invalid;
                 assert!(matches!(
                     err(operation, params.clone()),
