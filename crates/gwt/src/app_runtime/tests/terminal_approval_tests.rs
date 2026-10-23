@@ -10,7 +10,7 @@ fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-merged-cleanup-row",
@@ -66,7 +66,7 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-merged-grouped-row",
@@ -146,7 +146,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
     let repo = temp.path().join("repo");
     let worktree = repo.join("work/20260616-0203");
     fs::create_dir_all(&worktree).expect("create worktree");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-live-cwd-cleanup-row",

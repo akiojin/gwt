@@ -47,7 +47,8 @@ const SOURCE_LIST: &str = "source-list:v1";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
-const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v10-legacy-log-metadata-cache";
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
+    "source-context-v11-source-relative-event-containers";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -1397,15 +1398,13 @@ fn worktree_event_sources(
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
     let mut sources = Vec::new();
     for entry in entries {
-        let container = entry.branch.clone().map(|branch| {
-            Arc::new(WorkspaceExecutionContainerRef {
-                branch: Some(branch),
-                worktree_path: Some(entry.path.clone()),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            })
-        });
+        let container = Some(Arc::new(WorkspaceExecutionContainerRef {
+            branch: entry.branch.clone(),
+            worktree_path: Some(entry.path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }));
         let legacy_path = entry.path.join(EVENTS_TREE_PATH);
         match std::fs::symlink_metadata(&legacy_path) {
             Ok(metadata) => sources.push(WorkEventsSource {

@@ -25,6 +25,8 @@ mod projection;
 pub mod store_migration;
 mod work_items;
 
+pub(crate) use persistence::resolve_workspace_work_event_container;
+
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
     can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
@@ -38,11 +40,11 @@ pub use lifecycle::{
 };
 pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
-    classify_workspace_projections, current_work_id, current_work_id_for_launch,
-    decode_workspace_work_event_line, decompose_legacy_multi_branch_work_items,
-    decompose_legacy_multi_branch_work_items_paths, detach_foreign_container_refs,
-    detach_foreign_container_refs_for_work_event_root, emit_workspace_discard_event_for_session,
-    emit_workspace_discard_event_for_session_outcome,
+    canonical_workspace_work_event_bytes, classify_workspace_projections, current_work_id,
+    current_work_id_for_launch, decode_workspace_work_event_line,
+    decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
+    detach_foreign_container_refs, detach_foreign_container_refs_for_work_event_root,
+    emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
     emit_workspace_discard_event_for_session_outcome_paths,
     emit_workspace_discard_event_for_session_paths, emit_workspace_discard_event_if_absent,
     emit_workspace_discard_event_if_absent_paths, emit_workspace_done_event_for_branch,

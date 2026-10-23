@@ -3923,6 +3923,14 @@ fn assert_fresh_execution_preserves_terminal_work(
                     projection.id.clone(),
                     Utc::now(),
                 );
+                // The foreign container is historical input, not a new local
+                // shard. Seed its original bytes before transaction replay.
+                let shard =
+                    gwt_core::paths::gwt_repo_local_work_event_shard_path(&repo, &other_host.id);
+                fs::create_dir_all(shard.parent().expect("legacy shard bucket"))?;
+                let mut bytes = serde_json::to_vec(&other_host).expect("legacy event");
+                bytes.push(b'\n');
+                fs::write(shard, bytes)?;
                 Ok((projection.id.clone(), vec![other_host, event]))
             },
         )
