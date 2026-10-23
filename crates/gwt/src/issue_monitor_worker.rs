@@ -5668,6 +5668,51 @@ pub(crate) mod tests {
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
     }
 
+    #[test]
+    fn permission_readiness_manual_profile_writes_preserve_auto_spec_deliveries() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        prefs.launch_auto = true;
+        prefs.launch_tiers = vec![
+            vec![unsupported_launch_profile("openclaw")],
+            vec![unsupported_launch_profile("codex")],
+        ];
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(IssueMonitorIssue {
+            labels: vec!["gwt-spec".into()],
+            readiness: IssueMonitorReadiness::Ready,
+            ..issue(42)
+        });
+        assert!(monitor.apply_confirmed_claim(42, "claim", "host:1", "effect", now));
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        let original = monitor.prefs();
+
+        // Cold profile writers have no inbox. Saving the unused manual pool
+        // must not misclassify this SPEC as a tier-0 Issue and release its claim.
+        for replace_pool in [false, true] {
+            let mut cold =
+                test_monitor_with_prefs(crate::IssueMonitorConfig::default(), original.clone());
+            assert!(cold.inbox_item(42).is_none());
+            if replace_pool {
+                cold.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                cold.switch_launch_profile_agent("openclaw").unwrap();
+            }
+            let committed = cold.prefs();
+            cold.rebase_daemon_driver_prefs(&committed);
+            assert_eq!(cold.pending_launch_delivery_id(42), Some(delivery.clone()));
+            assert_eq!(cold.active_count(), 1);
+            assert_eq!(committed.launch_profile_pool()[0].agent_id, "openclaw");
+            assert_eq!(committed.launch_tiers, original.launch_tiers);
+            assert!(committed.pending_effects.iter().all(|effect| !matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
+            )));
+        }
+    }
+
     /// A launch profile naming `agent_id`, with every other field at the value
     /// a freshly saved profile carries.
     fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
