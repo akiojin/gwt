@@ -319,6 +319,48 @@ fn view_uses_the_current_pr_base_instead_of_the_retained_base() {
 }
 
 #[test]
+fn view_distinguishes_unprovable_from_matching_fresh_heads() {
+    use crate::cli::verification_record as verification;
+    let fixture = RemoteFixture::new();
+    let record = fixture.canonical_record();
+    let matched = fixture.view();
+    assert!(matched.contains("classification=matched"), "{matched}");
+    assert!(
+        matched.contains("local_verification_fresh=true"),
+        "{matched}"
+    );
+    assert!(!matched.contains("PR head drift detected"), "{matched}");
+
+    // ls-remote still succeeds, but fetch cannot prove the comparison.
+    git(
+        &fixture.verified_repo,
+        &["config", "fetch.output", "invalid"],
+    );
+    let check = fixture.check();
+    assert_eq!(check.classification, "unprovable");
+    assert_eq!(check.remote_head, fixture.verified_head);
+    assert_eq!(
+        git(
+            &fixture.verified_repo,
+            &["rev-parse", "HEAD", "@{upstream}"]
+        ),
+        format!("{}\n{}", fixture.verified_head, fixture.verified_head)
+    );
+    let out = fixture.view();
+    assert!(out.contains("classification=unprovable"), "{out}");
+    assert!(out.contains("local_verification_fresh=true"), "{out}");
+    assert!(out.contains("drift has not been established"), "{out}");
+    assert!(!out.contains("PR head drift detected"), "{out}");
+    assert!(!out.contains("fast-forward"), "{out}");
+    assert!(!out.contains("rerun verify.plan / verify.run"), "{out}");
+    assert_eq!(
+        verification::load(&fixture.verified_repo).unwrap().unwrap(),
+        record,
+        "diagnostics must preserve the original verification evidence"
+    );
+}
+
+#[test]
 fn all_four_routes_share_the_bookkeeping_freshness_rule() {
     // AC-5 is also an architecture contract: paired behavioral tests would
     // still pass if a later change copied the exception into another gate.
@@ -376,6 +418,12 @@ fn bookkeeping_and_product_heads_agree_across_view_head_check_and_freshness() {
             "{out}"
         );
         assert_eq!(out.contains("PR head drift detected"), product, "{out}");
+        assert_eq!(out.contains("fast-forward locally"), product, "{out}");
+        assert_eq!(
+            out.contains("rerun verify.plan / verify.run"),
+            product,
+            "{out}"
+        );
         let unavailable = fixture.view_for_base(None);
         assert_eq!(unavailable.contains("PR head drift detected"), product,
             "canonical shards remain provable without a live base, while product history stays protected: {unavailable}");
