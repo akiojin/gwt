@@ -30,6 +30,8 @@ $realGit = (Get-Command git -CommandType Application).Source
 # Resolve the selected compiler before fresh HOME hides rustup's toolchain state.
 $rustc = (& rustup which rustc).Trim()
 if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $rustc -PathType Leaf)) { throw 'Cannot resolve the active Rust compiler.' }
+$cargo = (& rustup which cargo).Trim()
+if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $cargo -PathType Leaf)) { throw 'Cannot resolve the active Cargo executable.' }
 $environment = @{}
 foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
   if ($entry.Key -notmatch '^(GWT_|CODEX_|CLAUDE_|GH_TOKEN$|GITHUB_TOKEN$|OPENAI_API_KEY$|ANTHROPIC_API_KEY$)') { $environment[$entry.Key] = [string]$entry.Value }
@@ -106,9 +108,22 @@ $exitCode = 1
 $streams = @{}
 try {
   # Compile only the local command fixture, never an agent/provider package.
+  # Keep the caller's HOME and Cargo caches for this host build. Its artifact
+  # messages bind both extern crates to one dependency graph, including features.
+  $artifactLines = & $cargo build --offline -p gwt --lib --message-format=json --target-dir "$repoRoot/target" --manifest-path "$repoRoot/Cargo.toml"
+  if ($LASTEXITCODE) { throw 'Cannot resolve fixture libraries from the host Cargo build.' }
+  $artifacts = @($artifactLines | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object reason -EQ 'compiler-artifact')
+  $libraries = @{}
+  foreach ($crateName in @('gwt','serde_json')) {
+    $paths = @($artifacts | Where-Object { $_.target.name -eq $crateName -and $_.target.kind -contains 'lib' } | ForEach-Object {
+      $_.filenames | Where-Object { $_.EndsWith('.rlib') }
+    } | Sort-Object -Unique)
+    if ($paths.Count -ne 1 -or -not (Test-Path -LiteralPath $paths[0] -PathType Leaf)) { throw "Missing or ambiguous $crateName rlib in the host Cargo artifact messages." }
+    $libraries[$crateName] = Get-Item -LiteralPath $paths[0]
+  }
   $deps = Join-Path $repoRoot 'target/debug/deps'
-  $jsonLibrary = Get-ChildItem -LiteralPath $deps -Filter 'libserde_json-*.rlib' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $jsonLibrary) { throw 'Build checkout gwt/gwtd first (serde_json rlib missing).' }
+  $jsonLibrary = $libraries['serde_json']
+  $gwtLibrary = $libraries['gwt']
   $rustArgs = @('--edition=2021','--crate-name','issue_monitor_launch_provider',"$repoRoot/crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs",'-L',"dependency=$deps",'--extern',"serde_json=$($jsonLibrary.FullName)",'-o',"$checkHome/bin/provider.exe")
   $cargoConfig = [IO.File]::ReadAllText("$repoRoot/.cargo/config.toml")
   if ($cargoConfig -match '(?s)\[target\.x86_64-pc-windows-msvc\].*?linker\s*=\s*"([^"]+)"') { $rustArgs += @('-C',"linker=$($Matches[1])") }
@@ -171,8 +186,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 '@
     [IO.File]::WriteAllText("$checkHome/enqueue.rs", $enqueueSource)
-    $gwtLibrary = Get-ChildItem -LiteralPath $deps -Filter 'libgwt-*.rlib' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $gwtLibrary) { throw 'Build checkout gwt first (gwt rlib missing).' }
     $enqueueArgs = @('--edition=2021','--crate-name','issue_monitor_fixture_enqueue',"$checkHome/enqueue.rs",'-L',"dependency=$deps",'--extern',"serde_json=$($jsonLibrary.FullName)",'--extern',"gwt=$($gwtLibrary.FullName)",'-o',"$checkHome/bin/enqueue.exe")
     # rustc does not replay Cargo build-script metadata from an rlib. Reuse
     # the native search paths recorded by this checkout's compiled dependencies.
