@@ -13711,7 +13711,7 @@ impl AppRuntime {
                     );
                     return AgentFrontendDispatchOutcome::StaleCapability;
                 }
-                AgentDurableAuthority::Unavailable => {
+                AgentDurableAuthority::PendingActivation | AgentDurableAuthority::Unavailable => {
                     tracing::warn!(
                         target: "gwt_security",
                         "queued agent pane request rejected because execution authority is unavailable"

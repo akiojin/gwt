@@ -349,7 +349,38 @@ fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+    let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-worker-readiness");
+    let tokio = Arc::new(TokioRuntime::new().unwrap());
+    let (waiter_tx, waiter_rx) = mpsc::channel();
+    let issuer = fixture.issuer.clone();
+    let token = fixture.token.clone();
+    let waiting_runtime = tokio.clone();
+    set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
+        let grant = issuer.grant_for_test(&token).expect("promoted capability");
+        assert!(grant.principal().authorizes_producing_mutation());
+        assert_eq!(
+            issuer.durable_authority(&grant),
+            crate::embedded_server::AgentDurableAuthority::PendingActivation,
+            "an exact successor awaiting activation is not a settled execution"
+        );
+        let mut waiter = waiting_runtime.spawn(
+            gwt::agent_capability::durable_agent_execution_authority_with_lease_async(
+                grant.principal().clone(),
+            ),
+        );
+        waiting_runtime.block_on(async {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Activation is held fenced throughout this observation; scheduling delay cannot release it.
+                tokio::time::timeout(Duration::from_millis(100), &mut waiter)
+                    .await
+                    .is_err(),
+                "the first pane mutation must wait while activation is fenced"
+            );
+        });
+        waiter_tx.send(waiter).unwrap();
+    }));
     let (spawner, queue) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
@@ -379,6 +410,11 @@ fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
     );
     let events = commit_pending_fresh_execution(&mut fixture.runtime);
     assert!(!events.is_empty());
+    assert_eq!(
+        tokio.block_on(waiter_rx.recv().unwrap()).unwrap(),
+        crate::embedded_server::AgentDurableAuthority::Current,
+        "the same initial pane request must proceed after exact activation"
+    );
     assert!(!fixture
         .runtime
         .pending_fresh_execution_launches
@@ -1511,8 +1547,16 @@ fn fresh_execution_session_replacement_before_work_commit_preserves_predecessor_
         pending_fresh_execution_fixture(temp.path(), "fresh-session-replacement-before-commit");
     let sessions_dir = fixture.runtime.sessions_dir.clone();
     let session_id = fixture.candidate_session_id.clone();
+    let issuer = fixture.issuer.clone();
+    let token = fixture.token.clone();
     set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
         replace_fresh_candidate_session_incarnation(&sessions_dir, &session_id);
+        let grant = issuer.grant_for_test(&token).expect("original capability");
+        assert_eq!(
+            issuer.durable_authority(&grant),
+            crate::embedded_server::AgentDurableAuthority::Stale,
+            "a replaced Session must not be mistaken for pending activation"
+        );
     }));
 
     let readiness_nonce = fixture
@@ -3767,8 +3811,33 @@ fn fresh_execution_activated_response_loss_repairs_projection_pointer_and_worksp
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+    let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-activated-repair");
     leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    let grant = fixture.issuer.grant_for_test(&fixture.token).unwrap();
+    assert_eq!(
+        fixture.issuer.durable_authority(&grant),
+        crate::embedded_server::AgentDurableAuthority::PendingActivation,
+        "exact activation must wait for projection/pointer publication"
+    );
+    let waiting = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    waiting.block_on(async {
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            gwt::agent_capability::durable_agent_execution_authority_async(
+                grant.principal().clone()
+            )
+            .await,
+            crate::embedded_server::AgentDurableAuthority::Unavailable,
+            "unpublished activation must fail closed at the waiting deadline"
+        );
+        assert_eq!(started.elapsed().as_secs(), 10);
+    });
 
     let events = fixture
         .runtime
