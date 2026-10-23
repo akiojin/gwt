@@ -34882,15 +34882,52 @@ exit 1
                 dir.path(),
                 ExecutionCommand::Blocked {
                     reason: "environment blocker".to_string(),
-                    missing_verification: None,
+                    missing_verification: Some("runner unavailable".to_string()),
                 },
             )
             .unwrap();
             assert_eq!(code, 0, "{out}");
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
             assert_eq!(
-                load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Blocked
+                record.blocked_reason.as_deref(),
+                Some("environment blocker")
             );
+            assert_eq!(
+                record.missing_verification.as_deref(),
+                Some("runner unavailable")
+            );
+            assert!(record.settled_at.is_some());
+            let path = state_path(dir.path());
+            let original = fs::read(&path).unwrap();
+
+            // FR-022: a retry confirms the first settlement without replacing
+            // its reason, missing verification, timestamp, or integrity hash.
+            let retry = || ExecutionCommand::Blocked {
+                reason: "different environment blocker".to_string(),
+                missing_verification: None,
+            };
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("already settled"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), original);
+
+            // Terminal replay still checks ownership and integrity first.
+            {
+                let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("settlement refused"), "{out}");
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+            let tampered = String::from_utf8(original)
+                .unwrap()
+                .replace("environment blocker", "edited blocker");
+            fs::write(&path, &tampered).unwrap();
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("integrity validation"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), tampered.as_bytes());
         }
 
         /// Issue #4363 AC-1: Monitor membership is not execution authority.
