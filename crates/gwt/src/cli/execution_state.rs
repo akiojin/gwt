@@ -5517,7 +5517,7 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     )
 }
 
-/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// Clean up one exact captured holder runtime, including a historical generation.
 /// The caller must recheck its captured runtime proof under this lease before
 /// signalling the PTY. This authority never permits producing operations.
 pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
@@ -5608,13 +5608,33 @@ fn with_current_session_execution_identity_lease<T>(
                 .as_ref()
                 != Some(expected)
                 || canonical_worktree != context.worktree
-                || !current_execution_binding_matches_context(
+            {
+                return Ok(None);
+            }
+            let binding_matches = match authority {
+                CurrentExecutionBindingAuthority::RuntimeCleanup => {
+                    let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+                        return Ok(None);
+                    };
+                    ledger.generations.iter().any(|generation| {
+                        generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                            && authority.allows(ledger.effective_status_for(generation))
+                            && execution_binding_matches_historical_prefix(
+                                &ledger,
+                                generation,
+                                &expected.session_id,
+                                &binding.identity,
+                            )
+                    })
+                }
+                _ => current_execution_binding_matches_context(
                     context,
                     &expected.session_id,
                     &binding.identity,
                     authority,
-                )?
-            {
+                )?,
+            };
+            if !binding_matches {
                 return Ok(None);
             }
             Ok(Some(operation()))
@@ -13165,7 +13185,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 21] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -13181,6 +13201,7 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
     // were absent, so the one refusal that actually needed a prune route could
     // not carry it across the bridge and the agent was left guessing.
     "workspace.work_prune",
+    "workspace.work_repair",
     "workspace.candidates",
     "workspace.join",
     // Issue #5288: exact registered-PM supersession, live member stop, and
@@ -17075,13 +17096,15 @@ fn run_impl<E: CliEnv>(
                 ));
                 return Ok(2);
             }
+            let record = load(&worktree).ok().flatten();
+            let completed_by_session = record.as_ref().is_some_and(|record| {
+                record.status == ExecutionControlStatus::Completed
+                    && record.primary_session_id == session_id
+            });
             let evidence = crate::cli::verification_record::evaluate_evidence(
                 &worktree,
                 &session_id,
-                load(&worktree)
-                    .ok()
-                    .flatten()
-                    .map(|record| record.owner_number),
+                record.as_ref().map(|record| record.owner_number),
             );
             let mut expected_verification_hash =
                 match super::completion_pr::admit(env, &session_id, None, None, out) {
@@ -17095,7 +17118,11 @@ fn run_impl<E: CliEnv>(
                         return Ok(2);
                     }
                 };
-            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+            // Completed replay confirms the pinned receipt through settle below;
+            // only a new completion depends on the current remote marker.
+            if !completed_by_session
+                && evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+            {
                 let verification = crate::cli::verification_record::load(&worktree)
                     .map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(
@@ -23621,6 +23648,21 @@ mod tests {
             LegacyActiveDisposition::Unknown,
         )
         .unwrap();
+        let predecessor_binding = current_execution_binding(predecessor_dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            predecessor_dir.path(),
+            owner,
+            "session-original",
+            predecessor_binding,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor =
+            gwt_agent::Session::load(&sessions_dir.join("session-original.toml")).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&predecessor)
+            .unwrap()
+            .unwrap();
 
         let request = successor_request("operation-new-worktree", "principal-a", "continue-work");
         prepare_successor(successor_dir.path(), owner, &request).unwrap();
@@ -23638,6 +23680,38 @@ mod tests {
             !integrity_ok(&loaded),
             "a stale predecessor projection must fail closed instead of reviving completion"
         );
+        let ledger_before =
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap();
+        let successor_before = generation_authority_bytes(successor_dir.path(), owner);
+        assert!(
+            with_current_active_session_execution_identity_lease(&sessions_dir, &identity, || ())
+                .unwrap_or(None)
+                .is_none(),
+            "a historical predecessor must never regain producing authority"
+        );
+        assert_eq!(
+            with_current_runtime_cleanup_session_execution_identity_lease(
+                &sessions_dir,
+                &identity,
+                || "captured predecessor cleanup",
+            )
+            .expect("historical cleanup must not require the old worktree pointer"),
+            Some("captured predecessor cleanup"),
+        );
+        assert_eq!(
+            fs::read(generation_ledger_path(predecessor_dir.path(), owner).unwrap()).unwrap(),
+            ledger_before,
+            "cleanup authority must not change the owner ledger"
+        );
+        assert_eq!(
+            generation_authority_bytes(successor_dir.path(), owner),
+            successor_before,
+            "cleanup authority must not change successor projections"
+        );
+        assert!(!predecessor_trusted_dir
+            .join(GENERATION_POINTER_FILE)
+            .exists());
+        assert!(!generation_pointer_path(predecessor_dir.path()).exists());
     }
 
     #[test]
@@ -34814,15 +34888,52 @@ exit 1
                 dir.path(),
                 ExecutionCommand::Blocked {
                     reason: "environment blocker".to_string(),
-                    missing_verification: None,
+                    missing_verification: Some("runner unavailable".to_string()),
                 },
             )
             .unwrap();
             assert_eq!(code, 0, "{out}");
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
             assert_eq!(
-                load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Blocked
+                record.blocked_reason.as_deref(),
+                Some("environment blocker")
             );
+            assert_eq!(
+                record.missing_verification.as_deref(),
+                Some("runner unavailable")
+            );
+            assert!(record.settled_at.is_some());
+            let path = state_path(dir.path());
+            let original = fs::read(&path).unwrap();
+
+            // FR-022: a retry confirms the first settlement without replacing
+            // its reason, missing verification, timestamp, or integrity hash.
+            let retry = || ExecutionCommand::Blocked {
+                reason: "different environment blocker".to_string(),
+                missing_verification: None,
+            };
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("already settled"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), original);
+
+            // Terminal replay still checks ownership and integrity first.
+            {
+                let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("settlement refused"), "{out}");
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+            let tampered = String::from_utf8(original)
+                .unwrap()
+                .replace("environment blocker", "edited blocker");
+            fs::write(&path, &tampered).unwrap();
+            let (code, out) = run_cmd(dir.path(), retry()).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("integrity validation"), "{out}");
+            assert_eq!(fs::read(&path).unwrap(), tampered.as_bytes());
         }
 
         /// Issue #4363 AC-1: Monitor membership is not execution authority.

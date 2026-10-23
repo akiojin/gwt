@@ -156,6 +156,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         let launched = gwt::cli::run(
             &mut env,
             gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorLaunchNow {
+                expected_queue_order: None,
                 project_root: Some(project),
                 expected_priority_order: None,
                 number: 3165,
@@ -1666,6 +1667,29 @@ fn invalid_successor_tombstones_have_content_bound_identity_across_hosts() {
     );
     assert!(windows.is_successor_supersession());
     assert!(mac.is_successor_supersession());
+    let local = make(temp.path().to_str().unwrap(), now);
+    let bytes = work::canonical_workspace_work_event_bytes(&local, temp.path()).unwrap();
+    let portable: work::WorkEvent = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        portable.execution_container.as_ref().unwrap().worktree_path,
+        Some(PathBuf::from("."))
+    );
+    for path in [
+        Some(PathBuf::from(".")),
+        Some(temp.path().to_path_buf()),
+        Some(dunce::canonicalize(temp.path()).unwrap()),
+        None,
+    ] {
+        let mut resolved = portable.clone();
+        resolved.execution_container.as_mut().unwrap().worktree_path = path;
+        assert!(
+            resolved.is_successor_supersession(),
+            "source-root resolution must preserve the portable audit hash"
+        );
+    }
+    let mut foreign = portable;
+    foreign.execution_container.as_mut().unwrap().branch = Some("work/other".into());
+    assert!(!foreign.is_successor_supersession());
     let mut changed = windows.clone();
     changed.updated_at = mac.updated_at;
     assert!(

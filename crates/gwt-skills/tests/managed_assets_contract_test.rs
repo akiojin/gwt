@@ -157,9 +157,9 @@ fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
     for provider in [".claude", ".codex"] {
         let skills_root = dir.path().join(provider).join("skills");
         // A clean checkout has no runtime-generated coordination guidance.
-        let generated_board = skills_root.join("gwt-coordination/references/board.md");
-        if generated_board.exists() {
-            fs::remove_file(generated_board).expect("exclude locally generated guidance");
+        let generated = skills_root.join("gwt-coordination");
+        if generated.exists() {
+            fs::remove_dir_all(generated).expect("exclude locally generated guidance");
         }
         for entry in fs::read_dir(&skills_root).expect("distributed skills") {
             let skill_dir = entry.expect("skill entry").path();
@@ -1353,6 +1353,61 @@ fn autonomous_investigation_continues_in_scope_root_cause_fixes() {
         assert!(ownership.contains("In-scope root-cause fixes follow that contract"));
         assert!(ownership.contains("first apply the launch-route authority below"));
     }
+}
+
+#[test]
+fn materialized_issue_relationship_output_contract_is_shared_by_both_callers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+
+    let mut contracts = Vec::new();
+    for provider in [".claude", ".codex"] {
+        let skills = dir.path().join(provider).join("skills");
+        let work = fs::read_to_string(skills.join("gwt-coordination/references/work.md"))
+            .expect("materialized Work guidance");
+        let contract = markdown_block(
+            &work,
+            "## Issue relationship markers",
+            Some("## Git environment"),
+        );
+        for required in [
+            "| `bundled-required` | Primary | `Bundle-with: #701` |",
+            "| `dependent-follow-up` | Dependent | `Blocked-by: #700` |",
+            "| `reference-only` | Neither | No marker |",
+            "outside Markdown fences and HTML comments",
+            "positive, unique Issue numbers",
+            "`issue.edit`",
+            "`issue.spec.edit`",
+            "`issue.spec.section`",
+            "do not grant execution or mutation authority",
+        ] {
+            assert!(
+                contract.contains(required),
+                "{provider}: missing {required}"
+            );
+        }
+        for caller in [
+            "gwt-register-issue/references/workflow.md",
+            "gwt-discussion/references/state-lifecycle.md",
+        ] {
+            let path = skills.join(caller);
+            let text = fs::read_to_string(&path).expect("materialized caller");
+            for required in [
+                "`Issue relationship markers`",
+                "generated `gwt-coordination`",
+                "`references/work.md`",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{provider}/{caller}: missing {required}"
+                );
+            }
+        }
+        contracts.push(contract.to_string());
+    }
+    assert_eq!(contracts[0], contracts[1], "provider contract parity");
 }
 
 #[test]

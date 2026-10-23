@@ -4183,6 +4183,71 @@ pub(crate) struct WorkItemsIntakeSnapshot {
 }
 
 impl WorkItemsIntakeSnapshot {
+    /// A scoped repair never recovers lifecycle transactions or writes lock
+    /// metadata while inspecting state. Publication later takes the plain
+    /// writer lock and compares these exact bytes again.
+    pub(crate) fn capture_for_container_repair(
+        works_path: &Path,
+        local_path: Option<&Path>,
+    ) -> Result<Self> {
+        let mut paths = vec![
+            works_path.to_path_buf(),
+            container_detachments_path(works_path),
+        ];
+        paths.extend(local_path.map(Path::to_path_buf));
+        let files = paths
+            .into_iter()
+            .map(|path| Ok((path.clone(), read_intake_snapshot_file(&path)?)))
+            .collect::<Result<_>>()?;
+        let snapshot = Self { files };
+        snapshot.check_container_repair_snapshot()?;
+        Ok(snapshot)
+    }
+
+    fn check_container_repair_snapshot(&self) -> Result<()> {
+        let works_path = &self.files[0].0;
+        let mut markers = discover_pending_workspace_state_transaction_coordinators(
+            std::slice::from_ref(works_path),
+        )?;
+        markers.push(pending_workspace_state_transaction_path_for_work_items(
+            works_path,
+        ));
+        for path in markers {
+            if read_intake_snapshot_file(&path)?.is_some() {
+                return Err(GwtError::Other(format!(
+                    "Work container repair refused: pending workspace state transaction at {}; recover it before retrying",
+                    path.display()
+                )));
+            }
+        }
+        for (path, expected) in &self.files {
+            if read_intake_snapshot_file(path)? != *expected {
+                return Err(GwtError::Other(
+                    "work events intake snapshot changed; retry on the next poll".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_container_repair(
+        &self,
+        prepared: Option<&[u8]>,
+        dry_run: bool,
+    ) -> Result<()> {
+        if dry_run {
+            return self.check_container_repair_snapshot();
+        }
+        let works_path = &self.files[0].0;
+        with_workspace_work_items_locks(std::slice::from_ref(works_path), || {
+            self.check_container_repair_snapshot()?;
+            if let Some(bytes) = prepared {
+                write_atomic(works_path, bytes)?;
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn capture(works_path: &Path, local_path: Option<&Path>) -> Result<Self> {
         with_workspace_work_items_lock(works_path, || {
             let mut paths = vec![
@@ -4217,6 +4282,19 @@ impl WorkItemsIntakeSnapshot {
         bytes
             .as_ref()
             .map(|bytes| decode_workspace_work_items(path, bytes, &detachments))
+            .transpose()
+    }
+
+    /// Read the exact stored values for a scoped repair. Normal readers apply
+    /// migrations and compaction, which must not rewrite unrelated Work rows.
+    pub(crate) fn raw_projection(&self) -> Result<Option<WorkItemsProjection>> {
+        let (path, bytes) = &self.files[0];
+        bytes
+            .as_ref()
+            .map(|bytes| {
+                serde_json::from_slice(bytes)
+                    .map_err(|error| WorkspaceStateLoadError::json(path, error).into())
+            })
             .transpose()
     }
 
@@ -5961,6 +6039,18 @@ fn record_workspace_pr_metadata_for_execution_at(
             }
         }
         let [(index, existing)] = matches.as_slice() else {
+            if let Some((index, _)) = matches.first() {
+                if matches.iter().all(|(candidate, _)| candidate == index)
+                    && matches.iter().any(|(_, container)| {
+                        container.worktree_path.as_deref() == Some(Path::new("."))
+                    })
+                {
+                    return Err(GwtError::Other(format!(
+                        "PR metadata target Work {} has ambiguous container aliases; inspect workspace.work_repair params.work_id=\"{}\" (dry-run by default; params.dry_run=false applies accepted-source repair)",
+                        projection.work_items[*index].id, projection.work_items[*index].id
+                    )));
+                }
+            }
             return Err(refusal());
         };
         let item = &projection.work_items[*index];
@@ -8505,6 +8595,11 @@ pub fn canonical_workspace_work_event_bytes(
             }
             container.worktree_path = Some(PathBuf::from("."));
         }
+    }
+    // Historical path-bound audits authenticate the absolute path too. Keep
+    // their payload intact rather than publishing a shard with an invalid ID.
+    if event.is_successor_supersession() && !portable.is_successor_supersession() {
+        return serialized_workspace_work_event_bytes(event);
     }
     serialized_workspace_work_event_bytes(&portable)
 }

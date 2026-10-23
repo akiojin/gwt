@@ -172,7 +172,13 @@ export function createBoardLogsSurface({
       // resolved routing), keyed by project_root. Populated by the
       // `project_board_config` backend event; read by the Board window's
       // destination chip + config popover.
-      const boardConfigByProjectRoot = new Map();
+      const boardConfigModel = createUiStateStore({});
+      boardConfigModel.subscribeFrame(configs => configs, configs => {
+        if (Object.keys(configs).length === 0) return;
+        for (const windowId of activeBoardWindowIds()) {
+          boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));
+        }
+      });
       let activeDestinationPopover = null;
 
       function boardDestinationLabel(config) {
@@ -242,7 +248,7 @@ export function createBoardLogsSurface({
         closeBoardDestinationPopover();
         const projectRoot = activeProjectTab()?.project_root || "";
         if (!projectRoot) return;
-        const config = boardConfigByProjectRoot.get(projectRoot) || {};
+        const config = boardConfigModel.read()[projectRoot] || {};
 
         const pop = createNode("div", "board-destination-popover");
 
@@ -394,7 +400,7 @@ export function createBoardLogsSurface({
       // Board windows — refreshes the destination chip for the matching project.
       function applyProjectBoardConfigEventToBoard(event) {
         if (!event || !event.project_root) return;
-        boardConfigByProjectRoot.set(event.project_root, {
+        boardConfigModel.update(configs => ({ ...configs, [event.project_root]: {
           provider: event.provider || "",
           channel: event.channel || "",
           tenant: event.tenant || "",
@@ -403,10 +409,7 @@ export function createBoardLogsSurface({
           resolvedChannel: event.resolved_channel || "",
           signedIn: event.signed_in === true,
           message: event.message || "",
-        });
-        for (const windowId of activeBoardWindowIds()) {
-          boardModel.update(() => ({ windowId, entries: ensureBoardState(windowId).entries }));
-        }
+        } }));
       }
 
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
@@ -1061,9 +1064,7 @@ export function createBoardLogsSurface({
         // SPEC-2963 FR-030: reflect this project's resolved Board destination.
         const destinationChip = body.querySelector("[data-action='board-destination']");
         if (destinationChip) {
-          const config = boardConfigByProjectRoot.get(
-            activeProjectTab()?.project_root || "",
-          );
+          const config = boardConfigModel.read()[activeProjectTab()?.project_root || ""];
           destinationChip.replaceChildren(
             createNode("span", "board-destination-dot"),
             createNode(
@@ -1650,7 +1651,7 @@ export function createBoardLogsSurface({
               openBoardDestinationPopover(event.currentTarget);
             });
           const projectRoot = activeProjectTab()?.project_root || "";
-          if (projectRoot && !boardConfigByProjectRoot.has(projectRoot)) {
+          if (projectRoot && !Object.hasOwn(boardConfigModel.read(), projectRoot)) {
             send({ kind: "get_project_board_config", project_root: projectRoot });
           }
           const state = ensureBoardState(windowData.id);

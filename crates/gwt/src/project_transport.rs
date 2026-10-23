@@ -2177,7 +2177,7 @@ impl AgentPaneSessionScope {
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
-            "pane_close_result" => Some(payload),
+            "pane_close_result" | "pane_husk_removed" => Some(payload),
             "fleet_pane_close_result" => Some(payload),
             "work_close_result" => Some(payload),
             _ => None,
@@ -2609,7 +2609,7 @@ async fn client_session_with_scope(
                                                     .await;
                                                     break;
                                                 }
-                                                AgentDurableAuthority::Unavailable => {
+                                                AgentDurableAuthority::PendingActivation | AgentDurableAuthority::Unavailable => {
                                                     tracing::warn!(
                                                         target: "gwt_security",
                                                         "agent pane WebSocket execution authority is unavailable"
@@ -3529,20 +3529,26 @@ mod tests {
                 .is_none(),
             "a foreign-project window stays out of reach"
         );
-        assert!(
-            scope
-                .filter_outbound(
-                    serde_json::json!({
-                        "kind": "pane_close_result",
-                        "ok": true,
-                        "window_id": "tab-owned::agent-1",
-                        "reason": null
-                    })
-                    .to_string()
-                )
-                .is_some(),
-            "the close reply must reach the requesting client (Issue #3629 AC-12)"
-        );
+        scope.allowed_window_ids.clear();
+        for reply in [
+            serde_json::json!({
+                "kind": "pane_close_result",
+                "ok": true,
+                "window_id": "tab-owned::agent-1",
+                "reason": null
+            }),
+            serde_json::json!({
+                "kind": "pane_husk_removed",
+                "window_id": "tab-owned::agent-1"
+            }),
+        ] {
+            let payload = reply.to_string();
+            assert_eq!(
+                scope.filter_outbound(payload.clone()),
+                Some(payload),
+                "both close outcomes must reach the client after window removal"
+            );
+        }
     }
 
     #[test]

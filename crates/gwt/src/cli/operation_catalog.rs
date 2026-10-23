@@ -840,6 +840,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["workspace.work-prune"],
     },
     Operation {
+        name: "workspace.work_repair",
+        aliases: &[],
+    },
+    Operation {
         name: "worktree.gc_build_artifacts",
         aliases: &["worktree.gc-build-artifacts"],
     },

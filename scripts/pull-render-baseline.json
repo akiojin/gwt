@@ -18,7 +18,6 @@
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_error|log_error/log_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_error|log_error/log_entry_appended\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_error|log_error/log_error\"]",
-  "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/project_board_config\"]",
   "[\"crates/gwt/web/hub-app.js\",\"receive\",\"\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"applyKnowledgeReceiveEvent\",\"/branch_cleanup_result|branch_cleanup_progress|branch_error\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"applyKnowledgeReceiveEvent\",\"/knowledge_bridge_phase_updated\"]",

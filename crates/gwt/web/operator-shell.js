@@ -236,6 +236,10 @@ export function applyTelemetryCounts(doc, counts = {}) {
   }
 }
 
+export function subscribeIssueMonitorStatus(doc, model) {
+  return model.subscribeFrame(state => state.status, status => applyIssueMonitorStatus(doc, status));
+}
+
 export function applyIssueMonitorStatus(doc, status = {}) {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");

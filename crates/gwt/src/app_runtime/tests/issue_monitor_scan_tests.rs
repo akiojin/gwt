@@ -716,6 +716,170 @@ fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
     assert_eq!(probed.into_inner(), vec![1, 2, 3]);
 }
 
+fn dependency_completion_fixture() -> (
+    gwt::IssueMonitorState,
+    gwt::issue_monitor_worker::LoadedIssueMonitorCandidates,
+) {
+    let mut monitor = test_monitor_with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..queued_issue_monitor_prefs(&[42])
+        },
+    );
+    monitor.set_gui_connected(true);
+    let issues = [42, 44]
+        .into_iter()
+        .map(|number| gwt::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: format!("Issue {number}"),
+            labels: if number == 44 {
+                vec!["gwt-spec".to_string()]
+            } else {
+                Vec::new()
+            },
+            state: gwt::IssueMonitorIssueState::Open,
+            body: (number == 42).then(|| "Blocked-by: #44".to_string()),
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: Some("2026-10-23T00:00:00Z".to_string()),
+        })
+        .collect::<Vec<_>>();
+    gwt::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-10-23T00:00:00Z");
+    let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        open_pr_observations: BTreeMap::new(),
+        open_pr_observed_at: None,
+        issues,
+        source: gwt::IssueMonitorCandidateSource::Live,
+        live_error: None,
+        readiness_failures: Vec::new(),
+        urgent_assignments: Default::default(),
+    };
+    (monitor, loaded)
+}
+
+#[test]
+fn local_claim_observation_rechecks_the_frontier_after_dependency_completion() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (monitor, loaded) = dependency_completion_fixture();
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            Ok(number == 44)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("completion observations")
+            .expect("authorized live scan");
+
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[44, 42]);
+    assert_eq!(observed.1, BTreeMap::from([(42, false)]));
+    let blocker = loaded
+        .issues
+        .iter()
+        .find(|issue| issue.number == 44)
+        .expect("the probed dependency");
+    assert_eq!(
+        observed.2,
+        BTreeMap::from([(
+            44,
+            gwt::issue_monitor::IssueMonitorDependencyObservation::new(blocker, Some(true)),
+        )])
+    );
+}
+
+#[test]
+fn local_claim_observation_reprobes_pending_claim_dependencies_without_free_capacity() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut monitor, loaded) = dependency_completion_fixture();
+    monitor.set_max_active_agents(1);
+    let now = "2026-10-23T00:00:00Z";
+    assert_eq!(
+        monitor.try_prepare_claim_effects_with_probe_confirmed("owner", now, 1, None, |number| {
+            Ok::<_, ()>(if number == 44 {
+                gwt::issue_monitor::ClaimProbeOutcome::Completed
+            } else {
+                gwt::issue_monitor::ClaimProbeOutcome::Claimable
+            })
+        }),
+        Ok(1)
+    );
+    gwt::scan_issue_monitor_candidates(&mut monitor, &loaded.issues, now);
+    assert_eq!(monitor.claim_probe_plan(1).0, 0);
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let _hook = super::super::set_local_completion_probe_test_hook({
+        let probed = Arc::clone(&probed);
+        move |number| {
+            probed.lock().expect("probe log").push(number);
+            Ok(true)
+        }
+    });
+
+    let observed =
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo")
+            .expect("completion observations")
+            .expect("authorized live scan");
+
+    assert_eq!(probed.lock().expect("probe log").as_slice(), &[44]);
+    assert!(observed.1.is_empty(), "no slot permits an owner probe");
+    let blocker = loaded
+        .issues
+        .iter()
+        .find(|issue| issue.number == 44)
+        .expect("the probed dependency");
+    assert_eq!(
+        observed.2,
+        BTreeMap::from([(
+            44,
+            gwt::issue_monitor::IssueMonitorDependencyObservation::new(blocker, Some(true)),
+        )])
+    );
+    monitor.observe_dependency_completions(&observed.2);
+    prepare_local_issue_monitor_claim_proposals(
+        &mut monitor,
+        &loaded,
+        &observed.0,
+        now,
+        &observed.1,
+    );
+    assert_eq!(pending_claim_issue_numbers(&monitor.prefs()), vec![42]);
+}
+
+#[test]
+fn local_claim_observation_discards_the_scan_when_a_dependency_probe_expires() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (monitor, loaded) = dependency_completion_fixture();
+    let _hook = super::super::set_local_completion_probe_test_hook(|number| {
+        if number != 44 {
+            return Ok(false);
+        }
+        Err(
+            gwt::issue_monitor_worker::IssueMonitorCompletionProbeFailure::Deadline(
+                gwt::issue_monitor_worker::IssueMonitorScanFailure::new(
+                    gwt::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback,
+                    "dependency completion deadline expired",
+                ),
+            ),
+        )
+    });
+
+    assert!(
+        super::super::observe_local_claim_candidates(&monitor, &loaded, "example", "repo").is_err()
+    );
+}
+
 /// Issue #3528 (SPEC #3200 FR-057): without a saved launch profile the scan
 /// can never claim, so it must not spend a single `gh` probe on the frontier.
 #[test]

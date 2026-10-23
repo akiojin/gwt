@@ -1,7 +1,5 @@
 //! `errors.list` JSON operation (Issue #3778).
 
-use std::{collections::HashMap, path::Path};
-
 use chrono::{DateTime, Utc};
 use gwt_core::error_ledger::{ErrorRecord, ErrorScope};
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -87,19 +85,12 @@ pub fn run<E: CliEnv>(
                     let root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
                     gwt_core::paths::project_scope_hash(&root)
                 });
-            let mut matching_roots = HashMap::new();
             let errors: Vec<_> = errors
                 .into_iter()
                 .filter(|record| scope.includes(record, project_root.as_deref()))
                 .filter(|record| {
                     caller_project.as_ref().is_none_or(|caller_project| {
-                        record.target.project_root.as_deref().is_some_and(|root| {
-                            *matching_roots.entry(root.to_owned()).or_insert_with(|| {
-                                let root =
-                                    gwt_core::paths::resolve_current_worktree_root(Path::new(root));
-                                gwt_core::paths::project_scope_hash(&root) == *caller_project
-                            })
-                        })
+                        record.repo_hash.as_deref() == Some(caller_project.as_str())
                     })
                 })
                 .collect();
@@ -129,6 +120,8 @@ pub(crate) fn parse_since(raw: &str) -> Result<DateTime<Utc>, CliParseError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::cli::TestEnv;
     use chrono::TimeZone;
@@ -186,6 +179,101 @@ mod tests {
             let errors = payload["errors"].as_array().expect("errors");
             assert!(errors.iter().any(|row| row["id"] == record.id));
             assert!(errors.iter().any(|row| row["id"] == nested_record.id));
+        }
+    }
+
+    #[test]
+    fn errors_list_preserves_repository_identity_across_root_reuse_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        let main = dir.path().join("Workbench/repo");
+        let pm = dir.path().join("pm/worktree");
+        let issue = dir.path().join("work/issue-4735");
+        let foreign = dir.path().join("other");
+        let set_origin = |root: &Path, name: &str| {
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            std::fs::write(
+                root.join(".git/config"),
+                format!("[remote \"origin\"]\nurl = https://github.com/example/{name}.git\n"),
+            )
+            .unwrap();
+        };
+        set_origin(&main, "repo");
+        set_origin(&foreign, "other");
+        for (root, name) in [(&pm, "pm"), (&issue, "issue")] {
+            let git_dir = main.join(".git/worktrees").join(name);
+            std::fs::create_dir_all(&git_dir).unwrap();
+            std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(
+                root.join(".git"),
+                format!("gitdir: {}\n", git_dir.display()),
+            )
+            .unwrap();
+        }
+        let mut own = Vec::new();
+        for root in [&main, &pm, &issue, &foreign] {
+            let record = ErrorRecord::new(
+                ErrorKind::HookFailure,
+                "historical fault",
+                ErrorTarget {
+                    project_root: Some(root.display().to_string()),
+                    ..Default::default()
+                },
+            );
+            own.push(gwt_core::error_ledger::record(record).unwrap());
+        }
+        let foreign_record = own.pop().unwrap();
+        let mut legacy = serde_json::to_value(&own[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("repo_hash");
+        legacy["id"] = serde_json::json!("legacy-without-repository-identity");
+        let legacy =
+            gwt_core::error_ledger::record(serde_json::from_value(legacy).unwrap()).unwrap();
+
+        std::fs::remove_file(pm.join(".git")).unwrap();
+        set_origin(&pm, "other");
+        set_origin(&foreign, "repo");
+        std::fs::remove_dir_all(&issue).unwrap();
+
+        let own_ids: Vec<_> = own.iter().map(|row| row.id.clone()).collect();
+        let mut all_ids = own_ids.clone();
+        all_ids.extend([foreign_record.id, legacy.id.clone()]);
+        let mut env = TestEnv::new(main.clone());
+        for (scope, project_root, mut expected) in [
+            (ErrorListScope::Project, None, own_ids),
+            (
+                ErrorListScope::Project,
+                Some(main.display().to_string()),
+                vec![own[0].id.clone(), legacy.id],
+            ),
+            (
+                ErrorListScope::All,
+                Some(pm.display().to_string()),
+                vec![own[1].id.clone()],
+            ),
+            (ErrorListScope::All, None, all_ids),
+        ] {
+            let mut out = String::new();
+            run(
+                &mut env,
+                ErrorsCommand::List {
+                    since: None,
+                    scope,
+                    project_root: project_root.clone(),
+                },
+                &mut out,
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let mut actual: Vec<_> = payload["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "scope={scope:?}, root={project_root:?}");
         }
     }
 

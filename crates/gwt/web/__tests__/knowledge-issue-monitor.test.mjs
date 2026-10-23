@@ -283,6 +283,7 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
     ["launch_failed", ["Launch failed", "blocked"]],
     ["agent_failed", ["Agent failed", "blocked"]],
     ["blocked_by_claim", ["Blocked by claim", "needs-input"]],
+    ["blocked_by_dependency", ["Blocked by dependency", "needs-input"]],
     ["skipped", ["Skipped", "idle"]],
     ["needs_human", ["Needs human", "needs-input"]],
   ]);
@@ -431,6 +432,7 @@ test("Issue Monitor renders the JSON gui_status contract and follows updated lim
     },
   };
   surface.applyIssueMonitorStatus(response.gui_status);
+  surface.applyIssueMonitorInbox([{ issue: { number: 44, title: "Running issue", state: "open" }, state: "launched" }]);
   assert.match(monitorBand(body).text(),
     new RegExp(`Queue ${response.queue.length} \\| Active ${response.active_launches.length}/${response.max_active}`));
   surface.applyIssueMonitorStatus({ ...response.gui_status, max_active_agents: 5 });
@@ -592,6 +594,7 @@ test("Issue Monitor band preserves higher-priority states around quota-hold meta
   assert.equal(band.text(), "Stopped | Queue 3 | Active 0/2");
   assert.equal(band.pill.title, "");
 
+  surface.applyIssueMonitorInbox([{ issue: { number: 44, title: "Running issue", state: "open" }, state: "launched" }]);
   for (const state of ["active", "launching"]) {
     surface.applyIssueMonitorStatus({
       enabled: true,
@@ -1043,6 +1046,49 @@ test("Issue queue drops send one bulk request and retain server projection", asy
   assert.deepEqual(sent.at(-1),{kind:"issue_monitor_queue_remove",issue_numbers:[3]});
 });
 
+test("Issue #4499 queue drops explain missing cards, invalid data and unchanged columns", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind:"knowledge_entries", id:"win-1", knowledge_kind:"issue",
+    request_id:load.request_id, entries:[knowledgeEntry(1,null)], refresh_enabled:true });
+  const drop = (phase, raw) => {
+    const event = new window.Event("drop", {bubbles:true,cancelable:true});
+    event.dataTransfer = {getData:() => raw};
+    body.querySelector(`[data-queue-column="${phase}"]`).dispatchEvent(event);
+  };
+  const before = sent.length;
+  drop("queued", "99");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #99.*no longer.*Refresh/i);
+  drop("queued", "1-not-an-issue");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Drop an issue card/i);
+  drop("backlog", "1");
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*already.*Backlog/);
+  assert.equal(sent.length, before, "invalid and unchanged drops send no queue mutation");
+});
+
+test("Issue #4499 queue receipts show accepted changes and exact server refusal reasons", async (t) => {
+  const { body, surface, load, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind:"knowledge_entries", id:"win-1", knowledge_kind:"issue",
+    request_id:load.request_id, entries:[knowledgeEntry(1,null)], refresh_enabled:true });
+  const event = new window.Event("drop", {bubbles:true,cancelable:true});
+  event.dataTransfer = {getData:() => "1"};
+  body.querySelector('[data-queue-column="queued"]').dispatchEvent(event);
+  assert.deepEqual(sent.at(-1), {kind:"issue_monitor_queue_push",issue_numbers:[1]});
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1],
+    error:"Queue change rejected: issue is on hold" });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*Queue change rejected: issue is on hold/);
+  assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'));
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1], error:null });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*added to.*queue/i);
+  assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'), "the receipt does not invent membership");
+  surface.applyIssueMonitorStatus({terminal_queue:[{number:1,queued_by:"operator"}]});
+  assert.ok(body.querySelector('[data-queue-column="queued"] [data-issue-number="1"]'));
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /added to.*queue/i, "projection updates retain the result");
+  surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"remove", issue_numbers:[1], error:null });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*removed from.*queue/i);
+});
+
 test("terminal queue broadcasts control membership, provenance and confirmed order", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -1062,6 +1108,24 @@ test("terminal queue broadcasts control membership, provenance and confirmed ord
   assert.deepEqual(queued(),[2,1],"server confirmation controls order");
   surface.applyIssueMonitorStatus({terminal_queue:[{number:1,queued_by:"operator"},{number:2,queued_by:"auto-refill"}]});
   assert.deepEqual(queued(),[1,2]);
+});
+
+test("Issue #3165: dependency-blocked rows retain their queue position and explain the blocker", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(42, "queued", 1), knowledgeEntry(43, "queued", 2)],
+    refresh_enabled: true });
+  surface.applyIssueMonitorStatus({ terminal_queue: [{ number: 42 }, { number: 43 }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "blocked_by_dependency",
+    exclusion_reason: "Blocked by #44 (hold)", dependency: { blocked_by: [{ number: 44, hold: true }], cycle: [] } }]);
+  const row = body.querySelector('[data-queue-column="queued"] [data-issue-number="42"]');
+  assert.ok(row);
+  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
+  assert.equal(row.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
+  assert.match(row.textContent, /Blocked by #44 \(hold\)/);
+  assert.deepEqual([...body.querySelectorAll('[data-queue-column="queued"] .knowledge-row')]
+    .map(item => Number(item.dataset.issueNumber)), [42, 43]);
 });
 
 test("latest inbox launch state moves a cached queued row to Active while retaining terminal queue operations", async (t) => {

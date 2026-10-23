@@ -140,7 +140,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
   assert.equal(pill.dataset.tone, "active");
-  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 1/2");
+  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 0/2", "no Issue cards are loaded");
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
@@ -713,11 +713,62 @@ test("T-7b.2a: tier chips show only reported minimums and agent failures with at
   assert.equal(body.querySelectorAll('[data-kind="tier"]').length, 0, "omitted facts clear stale chips");
 });
 
+test("Issue catalog bursts render the latest snapshot once and cancel on close", async (t) => {
+  const frames = new Set();
+  const catalog = { appState: { tabs: [{ workspace: { windows: [
+    { id: "agent-11", status: "running", linked_issue_number: 11 },
+  ] } }] }, runtimeStates: {} };
+  const model = createUiStateStore({ catalog }, { scheduleFrame(run) {
+    frames.add(run);
+    return () => frames.delete(run);
+  } });
+  let rows = 0;
+  const { body, surface, state, sent } = await makeFixture({ surface: {
+    windowCatalogModel: model,
+    createNode(tag, className, text) {
+      if (className === "knowledge-row") rows++;
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = String(text);
+      return node;
+    },
+  } });
+  t.after(() => { surface.clearKnowledgeBridgeState("win-1"); model.dispose(); });
+  state.entries = [entry(11, "launched")];
+  surface.applyIssueMonitorStatus({ ...STATUS, tier_facts: [{ issue_number: 11,
+    confirmed_launch: { tier: 0, window_id: "agent-11", delivery_id: "delivery-11" },
+  }] });
+  const previous = model.read();
+  const row = body.querySelector(".knowledge-row");
+  rows = 0;
+  model.update(current => ({ catalog: { ...current.catalog, focusedId: "win-1", version: 1 } }));
+  assert.equal(frames.size, 0, "unrelated focus changes do not render Issues");
+  for (let i = 0; i < 50; i++) model.update(current => ({ catalog: {
+    ...current.catalog, runtimeStates: { "agent-11": i % 2 ? "idle" : "running" },
+  } }));
+  assert.equal(model.read().catalog.runtimeStates["agent-11"], "idle", "model commits synchronously");
+  assert.deepEqual(previous.catalog.runtimeStates, {}, "prior snapshots remain immutable");
+  assert.equal(rows, 0, "catalog receipts wait for the shared frame");
+  assert.equal(body.querySelector(".knowledge-row"), row);
+  assert.equal(frames.size, 1);
+  for (const run of [...frames]) { frames.delete(run); run(); }
+  assert.equal(rows, 1, "only the latest runtime presentation is built");
+  assert.equal(body.querySelector('[data-key="tier-running"]'), null);
+  model.update(current => ({ catalog: { ...current.catalog, runtimeStates: { "agent-11": "running" } } }));
+  body.querySelector(".knowledge-row-select").click();
+  assert.equal(state.selectedNumber, 11, "local selection stays synchronous while a frame is held");
+  assert.ok(sent.some(message => message.kind === "select_knowledge_bridge_entry" && message.number === 11));
+  assert.equal(body.querySelector(".knowledge-row-select").getAttribute("aria-current"), "true", "displayed Issue remains the selected action target");
+  surface.clearKnowledgeBridgeState("win-1");
+  assert.equal(frames.size, 0, "closing cancels the pending frame");
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
 test("T-7b.2b.2: Running tier follows exact confirmation and raw catalog runtime", async (t) => {
   const agent = { id: "agent-11", status: "running", linked_issue_number: 11 };
   const windowCatalogModel = createUiStateStore({ catalog: {
     appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 1 }] } }] }, runtimeStates: {},
-  } });
+  } }, { scheduleFrame: run => { run(); return () => {}; } });
   const { body, surface, state } = await makeFixture({ surface: { windowCatalogModel } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   state.entries = [entry(11, "launched")];

@@ -3995,13 +3995,20 @@ mod profiles_patch_contract_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _prefs_budget = pin_prefs_hang_guard();
-        let initial = initial_prefs();
-        let patch = patch_control(
-            &initial,
-            serde_json::json!([{"agent_id": "codex", "skip_permissions": true}]),
-        );
+        let mut initial = initial_prefs();
+        initial.launching_issues = vec![crate::issue_monitor::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: Some("2026-07-02T00:00:10Z".into()),
+        }];
+        initial.pending_launch_deliveries = vec![serde_json::from_value(serde_json::json!({
+            "delivery_id": "pending", "issue_number": 42,
+            "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+            "claim_id": "claim", "claim_owner": "host:1", "created_at": "2026-07-02T00:00:10Z"
+        }))
+        .unwrap()];
+        let patch = patch_control(&initial, serde_json::json!([{"agent_id": "openclaw"}]));
         let mut replacement = initial.launch_profile_pool();
-        replacement[0].skip_permissions = true;
+        replacement[0].agent_id = "openclaw".into();
         let legacy = IssueMonitorControl::ProfilesSet {
             profiles: replacement,
             usage_threshold_percent: None,
@@ -4032,6 +4039,37 @@ mod profiles_patch_contract_tests {
             );
             let visible = crate::load_issue_monitor_prefs(&path).expect("visible renamed commit");
             assert_eq!(visible.effect_authority_epoch, 8);
+            assert!(visible.pending_launch_deliveries.is_empty());
+            assert!(visible.launching_issues.is_empty());
+            assert_eq!(
+                visible
+                    .pending_effects
+                    .iter()
+                    .filter(|effect| matches!(
+                        &effect.payload,
+                        crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number: 42, claim_id, owner
+                        } if claim_id == "claim" && owner == "host:1"
+                    ))
+                    .count(),
+                1
+            );
+            // A historical release cannot erase a different claim or work
+            // already owned by a materializer in this process.
+            for owned in [false, true] {
+                let mut protected = initial.clone();
+                if owned {
+                    protected.pending_launch_deliveries[0].materializer_id = Some("gui".into());
+                } else {
+                    protected.pending_launch_deliveries[0].claim_id = "successor".into();
+                }
+                let mut protected = crate::IssueMonitorState::with_prefs(
+                    crate::IssueMonitorConfig::default(),
+                    protected,
+                );
+                protected.rebase_daemon_driver_prefs(&visible);
+                assert_eq!(protected.active_count(), 1);
+            }
             monitor = stale;
             assert!(matches!(
                 try_apply_accepted_issue_monitor_control_with_disk_migration(
@@ -4042,6 +4080,7 @@ mod profiles_patch_contract_tests {
                 IssueMonitorControlCommit::Committed { .. }
             ));
             assert_eq!(monitor.prefs(), visible);
+            assert!(monitor.take_pending_launch_requests().is_empty());
             assert_eq!(
                 crate::load_issue_monitor_prefs(&path).expect("receipt replay"),
                 visible
@@ -6607,7 +6646,11 @@ fn scan_issue_monitor_once_blocking(
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
-    use crate::issue_monitor_worker::{IssueMonitorScanContinuation, IssueMonitorScanStage};
+    use crate::issue_monitor::IssueMonitorDependencyObservation;
+    use crate::issue_monitor_worker::{
+        try_issue_completed_by_merged_pr_classified_with, IssueMonitorCompletionProbeFailure,
+        IssueMonitorScanContinuation, IssueMonitorScanStage,
+    };
 
     let span =
         tracing::info_span!("issue_monitor_scan", project_root = %scope.project_root.display());
@@ -6708,7 +6751,7 @@ fn scan_issue_monitor_once_blocking(
         } else {
             0
         };
-        let (_, claimable) = monitor.claim_probe_plan(claimable_cap);
+        let (_, claimable) = monitor.claim_candidate_refresh_plan(claimable_cap);
         let mut confirmed = std::collections::BTreeSet::new();
         let mut deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> = None;
         for issue_number in claimable
@@ -6935,7 +6978,8 @@ fn scan_issue_monitor_once_blocking(
         } else {
             0
         };
-        if monitor.active_count() < active_cap {
+        let dependencies = monitor.dependency_probe_candidates(active_cap);
+        if monitor.claim_probe_plan(active_cap).0 > 0 || !dependencies.is_empty() {
             // Issue #3933 AC-2 (review follow-up) / Issue #3928 AC-2: on a
             // previous-result pass only the candidates re-read authoritatively
             // above may authorize a claim. Passing them as an allowlist keeps
@@ -6951,18 +6995,53 @@ fn scan_issue_monitor_once_blocking(
             let mut probe_deferred = std::collections::BTreeSet::new();
             let mut probe_deferral: Option<crate::issue_monitor_worker::IssueMonitorScanFailure> =
                 None;
-            // SPEC #4093 FR-005: read the linked PRs of the whole claim
-            // frontier in one bulk query; the per-candidate probe below
-            // answers from it and only spawns for a candidate it missed.
-            let (_, probe_frontier) = monitor.claim_probe_plan(active_cap);
+            // Include queued candidates that a completed dependency may release
+            // so the re-evaluated frontier still shares one linked-PR batch.
+            let (_, queued) = monitor.claim_candidate_refresh_plan(active_cap);
             let probe_batch = crate::issue_monitor_worker::LinkedPrProbeBatch::prefetch(
                 &owner,
                 &repo,
-                loaded
+                loaded.issues.iter().filter(|issue| {
+                    queued.contains(&issue.number) || dependencies.contains(&issue.number)
+                }),
+            );
+            let mut dependency_observations = std::collections::BTreeMap::new();
+            for issue_number in dependencies {
+                let observation = match loaded
                     .issues
                     .iter()
-                    .filter(|issue| probe_frontier.contains(&issue.number)),
-            );
+                    .find(|issue| issue.number == issue_number)
+                {
+                    Some(issue) => {
+                        let completed = match try_issue_completed_by_merged_pr_classified_with(
+                            &owner,
+                            &repo,
+                            issue,
+                            Some(&probe_batch),
+                        ) {
+                            Ok(completed) => Some(completed),
+                            Err(IssueMonitorCompletionProbeFailure::Deadline(failure)) => {
+                                return Err(failure)
+                            }
+                            Err(IssueMonitorCompletionProbeFailure::Operation(failure)) => {
+                                crate::issue_monitor_worker::ensure_scan_deadline(failure.stage)?;
+                                tracing::debug!(
+                                    issue = issue_number,
+                                    error = %failure,
+                                    "dependency completion probe failed within budget (fail-open)"
+                                );
+                                None
+                            }
+                        };
+                        Some(IssueMonitorDependencyObservation::new(issue, completed))
+                    }
+                    None => monitor.dependency_observation(issue_number, None),
+                };
+                if let Some(observation) = observation {
+                    dependency_observations.insert(issue_number, observation);
+                }
+            }
+            monitor.observe_dependency_completions(&dependency_observations);
             let prepared = monitor.try_prepare_claim_effects_with_probe_confirmed(
                 &monitor_owner,
                 &now,

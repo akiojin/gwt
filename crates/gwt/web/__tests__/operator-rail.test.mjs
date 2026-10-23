@@ -16,9 +16,64 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
+
+test("Monitor strip batches the latest status while model reads and other subscribers stay synchronous", async () => {
+  const { subscribeIssueMonitorStatus } = await importOperatorShell();
+  const fixture = await mountFixture();
+  const frames = new Set();
+  const model = createUiStateStore({ status: { enabled: false } }, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  let unsubscribe = () => {};
+  try {
+    unsubscribe = subscribeIssueMonitorStatus(fixture.document, model);
+    const cell = fixture.document.getElementById("op-strip-issue-monitor");
+    const value = fixture.document.getElementById("op-strip-issue-monitor-value");
+    assert.equal(value.textContent, "Off", "initial status renders immediately");
+    let synchronousStatus;
+    model.subscribe(state => state.status, status => { synchronousStatus = status; });
+    let renders = 0;
+    const setAttribute = cell.setAttribute.bind(cell);
+    cell.setAttribute = (...args) => { if (args[0] === "aria-label") renders++; return setAttribute(...args); };
+    const previous = model.read();
+    for (let index = 0; index < 50; index++) {
+      model.update(state => ({ ...state, status: { enabled: true, state: "active", queue_len: index, active_count: 1 } }));
+    }
+    assert.equal(model.read().status.queue_len, 49);
+    assert.equal(synchronousStatus.queue_len, 49);
+    assert.equal(previous.status.enabled, false);
+    assert.equal(value.textContent, "Off");
+    assert.equal(renders, 0);
+    assert.equal(frames.size, 1);
+    const flush = () => { const callbacks = [...frames]; frames.clear(); callbacks.forEach(callback => callback()); };
+    flush();
+    assert.equal(value.textContent, "Run Q49 A1/1");
+    assert.equal(renders, 1);
+    model.update(state => ({ ...state, unrelated: true }));
+    flush();
+    assert.equal(renders, 1);
+    model.update(state => ({ ...state, status: { enabled: true, state: "error", last_error: "scan failed" } }));
+    flush();
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+    model.update(state => ({ ...state, status: { enabled: true, state: "idle" } }));
+    flush();
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+    const commands = [];
+    fixture.document.addEventListener("op:command", event => commands.push(event.detail.id));
+    cell.dispatchEvent(new fixture.window.Event("click"));
+    assert.deepEqual(commands, ["open-issue-monitor"]);
+    model.update(state => ({ ...state, status: { enabled: false } }));
+    assert.equal(frames.size, 1);
+    unsubscribe();
+    assert.equal(frames.size, 0);
+    assert.equal(value.textContent, "Idle Q0 A0/1");
+  } finally { unsubscribe(); model.dispose(); fixture.dispose(); }
+});
 
 test("rail: 起動時に reveal 系 dataset 属性を一切設定しない", async () => {
   const fixture = await mountFixture();

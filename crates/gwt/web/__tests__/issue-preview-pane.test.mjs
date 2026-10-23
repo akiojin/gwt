@@ -577,7 +577,7 @@ test("queue output explains queued and completed issues without agents", async (
   const state = fixture.surface.ensureKnowledgeBridgeState("win-1", "issue");
   for (const [extra, reason] of [
     [{ queue_position: 1, monitor_state: null }, "Waiting in queue. No agent has started."],
-    [{ state: "closed" }, "This issue is completed. No agent is running."],
+    [{ state: "closed", monitor_state: "released" }, "This issue is completed. No agent is running."],
   ]) {
     state.entries = [{ ...knowledgeEntry(3671), ...extra }];
     state.selectedNumber = 3671;

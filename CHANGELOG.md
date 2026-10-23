@@ -1,6 +1,107 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.139.0] - 2026-10-23
+
+### Bug Fixes
+
+- **monitor:** 起動エージェント切替時の未起動配信を補償する
+- **runtime:** Close remaining process teardown gaps
+- **pty:** Wait for native windows job member completion
+- **pty:** Reject unstable unix process census
+- **pane:** Distinguish restored view removal from tree exit
+- **pane:** Forward restored view removal to agent clients
+- **pty:** Recognize process disappearance during procfs reads
+- **work:** Preserve portable supersession audit identity
+- **deps:** Update ctutils to address constant-time advisory
+- **workspace:** Repair proven container aliases
+- **monitor:** Guard launch instructions with observed queue order
+- **monitor:** Compensate pending launches after profile saves
+- **deps:** Update ctutils to 0.4.4
+- **launch:** Preflight Codex configuration before candidate launch
+- **launch:** Keep inconclusive config probes eligible
+- **monitor:** Track accepted provider tool lifetimes
+- **startup:** Resend canvas readiness after reconnect
+- **execution:** Preserve completed quarantine replay
+- **pm:** Evaluate standing mandate on cold start
+- **agent:** 起動直後のpane操作を正確なactivationまで待機する
+- **issues-kanban:** Keep closed issues with live sessions active
+- **pm:** Handle disabled monitors in resident cycles
+- **errors:** Preserve capture-time repository identity
+- **pr:** Distinguish unprovable head comparisons from drift
+- **issue:** Kanban のドロップ結果と拒否理由を表示する
+- **pm:** Bootstrap missing profiles in resident cycles
+- **skills:** Reference runtime guidance without static links
+- **monitor:** Compensate wizard profile saves before publication
+- **launch:** Refresh admission without repeating launch facts
+- **daemon:** Prefer the running companion over hook fallback
+- **pty:** Treat dead procfs records as disappeared
+
+### Features
+
+- **issue-monitor:** Defer launches until dependencies are ready
+- **pm:** Persist priority rationale with its applied order
+- **skills:** Emit monitor relationship markers
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4168 pull request link
+- **work:** Record issue 4168 delivery verification
+- **work:** Record portable audit repair PR
+- **work:** Record launch queue guard PR delivery
+- **work:** Record ctutils advisory PR
+- **work:** Record blocked replay verification
+- **work:** Record split frame delivery recovery
+- **work:** Record issue 3431 update pause
+- **work:** Link issue 3431 priority rationale PR
+- **work:** Link issue 3590 quarantine replay PR
+- **work:** Record board configuration pull request
+- **work:** Link issue 3431 cold-start guidance PR
+- **work:** Record PR 6165 delivery link
+- **work:** Record issue 3590 terminal replay acceptance
+- **work:** Link issue 3590 acceptance PR
+- **work:** Reconcile issue 3165 phase d1 delivery
+- **work:** Record issue 3165 bookkeeping pr
+- **work:** Link disabled monitor slice to pr
+- **work:** Record issue 6156 delivery handoff
+- #4499 配信後の Work 記帳を追加する
+- **work:** Record issue 3590 operation order pr
+- **work:** Record profile bootstrap delivery PR
+- **work:** Record issue 3165 delivery pr
+- **work:** Record issue 6096 delivery audit
+- **work:** Record issue 6096 PR delivery
+- **work:** Record issue 6182 pull request delivery
+
+### Performance
+
+- **ui:** Batch agents catalog rendering per frame
+- **ui:** Batch split catalog rendering per frame
+- **ui:** Batch board destination configuration renders
+- **ui:** Batch monitor status strip renders
+- **ui:** Batch issue catalog renders
+
+### Refactor
+
+- **cli:** Move workspace command model into family
+- **ui:** Share board destination configuration state
+- **runtime:** Share active resume launch authority
+
+### Testing
+
+- **monitor:** Isolate preferences cache retention assertions
+- **execution:** Preserve blocked replay history
+- **pm:** Include priority rationale in status contract
+- **hook:** Isolate CPU controls from wall deadlines
+- **issues-kanban:** Align monitor metrics with displayed cards
+- **pr:** Split head comparison scenarios within timeout budget
+- **execution:** Cover abort and blocked operation order
+- **launch:** Initialize canonical slots in prefetch fixture
+- **launch:** Bind helper libraries to cargo artifacts
+- **launch:** Retain answer freshness diagnostics
+- **launch:** Isolate admission fixtures from host probe latency
+- **launch:** Align functional projection and admission fixtures
+- **launch:** Replay complete admitted delivery state
+
 ## [9.138.1] - 2026-10-23
 
 ### Bug Fixes

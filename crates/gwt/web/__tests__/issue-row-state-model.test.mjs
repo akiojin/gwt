@@ -79,6 +79,38 @@ test("Issue #4862 launch diagnoses retain the cause and name the next operation"
   }
 });
 
+test("Issue #6141 closed issues keep live sessions in Active until cleanup", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(6141, { state: "closed", monitor_state: "released" });
+  const live = agentWindow("live", 6141);
+  assert.equal(issueQueueColumn(entry, null, live), "active");
+  assert.equal(issueQueueColumn(entry, workRow()), "active");
+  assert.equal(issueQueueColumn({ ...entry, monitor_state: "launched" }), "active");
+  assert.equal(issueQueueColumn(entry, null, { ...live, status: "stopped" }), "done");
+  assert.equal(issueQueueColumn(entry, null, { ...live, status: "error" }), "done");
+  const model = issueRowStateModel({ entry, inlineWindow: live });
+  assert.deepEqual(model.secondary.map(item => item.label), ["Closed", "Session cleanup pending"]);
+});
+
+test("Issue #6141 Active metric follows the displayed cards and errors explain their cause", async t => {
+  const runtimeStates = {};
+  const fixture = await makeFixture({ workspaceWindows: [agentWindow("live", 6141)], runtimeStates });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  fixture.surface.applyIssueMonitorStatus({ active_count: 7, max_active_agents: 8 });
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(6141, { state: "closed" })]);
+  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1");
+  const metric = fixture.body.querySelector('[data-metric="active"]');
+  assert.equal(metric.textContent, "Active 1/8");
+  assert.match(metric.dataset.issueExplanation, /capacity.*7\/8/i);
+  runtimeStates.live = "error";
+  fixture.surface.applyIssueMonitorInbox([{ issue: { number: 6141, state: "closed" },
+    state: "agent_failed", error_message: "Agent exited with code 42" }]);
+  fixture.surface.renderAllKnowledgeBridgeWindows();
+  assert.equal(fixture.body.querySelector('[data-queue-column="done"] h3').textContent, "Done · 1");
+  assert.equal(metric.textContent, "Active 0/8");
+  assert.match(fixture.body.querySelector('.knowledge-row .knowledge-row-badge').dataset.issueExplanation, /Agent exited with code 42/);
+});
+
 test("Issue #5491 judgment holds outrank stale Work activity but preserve live agents", async () => {
   const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
   const reason = "Choose the publication scope before work can continue";
@@ -157,7 +189,7 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue" } = {}) {
+async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue", runtimeStates = {} } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
@@ -189,11 +221,11 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     workspaceWindowById: (id) => windows.find((entry) => entry.id === id) || null,
     getWorkspaceWindows: () => [...windows, ...otherProjectWindows],
     windowCatalogModel: {
-      read: () => ({ catalog: { appState: { tabs: [
+      read: () => ({ catalog: { runtimeStates, appState: { tabs: [
         { id: "project-1", workspace: { windows } },
         { id: "project-2", workspace: { windows: otherProjectWindows } },
       ] } } }),
-      subscribe: () => () => {},
+      subscribeFrame: () => () => {},
     },
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset: () => kind,

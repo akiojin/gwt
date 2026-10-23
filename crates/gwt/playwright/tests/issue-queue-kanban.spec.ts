@@ -18,13 +18,16 @@ test.beforeEach(async ({ page }, info) => {
   page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
+  if (info.title.includes("Issue catalog bursts")) {
+    await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
+  }
   const narrowSettings = info.title.includes("Settings integrates");
   if (narrowSettings) await page.setViewportSize({ width: 1280, height: 1000 });
   if (!liveUrl) await installEmbeddedRoutes(page);
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862"),
+    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -604,6 +607,69 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
 });
 
+test("Issue #6141 closed issues follow live sessions and explain cleanup, counts and errors", async ({ page }) => {
+  const activeMetric = page.locator('[data-metric="active"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([{ number: 5, title: "Closed issue awaiting session cleanup", state: "closed", labels: [] }]);
+    fixture.__queueConfirm([], { enabled: true, state: "active", active_count: 7, max_active_agents: 8 });
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "launched" }]);
+  });
+  for (const [status, label] of [["running", "Running"], ["idle", "Idle"], ["waiting", "Needs input"], ["starting", "Starting"]]) {
+    await page.evaluate(status => {
+      const fixture = window as any;
+      fixture.__queueAgentState(status);
+    }, status);
+    await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1");
+    await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+    await expect(column(page, "done").locator('[data-issue-number="5"]')).toHaveCount(0);
+    await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText(label);
+    await expect(row(page, 5).locator('[data-key="closed"]')).toHaveText("Closed");
+    await expect(row(page, 5)).toContainText("Session cleanup pending");
+    await expect(activeMetric).toHaveText("Active 1/8");
+  }
+  await activeMetric.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText(/capacity.*7\/8/i);
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueAgentState("stopped");
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "released" }]);
+  });
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0");
+  await expect(activeMetric).toHaveText("Active 0/8");
+  await expect(row(page, 5)).not.toContainText("Session cleanup pending");
+
+  const cause = "Agent process exited with code 17 during session cleanup";
+  await page.evaluate(cause => {
+    const fixture = window as any;
+    fixture.__queueAgentState("error");
+    fixture.__queueInbox([{ issue: { number: 5, state: "closed" }, state: "agent_failed", error_message: cause }]);
+  }, cause);
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  const badge = row(page, 5).locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Error");
+  await badge.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText(cause);
+  await page.mouse.move(1590, 1090);
+  await page.keyboard.press("Tab");
+  await row(page, 5).locator(".knowledge-row-select").focus();
+  await expect(popup).toContainText(cause);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5, state: "closed" }, state: "agent_failed" }]));
+  await badge.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).not.toContainText(cause);
+  await expect(popup).toContainText(/no.*(?:cause|detail|reason)|not.*reported/i);
+});
+
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
   await page.evaluate(() => {
     const fixture = window as any;
@@ -890,6 +956,64 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
 });
 
+test("T-7b.2b.2: Issue catalog bursts render once without delaying local selection", async ({ page }) => {
+  await confirm(page, [3, 4], { tier_facts: [{ issue_number: 5,
+    confirmed_launch: { tier: 0, window_id: "tab-queue::agent-5", delivery_id: "delivery-5" },
+  }] });
+  const chip = row(page, 5).locator('[data-key="tier-running"]');
+  await expect(chip).toHaveText("Running tier 0");
+  const result = await page.evaluate(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const board = document.querySelector(".issue-queue-board")!;
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancel = window.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 0;
+    window.requestAnimationFrame = run => { frames.set(++next, run); return next; };
+    window.cancelAnimationFrame = id => { frames.delete(id); };
+    const observer = new MutationObserver(() => {});
+    observer.observe(board, { childList: true, subtree: true });
+    const rowAdds = () => observer.takeRecords().reduce((count, record) => count +
+      [...record.addedNodes].filter(node => node instanceof Element && node.matches(".knowledge-row")).length, 0);
+    const inject = (status: string) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "terminal_status", id: "tab-queue::agent-5", status },
+    }));
+    try {
+      const initialRow = board.querySelector('[data-issue-number="5"]');
+      for (let index = 0; index < 50; index++) inject(index % 2 ? "idle" : "running");
+      const before = { rows: rowAdds(), same: initialRow === board.querySelector('[data-issue-number="5"]') };
+      for (const run of [...frames.values()]) run(performance.now());
+      return { before, rows: rowAdds(), running: !!board.querySelector('[data-key="tier-running"]') };
+    } finally {
+      observer.disconnect();
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+    }
+  });
+  expect(result).toEqual({ before: { rows: 0, same: true }, rows: 1, running: false });
+  await page.evaluate(() => {
+    (window as any).__icframeRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "terminal_status", id: "tab-queue::agent-5", status: "running" },
+    }));
+  });
+  try {
+    await expect(chip).toHaveText("Running tier 0", { timeout: 1000 });
+    await row(page, 5).locator(".knowledge-row-select").click();
+    await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #5");
+  } finally {
+    await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__icframeRaf;
+      delete (window as any).__icframeRaf;
+      delete (document as any).visibilityState;
+    });
+  }
+  await chip.hover();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).toContainText("Acknowledged launch tier");
+});
+
 test("T-7b.2b.2: Running tier uses exact live window and clears stale explanations", async ({page}) => {
   const facts = [{ issue_number: 5, recorded_launch_tier: 2,
     confirmed_launch: { tier: 0, window_id: "tab-queue::agent-5", delivery_id: "delivery-5" } }];
@@ -1002,6 +1126,9 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await drag(page,1,column(page,"queued").locator("h3"));
   await expect.poll(()=>messages(page)).toEqual([{kind:"issue_monitor_queue_push",issue_numbers:[1,2]}]);
   await expect(column(page,"backlog").locator('[data-issue-number="1"]')).toHaveCount(1);
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"push",issue_numbers:[1,2],error:null}));
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #1, Issue #2: added to the queue.");
   await confirm(page,[3,4,1,2]);
   await expect(column(page,"queued").locator(".knowledge-row")).toHaveCount(4);
   await row(page,1).getByRole("checkbox").uncheck();
@@ -1013,7 +1140,10 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   await expect(column(page,"queued").locator(".knowledge-row").first()).toHaveAttribute("data-issue-number","2");
   await drag(page,2,column(page,"backlog").locator("h3"));
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"issue_monitor_queue_remove",issue_numbers:[2]});
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"remove",issue_numbers:[2],error:null}));
   await confirm(page,[3,4,1]);
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: removed from the queue.");
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
   const before=(await messages(page)).length;
   for(const phase of ["active","done"]) {
@@ -1022,10 +1152,24 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   }
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
-  await confirm(page,[3,4,1],{last_error:"Queue change rejected: issue is on hold"});
+  await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
+    operation:"push",issue_numbers:[2],error:"Queue change rejected: issue is on hold"}));
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
-  await page.locator("#op-notifications-button").click();
-  await expect(page.locator("#notification-center")).toContainText("Queue change rejected: issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: issue is on hold");
+  await confirm(page,[3,4,1]);
+  await expect(page.locator(".issue-queue-feedback")).toContainText("issue is on hold");
+});
+
+test("Issue #4499 a card missing at drop time explains why it cannot move", async ({ page }) => {
+  const transfer = await page.evaluateHandle(() => new DataTransfer());
+  await row(page,1).dispatchEvent("dragstart",{dataTransfer:transfer});
+  await page.evaluate(() => (window as any).__queueSetEntries([{number:2,title:"Remaining issue",state:"open",labels:[]}]));
+  await expect(row(page,1)).toHaveCount(0);
+  const before = (await messages(page)).length;
+  await column(page,"queued").dispatchEvent("drop",{dataTransfer:transfer});
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #1 is no longer on this board. Refresh and try again.");
+  expect((await messages(page)).length).toBe(before);
+  await transfer.dispose();
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {
