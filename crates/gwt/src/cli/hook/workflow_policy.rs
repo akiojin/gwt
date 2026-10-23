@@ -669,6 +669,9 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             operation,
             "execution.adopt"
             | "execution.repair"
+            // Repair proves an existing Work's immutable source history;
+            // a broken assignment must not prevent its own bounded recovery.
+            | "workspace.work_repair"
             | "execution.reopen"
             | "execution.release_prepared"
             | "execution.release-prepared"
@@ -2356,6 +2359,7 @@ mod tests {
                 "execution.release_prepared",
                 r#"{"reason":"stale fence","operation_id":"op-1"}"#,
             ),
+            envelope_command("workspace.work_repair", r#"{"work_id":"existing-work"}"#),
         ] {
             assert_eq!(
                 evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),

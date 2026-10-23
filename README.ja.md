@@ -1252,6 +1252,12 @@ worktree にプロジェクトタブが切り替わります。
 追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
 archive を上書きしません。
 
+既存 Work に絶対 worktree path と `.` の container が重複している場合は、
+`workspace.work_repair` の `params.work_id` で対象を指定して修復内容を確認できます。
+既定は dry-run で、`"dry_run":false` を加えると適用します。記録済み Git worktree と
+永続 event の証拠が一致する場合だけ修復し、terminal 状態とソースファイルを保持します。
+証拠の欠損や曖昧性がある場合は拒否します。
+
 ## GitHub Discussions でローカル Board の節目を共有する
 
 別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に scoped な
