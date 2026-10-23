@@ -306,6 +306,22 @@ gwtd <<'JSON'
 JSON
 ```
 
+`fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
+JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
+一部の観測元が使えない場合の診断も含みます。`fleet.orphans` はpaneが観測されない
+プロセスを列挙します。pane情報の取得失敗時はorphanと断定しません。
+
+登録済みPMは `fleet.disposition` に空でない `targets` 配列を渡して整理できます。
+選んだ行の `id`、`session_id`、paneの `child_pid` / `child_started_at` を指定します。
+プロセスのみの対象には代わりに `pid` / `started_at` が必要です。
+配信状態がunknownの集合は `allow_unknown:true` を明示しない限り拒否されます。
+現在のclaim保持者、稼働中executionの保持者、未配信の作業は保護されます。
+`fleet.orphan.terminate` はプロセス対象のみ受け付けます。対象ごとにreceiptを返し、
+世代変更、未対応backend、プロセス終端未確認を報告します。通常closeへはfallbackしません。
+orphan終端には固定OS process handle（LinuxのpidfdまたはWindowsのprocess handle）が必要です。
+他のOS、handle取得不可、lifecycle権限が不確かな場合はプロセスを保持します。
+`allow_unknown` で上書きできるのは配信状態の不確かさだけです。
+
 `pane.health` は既存の workspace と runtime sidecar の状態から、GUI event loop に
 依存せずプロジェクトの pane health を読み取ります。応答の `output` 文字列を JSON として
 読んだ `panes` 配列に、各 pane の `classification`、`reason_code`、`recommended_action`

@@ -5,6 +5,9 @@ use std::sync::OnceLock;
 
 use fs2::FileExt;
 
+pub(super) use gwt::session_launch::durable_launch_recovery_exists;
+use gwt::session_launch::{durable_launch_recovery_dir, durable_launch_recovery_path};
+
 #[cfg(test)]
 type DurableLaunchRecoveryDirectorySyncHook = Box<dyn Fn(&Path) -> std::io::Result<()> + 'static>;
 
@@ -1716,7 +1719,6 @@ struct DurableFreshExecutionCandidate {
     agent_id: gwt_agent::AgentId,
 }
 
-const DURABLE_LAUNCH_RECOVERY_DIR: &str = "execution-launch-recovery";
 const DURABLE_LAUNCH_RECOVERY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1803,15 +1805,6 @@ impl DurableLaunchRecoveryRecord {
             number: self.owner_number,
         })
     }
-}
-
-fn durable_launch_recovery_dir(sessions_dir: &Path) -> PathBuf {
-    sessions_dir.join(DURABLE_LAUNCH_RECOVERY_DIR)
-}
-
-fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
-    gwt_agent::validate_session_id_path_component(session_id)?;
-    Ok(durable_launch_recovery_dir(sessions_dir).join(format!("{session_id}.json")))
 }
 
 fn durable_launch_recovery_lock_path(
@@ -2118,10 +2111,6 @@ pub(super) fn bind_durable_launch_recovery_session_identity(
         Some(&identity),
     )?;
     Ok(identity)
-}
-
-pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
-    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
 }
 
 fn durable_launch_recovery_records(

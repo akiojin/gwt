@@ -66,17 +66,28 @@ fn run_action<E: CliEnv>(
     if let SkillStateAction::Complete { spec, pr } = &action {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
-        let owning_active_build = gwt_core::skill_state::load(&worktree, SKILL_NAME)
-            .map_err(|error| {
-                gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
-                    error.to_string(),
-                ))
-            })?
-            .is_some_and(|state| {
-                state.active
-                    && state.session_id.trim() == session_id.trim()
-                    && state.owner_spec.is_none_or(|owner| owner == *spec)
-            });
+        let build_state = gwt_core::skill_state::load(&worktree, SKILL_NAME).map_err(|error| {
+            gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
+                error.to_string(),
+            ))
+        })?;
+        // Confirm an ended lifecycle without revalidating or rewriting its delivery.
+        if build_state.as_ref().is_some_and(|state| {
+            !state.active
+                && state.owner_spec == Some(*spec)
+                && !session_id.trim().is_empty()
+                && state.session_id.trim() == session_id.trim()
+        }) {
+            out.push_str(&format!(
+                "{VERB}: {SKILL_DISPLAY} lifecycle already finalized for SPEC-{spec}\n"
+            ));
+            return Ok(0);
+        }
+        let owning_active_build = build_state.is_some_and(|state| {
+            state.active
+                && state.session_id.trim() == session_id.trim()
+                && state.owner_spec.is_none_or(|owner| owner == *spec)
+        });
         match if owning_active_build {
             super::completion_pr::admit(env, session_id.trim(), Some(*spec), *pr, out)
         } else {
@@ -2439,6 +2450,33 @@ format_version: Some(1),
                 .is_some_and(|receipt| receipt.used_typed_quarantine),
             "typed quarantine must be pinned in the Completed ECR"
         );
+        let completed_bytes = crate::cli::execution_state::record_contents(repo.path()).unwrap();
+        let state_path = gwt_core::skill_state::state_path(repo.path(), SKILL_NAME);
+        let state_bytes = std::fs::read(&state_path).unwrap();
+        env.pr_quarantine_contexts
+            .get_mut(&3854)
+            .unwrap()
+            .body
+            .clear();
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                SkillStateAction::Complete {
+                    spec: 3248,
+                    pr: None,
+                },
+                &mut out,
+            )
+            .unwrap(),
+            0,
+            "completed lifecycle replay must not require the old PR marker: {out}"
+        );
+        assert_eq!(
+            crate::cli::execution_state::record_contents(repo.path()).unwrap(),
+            completed_bytes
+        );
+        assert_eq!(std::fs::read(state_path).unwrap(), state_bytes);
     }
 
     #[test]

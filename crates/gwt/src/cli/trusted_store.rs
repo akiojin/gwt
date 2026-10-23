@@ -378,7 +378,7 @@ pub(crate) fn with_write_lease_for_resolved_dir<T>(
     with_write_lease_for_resolved_dir_wait(trusted_dir, WRITE_LEASE_WAIT, operation)
 }
 
-fn with_write_lease_for_resolved_dir_wait<T>(
+pub(crate) fn with_write_lease_for_resolved_dir_wait<T>(
     dir: &Path,
     wait: Duration,
     operation: impl FnOnce() -> io::Result<T>,
