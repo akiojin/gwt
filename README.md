@@ -1309,6 +1309,10 @@ Use `scope: "host"` for machine-wide errors such as startup
 configuration failures, `scope: "unknown"` for unattributed records, or
 `scope: "all"` to inspect every scope. A `project_root` filter always excludes
 host and unknown records; gwt never guesses their project.
+Project records store the repo-hash when the error occurs, so deleting or reusing
+a worktree directory does not change the history's project. Older records without
+that identity are excluded from the default query; use an explicit `project_root`
+or `scope: "all"` to retrieve them.
 Damaged ledger rows appear as `ledger_corruption` host diagnostics with the
 ledger filename and line number. Their timestamp is when corruption is observed;
 the original rows remain intact.

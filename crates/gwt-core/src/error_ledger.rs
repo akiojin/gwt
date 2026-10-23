@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -82,6 +82,10 @@ pub struct ErrorRecord {
     pub message: String,
     #[serde(default)]
     pub target: ErrorTarget,
+    /// Project identity captured when the error occurred. Legacy rows keep
+    /// `None`: resolving their path now could assign history to a different repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_hash: Option<String>,
     /// Kind-specific structured detail (Issue #3541: hook failures carry
     /// `event`, `handler`, `exit_status`, `fail_open`). Values are sanitized
     /// like `message`; older rows without the field still deserialize.
@@ -99,6 +103,8 @@ struct ErrorRecordWire {
     message: String,
     #[serde(default)]
     target: ErrorTarget,
+    #[serde(default)]
+    repo_hash: Option<String>,
     #[serde(default)]
     context: BTreeMap<String, String>,
     #[serde(default)]
@@ -132,6 +138,7 @@ impl TryFrom<ErrorRecordWire> for ErrorRecord {
             kind: row.kind,
             message: row.message,
             target: row.target,
+            repo_hash: row.repo_hash,
             context: row.context,
         })
     }
@@ -139,6 +146,14 @@ impl TryFrom<ErrorRecordWire> for ErrorRecord {
 
 impl ErrorRecord {
     pub fn new(kind: ErrorKind, message: impl Into<String>, target: ErrorTarget) -> Self {
+        let repo_hash = target
+            .project_root
+            .as_deref()
+            .filter(|root| !root.trim().is_empty())
+            .map(|root| {
+                let root = crate::paths::resolve_current_worktree_root(Path::new(root));
+                crate::paths::project_scope_hash(&root).to_string()
+            });
         let target = sanitize_target(target);
         Self {
             scope: if has_project_root(&target) {
@@ -152,6 +167,7 @@ impl ErrorRecord {
             kind,
             message: sanitize_error_message(&message.into()),
             target,
+            repo_hash,
             context: BTreeMap::new(),
         }
     }
@@ -433,7 +449,9 @@ mod tests {
     fn legacy_scope_uses_only_recorded_root_and_project_requires_root() {
         let mut raw = serde_json::to_value(sample(ErrorKind::HookFailure, "legacy")).unwrap();
         raw.as_object_mut().unwrap().remove("scope");
+        raw.as_object_mut().unwrap().remove("repo_hash");
         let project: ErrorRecord = serde_json::from_value(raw.clone()).unwrap();
+        assert!(project.repo_hash.is_none());
         assert_eq!(serde_json::to_value(project).unwrap()["scope"], "project");
         raw["target"] = serde_json::json!({});
         let unknown: ErrorRecord = serde_json::from_value(raw.clone()).unwrap();
@@ -460,6 +478,8 @@ mod tests {
         assert_eq!(listed[0].target.window_id.as_deref(), Some("win-1"));
         assert_eq!(listed[0].target.session_id.as_deref(), Some("sess-1"));
         assert_eq!(listed[0].target.project_root.as_deref(), Some("/tmp/repo"));
+        assert!(recorded.repo_hash.is_some());
+        assert_eq!(listed[0].repo_hash, recorded.repo_hash);
         assert_eq!(listed[0].schema_version, SCHEMA_VERSION);
     }
 

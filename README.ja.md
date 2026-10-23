@@ -1191,6 +1191,9 @@ error ledger（`errors.list`）に記録されます。
 `scope: "host"`、帰属不明の記録は `scope: "unknown"`、全スコープは
 `scope: "all"` を明示して取得します。`project_root` を指定した場合は
 host・unknown 行を含めず、所属プロジェクトを推測で補いません。
+project 行には発生時の repo-hash を保存するため、worktree ディレクトリを削除・再利用しても
+履歴の所属は変わりません。repo-hash を持たない旧行は既定検索から除外されます。
+`project_root` の明示指定または `scope: "all"` で取得してください。
 破損した台帳行は、ファイル名と行番号を持つ `ledger_corruption` の host 診断として
 返します。timestamp は破損を検出した時刻で、元の行は変更しません。
 
