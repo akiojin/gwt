@@ -69,6 +69,7 @@ async function makeFixture(options = {}) {
   const opened = [];
   const reports = [];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);

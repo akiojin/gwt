@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }, info) => {
   page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
-  if (info.title.includes("Issue catalog bursts")) {
+  if ((info.title.includes("Issue catalog bursts") || info.title.includes("Monitor list bursts"))) {
     await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
   }
   const narrowSettings = info.title.includes("Settings integrates");
@@ -954,6 +954,69 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
     /^(set_|issue_monitor_queue_|update_viewport|input$)/.test(message.kind)), before);
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
+});
+
+test("Monitor list bursts render once while controls remain synchronous", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const board = document.querySelector(".issue-queue-board")!;
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancel = window.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 0;
+    window.requestAnimationFrame = run => { frames.set(++next, run); return next; };
+    window.cancelAnimationFrame = id => { frames.delete(id); };
+    const observer = new MutationObserver(() => {});
+    observer.observe(board, { childList: true, subtree: true });
+    const rowAdds = () => observer.takeRecords().reduce((count, record) => count +
+      [...record.addedNodes].filter(node => node instanceof Element && node.matches('.knowledge-row[data-issue-number="3"]')).length, 0);
+    const inject = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+    try {
+      const initialRow = board.querySelector('[data-issue-number="3"]');
+      for (let index = 0; index < 50; index++) {
+        inject({ kind: "issue_monitor_status", status: { queue_len: index, autonomous_mode: true,
+          tier_facts: [{ issue_number: 3, recorded_launch_tier: 0, minimum_tier_override: index }],
+        } });
+        inject({ kind: "issue_monitor_inbox", items: [{ issue: { number: 3 }, state: index % 2 ? "launched" : "queued" }] });
+      }
+      const before = { rows: rowAdds(), same: initialRow === board.querySelector('[data-issue-number="3"]'),
+        queue: document.querySelector('[data-metric="queue"]')!.textContent,
+        active: document.querySelector('[data-metric="active"]')!.textContent };
+      (document.querySelector('[data-action="monitor-autonomous"]') as HTMLElement).click();
+      const request = (window as any).__queueMessages.filter((message: any) => message.kind === "set_issue_monitor_autonomous_mode").at(-1);
+      for (const [id, run] of [...frames]) { frames.delete(id); run(performance.now()); }
+      return { before, rows: rowAdds(), active: !!board.querySelector('[data-queue-column="active"] [data-issue-number="3"]'),
+        latest: board.querySelector('[data-issue-number="3"] [data-key="tier-minimum"]')?.textContent, request };
+    } finally {
+      observer.disconnect();
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+    }
+  });
+  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 2/1" }, rows: 1, active: true,
+    latest: "Min tier 49", request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
+  const select = row(page, 3).locator(".knowledge-row-select");
+  await select.focus();
+  await page.evaluate(() => {
+    (window as any).__imframeRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "issue_monitor_inbox", items: [{ issue: { number: 3 }, state: "queued" }],
+    } }));
+  });
+  try {
+    await expect(column(page, "queued").locator('[data-issue-number="3"]')).toBeVisible({ timeout: 1000 });
+    await expect(select).toBeFocused();
+    await select.click();
+    await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #3");
+  } finally {
+    await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__imframeRaf;
+      delete (window as any).__imframeRaf;
+      delete (document as any).visibilityState;
+    });
+  }
 });
 
 test("T-7b.2b.2: Issue catalog bursts render once without delaying local selection", async ({ page }) => {
