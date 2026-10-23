@@ -4077,6 +4077,8 @@ fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
+
     let events = runtime.local_issue_monitor_events_with_policy(
         &runtime.test_context(),
         Some("client-1"),
