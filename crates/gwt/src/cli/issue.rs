@@ -200,35 +200,9 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
+            run_issue_comment(env, number, &body, out)?
         }
-        IssueCommand::CommentBody { number, body } => {
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
-        }
+        IssueCommand::CommentBody { number, body } => run_issue_comment(env, number, &body, out)?,
         IssueCommand::MonitorReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -6236,6 +6210,44 @@ fn cache_resource_is_fresh(path: &Path) -> bool {
         .is_some_and(|age| age < crate::issue_cache::ISSUE_CACHE_TTL)
 }
 
+/// Once GitHub has created the comment, a failed local projection must not
+/// turn success into a refusal that invites a duplicate POST (Issue #4171).
+fn run_issue_comment<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    body: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let comment = env.client().create_comment(IssueNumber(number), body)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.comment",
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    out.push_str(&format!(
+        "created comment {} on #{}\n",
+        comment.id.0, number
+    ));
+    if let Err(error) = refresh_issue_cache(env, IssueNumber(number)) {
+        let message = format!(
+            "comment {} on #{} was created; postprocessing cache refresh failed: {error}",
+            comment.id.0, number
+        );
+        super::operation_warnings::push("issue_comment_postprocessing_failed", &message);
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            message,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: Some(number),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+    }
+    Ok(0)
+}
+
 pub(super) fn refresh_issue_cache<E: CliEnv>(
     env: &mut E,
     number: IssueNumber,
@@ -6449,10 +6461,9 @@ where
         // PM and let the index catch up through its own fingerprint check.
         if let Err(error) = rebuild_issue_index(env.repo_path()) {
             let message = format!("rebuild issue index: {error}");
-            tracing::warn!(
-                issue = number.0,
-                %message,
-                "issue cache written; index rebuild failed"
+            super::operation_warnings::push(
+                "issue_cache_index_refresh_failed",
+                format!("issue #{} cache written; {message}", number.0),
             );
             gwt_core::error_ledger::record_fail_open(
                 gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
@@ -8072,6 +8083,37 @@ mod tests {
             comments: vec![],
         });
         (tmp, env)
+    }
+
+    #[test]
+    fn issue_comment_from_file_refreshes_cache_after_success() {
+        let (tmp, mut env) = seeded_edit_env(&[]);
+        let _home = ScopedGwtHome::set(tmp.path().join("gwt-home"));
+        let file = "comment.md".to_string();
+        env.files.insert(file.clone(), "evidence".into());
+        super::super::operation_warnings::take();
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::Comment { number: 7, file },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let comments = env.client.comments(IssueNumber(7));
+        assert_eq!(comments.len(), 1);
+        assert_eq!(out, format!("created comment {} on #7\n", comments[0].id.0));
+        assert_eq!(
+            Cache::new(env.cache_root())
+                .load_entry(IssueNumber(7))
+                .unwrap()
+                .snapshot
+                .comments,
+            comments
+        );
+        assert!(super::super::operation_warnings::take().is_empty());
     }
 
     fn fetched(env: &crate::cli::TestEnv, number: u64) -> IssueSnapshot {
@@ -17392,6 +17434,7 @@ command = "my-agent-cli"
     /// and the next read is a warm hit instead of another fetch plus rebuild.
     #[test]
     fn index_rebuild_failure_publishes_receipt_and_records_the_failure() {
+        super::super::operation_warnings::take();
         let temp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
@@ -17448,6 +17491,10 @@ command = "my-agent-cli"
             rows[0].message
         );
         assert_eq!(rows[0].target.issue, Some(42));
+        let warnings = super::super::operation_warnings::take();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "issue_cache_index_refresh_failed");
+        assert!(warnings[0].message.contains("injected rebuild failure"));
     }
 
     #[test]

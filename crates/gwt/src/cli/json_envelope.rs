@@ -4204,6 +4204,79 @@ mod tests {
         );
     }
 
+    /// Issue #4171 AC-1/3/4: a failed read after a successful POST must not
+    /// invite a duplicate POST or classify it as an operation refusal.
+    #[test]
+    fn issue_comment_preserves_success_when_postprocessing_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_next_fetch(gwt_github::ApiError::Parse {
+            operation: "graphql query".into(),
+            message: "GitHub GraphQL returned an unclassified error".into(),
+        });
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], true, "{payload}");
+        let comments = env.client.comments(issue.number);
+        assert_eq!(comments.len(), 1);
+        assert!(payload["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("created comment {} ", comments[0].id.0)));
+        assert_eq!(
+            payload["warnings"][0]["code"],
+            "issue_comment_postprocessing_failed"
+        );
+        assert!(payload["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("GitHub GraphQL"));
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert!(rows.iter().any(|row| row.kind
+            == gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+            && row.target.issue == Some(issue.number.0)));
+        assert!(!rows
+            .iter()
+            .any(|row| row.kind == gwt_core::error_ledger::ErrorKind::OperationRefusal));
+    }
+
+    #[test]
+    fn issue_comment_creation_failure_stays_an_operation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let mut env = TestEnv::new(temp.path().join("cache"));
+        let issue =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        env.client.fail_create_comment_after(0);
+        env.stdin = envelope(
+            "issue.comment",
+            json!({"number": issue.number.0, "body": "evidence"}),
+        );
+
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false, "{payload}");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected create_comment failure"));
+        assert!(env.client.comments(issue.number).is_empty());
+        assert!(!env
+            .client
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("fetch:")));
+        assert!(payload.get("warnings").is_none());
+    }
+
     #[test]
     fn operation_refusal_belongs_to_explicit_project_instead_of_caller_cwd() {
         let temp = tempfile::tempdir().unwrap();
