@@ -6419,10 +6419,17 @@ pub(crate) fn monitor_project_prefs_equal(
 }
 
 fn load_issue_monitor_prefs_raw(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    load_issue_monitor_prefs_raw_with_cache(path, issue_monitor_prefs_cache())
+}
+
+fn load_issue_monitor_prefs_raw_with_cache(
+    path: &Path,
+    cache: &std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>>,
+) -> io::Result<IssueMonitorPrefs> {
     let key = std::path::absolute(path)?;
     // Serialize misses as well as hits so concurrent readers parse a generation once.
     // The cross-process sibling writer lock still owns every mutation transaction.
-    let mut cache = issue_monitor_prefs_cache()
+    let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = match fs::File::open(&key) {
@@ -41728,6 +41735,11 @@ mod tests {
 
     #[test]
     fn prefs_cache_reuses_snapshots_and_invalidates_on_file_changes() {
+        // Parallel tests may legitimately evict entries from the global cache.
+        // Exercise the same reader with an isolated retention map.
+        let cache = std::sync::Mutex::new(BTreeMap::new());
+        let load_issue_monitor_prefs =
+            |path: &Path| load_issue_monitor_prefs_raw_with_cache(path, &cache);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issue-monitor.json");
         let mut prefs = IssueMonitorPrefs::default();
