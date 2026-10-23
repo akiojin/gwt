@@ -958,7 +958,9 @@ pub(super) fn run<E: CliEnv>(
                                     )
                             });
                         out.push_str(&format!("PR head comparison: verified_head={verified} remote_head={remote} classification={state} local_verification_fresh={local_fresh}\n"));
-                        if !matches!(state, "matched" | "bookkeeping_or_base_sync") {
+                        if state == "unprovable" {
+                            out.push_str("PR head comparison is unprovable; drift has not been established. Use pr.head_check to retry the comparison.\n");
+                        } else if !matches!(state, "matched" | "bookkeeping_or_base_sync") {
                             out.push_str("PR head drift detected (classification=drift). Record this comparison with pr.comment or issue.comment; fast-forward locally and rerun verify.plan / verify.run before claiming the current PR snapshot is verified.\n");
                         }
                     }
