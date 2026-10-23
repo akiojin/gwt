@@ -8,6 +8,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         initOperatorShell,
         applyTelemetryCounts,
         applyIssueMonitorStatus,
+        subscribeIssueMonitorStatus,
         applyProviderUsage,
         subscribeRuntimeHealth,
       } from "/operator-shell.js";
@@ -3808,8 +3809,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
         openSurfaceNotice: (key) => notificationCenter.open(key),
       });
-      issueMonitorModel.subscribe(model => model.status, status =>
-        window.__operatorShell?.applyIssueMonitorStatus?.(status));
+      subscribeIssueMonitorStatus(document, issueMonitorModel);
       issueMonitorModel.subscribe(model => model.status, status =>
         updateCtaController.handleIssueMonitorStatus(status));
       windowCatalogModel.subscribe(model => model.catalog, () =>
