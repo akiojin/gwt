@@ -3424,6 +3424,9 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
         MonitorNativeHolderFixture::None,
         true,
     );
+    // Own static claim inputs so this fixture reaches the FreshRequired launch.
+    let _projection =
+        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
         &fixture.runtime.test_context(),
         3165,
