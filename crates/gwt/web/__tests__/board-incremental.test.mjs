@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parseHTML } from "linkedom";
 
 const source = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
   .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`)
@@ -31,6 +32,48 @@ function fixture() {
 function entry(id, body = id) {
   return { id, body, created_at: `2026-10-15T00:00:0${id}Z` };
 }
+
+test("Board mount reads the cached destination for its project without refetching", t => {
+  const { document } = parseHTML('<div id="board"><div class="window-body"></div></div>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  // Match the writable select.value browser contract (linkedom is getter-only).
+  const selectPrototype = Object.getPrototypeOf(document.createElement("select"));
+  const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, "value");
+  Object.defineProperty(selectPrototype, "value", {
+    configurable: true,
+    get() { return this.__testValue ?? selectValue.get.call(this); },
+    set(value) { this.__testValue = String(value); },
+  });
+  t.after(() => Object.defineProperty(selectPrototype, "value", selectValue));
+  const sent = [];
+  let projectRoot = "/project-a";
+  const surface = createBoardLogsSurface({
+    send: event => sent.push(event),
+    createNode: (tag, className, text) => {
+      const node = document.createElement(tag);
+      node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    },
+    windowMap: new Map([["board", document.getElementById("board")]]),
+    activeWorkspace: () => ({ windows: [] }),
+    activeProjectTab: () => ({ project_root: projectRoot }),
+    getActiveWorkProjection: () => null,
+  });
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    surface.applyProjectBoardConfigEventToBoard({ project_root: root, provider: "slack",
+      channel, resolved_provider: "slack", resolved_channel: channel });
+  }
+  const body = document.querySelector(".window-body");
+  for (const [root, channel] of [["/project-a", "#alpha"], ["/project-b", "#beta"]]) {
+    projectRoot = root;
+    surface.mountBoardWindow({ id: "board", preset: "board" }, body);
+    assert.equal(body.querySelector(".board-destination-text").textContent, `Slack ${channel}`);
+  }
+  assert.ok(!sent.some(event => event.kind === "get_project_board_config"));
+});
 
 test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
   const { surface, state, sent } = fixture();

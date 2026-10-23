@@ -843,6 +843,17 @@ test("Close Project receiver commits shared data and rejects direct rendering", 
 });
 
 
+test("Board destination receiver commits shared state and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const options = { rootName: 'applyProjectBoardConfigEventToBoard' };
+  assert.deepEqual(scanModule(source, file, options), []);
+  const bypass = source.replace('function applyProjectBoardConfigEventToBoard(event) {',
+    'function applyProjectBoardConfigEventToBoard(event) { renderBoard("board");');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, options).some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("folder picker receiver commits shared state and rejects direct rendering", () => {
   const file = 'crates/gwt/web/project-clone-modal.js';
   const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');

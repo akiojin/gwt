@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
-test("Runtime hook refresh preserves Board controls and fences unrelated events", async ({ page }, info) => {
+test("Board destination updates and runtime hook refresh preserve controls and fence unrelated events", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base, "requires an isolated checkout server");
   const errors: string[] = [];
@@ -21,7 +21,7 @@ test("Runtime hook refresh preserves Board controls and fences unrelated events"
   const id = (await board.getAttribute("data-id"))!;
   // Controlled inbound frames exercise the app receiver, store and real Board.
   // Capture load requests so backend replies cannot race the loading assertions.
-  const result = await page.evaluate(id => {
+  const result = await page.evaluate(({ id, projectRoot }) => {
     const root = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
     const sent: any[] = [];
     const originalSend = WebSocket.prototype.send;
@@ -39,6 +39,13 @@ test("Runtime hook refresh preserves Board controls and fences unrelated events"
     input.focus(); input.value = "Unsent draft"; input.dispatchEvent(new Event("input")); input.setSelectionRange(2, 5);
     const hook = (event: any) => inject({ kind: "runtime_hook_event", event });
     try {
+      const config = { kind: "project_board_config", project_root: projectRoot,
+        provider: "slack", channel: "#shared-board", resolved_provider: "slack",
+        resolved_channel: "#shared-board", resolved_source: "project", signed_in: true };
+      inject(config);
+      inject({ ...config, project_root: "", resolved_channel: "#invalid" });
+      inject({ ...config, project_root: "/unrelated-project", resolved_channel: "#other" });
+      const destination = root.querySelector(".board-destination-text")!.textContent;
       hook(null); hook({ kind: "other" });
       hook({ kind: "coordination_event", project_root: "unrelated-project" });
       const ignored = sent.length;
@@ -47,16 +54,21 @@ test("Runtime hook refresh preserves Board controls and fences unrelated events"
       hook({ kind: "coordination_event" });
       const whileLoading = sent.length;
       receive(); hook({ kind: "coordination_event" }); receive();
-      return { ignored, loading, whileLoading, loads: sent.map(event => event.id),
+      return { destination, ignored, loading, whileLoading, loads: sent.map(event => event.id),
         sameCard: !!card && card === root.querySelector('[data-board-entry-id="hook-post"]'),
         sameInput: input === root.querySelector(".board-textarea"), focused: document.activeElement === input,
         draft: input.value, selection: [input.selectionStart, input.selectionEnd] };
     } finally { WebSocket.prototype.send = originalSend; }
-  }, id);
-  expect(result).toEqual({ ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
+  }, { id, projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
+  expect(result).toEqual({ destination: "Slack #shared-board ⚠", ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
     loads: [id, id], sameCard: true, sameInput: true, focused: true,
     draft: "Unsent draft", selection: [2, 5] });
-  await page.screenshot({ path: info.outputPath("runtime-hook-board.png") });
+  await board.locator("[data-action='board-destination']").click();
+  const popover = page.locator(".board-destination-popover");
+  await expect(popover.locator("select")).toHaveValue("slack");
+  await expect(popover.locator("input").first()).toHaveValue("#shared-board");
+  await popover.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.screenshot({ path: info.outputPath("board-destination.png") });
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
