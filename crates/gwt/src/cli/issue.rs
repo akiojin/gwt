@@ -286,11 +286,13 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             expected_queue_order,
             issue_numbers,
+            all_terminals,
         } => run_monitor_queue_remove(
             env,
             project_root.as_deref(),
             expected_queue_order.as_deref(),
             &issue_numbers,
+            all_terminals,
             out,
         )?,
         IssueCommand::MonitorQueueMove {
@@ -2113,6 +2115,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     expected_queue_order: Option<&[u64]>,
     numbers: &[u64],
+    all_terminals: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
@@ -2124,7 +2127,11 @@ fn run_monitor_queue_remove<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        monitor.terminal_queue_remove(numbers, &now);
+        if all_terminals {
+            monitor.terminal_queue_remove_all_terminals(numbers, &now);
+        } else {
+            monitor.terminal_queue_remove(numbers, &now);
+        }
         *prefs = monitor.prefs();
         Ok(())
     })
@@ -7324,10 +7331,10 @@ mod tests {
     fn a_held_row_with_a_live_session_still_reports_the_disagreement() {
         let mut inbox = vec![mismatch_row(
             4777,
-            crate::MonitorInboxState::HoldExcluded,
+            crate::MonitorInboxState::SourceExcluded,
             None,
         )];
-        inbox[0].exclusion_reason = Some("matched label: hold".to_string());
+        inbox[0].exclusion_reason = Some("Untrusted source; PM triage required".to_string());
         let sessions = vec![mismatch_session(Some(4777))];
 
         let output = mismatch_status(&inbox, &sessions);
@@ -7341,7 +7348,7 @@ mod tests {
         let reason = output["inbox"][0]["exclusion_reason"]
             .as_str()
             .expect("existing hold and live-session mismatch are both explained");
-        assert!(reason.starts_with("matched label: hold"));
+        assert!(reason.starts_with("Untrusted source; PM triage required"));
         assert!(reason.contains("working_without_active_row"));
     }
 
@@ -10148,6 +10155,48 @@ mod tests {
         assert_eq!(
             monitor_queue_reply(&unrelated, Some("another-host"))["urgent_queue_token"],
             token
+        );
+    }
+
+    #[test]
+    fn issue_monitor_queue_remove_all_terminals_preserves_unrelated_entries() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-22T00:00:00Z");
+        let mut prefs = monitor.prefs();
+        let remote = prefs.terminal_queues[&crate::process::current_hostname()].clone();
+        prefs
+            .terminal_queues
+            .insert("orphan-host".into(), remote.clone());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let super::super::CliCommand::Issue(command) = super::super::json_envelope::parse_operation(
+            "issue.monitor.queue.remove",
+            &serde_json::json!({"numbers":[1,3,4], "all_terminals":true, "expected_queue_order":[1,2,3]}),
+        ).unwrap() else { panic!("expected Issue command") };
+        run(&mut env, command, &mut String::new()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        for (host, queue) in &saved.terminal_queues {
+            assert_eq!(
+                queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.number)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                saved.terminal_queue_exclusions[host],
+                [1, 3, 4].into_iter().collect()
+            );
+        }
+        assert_eq!(
+            saved.terminal_queues["orphan-host"].last_seen_at,
+            remote.last_seen_at
         );
     }
 

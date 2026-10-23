@@ -276,7 +276,7 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
   const expected = new Map([
     ["queued", ["Queued", "idle"]],
     ["not_ready", ["Not ready", "needs-input"]],
-    ["hold_excluded", ["On hold", "needs-input"]],
+    ["source_excluded", ["Needs triage", "needs-input"]],
     ["launching", ["Launching", "active"]],
     ["launched", ["Launched", "active"]],
     ["merged", ["Merged", "done"]],
@@ -292,6 +292,9 @@ test("monitor state renderer is exhaustive and never aliases an unknown state to
   for (const [state, [label, tone]] of expected) {
     assert.deepEqual(monitorStateView(state), { state, label, tone });
   }
+  assert.deepEqual(monitorStateView("hold_excluded"), {
+    state: "source_excluded", label: "Needs triage", tone: "needs-input",
+  });
   assert.deepEqual(monitorStateView("awaiting_review"), {
     state: "awaiting_review",
     label: "Unknown (awaiting_review)",
@@ -635,8 +638,8 @@ test("Issue rows render monitor projections and send controls from the full cano
       knowledgeEntry(42, "queued", 1, { isSpec: true }),
       knowledgeEntry(43, "launching"),
       knowledgeEntry(44, "queued", 2),
-      knowledgeEntry(45, "hold_excluded", null, {
-        exclusionReason: "Excluded by label: hold",
+      knowledgeEntry(45, "source_excluded", null, {
+        exclusionReason: "untrusted external Issue; PM triage required; use a separate curated execution owner",
       }),
       knowledgeEntry(46, "queued", 3, { state: "closed" }),
       knowledgeEntry(47, "needs_human"),
@@ -673,8 +676,10 @@ test("Issue rows render monitor projections and send controls from the full cano
   assert.equal(row42.querySelector(".knowledge-row-badge").textContent, "Queued");
   assert.equal(row42.querySelectorAll(".knowledge-row-badge").length, 1);
   assert.match(row42.textContent, /Queue 1/);
-  assert.equal(row45.querySelector(".knowledge-row-badge").textContent, "On hold");
-  assert.match(row45.textContent, /Excluded by label: hold/);
+  assert.equal(row45.querySelector(".knowledge-row-badge").textContent, "Needs triage");
+  assert.match(row45.textContent, /untrusted external Issue; PM triage required; use a separate curated execution owner/);
+  assert.match(row45.querySelector(".knowledge-row-badge").dataset.issueExplanation, /source.*trust.*triage/i);
+  assert.doesNotMatch(row45.querySelector(".knowledge-row-badge").dataset.issueExplanation, /hold label/i);
   assert.equal(row48.querySelector(".knowledge-row-badge").textContent, "Unknown (awaiting_review)");
   assert.equal(row48.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
   assert.equal(row49.querySelector(".knowledge-row-badge").textContent, "Open");
@@ -751,6 +756,17 @@ test("Issue rows render monitor projections and send controls from the full cano
   surface.applyIssueMonitorStatus({ autonomous_mode: true });
   assert.equal(body.querySelector('[data-action="monitor-autonomous"]').getAttribute("aria-checked"), "true");
   assert.equal(document.querySelector(".issue-monitor-card"), null);
+  for (const [state, exclusion_reason] of [
+    ["hold_excluded", "hold label: hold"],
+    ["source_excluded", "Excluded by label: hold"],
+  ]) {
+    surface.applyIssueMonitorInbox([{ issue: { number: 45 }, state, exclusion_reason }]);
+    const stale = body.querySelector('[data-issue-number="45"]');
+    const message = "This exclusion was reported by an older monitor. Refresh to confirm queue membership.";
+    assert.match(stale.textContent, /This exclusion was reported by an older monitor\. Refresh to confirm queue membership\./);
+    assert.equal(stale.querySelector(".knowledge-row-badge").dataset.issueExplanation, message);
+    assert.doesNotMatch(stale.textContent, /hold label: hold|Excluded by label: hold/);
+  }
 });
 
 // --- Issue #3561: the Autonomous toggle is a state switch, never an action ---
@@ -1028,11 +1044,14 @@ test("Issue board has four queue columns, labelled controls and one filter row",
 
 });
 
-test("Issue queue drops send one bulk request and retain server projection", async (t) => {
+test("Issue queue drops include hold-labeled cards and retain server projection", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
-    entries:[knowledgeEntry(1,null),knowledgeEntry(2,null),knowledgeEntry(3,"queued",1)],refresh_enabled:true});
+    entries:[{...knowledgeEntry(1,null),labels:["hold"]},knowledgeEntry(2,null),
+      {...knowledgeEntry(3,"queued",1),labels:["hold"]}],refresh_enabled:true});
+  assert.equal(body.querySelector('[data-issue-number="1"] .knowledge-row-badge').textContent, "Open");
+  assert.equal(body.querySelector('[data-issue-number="3"] .knowledge-row-badge').textContent, "Queued");
   for (const number of [1,2]) body.querySelector(`[data-issue-number="${number}"] [data-action="queue-select"]`).click();
   const drop=(column,number)=> { const event=new window.Event("drop",{bubbles:true,cancelable:true}); event.dataTransfer={getData:()=>String(number)}; body.querySelector(`[data-queue-column="${column}"]`).dispatchEvent(event); };
   const before=sent.length;
@@ -1077,8 +1096,8 @@ test("Issue #4499 queue receipts show accepted changes and exact server refusal 
   body.querySelector('[data-queue-column="queued"]').dispatchEvent(event);
   assert.deepEqual(sent.at(-1), {kind:"issue_monitor_queue_push",issue_numbers:[1]});
   surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1],
-    error:"Queue change rejected: issue is on hold" });
-  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*Queue change rejected: issue is on hold/);
+    error:"Queue change rejected: queue is unavailable" });
+  assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*Queue change rejected: queue is unavailable/);
   assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="1"]'));
   surface.applyIssueMonitorQueueResult({ kind:"issue_monitor_queue_result", operation:"push", issue_numbers:[1], error:null });
   assert.match(body.querySelector(".issue-queue-feedback").textContent, /Issue #1.*added to.*queue/i);
@@ -1119,12 +1138,13 @@ test("Issue #3165: dependency-blocked rows retain their queue position and expla
     refresh_enabled: true });
   surface.applyIssueMonitorStatus({ terminal_queue: [{ number: 42 }, { number: 43 }] });
   surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "blocked_by_dependency",
-    exclusion_reason: "Blocked by #44 (hold)", dependency: { blocked_by: [{ number: 44, hold: true }], cycle: [] } }]);
+    exclusion_reason: "Blocked by #44", dependency: { blocked_by: [{ number: 44 }], cycle: [] } }]);
   const row = body.querySelector('[data-queue-column="queued"] [data-issue-number="42"]');
   assert.ok(row);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
   assert.equal(row.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
-  assert.match(row.textContent, /Blocked by #44 \(hold\)/);
+  assert.match(row.textContent, /Blocked by #44/);
+  assert.doesNotMatch(row.textContent, /\(hold\)/);
   assert.deepEqual([...body.querySelectorAll('[data-queue-column="queued"] .knowledge-row')]
     .map(item => Number(item.dataset.issueNumber)), [42, 43]);
 });

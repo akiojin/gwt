@@ -659,8 +659,8 @@ mod monitor_snapshot_cache_tests {
                 inbox_item(30, gwt::MonitorInboxState::Queued, None),
                 inbox_item(
                     40,
-                    gwt::MonitorInboxState::HoldExcluded,
-                    Some("Excluded by label: hold"),
+                    gwt::MonitorInboxState::SourceExcluded,
+                    Some("Untrusted source; PM triage required"),
                 ),
             ],
         );
@@ -690,9 +690,9 @@ mod monitor_snapshot_cache_tests {
                 filtered_entries[1].exclusion_reason.as_deref(),
             ),
             (
-                Some(gwt::MonitorInboxState::HoldExcluded),
+                Some(gwt::MonitorInboxState::SourceExcluded),
                 None,
-                Some("Excluded by label: hold"),
+                Some("Untrusted source; PM triage required"),
             ),
         );
         assert_eq!(
@@ -732,7 +732,7 @@ mod monitor_snapshot_cache_tests {
         let states = [
             gwt::MonitorInboxState::Queued,
             gwt::MonitorInboxState::NotReady,
-            gwt::MonitorInboxState::HoldExcluded,
+            gwt::MonitorInboxState::SourceExcluded,
             gwt::MonitorInboxState::Launching,
             gwt::MonitorInboxState::Launched,
             gwt::MonitorInboxState::Merged,

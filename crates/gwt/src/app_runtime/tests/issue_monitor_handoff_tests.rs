@@ -622,7 +622,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 fixture.execution_owner,
             )
             .unwrap();
-            issue.labels.push("hold".into());
+            monitor.terminal_queue_remove(&[number], "2026-08-13T00:01:00Z");
             gwt::scan_issue_monitor_candidates_with_provenance(
                 &mut monitor,
                 std::slice::from_ref(&issue),
@@ -630,10 +630,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 &fixture.project_root,
                 "2026-08-13T00:01:00Z",
             );
-            assert_eq!(
-                monitor.inbox_item(number).unwrap().state,
-                gwt::MonitorInboxState::HoldExcluded
-            );
+            assert!(monitor.inbox_item(number).is_none());
             assert!(monitor.queued_issue_numbers().is_empty());
             assert!(monitor.claim_probe_plan(1).1.is_empty());
             assert!(monitor
@@ -647,11 +644,10 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 )
                 .unwrap(),
                 predecessor,
-                "hold must preserve the Blocked generation without a Prepared successor"
+                "Backlog must preserve the Blocked generation without a Prepared successor"
             );
-            // The PM confirms the dependency merged, removes hold and
-            // requeues the same owner; dependency interpretation stays in PM.
-            issue.labels.retain(|label| label != "hold");
+            // The PM confirms the dependency merged and explicitly requeues
+            // the same owner; dependency interpretation stays in PM.
             issue.updated_at = Some("2026-08-13T00:01:01Z".into());
             monitor.record_launch_failed(number, "dependency-blocked predecessor stopped");
             gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
