@@ -393,6 +393,9 @@ fn format_pr_help() -> String {
         "  number, base, head, title, body, labels, add_labels, draft, comment",
         "  pr.edit: base alone is a valid update; existing edit authority applies.",
         "  pr.close: number and optional comment; preserves the branch.",
+        "  pr.review_threads.reply_and_resolve: number, body (plain text), optional thread_id.",
+        "  thread_id selects one thread; omitted, processes all unresolved threads.",
+        "  Unknown thread_id and JSON array bodies are rejected before mutations.",
         "",
     ]
     .join("\n")
@@ -1173,6 +1176,20 @@ mod tests {
         // must point at the real `search` family (SPEC-1942 FR-109).
         assert_eq!(did_you_mean("serach"), Some("search"));
         assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    #[test]
+    fn issue_3789_pr_help_documents_targeted_and_bulk_replies() {
+        let help = family_help("pr").expect("pr family help");
+        for expected in [
+            "thread_id",
+            "omitted",
+            "all unresolved",
+            "plain text",
+            "JSON array",
+        ] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
     }
 
     /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation

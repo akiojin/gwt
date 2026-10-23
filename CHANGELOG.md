@@ -1,6 +1,87 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.138.0] - 2026-10-22
+
+### Bug Fixes
+
+- **monitor:** Stop repeating resolved remediation notices
+- **workspace:** ローカル拒否と通信障害の分類を分ける
+- **monitor:** 無出力の子プロセス活動で実行中ペインの誤回収を防ぐ
+- **workspace:** Host障害と結果前切断を通信障害に分類する
+- **monitor:** Tier 設定の競合更新を防止する
+- **execution:** Settle receipts across audited takeovers
+- **monitor:** 未完SPECを完了slice後に起動待ちへ戻す
+- **fleet:** 整理直前の権限とプロセス終了証明を保護する
+
+### Features
+
+- **fleet:** Checkpoint inventory and guarded cleanup
+
+### Miscellaneous Tasks
+
+- **work:** Record tier CAS PR handoff
+- **work:** Reconcile delivered issue 5876 slice
+- **work:** Record Issue #3623 delivery reconciliation
+- **work:** Reconcile successor evidence delivery
+- **work:** Reconcile delivered tier configuration CAS slice
+- **work:** Record tier CAS reconciliation PR
+- **work:** PR #6092 の配送記録を保存する
+
+### Refactor
+
+- **runtime:** Session復元をGUI非依存の共有処理へ移す
+
+### Styling
+
+- **docs:** Fix fleet usage spacing for checkpoint push
+
+### Testing
+
+- **pane:** Windows health fixtureをconsoleから切り離す
+- **monitor:** 子プロセス検証を標準の起動ヘルパーへ統一する
+- **monitor:** 既存スキャンの Git 観測予算を fixture に合わせる
+- **ui:** 画面更新と競合する E2E fixture を修復
+- **fleet:** Live backend が無い環境では起動前に E2E を skip する
+
+## [9.137.1] - 2026-10-22
+
+### Bug Fixes
+
+- **gui:** エージェント状態とMonitor活動時刻を実ペインに追従させる
+- **execution:** Preserve blockers without monitor bindings
+- **monitor:** Report launch blockers and deduplicate retry notices
+- **launch:** Quota 復帰時に終了済みペインから同じ会話を再開する
+- **issue-monitor:** Retain error provenance and record bulk faults once
+- **monitor:** Preserve scans across capacity observations
+- **launch:** Clamp unsupported Astra reasoning overrides
+- **runtime:** Stop exact agent process trees after revocation
+- **pane:** Confirm captured process trees before close success
+- **agents:** Continue autonomous work after board decisions
+- **agents:** Preserve skill and environment test contracts
+- **process-tree:** Exclude exited windows processes from census
+- **monitor:** Require fresh healthy launch snapshots
+- **launch:** 再起動準備中は旧ペインの終了後も会話を予約する
+- **gwtd:** レビュー返信を指定スレッドのみに適用する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4363 pull request
+- **work:** Record review follow-up pull request
+- **work:** Record replacement pull request
+- **work:** Link scan observation fix to PR 6051
+- **work:** Associate issue 4168 with pr 6029
+- **work:** Refresh issue 4168 pr delivery link
+- **work:** Associate issue 4168 with pr 6054
+
+### Testing
+
+- **gui:** プレビューのモード表示と状態チップを区別して検証する
+- **monitor:** Name capacity observation hook type
+- **runtime:** Remove redundant stop fixture borrows
+- **pane:** Align close checks with deferred completion
+- **gwtd:** レビュー返信テストの環境設定を共通 fixture にまとめる
+
 ## [9.137.0] - 2026-10-22
 
 ### Bug Fixes

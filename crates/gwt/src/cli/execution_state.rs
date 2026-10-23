@@ -4987,6 +4987,32 @@ pub(crate) fn execution_binding_authorizes_current_generation(
         ))
 }
 
+/// Authenticate bookkeeping provenance across audited takeovers of the same
+/// generation. This proves the historical writer and head, never the caller's
+/// authority to produce mutations or reuse another Session's verification.
+pub(crate) fn execution_binding_has_current_generation_provenance(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    receipt_session_id: &str,
+    receipt_binding: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    Ok(
+        current.identity.worktree_binding_hash == worktree_binding_hash(worktree)
+            && execution_binding_matches_historical_prefix(
+                &ledger,
+                current,
+                receipt_session_id,
+                receipt_binding,
+            ),
+    )
+}
+
 /// Recovery-only identity derived from the authoritative owner ledger without
 /// requiring the caller worktree's projection/pointer pair to be readable.
 /// Mutation gates must continue to use [`current_execution_binding`].
@@ -6681,6 +6707,140 @@ pub fn with_workspace_successor_supersession_lease<T>(
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     with_generation_activation_leases(worktree, owner, |_| operation())
+}
+
+/// Fence fleet cleanup against lifecycle acquisition by the selected runtime.
+/// Contention refuses immediately so the GUI can retain the pane and retry.
+/// An unassociated process cannot be cleaned while any execution is active.
+pub fn with_fleet_cleanup_lease<T>(
+    worktree: &Path,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let protected = |reason| io::Error::new(ErrorKind::PermissionDenied, reason);
+    let session_owner = |session: &gwt_agent::Session| -> io::Result<Option<ExecutionOwnerKey>> {
+        session
+            .execution_binding
+            .as_ref()
+            .map(|binding| {
+                let kind = match binding.owner_kind.as_str() {
+                    "issue" => ExecutionOwnerKind::Issue,
+                    "spec" => ExecutionOwnerKind::Spec,
+                    _ => return Err(protected("fleet target Session authority is invalid")),
+                };
+                Ok(ExecutionOwnerKey {
+                    kind,
+                    number: binding.owner_number,
+                })
+            })
+            .transpose()
+    };
+    crate::cli::trusted_store::with_write_lease_wait(worktree, Duration::ZERO, || {
+        let record = load(worktree)?;
+        let record_owner = record.as_ref().map(|record| ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        });
+        let session = session_id
+            .map(|id| {
+                gwt_agent::validate_session_id_path_component(id)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+                match gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))) {
+                    Ok(session) => Ok(Some(session)),
+                    Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
+                }
+            })
+            .transpose()?
+            .flatten();
+        let bound_owner = session.as_ref().map(session_owner).transpose()?.flatten();
+        if record_owner
+            .zip(bound_owner)
+            .is_some_and(|(left, right)| left != right)
+        {
+            return Err(protected(
+                "fleet target Session authority changed; refresh fleet inventory",
+            ));
+        }
+        let context = record_owner
+            .or(bound_owner)
+            .map(|owner| GenerationTransactionContext::resolve(worktree, owner))
+            .transpose()?;
+        let cleanup = || {
+            let check_and_run = |state: Option<gwt_agent::SessionPathState>| {
+                if let Some(state) = state {
+                    match state {
+                        gwt_agent::SessionPathState::Present(current) => {
+                            if dunce::canonicalize(&current.worktree_path)?
+                                != dunce::canonicalize(worktree)?
+                                || session_owner(&current)? != bound_owner
+                            {
+                                return Err(protected("fleet target Session authority changed; refresh fleet inventory"));
+                            }
+                        }
+                        gwt_agent::SessionPathState::Error(error) => return Err(error),
+                        gwt_agent::SessionPathState::Missing => {
+                            if session.is_some() {
+                                return Err(protected(
+                                    "fleet target Session disappeared; refresh fleet inventory",
+                                ));
+                            }
+                        }
+                    }
+                }
+                let mut records = load(worktree)?.into_iter().collect::<Vec<_>>();
+                if let Some(context) = context.as_ref() {
+                    if let Some(ledger) = load_owner_generation_ledger_from_context(context)? {
+                        if let Some(current) = ledger.current_generation() {
+                            records.push(
+                                serde_json::from_str::<ExecutionControlRecord>(
+                                    ledger.effective_projection_for(current),
+                                )
+                                .map(hydrate_recovery_envelopes)
+                                .map_err(io::Error::other)?,
+                            );
+                        }
+                    }
+                }
+                for record in records {
+                    if !integrity_ok(&record) {
+                        return Err(protected(
+                            "fleet target execution authority is unreadable; use execution.status",
+                        ));
+                    }
+                    if record.status == ExecutionControlStatus::Active
+                        && session_id.is_none_or(|id| id == record.primary_session_id)
+                    {
+                        return Err(protected("current execution holder is protected; use its owner lifecycle operation"));
+                    }
+                }
+                operation()
+            };
+            match session_id {
+                Some(id) => gwt_agent::with_session_path_lease_wait(
+                    sessions_dir,
+                    id,
+                    Duration::ZERO,
+                    |state| check_and_run(Some(state)),
+                ),
+                None => check_and_run(None),
+            }
+        };
+        match context.as_ref() {
+            Some(context) => crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                &context.owner_dir,
+                Duration::ZERO,
+                || {
+                    context.validate_unchanged()?;
+                    cleanup()
+                },
+            ),
+            None => cleanup(),
+        }
+    })
 }
 
 fn with_resolved_generation_owner_lease<T>(

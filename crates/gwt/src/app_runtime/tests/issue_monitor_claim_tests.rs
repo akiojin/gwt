@@ -26,6 +26,207 @@ fn commit_issue_monitor_preparations(
 }
 
 #[test]
+fn issue_3809_settings_refresh_uses_the_same_project_background_worker() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    init_repo_with_initial_commit(&repo);
+    init_repo_with_initial_commit(&other);
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
+        sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.test_context();
+    reset_local_issue_monitor_remote_scan_count();
+    runtime.local_issue_monitor_events_for(&context, Some("client-1"), |_| {});
+    runtime.local_issue_monitor_events_for(&context, Some("client-1"), |_| {});
+    assert_eq!(
+        local_issue_monitor_remote_scan_count(),
+        0,
+        "settings refresh must not reclaim panes without background child observations"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the existing in-flight gate coalesces refreshes"
+    );
+    assert!(runtime
+        .project_state_for_root(&repo)
+        .unwrap()
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)));
+    assert!(
+        runtime
+            .project_state_for_root(&other)
+            .unwrap()
+            .issue_monitor_scheduled_scans_in_flight
+            .is_empty(),
+        "settings refresh must not enqueue unrelated projects"
+    );
+}
+
+#[test]
+#[cfg(any(windows, unix))]
+fn issue_3809_scheduled_scan_preserves_child_activity_after_disk_rebase() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let (repo, prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let session_id = "issue-3809-gui-holder";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 43,
+    };
+    let branch = gwt_git::Repository::open(&repo)
+        .unwrap()
+        .current_branch()
+        .unwrap()
+        .unwrap();
+    seed_defunct_active_owner(
+        &sessions_dir,
+        &repo,
+        &repo,
+        &branch,
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Running,
+    );
+    let session =
+        gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .unwrap()
+        .unwrap();
+    let started = gwt::process::host_process_start_time(std::process::id()).unwrap();
+    gwt_agent::SessionRuntimeState::for_execution_process(
+        gwt_agent::AgentStatus::Running,
+        &identity,
+        1,
+        started,
+        std::process::id(),
+        started,
+    )
+    .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+    .unwrap();
+
+    struct OwnedChild(std::process::Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    #[cfg(windows)]
+    let mut command = gwt_core::process::hidden_command("powershell.exe");
+    #[cfg(windows)]
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$value = 0; while ($true) { $value = ($value + 1) % 1000000 }",
+    ]);
+    #[cfg(unix)]
+    let mut command = gwt_core::process::hidden_command("sh");
+    #[cfg(unix)]
+    command.args(["-c", "while :; do :; done"]);
+    let _child = OwnedChild(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let before_scan = chrono::Utc::now();
+    let now = before_scan.to_rfc3339();
+    let old = (before_scan - chrono::Duration::hours(2)).to_rfc3339();
+    let window_id = "tab-1::agent-43";
+    let mut seeded = test_monitor_with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+    );
+    seeded.complete_active_launch_at(43, window_id, &old);
+    seeded.set_autonomous_phase(43, gwt::AutonomousPhase::Implementing);
+    seeded.record_autonomous_heartbeat(43, &old);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).unwrap();
+    let snapshot = gwt::IssueMonitorWindowSnapshot {
+        project_tab_id: "tab-1".into(),
+        observed_at: now.clone(),
+        windows: vec![gwt::IssueMonitorWindowObservation {
+            monitor_owned: true,
+            window_id: window_id.into(),
+            issue_number: Some(43),
+            status: gwt::WindowState::Running,
+            review_dispatch: false,
+            hold_reason: None,
+            last_output_at: Some(old),
+            session_id: Some(session_id.into()),
+        }],
+    };
+    let live_windows = std::collections::BTreeSet::from([window_id.to_string()]);
+    let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        Some(&live_windows),
+        Some(&snapshot),
+        None,
+        &now,
+        &super::super::default_issue_client_factory(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(30),
+    )
+    .expect("scheduled scan");
+    super::super::wait_scan_generation_reaper(&prefs_path);
+    let ScheduledIssueMonitorScanOutcome::Applied(mut applied) = outcome else {
+        panic!("the local scheduled scan must commit");
+    };
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let heartbeat = persisted
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == 43)
+        .and_then(|record| record.last_heartbeat.as_deref())
+        .expect("the owned child observation must survive the disk rebase");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(heartbeat).unwrap()
+            >= chrono::DateTime::parse_from_rfc3339(&now).unwrap(),
+        "the actual scheduled scan must persist its child activity: {heartbeat} < {now}"
+    );
+    assert!(persisted
+        .launched_issues
+        .iter()
+        .any(|launch| launch.issue_number == 43 && launch.window_id == window_id));
+    assert_eq!(applied.active_issue_numbers(), vec![43]);
+    assert_eq!(
+        applied.inbox_item(43).unwrap().state,
+        gwt::MonitorInboxState::Launched,
+        "active child work must never become queued during the scan"
+    );
+    assert!(applied.take_pending_idle_pane_closes().is_empty());
+}
+
+#[test]
 fn app_runtime_fallible_control_fallback_error_preserves_project_snapshot() {
     let _env_lock = env_test_lock()
         .lock()
@@ -3595,6 +3796,11 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let _gh_lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert migration and admission outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3708,7 +3914,11 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
             super::super::IssueMonitorScanPolicy::Scan,
             |_| {},
         );
-        assert_eq!(probed.lock().expect("probe log").as_slice(), &[43]);
+        assert_eq!(
+            probed.lock().expect("probe log").as_slice(),
+            &[43],
+            "Auto admission did not reach the completion probe: {_events:?}"
+        );
     }
 }
 

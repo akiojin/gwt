@@ -50,7 +50,12 @@ pub fn handle_with_input(
         None => output,
     });
     let result = result.map(|output| {
-        if event == "PreToolUse" {
+        if event == "PreToolUse"
+            && matches!(
+                &output,
+                HookOutput::Silent | HookOutput::PreToolUseAdditionalContext(_)
+            )
+        {
             append_boundary_advisory(output, event, gate_remediation_context(worktree_root))
         } else {
             output
@@ -445,6 +450,7 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
     use crate::cli::execution_state::{
         execution_binding_authorizes_current_generation, ExecutionOwnerKey, ExecutionOwnerKind,
     };
+    use sha2::{Digest, Sha256};
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
     gwt_agent::validate_session_id_path_component(&session_id).ok()?;
     let session = gwt_agent::Session::load(
@@ -485,6 +491,40 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
     .unwrap_or(false)
     {
         return None;
+    }
+    // A gate failure remains pending until the corrected head starts review.
+    // Track notification separately so every hook process sees the same receipt
+    // without clearing the Monitor's failure or touching its review authority.
+    let mut snapshot = record.acceptance_snapshot.clone();
+    if let Some(snapshot) = &mut snapshot {
+        snapshot.ids.sort();
+        if let Some(texts) = &mut snapshot.criterion_texts {
+            texts.sort();
+        }
+    }
+    let notice = serde_json::to_vec(&(
+        &identity.execution_binding.identity,
+        issue,
+        &record.reviewed_sha,
+        reason,
+        record.attempts,
+        snapshot,
+    ))
+    .ok()?;
+    let receipt_dir = gwt_core::paths::gwt_sessions_dir()
+        .join("gate-remediation")
+        .join(&session_id);
+    let receipt = receipt_dir.join(format!("{:x}.notice", Sha256::digest(&notice)));
+    let claimed = std::fs::create_dir_all(&receipt_dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(receipt)
+    });
+    match claimed {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return None,
+        Err(error) => tracing::warn!(%error, issue, "remediation notification receipt unavailable"),
     }
     let ids = record
         .acceptance_snapshot
@@ -1042,6 +1082,10 @@ mod tests {
         record.acceptance_snapshot = Some(AcceptanceSnapshot {
             ids: vec!["AC-1".into(), "AC-R2".into()],
             visual_surface: false,
+            criterion_texts: Some(vec![
+                ("AC-1".into(), "original".into()),
+                ("AC-R2".into(), "requirement".into()),
+            ]),
         });
         let prefs = IssueMonitorPrefs {
             autonomous_records: vec![record],
@@ -1068,6 +1112,56 @@ mod tests {
         );
         assert!(context.contains("AC-R2"), "{context}");
         assert!(context.contains("same window"), "{context}");
+
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "Issue #6061: unchanged remediation is injected only once"
+        );
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+        let mut reordered = prefs.clone();
+        let snapshot = reordered.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap();
+        snapshot.ids.reverse();
+        snapshot.criterion_texts.as_mut().unwrap().reverse();
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &reordered).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "order is not AC drift"
+        );
+        let mut changed = prefs.clone();
+        changed.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap()
+            .criterion_texts
+            .as_mut()
+            .unwrap()[0]
+            .1 = "updated requirement".into();
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_some(),
+            "a text edit is delivered"
+        );
+        assert!(gate_remediation_context(&worktree).is_none());
+        changed.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap()
+            .ids
+            .push("AC-3".into());
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(gate_remediation_context(&worktree)
+            .unwrap()
+            .contains("AC-3"));
+        assert!(gate_remediation_context(&worktree).is_none());
+        changed.autonomous_records[0].last_failure_message = None;
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "delivered remediation has no notice"
+        );
 
         let sessions = gwt_core::paths::gwt_sessions_dir();
         std::fs::copy(

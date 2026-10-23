@@ -835,6 +835,15 @@ jobs:
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture
         timeout-minutes: 15
+      - name: Run native fleet orphan process handle contracts
+        shell: bash
+        run: |
+          both() {
+            "$@" | tee "$RUNNER_TEMP/fleet-process-handles.log"
+            grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/fleet-process-handles.log"
+          }
+          both node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture
+        timeout-minutes: 5
       - name: Run targeted issue cache refresh regression
         run: node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
         timeout-minutes: 15

@@ -321,6 +321,23 @@ gwtd <<'JSON'
 JSON
 ```
 
+`fleet.inventory` returns project agent processes, panes, and Monitor rows in one
+JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
+and partial-source diagnostics. `fleet.orphans` lists processes without an
+observed pane. A missing pane source means an orphan is unconfirmed.
+
+The registered PM can use `fleet.disposition` with a nonempty `targets` array.
+Copy each selected row's `id`, `session_id`, and observed pane `child_pid` /
+`child_started_at`; process-only targets instead need `pid` / `started_at`.
+Unknown delivery rejects the batch unless `allow_unknown:true` is explicit.
+Current claim holders, active execution holders, and undelivered work remain protected.
+`fleet.orphan.terminate` accepts only process targets. Every target receives a
+receipt; generation changes, unsupported backends, and incomplete process
+termination are reported instead of falling back to an ordinary close.
+Orphan termination requires a stable OS process handle (Linux pidfd or a Windows
+process handle). Other platforms, unavailable handles, and uncertain lifecycle
+authority retain the process; `allow_unknown` only overrides delivery uncertainty.
+
 `pane.health` reads project pane health from existing workspace and runtime
 sidecar state without depending on the GUI event loop. Decode the response's
 `output` string as JSON; its `panes` array contains each pane's `classification`,
@@ -714,6 +731,13 @@ existing manual pool. `issue.monitor.tier.set` with `number` and `tier` raises
 an Issue's persistent minimum tier. `issue.monitor.tiers` reports the
 configuration, Issue history and lowest-tier landing rate (`null` until a
 landing is observed), plus the count of unclassified terminations.
+For a conditional `tiers.set`, read fresh `saved_config` and `config_token`
+from `issue.monitor.status` or `issue.monitor.tiers`, then pass the token as
+`expected_config_token`. A mismatch leaves all preferences unchanged; re-read
+status and reconsider the change, then read back success. The token includes
+saved `launch_auto` and `launch_tiers`. Omitting the guard keeps existing behavior;
+null, blank and non-string guards are rejected. This value comparison does not
+track ABA history or guard individual `tier.set` writes.
 `issue.monitor.status` exposes `launch_tier`, `landing_tier`, total `attempts`,
 excluded `non_agent_attempts`, and their difference `tier_input` on each
 observed Issue row.

@@ -23,6 +23,9 @@ use crate::{
 /// Errors surfaced by [`SpecOps`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecOpsError {
+    /// A local operation failure, without implying a network or API cause.
+    #[error("{0}")]
+    Operation(String),
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error(transparent)]

@@ -20,6 +20,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this shared value rather than recovering it
+/// out of the persisted `launch_args`.
+pub const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+
 /// Issue #3632 FR-1/FR-2/FR-3 (user ruling 2026-08-17): how every prompt gwt
 /// injects into the resident PM must end.
 ///
