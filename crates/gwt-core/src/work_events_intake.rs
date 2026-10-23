@@ -81,6 +81,302 @@ impl SharedWorkEventsSource {
     }
 }
 
+/// Outcome of a projection-only repair of one Work's portable container aliases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkEventContainersRepairReport {
+    pub work_id: String,
+    pub changed: bool,
+    pub repaired_aliases: usize,
+}
+
+/// Refold only a Work's already accepted history using durable source roots.
+/// No lifecycle event or source file is written. Missing or conflicting
+/// provenance is an error, including for terminal Work and dry runs.
+pub fn repair_work_event_containers(
+    works_path: &Path,
+    work_id: &str,
+    sources: Vec<SharedWorkEventsSource>,
+    close_path: Option<&Path>,
+    dry_run: bool,
+) -> Result<WorkEventContainersRepairReport> {
+    let snapshot = WorkItemsIntakeSnapshot::capture_for_container_repair(works_path, close_path)?;
+    publish_work_event_containers_repair(&snapshot, work_id, sources, dry_run)
+}
+
+fn publish_work_event_containers_repair(
+    snapshot: &WorkItemsIntakeSnapshot,
+    work_id: &str,
+    sources: Vec<SharedWorkEventsSource>,
+    dry_run: bool,
+) -> Result<WorkEventContainersRepairReport> {
+    let refuse = |reason: &str| {
+        GwtError::Other(format!("Work {work_id} container repair refused: {reason}"))
+    };
+    let mut previous = snapshot
+        .raw_projection()?
+        .ok_or_else(|| refuse("works projection is missing"))?;
+    let targets = previous
+        .work_items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.id == work_id)
+        .collect::<Vec<_>>();
+    let [(target_index, target)] = targets.as_slice() else {
+        return Err(refuse("exactly one existing target Work is required"));
+    };
+    let target_index = *target_index;
+    let target = (*target).clone();
+    if target.events.is_empty()
+        || target.legacy_metadata_authoritative
+        || target.legacy_metadata_snapshot.is_some()
+        || target.legacy_metadata_snapshot_at.is_some()
+    {
+        return Err(refuse(
+            "complete eventful, non-compacted history is required",
+        ));
+    }
+    if snapshot
+        .detachments()?
+        .get(work_id)
+        .is_some_and(|entries| !entries.is_empty())
+    {
+        return Err(refuse("target has explicit container detachments"));
+    }
+    let anchors = target
+        .execution_containers
+        .iter()
+        .filter(|container| {
+            container
+                .worktree_path
+                .as_deref()
+                .is_some_and(Path::is_absolute)
+        })
+        .collect::<Vec<_>>();
+    let [anchor] = anchors.as_slice() else {
+        return Err(refuse("ambiguous or missing absolute container anchor"));
+    };
+    if anchor.branch.as_deref().is_none_or(str::is_empty)
+        || target.execution_containers.iter().any(|container| {
+            container.branch != anchor.branch
+                || (container.worktree_path != anchor.worktree_path
+                    && container.worktree_path.as_deref() != Some(Path::new(".")))
+        })
+    {
+        return Err(refuse(
+            "container paths or branches do not share one absolute anchor",
+        ));
+    }
+    let repaired_aliases = target
+        .execution_containers
+        .iter()
+        .filter(|container| container.worktree_path.as_deref() == Some(Path::new(".")))
+        .count();
+    let mut retained = target.events.clone();
+    for entries in target.duplicate_event_containers.values() {
+        for provenance in entries {
+            let Some(event) = provenance.event() else {
+                return Err(refuse(
+                    "duplicate container lacks complete event provenance",
+                ));
+            };
+            retained.push(event.clone());
+        }
+    }
+    let event_ids = target
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<HashSet<_>>();
+    if event_ids.len() != target.events.len()
+        || retained
+            .iter()
+            .any(|event| event.work_item_id != work_id || !event_ids.contains(event.id.as_str()))
+        || previous.work_items.iter().any(|item| {
+            item.id != work_id
+                && item
+                    .events
+                    .iter()
+                    .any(|event| event_ids.contains(event.id.as_str()))
+        })
+    {
+        return Err(refuse(
+            "accepted event IDs have conflicting Work provenance",
+        ));
+    }
+    // A portable source must carry both parts of its owning context. Never
+    // let the reader's CWD or a branch-less source supply that evidence.
+    for source in &sources {
+        for line in source.content.lines() {
+            let Ok(DecodedWorkspaceWorkEvent::Known(event)) =
+                decode_workspace_work_event_line(line.as_bytes())
+            else {
+                continue;
+            };
+            if event_ids.contains(event.id.as_str())
+                && event.execution_container.as_ref().is_some_and(|container| {
+                    container.worktree_path.as_deref() == Some(Path::new("."))
+                })
+                && !source
+                    .source_execution_container
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(Path::is_absolute)
+                            && context
+                                .branch
+                                .as_deref()
+                                .is_some_and(|branch| !branch.is_empty())
+                    })
+            {
+                return Err(refuse(
+                    "portable event source is missing its absolute root or branch",
+                ));
+            }
+        }
+    }
+    let mut intake_report = WorkEventsIntakeReport::default();
+    let mut durable = collect_shared_work_event_sources(sources, &mut intake_report)?;
+    if let Some(content) = snapshot.local_content()? {
+        durable.extend(collect_machine_local_work_events(content)?);
+    }
+    durable.retain(|(event, _)| event_ids.contains(event.id.as_str()));
+    for (event, _) in &durable {
+        if !retained
+            .iter()
+            .any(|known| work_events_equal_except_path(known, event))
+        {
+            return Err(refuse(&format!(
+                "event {} has conflicting durable payload",
+                event.id
+            )));
+        }
+    }
+    let normalize = |event: &WorkEvent| -> Result<WorkEvent> {
+        let matching = durable
+            .iter()
+            .filter(|(candidate, _)| work_events_equal_except_path(event, candidate))
+            .map(|(candidate, _)| candidate)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(refuse(&format!(
+                "event {} is missing durable source evidence",
+                event.id
+            )));
+        }
+        let portable = event
+            .execution_container
+            .as_ref()
+            .is_some_and(|container| container.worktree_path.as_deref() == Some(Path::new(".")));
+        if !portable {
+            if matching.iter().any(|candidate| *candidate != event) {
+                return Err(refuse(&format!(
+                    "event {} has ambiguous source paths",
+                    event.id
+                )));
+            }
+            return Ok(event.clone());
+        }
+        let session = event.agent_session_id.as_deref().ok_or_else(|| {
+            refuse(&format!(
+                "portable event {} lacks Session provenance",
+                event.id
+            ))
+        })?;
+        if target
+            .agents
+            .iter()
+            .filter(|agent| agent.session_id == session)
+            .count()
+            != 1
+            || !retained.iter().any(|known| {
+                known.agent_session_id.as_deref() == Some(session)
+                    && known.execution_container.as_ref().is_some_and(|container| {
+                        container.worktree_path == anchor.worktree_path
+                            && container.branch == anchor.branch
+                    })
+            })
+            || matching.iter().any(|candidate| {
+                candidate
+                    .execution_container
+                    .as_ref()
+                    .is_none_or(|container| {
+                        container.worktree_path != anchor.worktree_path
+                            || container.branch != anchor.branch
+                    })
+            })
+        {
+            return Err(refuse(&format!(
+                "portable event {} has ambiguous root, branch, or Session provenance",
+                event.id
+            )));
+        }
+        Ok(matching[0].clone())
+    };
+    let normalized = retained.iter().map(normalize).collect::<Result<Vec<_>>>()?;
+    let mut replay = previous.clone();
+    replay.work_items.remove(target_index);
+    let incoming = normalized
+        .iter()
+        .map(|event| {
+            serde_json::to_string(event)
+                .map(|key| (event.clone(), key))
+                .map_err(|error| refuse(&format!("event stable key: {error}")))
+        })
+        .collect::<Result<_>>()?;
+    fold_work_events(&mut replay, &HashSet::new(), incoming, &mut intake_report);
+    let Some(rebuilt) = replay.work_items.iter().find(|item| item.id == work_id) else {
+        return Err(refuse("history replay rejected the target Work"));
+    };
+    let mut repaired = target.clone();
+    repaired.events = normalized[..target.events.len()].to_vec();
+    let mut duplicates = normalized[target.events.len()..].iter();
+    for entries in repaired.duplicate_event_containers.values_mut() {
+        for provenance in entries {
+            *provenance =
+                DuplicateWorkEventProvenance::Event(Box::new(duplicates.next().unwrap().clone()));
+        }
+    }
+    repaired.execution_containers = rebuilt.execution_containers.clone();
+    let mut replayed = rebuilt.clone();
+    replayed.duplicate_event_containers = repaired.duplicate_event_containers.clone();
+    if replayed != repaired {
+        return Err(refuse(
+            "history replay would change non-path metadata, accepted events, or lifecycle state",
+        ));
+    }
+    let changed = repaired != target;
+    if changed && repaired_aliases == 0 {
+        return Err(refuse(
+            "projection differs outside portable container aliases",
+        ));
+    }
+    let prepared = if changed && !dry_run {
+        previous.work_items[target_index] = repaired;
+        Some(
+            serde_json::to_vec_pretty(&previous)
+                .map_err(|error| refuse(&format!("projection json: {error}")))?,
+        )
+    } else {
+        None
+    };
+    snapshot.commit_container_repair(prepared.as_deref(), dry_run)?;
+    Ok(WorkEventContainersRepairReport {
+        work_id: work_id.to_string(),
+        changed,
+        repaired_aliases,
+    })
+}
+
+fn work_events_equal_except_path(left: &WorkEvent, right: &WorkEvent) -> bool {
+    let mut right = right.clone();
+    if let (Some(left), Some(right)) = (&left.execution_container, &mut right.execution_container) {
+        right.worktree_path = left.worktree_path.clone();
+    }
+    *left == right
+}
+
 fn is_close_kind(event: &WorkEvent) -> bool {
     matches!(
         event.kind,
@@ -1708,6 +2004,248 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_state: None,
+        }
+    }
+
+    fn poisoned_container_repair_fixture(
+        directory: &Path,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Vec<SharedWorkEventsSource>,
+        WorkItemsProjection,
+    ) {
+        let works = directory.join("works.json");
+        let close = directory.join("close.jsonl");
+        let mut anchor = source_container("work/issue-3590");
+        anchor.worktree_path = Some(directory.join("worktree"));
+        let at = Utc.timestamp_opt(20_000, 0).unwrap();
+        let mut start = WorkEvent::new(WorkEventKind::Start, "repair-target", at);
+        start.id = "repair-start".to_string();
+        start.owner = Some("Issue #3590".to_string());
+        start.agent_session_id = Some("repair-session".to_string());
+        start.execution_container = Some(anchor.clone());
+        let mut pr = WorkEvent::new(
+            WorkEventKind::Pr,
+            "repair-target",
+            at + chrono::Duration::seconds(1),
+        );
+        pr.id = "repair-pr".to_string();
+        pr.agent_session_id = start.agent_session_id.clone();
+        let mut portable = anchor.clone();
+        portable.worktree_path = Some(PathBuf::from("."));
+        portable.pr_number = Some(3591);
+        portable.pr_url = Some("https://example.test/pull/3591".to_string());
+        portable.pr_state = Some("MERGED".to_string());
+        pr.execution_container = Some(portable);
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            "repair-target",
+            at + chrono::Duration::seconds(2),
+        );
+        done.id = "repair-done".to_string();
+        done.summary = Some("delivered".to_string());
+        done.execution_container = Some(anchor.clone());
+        let mut projection = WorkItemsProjection::empty(at);
+        for event in [&start, &pr, &done] {
+            projection.apply_event(event.clone());
+        }
+        projection.work_items[0].duplicate_event_containers.insert(
+            done.id.clone(),
+            vec![DuplicateWorkEventProvenance::Event(Box::new(done.clone()))],
+        );
+        let mut unrelated = WorkEvent::new(WorkEventKind::Start, "untouched-work", at);
+        unrelated.id = "untouched-event".to_string();
+        unrelated.title = Some("Workspace untouched".to_string());
+        projection.apply_event(unrelated);
+        std::fs::write(&works, serde_json::to_vec_pretty(&projection).unwrap()).unwrap();
+        std::fs::write(
+            &close,
+            format!("{}\n", serde_json::to_string(&done).unwrap()),
+        )
+        .unwrap();
+        let shared = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&start).unwrap(),
+            serde_json::to_string(&pr).unwrap()
+        );
+        std::fs::write(directory.join("events.jsonl"), &shared).unwrap();
+        let sources = vec![SharedWorkEventsSource::new(shared, Some(anchor))];
+        (works, close, sources, projection)
+    }
+
+    #[test]
+    fn container_repair_converges_poisoned_done_without_changing_other_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, before) = poisoned_container_repair_fixture(temp.path());
+        let works_bytes = std::fs::read(&works).unwrap();
+        let close_bytes = std::fs::read(&close).unwrap();
+        let source_path = temp.path().join("events.jsonl");
+        let source_bytes = std::fs::read(&source_path).unwrap();
+        let dry_run = repair_work_event_containers(
+            &works,
+            "repair-target",
+            sources.clone(),
+            Some(&close),
+            true,
+        )
+        .unwrap();
+        assert!(dry_run.changed);
+        assert_eq!(dry_run.repaired_aliases, 1);
+        assert_eq!(std::fs::read(&works).unwrap(), works_bytes);
+        assert!(
+            !works.with_extension("lock").exists(),
+            "dry run must not write lock metadata"
+        );
+        let applied = repair_work_event_containers(
+            &works,
+            "repair-target",
+            sources.clone(),
+            Some(&close),
+            false,
+        )
+        .unwrap();
+        assert_eq!(applied, dry_run);
+        let repaired: WorkItemsProjection =
+            serde_json::from_slice(&std::fs::read(&works).unwrap()).unwrap();
+        let target = repaired
+            .work_items
+            .iter()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        assert_eq!(
+            target.execution_containers.len(),
+            1,
+            "the existing portable alias must converge onto its absolute anchor"
+        );
+        assert_eq!(target.execution_containers[0].pr_number, Some(3591));
+        assert!(target.execution_containers[0]
+            .worktree_path
+            .as_deref()
+            .unwrap()
+            .is_absolute());
+        let original = before
+            .work_items
+            .iter()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        let mut expected = original.clone();
+        expected.execution_containers = target.execution_containers.clone();
+        expected.events[1]
+            .execution_container
+            .as_mut()
+            .unwrap()
+            .worktree_path = target.execution_containers[0].worktree_path.clone();
+        assert_eq!(
+            *target, expected,
+            "only paths and folded container metadata may change"
+        );
+        assert_eq!(
+            repaired
+                .work_items
+                .iter()
+                .find(|item| item.id == "untouched-work"),
+            before
+                .work_items
+                .iter()
+                .find(|item| item.id == "untouched-work")
+        );
+        assert_eq!(repaired.updated_at, before.updated_at);
+        let applied_bytes = std::fs::read(&works).unwrap();
+        let repeated =
+            repair_work_event_containers(&works, "repair-target", sources, Some(&close), false)
+                .unwrap();
+        assert!(!repeated.changed);
+        assert_eq!(repeated.repaired_aliases, 0);
+        assert_eq!(std::fs::read(&works).unwrap(), applied_bytes);
+        assert_eq!(std::fs::read(close).unwrap(), close_bytes);
+        assert_eq!(std::fs::read(source_path).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn container_repair_refuses_missing_or_ambiguous_provenance_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, mut projection) =
+            poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let missing =
+            repair_work_event_containers(&works, "repair-target", sources.clone(), None, false)
+                .unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("repair-done is missing durable source evidence"));
+        let mut ambiguous = sources.clone();
+        let mut foreign = source_container("work/issue-3590");
+        foreign.worktree_path = Some(temp.path().join("other-worktree"));
+        ambiguous.push(SharedWorkEventsSource::new(
+            Arc::clone(&sources[0].content),
+            Some(foreign),
+        ));
+        let error =
+            repair_work_event_containers(&works, "repair-target", ambiguous, Some(&close), false)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ambiguous root, branch, or Session provenance"));
+        assert_eq!(std::fs::read(&works).unwrap(), before);
+        let target = projection
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "repair-target")
+            .unwrap();
+        target
+            .execution_containers
+            .push(target.execution_containers[0].clone());
+        std::fs::write(&works, serde_json::to_vec_pretty(&projection).unwrap()).unwrap();
+        let duplicated = std::fs::read(&works).unwrap();
+        let error =
+            repair_work_event_containers(&works, "repair-target", sources, Some(&close), false)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ambiguous or missing absolute container anchor"));
+        assert_eq!(std::fs::read(works).unwrap(), duplicated);
+    }
+
+    #[test]
+    fn container_repair_cas_rejects_concurrent_terminal_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, _) = poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let snapshot =
+            WorkItemsIntakeSnapshot::capture_for_container_repair(&works, Some(&close)).unwrap();
+        let mut close_bytes = std::fs::read(&close).unwrap();
+        close_bytes.push(b'\n');
+        std::fs::write(&close, &close_bytes).unwrap();
+        let error =
+            publish_work_event_containers_repair(&snapshot, "repair-target", sources, false)
+                .unwrap_err();
+        assert!(error.to_string().contains("snapshot changed"));
+        assert_eq!(std::fs::read(works).unwrap(), before);
+        assert_eq!(std::fs::read(close).unwrap(), close_bytes);
+    }
+
+    #[test]
+    fn container_repair_refuses_pending_transaction_without_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let (works, close, sources, _) = poisoned_container_repair_fixture(temp.path());
+        let before = std::fs::read(&works).unwrap();
+        let marker = temp.path().join("pending-state-transaction.json");
+        std::fs::write(&marker, b"interrupted transaction").unwrap();
+        for dry_run in [true, false] {
+            let error = repair_work_event_containers(
+                &works,
+                "repair-target",
+                sources.clone(),
+                Some(&close),
+                dry_run,
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("pending workspace state transaction"));
+            assert_eq!(std::fs::read(&marker).unwrap(), b"interrupted transaction");
+            assert_eq!(std::fs::read(&works).unwrap(), before);
         }
     }
 

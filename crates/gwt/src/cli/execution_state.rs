@@ -13185,7 +13185,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 21] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -13201,6 +13201,7 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
     // were absent, so the one refusal that actually needed a prune route could
     // not carry it across the bridge and the agent was left guessing.
     "workspace.work_prune",
+    "workspace.work_repair",
     "workspace.candidates",
     "workspace.join",
     // Issue #5288: exact registered-PM supersession, live member stop, and

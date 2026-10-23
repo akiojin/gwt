@@ -653,7 +653,16 @@ readback. Omission retains existing behavior; `null`, empty strings and other ty
 are rejected. This value comparison does not track intervening history or protect
 other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
-queue and requests a scan. Existing `issue.monitor.priority.move` and
+queue and requests a scan. Also read the current terminal's saved `queue_order`
+from `issue.monitor.queue.list` and pass it as `expected_queue_order` to
+`launch_now` (or `launch-now`). Both order guards are compared under the same
+preferences lock before any priority, queue or hold change and before a scan
+request. On conflict, re-read the relevant status/list and reconsider the
+instruction; read back status and the queue list after success. Each guard is
+optional; `[]` requires its saved order to be empty, and `null` is invalid.
+Arrays retain existing decimal u64 string compatibility. Queue comparison does
+not cover urgent metadata, other settings or intervening history.
+Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
 an intervening priority change, read the full `priority_order` from
 `issue.monitor.status` and pass that array as `expected_priority_order` to either
@@ -1365,6 +1374,12 @@ Repeat with `"dry_run":false` to preserve both originals in the reported home
 archives and publish both events under content-specific identities. Then retry
 the Git merge. Tracked shards, ordinary events, and tombstones for different
 branches are refused; existing source or archive bytes are never overwritten.
+
+If an existing Work contains both an absolute worktree container and its `.`
+alias, use `workspace.work_repair` with `params.work_id` to inspect a scoped
+repair. It defaults to dry-run; repeat with `"dry_run":false` to apply. The
+operation requires matching Git worktree and durable event evidence, preserves
+terminal state and source files, and refuses ambiguous or missing provenance.
 
 ## Share local Board milestones through GitHub Discussions
 

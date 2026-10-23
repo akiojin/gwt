@@ -607,6 +607,13 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
 `null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
+併せて現在端末の `issue.monitor.queue.list` から保存済み `queue_order` を読み、
+`launch_now`（または `launch-now`）に `expected_queue_order` として渡します。
+両方の順序ガードを同じ設定ロック内で比較し、priority・queue・hold の変更と scan 要求の前に
+不一致を拒否します。競合時は該当する status/list を再読して指示を再判断し、
+成功後も status と queue list を読み戻します。各ガードは省略可能で、`[]` は対応する保存順序が
+空の場合だけ一致し、`null` は拒否します。配列内の10進 u64 文字列は既存互換で受理します。
+キュー比較は urgent metadata、他の設定、途中の変更履歴を保護しません。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
 `priority_order` を読み、いずれの優先順操作または `issue.monitor.launch_now` にも同じ配列を
@@ -1251,6 +1258,12 @@ worktree にプロジェクトタブが切り替わります。
 保存し、内容ごとの ID で双方の event を公開します。その後 Git merge を再実行します。
 追跡済み shard、通常の event、異なるブランチの tombstone は拒否し、既存のソースや
 archive を上書きしません。
+
+既存 Work に絶対 worktree path と `.` の container が重複している場合は、
+`workspace.work_repair` の `params.work_id` で対象を指定して修復内容を確認できます。
+既定は dry-run で、`"dry_run":false` を加えると適用します。記録済み Git worktree と
+永続 event の証拠が一致する場合だけ修復し、terminal 状態とソースファイルを保持します。
+証拠の欠損や曖昧性がある場合は拒否します。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
