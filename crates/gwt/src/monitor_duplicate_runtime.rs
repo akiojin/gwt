@@ -238,7 +238,7 @@ fn counts(entries: &[RegisteredMonitorRuntime]) -> BTreeMap<u64, usize> {
         .iter()
         .filter(|entry| !entry.registration.review_dispatch)
     {
-        if !matches!(entry.handle.try_wait(), Ok(Some(_))) {
+        if !entry.handle.tree_exit_confirmed() {
             *counts.entry(entry.registration.issue_number).or_default() += 1;
         }
     }
@@ -271,8 +271,7 @@ fn publish_counts(
             let windows = entries
                 .iter()
                 .filter(|entry| {
-                    !entry.registration.review_dispatch
-                        && !matches!(entry.handle.try_wait(), Ok(Some(_)))
+                    !entry.registration.review_dispatch && !entry.handle.tree_exit_confirmed()
                 })
                 .map(|entry| {
                     (
@@ -379,7 +378,7 @@ fn stop_requested_runtimes(
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         project_root,
     ))?;
-    let mut stopped = false;
+    let mut refresh_inventory = false;
     for entry in entries
         .iter()
         .filter(|entry| !entry.registration.review_dispatch)
@@ -416,6 +415,8 @@ fn stop_requested_runtimes(
                     if !request.matches_runtime(&proof.session.id, proof.host_pid, &proof.runtime) {
                         return Ok(false);
                     }
+                    // A failed teardown or persistence can still change liveness.
+                    refresh_inventory = true;
                     if !crate::session_finalizer::kill_and_reap(&entry.handle, &registration.window_id)? {
                         return Err(io::Error::other("captured runtime tree did not finish teardown"));
                     }
@@ -433,14 +434,18 @@ fn stop_requested_runtimes(
                     }
                     Ok(true)
                 },
-            )?.transpose()?;
-            if result == Some(true) {
-                stopped = true;
-                break;
+            ).and_then(|result| result.transpose());
+            match result {
+                Ok(Some(true)) => break,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(target: "gwt.monitor.runtime", session_id = %registration.session_id, window_id = %registration.window_id, %error, "runtime stop did not complete; retaining captured runtime and continuing reconciliation");
+                    break;
+                }
             }
         }
     }
-    Ok(stopped)
+    Ok(refresh_inventory)
 }
 
 fn reconcile_project(
@@ -458,9 +463,10 @@ fn reconcile_project(
     let inventory = refreshed_inventory.as_ref().unwrap_or(inventory);
     let complete_counts = publish_counts(project_root, entries)?;
     let mut groups = BTreeMap::<u64, Vec<&RegisteredMonitorRuntime>>::new();
-    for entry in entries.iter().filter(|entry| {
-        !entry.registration.review_dispatch && !matches!(entry.handle.try_wait(), Ok(Some(_)))
-    }) {
+    for entry in entries
+        .iter()
+        .filter(|entry| !entry.registration.review_dispatch && !entry.handle.tree_exit_confirmed())
+    {
         groups
             .entry(entry.registration.issue_number)
             .or_default()
@@ -950,16 +956,24 @@ mod stop_tests {
     }
 
     fn is_process_alive(pid: u32) -> bool {
-        let mut system = sysinfo::System::new();
-        let pid = sysinfo::Pid::from_u32(pid);
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[pid]),
-            true,
-            sysinfo::ProcessRefreshKind::nothing(),
-        );
-        system
-            .process(pid)
-            .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        #[cfg(windows)]
+        {
+            crate::process::host_process_liveness(pid)
+                .expect("native child liveness must be observable")
+        }
+        #[cfg(unix)]
+        {
+            let mut system = sysinfo::System::new();
+            let pid = sysinfo::Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            system
+                .process(pid)
+                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        }
     }
 
     fn with_stop_fixture(test: impl FnOnce(&mut StopFixture)) {
@@ -1386,5 +1400,89 @@ mod stop_tests {
     #[test]
     fn monitor_stop_request_survives_execution_completion() {
         assert_stop_request_kills_live_tree(CompletionTiming::AfterStop);
+    }
+
+    #[test]
+    fn reaped_leader_keeps_capacity_until_captured_tree_exit_is_confirmed() {
+        with_stop_fixture(|fixture| {
+            fixture.entry.handle.kill().unwrap();
+            fixture.entry.handle.wait().unwrap();
+            let entries = std::slice::from_ref(&fixture.entry);
+            assert_eq!(
+                super::counts(entries),
+                BTreeMap::from([(fixture.owner.number, 1)]),
+                "a reaped leader does not prove its captured tree exited"
+            );
+            assert!(crate::session_finalizer::kill_and_reap(
+                &fixture.entry.handle,
+                &fixture.entry.registration.window_id,
+            )
+            .unwrap());
+            assert!(
+                super::counts(entries).is_empty(),
+                "capacity is released after captured-tree exit is confirmed"
+            );
+        });
+    }
+
+    #[test]
+    fn failed_stop_authority_keeps_runtime_and_accounting_running() {
+        with_stop_fixture(|fixture| {
+            let request = super::capture_stop_request(
+                fixture.project.path(),
+                fixture.owner.number,
+                "",
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap()
+            .unwrap();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(fixture.project.path());
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    monitor_runtime_stop_requests: vec![request.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let trusted =
+                crate::cli::trusted_store::trusted_dir_for_worktree(fixture.project.path())
+                    .unwrap();
+            let broken_ledger = trusted
+                .parent()
+                .unwrap()
+                .join("execution-owners")
+                .join(format!("owner-{}", fixture.owner.number))
+                .join("generation-ledger.json");
+            std::fs::write(broken_ledger, b"invalid owner ledger").unwrap();
+            let session_path = fixture
+                .sessions
+                .join(format!("{}.toml", fixture.session.id));
+            let session_before = std::fs::read(&session_path).unwrap();
+            let inventory =
+                crate::session_inventory::ProjectSessionCensus::capture(&fixture.sessions)
+                    .observe(fixture.project.path());
+            super::reconcile_project(
+                fixture.project.path(),
+                &fixture.sessions,
+                std::slice::from_ref(&fixture.entry),
+                &inventory,
+            )
+            .expect("one failed stop must not abort accounting");
+            assert!(
+                fixture.entry.handle.try_wait().unwrap().is_none(),
+                "unknown authority must retain its captured runtime"
+            );
+            assert_eq!(std::fs::read(session_path).unwrap(), session_before);
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            assert_eq!(prefs.monitor_runtime_stop_requests, vec![request]);
+            let host = prefs
+                .monitor_runtime_counts
+                .values()
+                .find(|host| host.host_pid == std::process::id())
+                .expect("fresh host accounting");
+            assert_eq!(host.counts, BTreeMap::from([(fixture.owner.number, 1)]));
+        });
     }
 }

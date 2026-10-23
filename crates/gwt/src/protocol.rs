@@ -2199,6 +2199,11 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    /// Only the stopped placeholder was removed. This is not process-tree
+    /// exit evidence for its historical runtime (Issue #4168 AC-7).
+    PaneHuskRemoved {
+        window_id: String,
+    },
     /// Correlated acceptance/refusal of the exact fleet target. `ok` confirms
     /// window removal and finalizer ownership, not completion of detached cleanup.
     FleetPaneCloseResult {
@@ -3088,6 +3093,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_husk_removed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "fleet_pane_close_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3545,6 +3555,7 @@ impl BackendEvent {
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::PaneHuskRemoved { .. } => "pane_husk_removed",
             BackendEvent::FleetPaneCloseResult { .. } => "fleet_pane_close_result",
             BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",

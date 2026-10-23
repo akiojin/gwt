@@ -1058,12 +1058,38 @@ impl AppRuntime {
                 }
             };
 
-            // A restored Session without a captured PTY provides no proof that
-            // its process tree exited, even if its former leader is gone.
-            let mut local_process_exited = runtime.is_none()
+            // A view-only result never becomes exit proof for Session/Work
+            // terminalization or a capability handoff.
+            let peer_exit_unconfirmed = runtime.is_none()
                 && peer_reply
                     .as_ref()
-                    .is_none_or(|reply| reply.session_id.is_none());
+                    .is_some_and(|reply| reply.session_id.is_some());
+            let husk_session = cached_session.or_else(|| {
+                peer_reply
+                    .as_ref()
+                    .filter(|reply| reply.stopped_husk)
+                    .and_then(|reply| reply.session_id.as_ref())
+                    .and_then(|id| {
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                    })
+            });
+            let husk_removed = peer_exit_unconfirmed
+                && peer_reply.as_ref().is_some_and(|reply| reply.stopped_husk)
+                && window_lifecycle_generation_is_current(
+                    &window_lifecycle_generations,
+                    &window_id,
+                    closing_window_generation,
+                )
+                && husk_session.as_ref().is_some_and(|expected| {
+                    gwt::session_finalizer::remove_restored_stopped_view(&sessions_dir, expected)
+                        .unwrap_or(false)
+                })
+                && window_lifecycle_generation_is_current(
+                    &window_lifecycle_generations,
+                    &window_id,
+                    closing_window_generation,
+                );
+            let mut local_process_exited = runtime.is_none() && !peer_exit_unconfirmed;
             let mut terminal_persisted = session.is_none();
             if let Some(pty) = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty)) {
                 let kill_and_reap = || gwt::session_finalizer::kill_and_reap(&pty, &window_id);
@@ -1121,18 +1147,25 @@ impl AppRuntime {
             }
 
             if let Some(reply) = peer_reply {
+                let process_tree_exited = local_process_exited && !peer_exit_unconfirmed;
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply.client_id,
-                    BackendEvent::PaneCloseResult {
-                        ok: local_process_exited,
-                        window_id: window_id.clone(),
-                        reason: (!local_process_exited)
-                            .then(|| "process-tree exit was not confirmed".to_string()),
+                    if husk_removed {
+                        BackendEvent::PaneHuskRemoved {
+                            window_id: window_id.clone(),
+                        }
+                    } else {
+                        BackendEvent::PaneCloseResult {
+                            ok: process_tree_exited,
+                            window_id: window_id.clone(),
+                            reason: (!process_tree_exited)
+                                .then(|| "process-tree exit was not confirmed".to_string()),
+                        }
                     },
                 )]));
             }
 
-            if runtime.is_none() {
+            if runtime.is_none() && local_process_exited {
                 if let Some((identity, None)) = exact_terminal.as_ref() {
                     if let Some(Ok(_handoff)) = exact_handoff.as_mut() {
                         terminal_persisted =
@@ -1319,17 +1352,16 @@ impl AppRuntime {
                 }
             }
 
-            let (pm_deregistered, pm_status) =
-                match (project_root.as_deref(), closing_session_id.as_deref()) {
-                    (Some(project_root), Some(session_id)) => {
-                        Self::deregister_pm_for_closed_window_in_background(
-                            project_root,
-                            session_id,
-                        )
-                    }
-                    _ => (false, None),
-                };
-            let monitor_result = if notify_issue_monitor {
+            let (pm_deregistered, pm_status) = match (
+                project_root.as_deref(),
+                closing_session_id.as_deref().filter(|_| !husk_removed),
+            ) {
+                (Some(project_root), Some(session_id)) => {
+                    Self::deregister_pm_for_closed_window_in_background(project_root, session_id)
+                }
+                _ => (false, None),
+            };
+            let monitor_result = if notify_issue_monitor && !husk_removed {
                 match (project_root.as_deref(), monitor_close_target) {
                     (Some(project_root), Ok(Some(target)))
                         if window_lifecycle_generation_is_current(

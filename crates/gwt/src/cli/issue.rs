@@ -3065,9 +3065,9 @@ fn run_monitor_stop<E: CliEnv>(
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     // No active target means this is an idempotent stop or stranded-generation recovery.
     let observed_prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
-    let observed_identity =
-        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs)
-            .launch_identity(number);
+    let mut observed_monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs);
+    let observed_identity = observed_monitor.launch_identity(number);
     let caller_session =
         crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
     let (target_session, mut board_warning) = if observed_identity.active {
@@ -3123,6 +3123,25 @@ fn run_monitor_stop<E: CliEnv>(
         tracing::warn!(%warning, "Monitor stop Board observation failed open");
     }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let settlement = monitor_execution_settlement(&project_root, number);
+    // Session/runtime and OS process inspection must not hold the shared prefs
+    // lock. Only capture a request the observed launch would actually accept.
+    let captured_runtime_stop_request = if observed_identity.active
+        && !matches!(
+            observed_monitor.stop_only_with_settlement(&target, reason, &now, settlement),
+            crate::IssueMonitorStopOutcome::Mismatch(_)
+        ) {
+        crate::monitor_duplicate_runtime::capture_stop_request(
+            &project_root,
+            number,
+            observed_identity.window_id.as_deref().unwrap_or_default(),
+            target_session.as_deref(),
+            &now,
+        )
+        .map_err(io_as_api_error)?
+    } else {
+        None
+    };
     let (_, (outcome, identity, runtime_stop_request)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -3132,23 +3151,15 @@ fn run_monitor_stop<E: CliEnv>(
             // Issue #3992 AC-3: read before mutating, so a refusal reports the
             // identity it disagreed with rather than one a later write changed.
             let identity = monitor.launch_identity(number);
-            let outcome = monitor.stop_only_with_settlement(
-                &target,
-                reason,
-                &now,
-                monitor_execution_settlement(&project_root, number),
-            );
+            if identity != observed_identity {
+                return Err(std::io::Error::other(
+                    "Monitor launch identity changed during stop inspection; refresh the snapshot before retrying",
+                ));
+            }
+            let outcome = monitor.stop_only_with_settlement(&target, reason, &now, settlement);
             let mut runtime_stop_request = None;
             if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
-                if identity.active {
-                    runtime_stop_request = crate::monitor_duplicate_runtime::capture_stop_request(
-                        &project_root,
-                        number,
-                        identity.window_id.as_deref().unwrap_or_default(),
-                        target_session.as_deref(),
-                        &now,
-                    )?;
-                }
+                runtime_stop_request = captured_runtime_stop_request.clone();
                 if remove_from_queue {
                     monitor.terminal_queue_remove(&[number], &now);
                 }
