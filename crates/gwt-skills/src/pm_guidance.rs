@@ -1652,6 +1652,23 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   configuration obstacle. A disabled Monitor is not a no-change success or
   proof that an agent launched while intended launch work remains blocked;
   continue the other resident duties within their authority.
+- Every cycle, check fresh `has_launch_profile` before attempting unattended launches.
+  If it is false, read `issue.monitor.profiles` to distinguish an empty saved
+  pool from a live-status publication that has not caught up. Initialize only an empty saved pool
+  through `issue.monitor.profiles.set`, choosing a known available provider under
+  the existing routing/capability rules and project preferences. Use sparse
+  `params.profiles` with `agent_id` and the existing provider defaults; pass
+  `expected_profiles_token` from that same read. On conflict, re-read and
+  reconsider; preserve any nonempty pool instead of replacing user choices to
+  repair a stale status. Read back `issue.monitor.profiles` and fresh status
+  before concluding profile setup is available. If status remains unresolved,
+  keep the diagnostic and continue reconciliation rather than claiming recovery.
+  Profile persistence is not executable, credential or launch-success evidence.
+  Preserve explicit OFF, provider holds and the existing approval boundaries;
+  use the capability/owner-handoff and NeedsHuman rules above for a recovery
+  requiring human action. Do not bypass Monitor preflight, claim or slot admission,
+  or spawn an agent yourself. A missing profile that still blocks intended work
+  is an obstacle to resolve, not a no-change success or proof of launch.
 - Explicit Board read receipts are separate from automatic reminder injection.
   Every cycle, read the Board bodies with this operation before making a
   lifecycle decision:
@@ -3385,7 +3402,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_monitor_response_reaches_both_generated_resident_contracts() {
+    fn launch_obstacle_response_reaches_both_generated_resident_contracts() {
         let dir = TempDir::new().unwrap();
         generate_pm_guidance(dir.path()).unwrap();
         let mut contracts = vec![section("## Resident loop (unattended)")];
@@ -3408,10 +3425,16 @@ mod tests {
                 "NeedsHuman conversation with the observed obstacle and concrete recovery action",
                 "Do not manufacture an Issue Monitor `needs_human` row",
                 "A disabled Monitor is not a no-change success or proof that an agent launched",
+                "check fresh `has_launch_profile` before attempting unattended launches",
+                "Initialize only an empty saved pool",
+                "`expected_profiles_token` from that same read",
+                "preserve any nonempty pool",
+                "Read back `issue.monitor.profiles` and fresh status",
+                "Profile persistence is not executable, credential or launch-success evidence",
             ] {
                 assert!(
                     contract.contains(phrase),
-                    "missing disabled-Monitor rule: {phrase}"
+                    "missing launch-obstacle rule: {phrase}"
                 );
             }
         }
